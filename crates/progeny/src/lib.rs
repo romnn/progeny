@@ -22,6 +22,7 @@
 //! types are gated by compiling them. The client and server renderers do not exist yet, so
 //! [`generate`] emits the shared type layer and nothing else.
 
+mod catalogue;
 mod config;
 mod contract;
 mod diag;
