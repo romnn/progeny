@@ -1,0 +1,24 @@
+.DS_Store
+/target
+**/*.rs.bk
+
+/plan
+
+# taskfile
+/.task
+
+# cooldown
+.cooldown.lock
+
+# Vendor OpenAPI documents: ~117 MB, and redistribution rights vary by publisher.
+# Fetched from corpus/manifest.toml via `cargo xtask corpus --fetch`.
+/corpus/cache/
+
+# cargo-fuzz working state; the fuzz targets themselves are committed.
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+
+# cargo-fuzz builds outside the workspace.
+/fuzz/Cargo.lock

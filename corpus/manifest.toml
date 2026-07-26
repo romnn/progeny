@@ -1,0 +1,797 @@
+# progeny conformance corpus — provenance manifest
+#
+# 78 real-world OpenAPI documents. Vendor specs are NOT committed: they total
+# ~117 MB and their redistribution rights vary by publisher. `cargo xtask corpus
+# --fetch` downloads each `url` into `corpus/cache/` (gitignored); only this
+# manifest and specs marked `local = true` live in git.
+#
+# Fields:
+#   url          upstream source; absent for local specs
+#   file         filename in corpus/cache/ (or corpus/specs/ when local)
+#   local        committed in-tree, hermetic, safe for PR-time CI
+#   mock         spec exercises the mock/test-double path
+#   schema_docs  keep full JSON-schema doc blocks for this spec
+#   bad_examples schema names whose spec examples contradict their own schema;
+#                excluded from payload round-trips (a vendor bug, not ours)
+#   notes        why this spec is in the corpus / what it stresses
+# Imported from the predecessor corpus on 2026-07-26.
+
+[[spec]]
+name = "airbyte"
+version = "3.0"
+url = "https://raw.githubusercontent.com/airbytehq/airbyte-platform/main/airbyte-api/server-api/src/main/openapi/config.yaml"
+file = "airbyte.yaml"
+notes = "config API; discriminator, binary"
+bad_examples = [
+  "ConnectionsResponse",
+  "ConnectorDefinitionResponse",
+  "DestinationResponse",
+  "DestinationsResponse",
+  "JobResponse",
+  "JobsResponse",
+  "SourceResponse",
+  "SourcesResponse",
+  "WorkspacesResponse",
+]
+
+[[spec]]
+name = "airflow"
+version = "3.1"
+url = "https://raw.githubusercontent.com/apache/airflow/main/airflow-core/src/airflow/api_fastapi/core_api/openapi/v2-rest-api-generated.yaml"
+file = "airflow.yaml"
+notes = "Apache Airflow 3 FastAPI; 639 anyOf, prefixItems, 626 null-type lines"
+
+[[spec]]
+name = "aiven"
+version = "3.0"
+url = "https://api.aiven.io/doc/openapi.json"
+file = "aiven.json"
+notes = "openapi key NOT in first 128 KB (parser-order stress)"
+
+[[spec]]
+name = "anthropic"
+version = "3.1"
+url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/anthropic/anthropic-5ce93251152bd7c4c288dacdf5a445383825ba50bc472ff9e9821ee9455e3564.yml"
+file = "anthropic.yaml"
+mock = true
+bad_examples = [
+  "BetaCloudConfig",
+  "BetaCloudConfigParams",
+  "BetaCountMessageTokensParams",
+  "BetaCreateMessageParams",
+  "BetaEnvironment",
+  "BetaEnvironmentDeleteResponse",
+  "BetaManagedAgentsAgent",
+  "BetaManagedAgentsCreateAgentParams",
+  "BetaManagedAgentsListSessionThreads",
+  "BetaManagedAgentsModelConfig",
+  "BetaManagedAgentsModelConfigParams",
+  "BetaManagedAgentsSession",
+  "BetaManagedAgentsSessionAgent",
+  "BetaManagedAgentsSessionThread",
+  "BetaManagedAgentsSessionThreadAgent",
+  "BetaMessage",
+  "BetaPublicEnvironmentCreateRequest",
+  "CompletionRequest",
+  "CompletionResponse",
+  "CountMessageTokensParams",
+  "CreateMessageParams",
+  "CreateMessageParamsWithoutStream",
+  "Message",
+]
+
+[[spec]]
+name = "bfl"
+version = "3.1"
+url = "https://api.bfl.ai/openapi.json"
+file = "bfl.json"
+notes = "Black Forest Labs FLUX; HEAD 405, GET fine"
+
+[[spec]]
+name = "binance"
+version = "3.0"
+url = "https://raw.githubusercontent.com/binance/binance-api-swagger/master/spot_api.yaml"
+file = "binance.yaml"
+notes = "quoted version string '3.0.2'; huge enum/array responses"
+
+[[spec]]
+name = "chroma"
+version = "3.1"
+url = "https://api.trychroma.com/openapi.json"
+file = "chroma.json"
+notes = "vector-DB cloud API"
+
+[[spec]]
+name = "circleci"
+version = "3.0"
+url = "https://circleci.com/api/v2/openapi.json"
+file = "circleci.json"
+notes = "HEAD 404, GET 200"
+
+[[spec]]
+name = "clerk"
+version = "3.0"
+url = "https://raw.githubusercontent.com/clerk/openapi-specs/main/bapi/2024-10-01.yml"
+file = "clerk.yaml"
+notes = "dated-filename spec; discriminators, patternProperties"
+
+[[spec]]
+name = "clickhouse-cloud"
+version = "3.1"
+url = "https://api.clickhouse.cloud/v1"
+file = "clickhouse-cloud.json"
+mock = true
+
+[[spec]]
+name = "cloudflare"
+version = "3.0"
+url = "https://raw.githubusercontent.com/cloudflare/api-schemas/main/openapi.json"
+file = "cloudflare.json"
+bad_examples = [
+  "aaa_mechanisms",
+  "access_allow_authenticate_via_warp",
+  "access_deny_unmatched_requests",
+  "access_is_ui_read_only",
+  "access_is_ui_read_only-2",
+  "access_schemas-is_ui_read_only",
+  "api-shield_old_validation_override_mitigation_action",
+  "api-shield_per_operation_bulk_settings",
+  "api-shield_token_sources",
+  "dns-firewall_dns_firewall_ips",
+  "dns-firewall_upstream_ips",
+  "dns-records_ttl",
+  "iam_resources",
+  "images_image_identifier",
+  "images_image_variant_identifier",
+  "images_image_variants",
+  "images_images_list_continuation_token",
+  "images_signing_key_identifier",
+  "magic-visibility-mnm_mnm_rule_automatic_advertisement",
+  "magic-visibility-mnm_mnm_rule_duration",
+  "organizations-api_MemberID",
+  "organizations-api_OrganizationID",
+  "posture-api_Asset",
+  "r2_queue_identifier",
+  "realtimekit_app_id",
+  "tunnel_tunnel_types",
+  "workers-kv_value",
+  "workers_multipart-script",
+  "zaraz_zaraz-config-base",
+]
+
+[[spec]]
+name = "codat-accounting"
+version = "3.1"
+url = "https://raw.githubusercontent.com/codatio/oas/main/yaml/Codat-Accounting.yaml"
+file = "codat-accounting.yaml"
+bad_examples = [
+  "BillCreditNote",
+  "BillPayment",
+  "CompanyDataset",
+  "CreditNote",
+  "SalesOrder",
+]
+
+[[spec]]
+name = "cratesio"
+version = "3.1"
+url = "https://crates.io/api/openapi.json"
+file = "cratesio.json"
+notes = "utoipa (Rust)-generated — dogfood value"
+
+[[spec]]
+name = "deepinfra"
+version = "3.1"
+url = "https://api.deepinfra.com/openapi.json"
+file = "deepinfra.json"
+notes = "live FastAPI; prefixItems, const, patternProperties"
+
+[[spec]]
+name = "deepl"
+version = "3.0"
+url = "https://raw.githubusercontent.com/DeepLcom/openapi/main/openapi.yaml"
+file = "deepl.yaml"
+notes = "official; multipart, patternProperties"
+
+[[spec]]
+name = "discord"
+version = "3.1"
+url = "https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json"
+file = "discord.json"
+mock = true
+
+[[spec]]
+name = "dub"
+version = "3.0"
+url = "https://spec.speakeasy.com/dub/dub/dub-with-code-samples"
+file = "dub.json"
+notes = "Speakeasy registry permalink; x-codeSamples-laden"
+
+[[spec]]
+name = "exoscale"
+version = "3.0"
+url = "https://openapi-v2.exoscale.com/source.yaml"
+file = "exoscale.yaml"
+notes = "chunked transfer (no content-length)"
+
+[[spec]]
+name = "figma"
+version = "3.1"
+url = "https://raw.githubusercontent.com/figma/rest-api-spec/main/openapi/openapi.yaml"
+file = "figma.yaml"
+
+[[spec]]
+name = "finch"
+version = "3.1"
+url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/finch%2Ffinch-46f433f34d440aa1dfcc48cc8d822c598571b68be2f723ec99e1b4fba6c13b1e.yml"
+file = "finch.yaml"
+notes = "Stainless hash-URL rotates; see finch-python .stats.yml; HR/payroll; discriminators, null types"
+
+[[spec]]
+name = "frankfurter"
+version = "3.1"
+url = "https://api.frankfurter.dev/v1/openapi.json"
+file = "frankfurter.json"
+notes = "rare 3.1.2 version string; tiny smoke-test size"
+bad_examples = [
+  "rates",
+]
+
+[[spec]]
+name = "github-31"
+version = "3.1"
+url = "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions-next/api.github.com/api.github.com.json"
+file = "github-31.json"
+mock = true
+
+[[spec]]
+name = "gladia"
+version = "3.1"
+url = "https://api.gladia.io/openapi.json"
+file = "gladia.json"
+notes = "webhooks, multipart, discriminator; speech-to-text FastAPI"
+
+[[spec]]
+name = "hetzner-cloud"
+version = "3.1"
+url = "https://docs.hetzner.cloud/cloud.spec.json"
+file = "hetzner-cloud.json"
+mock = true
+
+[[spec]]
+name = "hubspot-contacts"
+version = "3.0"
+url = "https://api.hubspot.com/public/api/spec/v2/specs/release/22150/version/3"
+file = "hubspot-contacts.json"
+notes = "unusual 'openapi' : '3.0.1' spacing; release-pinned URL; extensionless, caches as .json"
+
+[[spec]]
+name = "increase"
+version = "3.1"
+url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/increase/increase-beca94b958f84df1e88f5e26405a66965fbf81a0c0c33b5201f0ec8d06e13ff0.yml"
+file = "increase.yaml"
+notes = "Stainless hash-URL rotates; see increase-python .stats.yml openapi_spec_url to re-resolve; webhooks, 1557 anyOf, null-heavy"
+bad_examples = [
+  "create_an_entity_parameters",
+  "sandbox_create_a_card_token_parameters",
+]
+
+[[spec]]
+name = "influxdb"
+version = "3.0"
+url = "https://raw.githubusercontent.com/influxdata/openapi/master/contracts/ref/cloud.yml"
+file = "influxdb.yaml"
+notes = "openapi key deep in YAML; multipart, binary"
+bad_examples = [
+  "MeasurementSchema",
+  "MeasurementSchemaColumn",
+  "MeasurementSchemaCreateRequest",
+  "MeasurementSchemaList",
+  "MeasurementSchemaUpdateRequest",
+  "Variables",
+]
+
+[[spec]]
+name = "intercom"
+version = "3.0"
+url = "https://raw.githubusercontent.com/intercom/Intercom-OpenAPI/main/descriptions/2.14/api.intercom.io.yaml"
+file = "intercom.yaml"
+notes = "versioned descriptions dirs; multipart"
+bad_examples = [
+  "custom_attributes",
+]
+
+[[spec]]
+name = "jellyfin"
+version = "3.0"
+url = "https://api.jellyfin.org/openapi/jellyfin-openapi-stable.json"
+file = "jellyfin.json"
+notes = "77 format:binary + octet-stream — best binary-body exerciser; .NET-generated"
+
+[[spec]]
+name = "jina"
+version = "3.1"
+url = "https://api.jina.ai/openapi.json"
+file = "jina.json"
+notes = "minified live FastAPI"
+bad_examples = [
+  "ClipCreateTrainingRequest",
+  "ClipV1Request",
+  "ClipV2Request",
+  "ClipZeroShotClassificationRequest",
+  "CodeEmbeddings1500MRequest",
+  "CodeEmbeddings500MRequest",
+  "CodeEmbeddingsZeroShotClassificationRequest",
+  "ColbertV1Request",
+  "ColbertV2Request",
+  "ELSERV2Request",
+  "EmbeddingsV2CreateTrainingRequest",
+  "EmbeddingsV2Request",
+  "EmbeddingsV2ZeroShotClassificationRequest",
+  "EmbeddingsV3CreateTrainingRequest",
+  "EmbeddingsV3Request",
+  "EmbeddingsV3ZeroShotClassificationRequest",
+  "EmbeddingsV4CreateTrainingRequest",
+  "EmbeddingsV4Request",
+  "EmbeddingsV4ZeroShotClassificationRequest",
+  "RerankerM0Request",
+  "RerankerV3Request",
+  "TextRerankerRequest",
+]
+
+[[spec]]
+name = "klaviyo"
+version = "3.0"
+url = "https://raw.githubusercontent.com/klaviyo/openapi/main/openapi/stable.json"
+file = "klaviyo.json"
+notes = "180 oneOf; official stable.json"
+
+[[spec]]
+name = "lago"
+version = "3.1"
+url = "https://raw.githubusercontent.com/getlago/lago-openapi/main/openapi.yaml"
+file = "lago.yaml"
+notes = "webhooks block; OSS billing API"
+
+[[spec]]
+name = "lambda-cloud"
+version = "3.1"
+url = "https://cloud.lambdalabs.com/api/v1/openapi.json"
+file = "lambda-cloud.json"
+notes = "GPU cloud; const, anyOf, null types"
+
+[[spec]]
+name = "langsmith"
+version = "3.1"
+url = "https://api.smith.langchain.com/openapi.json"
+file = "langsmith.json"
+notes = "minified single-line FastAPI; webhooks, prefixItems, patternProperties"
+
+[[spec]]
+name = "launchdarkly"
+version = "3.0"
+url = "https://app.launchdarkly.com/api/v2/openapi.json"
+notes = "live vendor endpoint; APIs.guru copy is stale Swagger 2.0"
+bad_examples = [
+  "AgentGraph",
+  "AgentGraphEdge",
+  "AgentGraphEdgePost",
+  "AgentGraph__maintainer",
+  "AgentGraphPatch",
+  "AgentGraphPost",
+  "AgentGraphs",
+  "AgentOptimization",
+  "AgentOptimizationResult",
+  "AgentOptimizationResults",
+  "AgentOptimizations",
+  "AIConfig",
+  "AIConfig__maintainer",
+  "AIConfigPost",
+  "AIConfigTargeting",
+  "AIConfigTargetingVariation",
+  "AIConfigVariation",
+  "AIConfigVariationPatch",
+  "AIConfigVariationPost",
+  "AIConfigVariationsResponse",
+  "AIConfigs",
+  "AiConfigsAccess",
+  "AiConfigsAccessAllowedReason",
+  "AiConfigsAccessAllowedRep",
+  "AiConfigsAccessDenied",
+  "AiConfigsAccessDeniedReason",
+  "AiConfigsExperimentInfoRep",
+  "AiConfigsLegacyExperimentRep",
+  "AiConfigsMetricListingRep",
+  "AITool",
+  "AIToolPatch",
+  "AIToolPost",
+  "AITools",
+  "AnnouncementAccessAllowedReason",
+  "AnnouncementAccessAllowedRep",
+  "AnnouncementAccessDenied",
+  "AnnouncementAccessDeniedReason",
+  "AnnouncementAccessRep",
+  "AnnouncementResponse",
+  "getAnnouncementsPublic_200_response",
+  "LinkResourceSuccessResponse",
+  "ModelConfig",
+  "ModelConfigPost",
+  "PromptSnippet",
+  "PromptSnippets",
+  "ReleasePoliciesAccessAllowedReason",
+  "ReleasePoliciesAccessAllowedRep",
+  "ReleasePoliciesAccessDenied",
+  "ReleasePoliciesAccessDeniedReason",
+  "ReleasePoliciesAccessRep",
+  "ReleasePoliciesResponse",
+  "ReleasePolicy",
+  "View",
+  "ViewLinkedResource",
+  "ViewLinkedResourceDetails",
+  "ViewLinkedResources",
+  "Views",
+  "ViewsAccessAllowedReason",
+  "ViewsAccessAllowedRep",
+  "ViewsAccessDenied",
+  "ViewsAccessDeniedReason",
+  "ViewsAccessRep",
+]
+
+[[spec]]
+name = "lithic"
+version = "3.1"
+url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/lithic/lithic-efe780032e44b3cf0f6914407e43bce6aa7176fa50aa6ec018f93c1f28af8490.yml"
+file = "lithic.yaml"
+notes = "Stainless hash-URL rotates; see lithic-python .stats.yml; card-issuing fintech; 99 oneOf, 86 const, patternProperties"
+bad_examples = [
+  "account-holder-created",
+  "account-holder-document-updated",
+  "account-holder-verification",
+  "card_transaction",
+  "digital-wallet-tokenization-updated",
+  "list_transactions_response",
+  "tokenization-updated",
+]
+
+[[spec]]
+name = "logfire"
+version = "3.1"
+url = "https://logfire-api.pydantic.dev/openapi.json"
+file = "logfire.json"
+notes = "FastAPI live endpoint; prefixItems, const, multipart, discriminator"
+
+[[spec]]
+name = "meilisearch"
+version = "3.1"
+url = "https://raw.githubusercontent.com/meilisearch/open-api/main/open-api.json"
+file = "meilisearch.json"
+mock = true
+bad_examples = [
+  "Kind",
+]
+
+[[spec]]
+name = "miro"
+version = "3.0"
+url = "https://raw.githubusercontent.com/miroapp/api-clients/main/packages/generator/spec.json"
+file = "miro.json"
+notes = "patternProperties, multipart, discriminator"
+bad_examples = [
+  "WidgetId",
+  "GroupId",
+]
+
+[[spec]]
+name = "mongodb-atlas"
+version = "3.0"
+url = "https://raw.githubusercontent.com/mongodb/openapi/main/openapi/v2.json"
+file = "mongodb-atlas.json"
+
+[[spec]]
+name = "neon"
+version = "3.0"
+url = "https://neon.com/api_spec/release/v2.json"
+file = "neon.json"
+notes = "vendor release alias (neon.tech 301s to neon.com)"
+
+[[spec]]
+name = "netbird"
+version = "3.1"
+url = "https://raw.githubusercontent.com/netbirdio/netbird/main/shared/management/http/api/openapi.yml"
+file = "netbird.yaml"
+notes = "WireGuard mesh-VPN management API"
+
+[[spec]]
+name = "nomad"
+version = "3.0"
+url = "https://raw.githubusercontent.com/hashicorp/nomad-openapi/main/v1/openapi.yaml"
+file = "nomad.yaml"
+notes = "starts with a license comment block (key not near byte 0)"
+
+[[spec]]
+name = "novu"
+version = "3.0"
+url = "https://api.novu.co/openapi.json"
+file = "novu.json"
+notes = "NestJS minified live"
+
+[[spec]]
+name = "okta"
+version = "3.0"
+url = "https://raw.githubusercontent.com/okta/okta-management-openapi-spec/master/dist/current/management-minimal.yaml"
+file = "okta.yaml"
+notes = "56 discriminators — discriminator-heavy big YAML"
+bad_examples = [
+  "ApplicationUniversalLogout",
+  "AwsAccountId",
+  "AwsEventSourceName",
+  "SplunkToken",
+  "UserFactorPassCode",
+  "ZscalerbyzApplication",
+]
+
+[[spec]]
+name = "openai"
+version = "3.1"
+url = "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml"
+file = "openai.yaml"
+mock = true
+bad_examples = [
+  "ChatSessionResource",
+  "CompactResource",
+  "ModelIdsResponses",
+  "ModelIdsShared",
+  "Response",
+  "VoiceIdsShared",
+]
+
+[[spec]]
+name = "openrouter"
+version = "3.1"
+url = "https://openrouter.ai/openapi.json"
+file = "openrouter.json"
+notes = "patternProperties, const, multipart, octet-stream"
+
+[[spec]]
+name = "opensearch"
+version = "3.1"
+url = "https://github.com/opensearch-project/opensearch-api-specification/releases/download/main-latest/opensearch-openapi.yaml"
+file = "opensearch.yaml"
+notes = "302-redirects to release-assets.githubusercontent.com; 256 oneOf, 183 const"
+
+[[spec]]
+name = "orb"
+version = "3.1"
+url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/orb%2Forb-c92fb451e13f157b3735f188acc8d57aa3adfbaac1683645e1ba4f432dd7a4f8.yml"
+file = "orb.yaml"
+notes = "Stainless hash-URL rotates; see orb-python .stats.yml; 2955 oneOf lines, 19 discriminators, octet-stream, null-heavy"
+
+[[spec]]
+name = "oxide"
+version = "3.0"
+url = "https://raw.githubusercontent.com/oxidecomputer/oxide.rs/main/oxide.json"
+file = "oxide.json"
+notes = "progenitor flagship consumer spec (Oxide Rack) — regression-protection value; 89 oneOf"
+
+[[spec]]
+name = "pagerduty"
+version = "3.0"
+url = "https://raw.githubusercontent.com/PagerDuty/api-schema/main/reference/REST/openapiv3.json"
+file = "pagerduty.json"
+mock = true
+bad_examples = [
+  "IncidentAddon",
+]
+
+[[spec]]
+name = "perplexity"
+version = "3.1"
+url = "https://docs.perplexity.ai/openapi.json"
+file = "perplexity.json"
+
+[[spec]]
+name = "petstore-31"
+version = "3.1"
+file = "petstore-31.yaml"
+local = true
+mock = true
+schema_docs = true
+notes = "Hermetic tiny spec committed in the crate directory; used as a fast always-asserted PR-CI crate."
+
+[[spec]]
+name = "pinecone"
+version = "3.0"
+url = "https://raw.githubusercontent.com/pinecone-io/pinecone-api/main/2026-04/db_control_2026-04.oas.yaml"
+file = "pinecone.yaml"
+notes = "official date-stamped spec repo"
+
+[[spec]]
+name = "pokeapi"
+version = "3.1"
+url = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/openapi.yml"
+file = "pokeapi.yaml"
+notes = "drf-spectacular; highly recognizable"
+
+[[spec]]
+name = "polygon"
+version = "3.0"
+url = "https://api.polygon.io/openapi"
+file = "polygon.json"
+notes = "extensionless live URL; HEAD 405; caches as .json"
+
+[[spec]]
+name = "posthog"
+version = "3.1"
+url = "https://app.posthog.com/api/schema/"
+file = "posthog.json"
+notes = "slow; 925 patternProperties, 3743 anyOf, 198 const, prefixItems; extensionless URL caches as .json"
+
+[[spec]]
+name = "qdrant"
+version = "3.0"
+url = "https://raw.githubusercontent.com/qdrant/qdrant/master/docs/redoc/master/openapi.json"
+file = "qdrant.json"
+
+[[spec]]
+name = "resend"
+version = "3.1"
+url = "https://raw.githubusercontent.com/resend/resend-openapi/main/resend.yaml"
+file = "resend.yaml"
+mock = true
+
+[[spec]]
+name = "runway"
+version = "3.1"
+url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/runwayml/runwayml-e4103e353904891c1dfe59c4cfaefb536c0dc20ae0316f2c18bae77aa4e8d8c7.yml"
+file = "runway.yaml"
+notes = "Stainless hash-URL rotates; see runwayml-python .stats.yml; 54 discriminators, 163 const"
+
+[[spec]]
+name = "scaleway-instance"
+version = "3.1"
+url = "https://www.scaleway.com/en/developers/api/instance/v1/schema.yml"
+file = "scaleway-instance.yaml"
+notes = "EU cloud; sibling product schemas available for later expansion"
+
+[[spec]]
+name = "sentry"
+version = "3.0"
+url = "https://raw.githubusercontent.com/getsentry/sentry-api-schema/main/openapi-derefed.json"
+file = "sentry.json"
+notes = "official derefed artifact, auto-updated; 89 anyOf, patternProperties"
+
+[[spec]]
+name = "spotify"
+version = "3.0"
+url = "https://raw.githubusercontent.com/sonallux/spotify-web-api/main/fixed-spotify-open-api.yml"
+file = "spotify.yaml"
+notes = "community-fixed official spec (sonallux)"
+
+[[spec]]
+name = "stytch"
+version = "3.0"
+url = "https://raw.githubusercontent.com/stytchauth/stytch-openapi/main/openapi.yml"
+file = "stytch.yaml"
+notes = "big plain YAML — bulk stress with few composition keywords"
+
+[[spec]]
+name = "superset"
+version = "3.0"
+url = "https://raw.githubusercontent.com/apache/superset/master/docs/static/resources/openapi.json"
+file = "superset.json"
+notes = "flask-appbuilder; openapi key not in first 128 KB"
+
+[[spec]]
+name = "svix"
+version = "3.1"
+url = "https://api.svix.com/api/v1/openapi.json"
+file = "svix.json"
+mock = true
+
+[[spec]]
+name = "telnyx"
+version = "3.1"
+url = "https://raw.githubusercontent.com/team-telnyx/openapi/master/openapi/spec3.json"
+file = "telnyx.json"
+notes = "slow; webhooks block, 36 discriminators, 79 oneOf, multipart, octet-stream"
+bad_examples = [
+  "attempt",
+  "BooleanLiteralExpression",
+  "BooleanOpExpression",
+  "ComparisonExpression",
+  "ConversationFlow",
+  "ConversationFlowReq",
+  "DefaultCondition",
+  "DynamicVariableExpression",
+  "ExpressionCondition",
+  "FlowNodeReq",
+  "LLMCondition",
+  "NumberLiteralExpression",
+  "SpeakNodeReq",
+  "StringLiteralExpression",
+  "ToolNodeReq",
+]
+
+[[spec]]
+name = "twilio-api-v2010"
+version = "3.0"
+url = "https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/json/twilio_api_v2010.json"
+file = "twilio-api-v2010.json"
+mock = true
+
+[[spec]]
+name = "twitter"
+version = "3.0"
+url = "https://api.twitter.com/2/openapi.json"
+file = "twitter.json"
+notes = "X API v2; unusual 'openapi' : '3.0.0' spacing; HEAD 405"
+bad_examples = [
+  "Tweet",
+]
+
+[[spec]]
+name = "unstructured"
+version = "3.1"
+url = "https://api.unstructuredapp.io/general/openapi.json"
+file = "unstructured.json"
+notes = "const, binary in a tiny file"
+
+[[spec]]
+name = "urlbox"
+version = "3.1"
+url = "https://urlbox.com/.well-known/open-api.yaml"
+file = "urlbox.yaml"
+notes = ".well-known/open-api.yaml path; smallest 3.1 spec"
+
+[[spec]]
+name = "vapi"
+version = "3.0"
+url = "https://api.vapi.ai/api-json"
+file = "vapi.json"
+notes = "NestJS minified live endpoint, extensionless URL; caches as .json"
+
+[[spec]]
+name = "weather-gov"
+version = "3.1"
+url = "https://api.weather.gov/openapi.json"
+file = "weather-gov.json"
+notes = "rare 3.1.2 version string; requires User-Agent header (harness already sends one)"
+
+[[spec]]
+name = "webflow"
+version = "3.1"
+url = "https://raw.githubusercontent.com/webflow/openapi-spec/main/openapi/v2.yml"
+file = "webflow.yaml"
+notes = "webhooks block, official Data API v2"
+
+[[spec]]
+name = "workos"
+version = "3.1"
+url = "https://raw.githubusercontent.com/workos/openapi-spec/main/spec/open-api-spec.yaml"
+file = "workos.yaml"
+notes = "rare 3.1.1 version string; 623 const"
+bad_examples = [
+  "EventList",
+  "EventSchema",
+]
+
+[[spec]]
+name = "xai"
+version = "3.1"
+url = "https://docs.x.ai/openapi.json"
+file = "xai.json"
+notes = "patternProperties, multipart, octet-stream"
+
+[[spec]]
+name = "zendesk"
+version = "3.0"
+url = "https://developer.zendesk.com/zendesk/oas.yaml"
+file = "zendesk.yaml"
+notes = "34 oneOf, octet-stream, multipart"
+
+[[spec]]
+name = "zoom"
+version = "3.0"
+url = "https://api.apis.guru/v2/specs/zoom.us/2.0.0/openapi.json"
+file = "zoom.json"
+notes = "slow; 53 oneOf, heavy multipart; APIs.guru permalink (vendor spec is login-gated)"

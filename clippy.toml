@@ -1,0 +1,24 @@
+# unwrap/expect/panic/indexing are denied in production code (workspace lints) because
+# the generator must never panic on any input: a panic is a rejection without a
+# diagnostic. They are the idiomatic failure mode inside tests, so scope the denies to
+# non-test code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# Proper nouns that look like code identifiers but should not be backticked in docs.
+# `..` appends to clippy's built-in list (GitHub, OAuth, …) rather than replacing it.
+doc-valid-idents = ["OpenAPI", "JSON", "YAML", "SCC", "RSS", ".."]
+
+disallowed-macros = [
+  { path = "std::dbg", reason = "remove before commit" },
+]
+
+# Determinism is an output invariant: identical (document, config, version) must render
+# byte-identical source. Hash-map iteration order would break it silently, so the model
+# and every rendering path use BTreeMap/BTreeSet instead.
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "generated output must be deterministic: use BTreeMap" },
+  { path = "std::collections::HashSet", reason = "generated output must be deterministic: use BTreeSet" },
+]

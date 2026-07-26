@@ -1,0 +1,82 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/romnn/progeny"
+homepage = "https://github.com/romnn/progeny"
+authors = ["romnn <roman@airtype.de>"]
+keywords = ["openapi", "codegen", "reqwest", "axum", "serde"]
+categories = ["development-tools", "web-programming"]
+
+[workspace.metadata.cargo-fc]
+install_missing_targets = true
+dedupe = true
+aggregate_targets = false
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-gnu",
+  "aarch64-apple-darwin",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[workspace.lints.rust]
+warnings = { level = "warn", priority = -1 }
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+todo = "deny"
+indexing_slicing = "deny"
+missing_errors_doc = "warn"
+await_holding_lock = "deny"
+# Every `#[allow(...)]` must carry a `reason = "..."` justifying the escape hatch.
+allow_attributes_without_reason = "deny"
+
+# Allowed
+map_unwrap_or = "allow"
+assigning_clones = "allow"
+struct_excessive_bools = "allow"
+
+[workspace.dependencies]
+progeny = { path = "crates/progeny", version = "0.0.1" }
+
+serde = { version = "1", features = ["derive"] }
+# `arbitrary_precision` keeps number literals byte-exact through the model
+# (`1.0` stays `1.0`, 128-bit decimals survive), which the round-trip property needs.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+# YAML event parser. Chosen over the pure-Rust YAML 1.2 parsers by running the corpus
+# through both: they reject `netbird`, whose `enum: [` closes its flow sequence at the
+# key's own indentation — strictly at fault, universally accepted, and refusing a
+# document every other tool reads is the worst outcome available. This one reports the
+# raw scalar text, its style and its tag and leaves *resolution* to the loader, which
+# is what keeps YAML 1.2 core-schema semantics (`y`, `n`, `on`, `off`, `=` stay
+# strings) and exact number literals despite the lenient parse.
+libyaml-safer = "0.3"
+camino = { version = "1", features = ["serde1"] }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+syn = { version = "2", features = ["full", "visit"] }
+# `span-locations` is what turns a parsed span into a line number, which is what makes a
+# layering violation clickable rather than a name to go hunting for.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+toml = "1"
+ureq = "3"
+nix = { version = "0.31", features = ["resource"] }

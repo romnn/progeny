@@ -1,0 +1,28 @@
+# Default == unit tests only: hermetic, offline, fast. The conformance corpus is not run
+# from nextest at all — it needs `corpus/cache/`, which is gitignored and fetched — so
+# `cargo xtask corpus` owns it. Only `petstore-31` is committed, and its round-trip runs
+# here as an ordinary test.
+#
+# Classification is by module path (`integration_tests::`) so new tests inherit a profile
+# from their location. `binary()` predicates are deliberately absent: nextest errors when a
+# `binary()` regex matches zero binaries, and no such binary exists yet.
+[profile.default]
+default-filter = 'not test(/integration_tests?::/)'
+fail-fast = { max-fail = "all" }
+retries = 0
+# Hard cap: 60s per unit test.
+slow-timeout = { period = "60s", terminate-after = 1, grace-period = "10s" }
+
+# Integration-only profile: exactly what the default profile excludes.
+[profile.integration]
+default-filter = 'test(/integration_tests?::/)'
+fail-fast = { max-fail = "all" }
+retries = 3
+slow-timeout = { period = "300s", terminate-after = 1, grace-period = "10s" }
+
+# CI: run everything.
+[profile.ci]
+default-filter = 'all()'
+fail-fast = false
+retries = 0
+slow-timeout = { period = "300s", terminate-after = 1, grace-period = "10s" }

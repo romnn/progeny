@@ -1,0 +1,30 @@
+[package]
+name = "progeny"
+description = "Generate a Rust client and server from an OpenAPI description, faithfully and loudly"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# The front end exposed for the conformance corpus runner and the fuzz targets. Not public
+# API: no semver, no stability, and never enabled by a consumer of the generator.
+harness = []
+
+[dependencies]
+camino.workspace = true
+libyaml-safer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `Config` is what a `progeny.toml` deserializes into. Only the `progeny` binary and the
+# configuration's own tests read TOML; the library itself never touches a file.
+toml.workspace = true
+
+[lints]
+workspace = true
