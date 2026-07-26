@@ -792,6 +792,171 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_that_accepts_a_later_ones_payloads_is_not_told_apart_by_it() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Base": {"type": "object", "properties": {"name": {"type": "string"}}},
+            "Extended": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "id": {"type": "string"}},
+                "required": ["id"],
+            },
+            // `Extended` requires something `Base` does not declare, which tells `Base`'s payloads
+            // apart from `Extended` — the direction that does not matter, because `Base` is tried
+            // first and is open, so it accepts `{"name": …, "id": …}` and drops the `id`.
+            "Envelope": {"anyOf": [
+                {"$ref": "#/components/schemas/Base"},
+                {"$ref": "#/components/schemas/Extended"},
+            ]},
+        })));
+        assert_eq!(shape_of(&shapes, "Envelope"), &Shape::Any);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.class() == crate::BreakageClass::WildUnion),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_two_branches_in_the_other_order_need_no_tag() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Base": {"type": "object", "properties": {"name": {"type": "string"}}},
+            "Extended": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "id": {"type": "string"}},
+                "required": ["id"],
+            },
+            "Envelope": {"anyOf": [
+                {"$ref": "#/components/schemas/Extended"},
+                {"$ref": "#/components/schemas/Base"},
+            ]},
+        })));
+        // The pair is the same and the reading is sound: an `Extended` payload matches `Extended`,
+        // and a `Base` payload has no `id` for `Extended` to find, so it falls through. Paired with
+        // `a_branch_that_accepts_a_later_ones_payloads_is_not_told_apart_by_it`, this is why the
+        // question has to be asked in declaration order — one pair of branches, two orders, and
+        // only one of them sound, so a symmetric test cannot be right about both.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(envelope) = shape_of(&shapes, "Envelope") else {
+            panic!("expected a union");
+        };
+        assert_eq!(envelope.tag, None);
+        assert_eq!(envelope.variants.len(), 2);
+    }
+
+    #[test]
+    fn one_property_holding_two_kinds_tells_the_branches_apart() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            // `workos` returns exactly this from one status. The branches share every property
+            // name, which is what makes them look alike — but `message` is a string in one and a
+            // list in the other, and deserializing a list into a `String` is an error, which is a
+            // fall-through to the next variant rather than a wrong match.
+            "Error": {"oneOf": [
+                {
+                    "type": "object", "required": ["message"],
+                    "properties": {"message": {"type": "string"}},
+                },
+                {
+                    "type": "object", "required": ["message", "error"],
+                    "properties": {
+                        "message": {"type": "array", "items": {"type": "string"}},
+                        "error": {"type": "string"},
+                    },
+                },
+            ]},
+        })));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(error) = shape_of(&shapes, "Error") else {
+            panic!("expected a union");
+        };
+        assert_eq!(error.tag, None);
+        assert_eq!(error.variants.len(), 2);
+    }
+
+    #[test]
+    fn a_closed_branch_is_told_apart_by_what_a_later_one_requires() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Base": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "additionalProperties": false,
+            },
+            "Extended": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "id": {"type": "string"}},
+                "required": ["id"],
+            },
+            "Envelope": {"anyOf": [
+                {"$ref": "#/components/schemas/Base"},
+                {"$ref": "#/components/schemas/Extended"},
+            ]},
+        })));
+        // Closing `Base` is what makes the first order sound too: it is the one shape that turns a
+        // payload down for carrying something extra, and every `Extended` payload carries `id`.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(envelope) = shape_of(&shapes, "Envelope") else {
+            panic!("expected a union");
+        };
+        assert_eq!(envelope.tag, None);
+    }
+
+    #[test]
+    fn a_branch_that_becomes_arbitrary_json_tells_nothing_apart() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            // A bare enumeration of objects narrows nothing progeny can type, so the branch is
+            // `serde_json::Value` — which accepts every payload and would swallow `Payload`.
+            "Loose": {"enum": [{"a": 1}, {"b": 2}]},
+            "Payload": {
+                "type": "object",
+                "properties": {"k": {"type": "string"}},
+                "required": ["k"],
+            },
+            "Either": {"anyOf": [
+                {"$ref": "#/components/schemas/Loose"},
+                {"$ref": "#/components/schemas/Payload"},
+            ]},
+        })));
+        assert_eq!(shape_of(&shapes, "Either"), &Shape::Any);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.class() == crate::BreakageClass::WildUnion),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_numeric_enum_is_a_number_rather_than_arbitrary_json() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Code": {"enum": [1, 2, 3]},
+            "Ratio": {"enum": [0.5, 1.5]},
+            "Flag": {"enum": [true, false]},
+        })));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // `type` is not the only way a document names a kind, and reading these as arbitrary JSON
+        // lost the type *and* gave a union branch that swallows its siblings.
+        assert_eq!(
+            shape_of(&shapes, "Code"),
+            &Shape::Scalar(Scalar::Integer { signed: true })
+        );
+        assert_eq!(shape_of(&shapes, "Ratio"), &Shape::Scalar(Scalar::Number));
+        assert_eq!(shape_of(&shapes, "Flag"), &Shape::Scalar(Scalar::Bool));
+    }
+
+    #[test]
+    fn an_enum_that_repeats_a_value_gives_one_variant_per_distinct_value() {
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            // Not adjacent, which is the whole reason `Vec::dedup` missed it: two variants renamed
+            // to `"a"` gave serde a second one it can never produce or report.
+            "Repeats": {"type": "string", "enum": ["a", "b", "a"]},
+        })));
+        assert_eq!(
+            shape_of(&shapes, "Repeats"),
+            &Shape::StringEnum(vec!["a".to_owned(), "b".to_owned()])
+        );
+    }
+
+    #[test]
     fn branches_of_different_kinds_still_need_no_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Either": {"anyOf": [
@@ -840,6 +1005,63 @@ mod tests {
                 .iter()
                 .any(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn a_variant_that_is_itself_a_response_body_keeps_its_tag() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/file": {"get": {
+                    "operationId": "getFile",
+                    "responses": {"200": {
+                        "description": "the file itself, where `kind` really is on the wire",
+                        "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/FromFile"},
+                        }},
+                    }},
+                }},
+            },
+            "components": {"schemas": {
+                "FromFile": {
+                    "type": "object", "required": ["kind", "location"],
+                    "properties": {"kind": {"type": "string"}, "location": {"type": "string"}},
+                },
+                "FromUrl": {
+                    "type": "object", "required": ["kind", "location"],
+                    "properties": {"kind": {"type": "string"}, "location": {"type": "string"}},
+                },
+                "Source": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/FromFile"},
+                        {"$ref": "#/components/schemas/FromUrl"},
+                    ],
+                    "discriminator": {"propertyName": "kind"},
+                },
+            }},
+        });
+        let (shapes, diagnostics) = shapes_of(document);
+        // The refusal the union table always specified, from the half of the safety condition that
+        // has no edge to be found by: an API-surface position points at no shape, so a walk over
+        // shapes alone never sees that `FromFile` is a `200` body. Stripping `kind` there loses it
+        // on the wire.
+        let Shape::Struct(from_file) = shape_of(&shapes, "FromFile") else {
+            panic!("expected a struct");
+        };
+        assert!(
+            from_file.fields.iter().any(|field| field.wire == "kind"),
+            "the response body kept `kind`: {from_file:?}"
+        );
+        assert_eq!(shape_of(&shapes, "Source"), &Shape::Any);
+        let reported = diagnostics
+            .iter()
+            .find(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase)
+            .expect("the refusal should be reported");
+        assert!(
+            reported.detail().contains("outside this union"),
+            "{reported}"
         );
     }
 

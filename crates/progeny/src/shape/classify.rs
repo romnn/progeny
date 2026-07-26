@@ -151,11 +151,51 @@ fn untyped(view: &View) -> Shape {
     if view.uniform_pattern.is_some() {
         return object(view);
     }
+    if let Some(scalar) = enumerated_scalar(view) {
+        return scalar;
+    }
     if view.format.is_some() || view.content_encoding.is_some() || view.content_media_type.is_some()
     {
         return string(view);
     }
     Shape::Any
+}
+
+/// The scalar a bare `enum`/`const` of one non-string kind names.
+///
+/// `{"enum": [1, 2, 3]}` says its values are numbers as surely as `type: integer` would, and real
+/// documents write it both ways. Reading it as arbitrary JSON loses the type twice over: the field
+/// stops being a number, and — because `serde_json::Value` accepts every payload — the branch
+/// swallows its siblings wherever it sits in a union.
+///
+/// String enumerations never reach here: they have a named Rust type of their own and [`core`]
+/// takes them before the `type` keyword is consulted at all. Only the narrowing to the listed
+/// values is lost, which is the sound direction and the one [`string_values`] already documents.
+fn enumerated_scalar(view: &View) -> Option<Shape> {
+    match enumerated_kind(view)? {
+        Kind::Number => Some(Shape::Scalar(if integral(view) {
+            Scalar::Integer {
+                signed: !view.unsigned,
+            }
+        } else {
+            Scalar::Number
+        })),
+        Kind::Boolean => Some(Shape::Scalar(Scalar::Bool)),
+        Kind::String | Kind::Array | Kind::Object | Kind::Null => None,
+    }
+}
+
+/// Whether every listed value is a whole number, which is what separates the two numeric scalars.
+fn integral(view: &View) -> bool {
+    let declared = match (&view.enumeration, &view.constant) {
+        (Some(values), _) => values.as_slice(),
+        (None, Some(value)) => std::slice::from_ref(value),
+        (None, None) => return false,
+    };
+    declared
+        .iter()
+        .filter(|value| !value.is_null())
+        .all(|value| value.as_i64().is_some() || value.as_u64().is_some())
 }
 
 fn object(view: &View) -> Shape {
@@ -456,10 +496,10 @@ fn ambiguity_at(
             }
             match left {
                 Kind::Object => {
-                    if !separated(resolved, view, other) {
+                    if !rejects(resolved, view, other) {
                         return Some(
-                            "two of its branches are objects that no required property and no \
-                             constant value tells apart"
+                            "one of its branches is an object that accepts the payloads of a \
+                             later one, which is tried after it and so never reached"
                                 .to_owned(),
                         );
                     }
@@ -549,6 +589,14 @@ fn kind_of(view: &View) -> Option<Kind> {
         // second, quieter copy of this whole function.
         return None;
     }
+    // What [`key`] answers before it ever reaches [`core`]. These branches become
+    // `serde_json::Value`, which accepts every payload each of its siblings does, so reporting the
+    // kind their remaining keywords suggest would claim a branch discriminates when the type
+    // actually emitted for it cannot. The question this function answers is about the emitted type,
+    // not about the schema.
+    if view.impossible || view.conflict.is_some() || view.unions_collide {
+        return None;
+    }
     let named: Vec<&TypeName> = view
         .types
         .iter()
@@ -582,8 +630,13 @@ fn kind_of(view: &View) -> Option<Kind> {
     if view.items.is_some() || view.prefix_items.is_some() {
         return Some(Kind::Array);
     }
-    if view.enumeration.is_some() || view.constant.is_some() {
-        return Some(Kind::String);
+    match enumerated_kind(view) {
+        // A bare enumeration names its kind as plainly as `type` would, and these three have a
+        // Rust type of their own to be named into.
+        Some(kind @ (Kind::String | Kind::Number | Kind::Boolean)) => return Some(kind),
+        // An enumeration of objects or lists narrows nothing progeny can express, so the branch
+        // becomes `serde_json::Value` and discriminates nothing.
+        Some(Kind::Object | Kind::Array | Kind::Null) | None => {}
     }
     if view.format.is_some() || view.content_encoding.is_some() || view.content_media_type.is_some()
     {
@@ -592,33 +645,89 @@ fn kind_of(view: &View) -> Option<Kind> {
     None
 }
 
-/// Whether two object branches can be told apart by a payload alone.
+/// The one JSON kind every value of an `enum`/`const` has, when they agree on one.
 ///
-/// Two ways, both of which serde's untagged matching actually acts on: a property one branch
-/// *requires* and the other does not declare at all, or a property both declare where the sets of
-/// values each admits do not overlap. The second is what makes the common `const`-tagged union
-/// exact without any tagging machinery — and it is worth having precisely because so many
-/// documents write the tag as a constant *and* declare a discriminator beside it.
-fn separated(resolved: &ResolvedDocument, left: &View, right: &View) -> bool {
+/// `null` is nullability rather than a value and the caller has already read it as such. Values of
+/// mixed kinds have no single Rust type at all, which is the case [`string_values`] reports.
+fn enumerated_kind(view: &View) -> Option<Kind> {
+    let declared = match (&view.enumeration, &view.constant) {
+        (Some(values), _) => values.clone(),
+        (None, Some(value)) => vec![value.clone()],
+        (None, None) => return None,
+    };
+    let mut kinds = declared
+        .iter()
+        .filter(|value| !value.is_null())
+        .map(|value| match value {
+            Value::String(_) => Kind::String,
+            Value::Number(_) => Kind::Number,
+            Value::Bool(_) => Kind::Boolean,
+            Value::Array(_) => Kind::Array,
+            Value::Object(_) | Value::Null => Kind::Object,
+        });
+    let first = kinds.next()?;
+    kinds.all(|kind| kind == first).then_some(first)
+}
+
+/// Whether the branch tried *first* is guaranteed to turn down the payloads of a later one.
+///
+/// The order is the question, and asking it symmetrically is wrong in a way that produces silently
+/// wrong output. serde tries variants in declaration order and takes the first that deserializes,
+/// so what has to hold for a pair is not that *something* tells them apart but that the one tried
+/// first refuses the other's payloads. A required property the later branch never declares does
+/// that. The same property required by the *later* branch does not: by the time it would have said
+/// so, the earlier branch has already accepted the payload and dropped the member that would have
+/// distinguished it — a `{name, id}` read as the `{name}` branch, losing `id` with nothing
+/// reported.
+///
+/// Three ways an earlier branch refuses, all of which serde's untagged matching acts on:
+///
+/// * it requires a property the later branch never declares, so no payload of the later one carries
+///   it;
+/// * it refuses members it does not declare, and every payload of the later one carries one;
+/// * a property both declare admits disjoint sets of values, which is what makes the common
+///   `const`-tagged union exact without any tagging machinery — and it is worth having precisely
+///   because so many documents write the tag as a constant *and* declare a discriminator beside it;
+/// * a property both declare holds a different *kind* of value in each — `workos` returns
+///   `{message: string}` or `{message: [string], error: string}` from one status — because
+///   deserializing an array into the earlier branch's `String` is an error, and an error is a
+///   fall-through to the next variant. This one is easy to forget because the property has the same
+///   name in both, which is what makes the branches *look* alike.
+///
+/// A payload the earlier branch accepts *and* the later branch validates is ambiguous in the
+/// document itself, not in this reading of it, so it is not what these rules are for.
+fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
     let missing = |required: &BTreeSet<String>, other: &View| {
         required
             .iter()
             .any(|name| !other.properties.contains_key(name))
     };
-    if missing(&left.required, right) || missing(&right.required, left) {
+    if missing(&earlier.required, later) {
         return true;
     }
-    left.properties.iter().any(|(name, key)| {
-        let Some(other) = right.properties.get(name) else {
+    // Only sound in this direction: a closed struct is the one shape that rejects a payload for
+    // carrying something *extra*, so what the later branch insists on is what turns it down.
+    if earlier.additional_denied && missing(&later.required, earlier) {
+        return true;
+    }
+    earlier.properties.iter().any(|(name, key)| {
+        let Some(other) = later.properties.get(name) else {
             return false;
         };
-        let (Some(here), Some(there)) = (
+        if let (Some(here), Some(there)) = (
             admitted_values(resolved, key),
             admitted_values(resolved, other),
+        ) && here.is_disjoint(&there)
+        {
+            return true;
+        }
+        let (Some(here), Some(there)) = (
+            kind_of(&merge::view(resolved, key)),
+            kind_of(&merge::view(resolved, other)),
         ) else {
             return false;
         };
-        here.is_disjoint(&there)
+        here != there
     })
 }
 
@@ -658,12 +767,10 @@ fn string_values(view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Option<Vec<Str
         return None;
     }
     if values.iter().all(|value| value.is_string()) {
-        let mut names: Vec<String> = values
+        let names = values
             .iter()
-            .filter_map(|value| value.as_str().map(ToOwned::to_owned))
-            .collect();
-        names.dedup();
-        return Some(names);
+            .filter_map(|value| value.as_str().map(ToOwned::to_owned));
+        return Some(unique(names));
     }
     // Values of one non-string kind — a numeric or boolean enumeration — fall back to that kind's
     // scalar, which still accepts every listed value; only the narrowing is lost, and there is no
@@ -701,7 +808,24 @@ fn branch_constants(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Optio
         }?;
         values.push(declared.as_str()?.to_owned());
     }
-    (!values.is_empty()).then_some(values)
+    (!values.is_empty()).then_some(unique(values))
+}
+
+/// The listed values with repeats dropped, in the order the document wrote them.
+///
+/// JSON Schema calls `enum` a set, and documents still repeat values in it. Two variants renamed to
+/// one string would give serde a variant it can never produce: the second is unreachable coming in
+/// and indistinguishable going out, so it round-trips as the first. Dropping the repeat loses
+/// nothing, because a set with a member written twice is the same set.
+///
+/// Repeats are not adjacent in practice — `["a", "b", "a"]` is how a document writes one — so
+/// [`Vec::dedup`], which only collapses runs, does not do this.
+fn unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
 }
 
 fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {

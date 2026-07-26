@@ -66,6 +66,41 @@ components:
           $ref: "#/components/schemas/Widget"
         nullable:
           type: boolean
+        # The same union, spelled the way 3.1 spells a null arm.
+        tag:
+          anyOf:
+            - $ref: "#/components/schemas/Named"
+            - type: "null"
+        source:
+          oneOf:
+            - $ref: "#/components/schemas/FromFile"
+            - $ref: "#/components/schemas/FromUrl"
+          discriminator:
+            propertyName: kind
+            mapping:
+              file: "#/components/schemas/FromFile"
+              url: FromUrl
       default:
         nullable: true
         example: 1
+    Named:
+      type: object
+      properties:
+        label:
+          type: string
+    FromFile:
+      type: object
+      required: [kind, location]
+      properties:
+        kind:
+          type: string
+        location:
+          type: string
+    FromUrl:
+      type: object
+      required: [kind, location]
+      properties:
+        kind:
+          type: string
+        location:
+          type: string

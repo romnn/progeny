@@ -74,7 +74,46 @@ components:
         # A property whose name is a keyword is still a schema.
         nullable:
           type: boolean
+        # A union with a null arm, which 3.0 can only spell as a branch saying `nullable: true`.
+        # Stage 4 reads that branch as the null arm rather than as a branch that constrains
+        # nothing; this pair is what keeps the reading a normalization rather than a 3.0 dialect of
+        # the union table.
+        tag:
+          anyOf:
+            - $ref: "#/components/schemas/Named"
+            - nullable: true
+        # A discriminated union, whose variants nothing structural tells apart.
+        source:
+          oneOf:
+            - $ref: "#/components/schemas/FromFile"
+            - $ref: "#/components/schemas/FromUrl"
+          discriminator:
+            propertyName: kind
+            mapping:
+              file: "#/components/schemas/FromFile"
+              url: FromUrl
       # Another decoy: a default payload is data, not a schema.
       default:
         nullable: true
         example: 1
+    Named:
+      type: object
+      properties:
+        label:
+          type: string
+    FromFile:
+      type: object
+      required: [kind, location]
+      properties:
+        kind:
+          type: string
+        location:
+          type: string
+    FromUrl:
+      type: object
+      required: [kind, location]
+      properties:
+        kind:
+          type: string
+        location:
+          type: string

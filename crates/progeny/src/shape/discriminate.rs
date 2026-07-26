@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Shape, ShapeKey, ShapeRef, Shapes, Union};
+use super::{RootKind, Shape, ShapeKey, ShapeRef, Shapes, Union};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 
@@ -67,18 +67,24 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
                         // the serializing, and the child needs it on neither. Worth saying out
                         // loud because a reader of the generated types will find a property
                         // missing and want to know which unions took it.
+                        //
+                        // Reported against the *variant*, which is the type that loses the
+                        // property and so the thing a reader has to go and look at. Against the
+                        // union it would be several byte-identical records whenever a union shares
+                        // more than one variant with another — which is what a per-occurrence
+                        // class is supposed to never produce.
                         ctx.report(
                             Diagnostic::new(
                                 BreakageClass::MultiParentDiscriminator,
                                 Action::Warn,
-                                at.clone(),
+                                address(resolved, shapes, variant),
                                 format!(
                                     "`{property}` is the discriminator of more than one union over \
                                      this variant; the variant carries the property in neither, \
                                      because each union writes it itself"
                                 ),
                             )
-                            .with_related([address(resolved, shapes, first)]),
+                            .with_related([address(resolved, shapes, first), at.clone()]),
                         );
                     } else {
                         claimed.insert(variant.clone(), (property.clone(), union_key.clone()));
@@ -207,6 +213,15 @@ fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
 /// edge — a struct member, a list element, a map value, a variant of an untagged union — is a
 /// position where the payload really does contain the property, so a type reached that way must
 /// keep it.
+///
+/// Edges between shapes are only half of it. A schema the API surface names directly — a response
+/// body, a request body, a parameter, a header — is a wire position with no edge pointing at it, so
+/// a walk over shapes alone cannot see it, and taking the tag off a type that is *itself* a `200`
+/// response makes the client drop the property coming in and omit it going out. So an API-surface
+/// root counts as a use, exactly like a struct member does.
+///
+/// A `components.schemas` entry does not, because being named is not being on the wire; counting it
+/// would refuse every discriminated union whose variants the document bothered to name.
 fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
     let mut borrowed = BTreeSet::new();
     for (_, shape) in shapes.entries() {
@@ -217,6 +232,11 @@ fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
         }
         for key in super::child_keys(shape) {
             borrowed.insert(key);
+        }
+    }
+    for root in shapes.roots() {
+        if root.kind == RootKind::Inline {
+            borrowed.insert(root.key.clone());
         }
     }
     borrowed

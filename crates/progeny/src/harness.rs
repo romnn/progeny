@@ -416,17 +416,19 @@ mod tests {
         let result = super::convergence(OLD, NEW).unwrap();
         assert!(result.is_clean(), "{:#?}", result.differences);
         // The 3.1 half is already in the dialect the parser reads, so nothing about it is a
-        // finding; the 3.0 half's rewriting is the documented normalization and says nothing
-        // either.
-        assert!(
-            result.diagnostics.is_empty(),
-            "{:?}",
-            result
-                .diagnostics
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        );
+        // finding. The 3.0 half's rewriting is the documented normalization, and *one row of it
+        // reports*: `{nullable: true}` alone in a union is repaired into the null arm and said out
+        // loud, because the literal reading costs the union its type. So the assertion is that
+        // nothing was given up — a `Degrade` or a `Warn` here would mean the two halves agree only
+        // because both lost the same thing — and not that the normalization was silent, which was
+        // only ever true while every row of it happened to be.
+        let given_up: Vec<String> = result
+            .diagnostics
+            .iter()
+            .filter(|found| found.action() != crate::Action::Repair)
+            .map(ToString::to_string)
+            .collect();
+        assert!(given_up.is_empty(), "{given_up:?}");
     }
 
     #[test]
