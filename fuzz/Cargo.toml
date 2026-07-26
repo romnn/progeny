@@ -25,6 +25,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 progeny = { path = "../crates/progeny", features = ["harness"] }
+# The generation target asserts that what comes out parses as Rust, which needs a parser.
+syn = { version = "2", features = ["full", "parsing"] }
 
 [[bin]]
 name = "front_end"
@@ -36,6 +38,20 @@ bench = false
 [[bin]]
 name = "round_trip"
 path = "fuzz_targets/round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resolution"
+path = "fuzz_targets/resolution.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "generate"
+path = "fuzz_targets/generate.rs"
 test = false
 doc = false
 bench = false

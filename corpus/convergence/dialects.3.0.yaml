@@ -1,0 +1,80 @@
+# One half of a convergence pair: this document and `dialects.3.1.yaml` describe the same API in
+# the two dialects, and must produce the same model. Every row of the 3.0 -> 3.1 normalization
+# table appears here, together with decoys that must survive untouched.
+openapi: 3.0.3
+info:
+  title: Convergence
+  version: "1.0"
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      parameters:
+        - name: dry
+          in: query
+          schema:
+            type: boolean
+            nullable: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Widget"
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                # A file part: 3.0 marks which property is binary with `format`, and the
+                # media-type key cannot carry a per-property fact.
+                upload:
+                  type: string
+                  format: binary
+                notes:
+                  type: string
+      responses:
+        "200":
+          description: made one
+          headers:
+            X-Rate-Limit:
+              schema:
+                type: integer
+                minimum: 0
+                exclusiveMinimum: true
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Widget"
+              # A decoy: an example payload whose members are named like keywords.
+              example:
+                nullable: true
+                format: binary
+                exclusiveMinimum: true
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: a widget
+        colour:
+          type: string
+          enum: [red, green]
+          nullable: true
+        size:
+          type: integer
+          maximum: 100
+          exclusiveMaximum: true
+        blob:
+          type: string
+          format: byte
+        parent:
+          $ref: "#/components/schemas/Widget"
+        # A property whose name is a keyword is still a schema.
+        nullable:
+          type: boolean
+      # Another decoy: a default payload is data, not a schema.
+      default:
+        nullable: true
+        example: 1

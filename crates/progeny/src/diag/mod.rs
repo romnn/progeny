@@ -8,7 +8,9 @@
 
 mod pointer;
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU32;
 
 pub use pointer::JsonPointer;
 
@@ -95,6 +97,25 @@ pub enum BreakageClass {
     InvalidDefault,
     /// A route the generated router could not register, or that collides with another.
     UnregistrableRoute,
+    /// The draft-04 tuple form `items: [A, B]`, which 2020-12 spells `prefixItems`.
+    LegacyTupleItems,
+    /// The 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` form in a document that declares
+    /// 3.1, where a boolean there is never valid.
+    LegacyExclusiveBound,
+    /// A schema construct progeny does not interpret — `not`, `if`/`then`/`else`,
+    /// `dependentSchemas`, `unevaluated*`, non-uniform `patternProperties`, a mixed-type `enum`.
+    /// Held losslessly and typed as `serde_json::Value`.
+    UnsupportedConstruct,
+    /// An `allOf` whose branches cannot be merged into one shape: irreconcilable `type`s, or one
+    /// property given two incompatible schemas.
+    IrreconcilableAllOf,
+    /// A property that is both optional and nullable, collapsed onto one `Option`, so "absent"
+    /// and "present and null" become the same value.
+    PresenceCollapse,
+    /// Two shapes whose names sanitize to the same Rust identifier.
+    CollidingTypeName,
+    /// A derive the caller asked every type for, on a type that cannot have it.
+    UnsatisfiableDerive,
 }
 
 impl BreakageClass {
@@ -117,8 +138,68 @@ impl BreakageClass {
             Self::InvalidExample => "invalid-example",
             Self::InvalidDefault => "invalid-default",
             Self::UnregistrableRoute => "unregistrable-route",
+            Self::LegacyTupleItems => "legacy-tuple-items",
+            Self::LegacyExclusiveBound => "legacy-exclusive-bound",
+            Self::UnsupportedConstruct => "unsupported-construct",
+            Self::IrreconcilableAllOf => "irreconcilable-all-of",
+            Self::PresenceCollapse => "presence-collapse",
+            Self::CollidingTypeName => "colliding-type-name",
+            Self::UnsatisfiableDerive => "unsatisfiable-derive",
         }
     }
+
+    /// Whether one record stands for one occurrence or for every occurrence in the document.
+    ///
+    /// Some classes fire at a scale that would make the output useless — 16,100
+    /// optional-and-nullable collapses and 652 draft-04 tuple forms in this corpus alone — and a
+    /// record per occurrence turns the per-spec snapshot into noise nobody reads, which defeats
+    /// its purpose as a review gate. So a class says here whether it aggregates, and the choice
+    /// is made where the action is: adding a variant forces both decisions at once.
+    ///
+    /// The rule of thumb behind the assignments: aggregate when a reader wants the *count* and a
+    /// handful of examples ("this document writes draft-04 tuples, 651 times"); keep every
+    /// occurrence when a reader has to act on each one individually (a skipped route, a renamed
+    /// operation).
+    #[must_use]
+    pub fn aggregation(self) -> Aggregation {
+        match self {
+            // Scale classes: the count is the finding.
+            Self::MalformedMember
+            | Self::NonFiniteNumber
+            | Self::UnsupportedDialect
+            | Self::DynamicScoping
+            | Self::DanglingRef
+            | Self::UnknownSchemaType
+            | Self::WildUnion
+            | Self::QuerySerializationStyle
+            | Self::InvalidExample
+            | Self::InvalidDefault
+            | Self::LegacyTupleItems
+            | Self::LegacyExclusiveBound
+            | Self::UnsupportedConstruct
+            | Self::IrreconcilableAllOf
+            | Self::PresenceCollapse
+            | Self::CollidingTypeName
+            | Self::UnsatisfiableDerive => Aggregation::PerDocument,
+            // The first can occur at most once per document by construction; each of the rest names
+            // a distinct set of document locations a reader has to look at, with no useful count to
+            // report instead.
+            Self::MissingFinalLineBreak
+            | Self::MultiParentDiscriminator
+            | Self::DiscriminatorEdgeCase
+            | Self::CollidingOperationId
+            | Self::UnregistrableRoute => Aggregation::PerOccurrence,
+        }
+    }
+}
+
+/// Whether a diagnostic stands for one occurrence or for a class of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Aggregation {
+    /// One record per occurrence.
+    PerOccurrence,
+    /// One record per document, carrying the occurrence count and the first few locations.
+    PerDocument,
 }
 
 impl fmt::Display for BreakageClass {
@@ -135,7 +216,14 @@ pub struct Diagnostic {
     location: JsonPointer,
     detail: String,
     related: Vec<JsonPointer>,
+    occurrences: NonZeroU32,
 }
+
+/// How many locations an aggregated diagnostic names before it stops collecting them.
+///
+/// The count is the finding for an aggregated class; the locations are there to make it
+/// investigable, and a few are enough for that.
+const RELATED_CAP: usize = 5;
 
 impl Diagnostic {
     /// Record a deviation at `location`.
@@ -156,6 +244,7 @@ impl Diagnostic {
             location,
             detail: detail.into(),
             related: Vec::new(),
+            occurrences: NonZeroU32::MIN,
         }
     }
 
@@ -197,6 +286,26 @@ impl Diagnostic {
         &self.related
     }
 
+    /// How many times this finding occurred.
+    ///
+    /// Always 1 for a per-occurrence class. For an aggregated one this is the whole document's
+    /// count, [`Diagnostic::location`] is the first occurrence, and [`Diagnostic::related`] holds
+    /// the next few.
+    #[must_use]
+    pub fn occurrences(&self) -> NonZeroU32 {
+        self.occurrences
+    }
+
+    /// Fold another occurrence of the same finding into this record.
+    fn absorb(&mut self, location: JsonPointer) {
+        // Saturating rather than wrapping: a document with four billion occurrences of one
+        // finding is already told truthfully enough by the cap.
+        self.occurrences = self.occurrences.checked_add(1).unwrap_or(self.occurrences);
+        if self.related.len() < RELATED_CAP {
+            self.related.push(location);
+        }
+    }
+
     /// The one-line JSON rendering used for the checked-in per-spec snapshots.
     ///
     /// Keys are emitted in a fixed order so a snapshot diff reads as a behaviour change
@@ -212,6 +321,10 @@ impl Diagnostic {
         push_json_string(&mut out, &self.location.to_string());
         out.push_str(",\"detail\":");
         push_json_string(&mut out, &self.detail);
+        if self.occurrences > NonZeroU32::MIN {
+            out.push_str(",\"occurrences\":");
+            out.push_str(&self.occurrences.to_string());
+        }
         if !self.related.is_empty() {
             out.push_str(",\"related\":[");
             for (index, pointer) in self.related.iter().enumerate() {
@@ -240,9 +353,20 @@ impl fmt::Display for Diagnostic {
             "{}: {} at {location}: {}",
             self.action, self.class, self.detail
         )?;
-        if !self.related.is_empty() {
-            let related: Vec<String> = self.related.iter().map(ToString::to_string).collect();
-            write!(f, " (see also {})", related.join(", "))?;
+        if self.occurrences > NonZeroU32::MIN {
+            write!(f, " ({} occurrences)", self.occurrences)?;
+        }
+        // A handful of pointers into a deeply nested schema is longer than the sentence they
+        // qualify, so build output gets the count and the JSON-lines rendering keeps the list for
+        // tooling. Up to two are short enough to be worth naming — which covers the classes where
+        // the other location *is* the finding, such as two colliding operations.
+        match self.related.len() {
+            0 => {}
+            1 | 2 => {
+                let related: Vec<String> = self.related.iter().map(ToString::to_string).collect();
+                write!(f, " (see also {})", related.join(", "))?;
+            }
+            more => write!(f, " (and {more} more locations)")?,
         }
         Ok(())
     }
@@ -295,6 +419,8 @@ pub enum RejectKind {
     UnsupportedVersion,
     /// Neither `paths` nor `webhooks`, so the document describes no operations.
     NoOperations,
+    /// The configuration asks, by name, for something this document cannot be given.
+    UnsatisfiableConfig,
 }
 
 impl RejectKind {
@@ -308,6 +434,7 @@ impl RejectKind {
             Self::MissingVersion => "missing-version",
             Self::UnsupportedVersion => "unsupported-version",
             Self::NoOperations => "no-operations",
+            Self::UnsatisfiableConfig => "unsatisfiable-config",
         }
     }
 }
@@ -381,6 +508,13 @@ impl std::error::Error for RejectError {}
 pub(crate) struct Ctx {
     path: JsonPointer,
     diagnostics: Vec<Diagnostic>,
+    /// Where each aggregated finding already sits in `diagnostics`, so folding an occurrence into
+    /// it is a lookup rather than a scan over everything reported so far.
+    ///
+    /// Keyed by the sentence as well as the class: two different findings of one class stay two
+    /// records, which is what keeps "`description` should be a string" from being merged with
+    /// "`url` should be a string" just because both are malformed members.
+    aggregated: BTreeMap<(BreakageClass, String), usize>,
 }
 
 impl Ctx {
@@ -393,6 +527,11 @@ impl Ctx {
         self.path.child(token)
     }
 
+    /// The location of the node currently being read.
+    pub(crate) fn here(&self) -> &JsonPointer {
+        &self.path
+    }
+
     /// Read a child node with the location extended by `token`.
     pub(crate) fn scoped<T>(&mut self, token: &str, f: impl FnOnce(&mut Self) -> T) -> T {
         self.path.push(token);
@@ -401,7 +540,24 @@ impl Ctx {
         out
     }
 
+    /// Record a deviation, folding it into an existing record when its class aggregates.
+    ///
+    /// Aggregation happens here rather than in a pass afterwards so that a caller cannot
+    /// accidentally emit 16,100 lines by reporting at the wrong level: the class decides, and
+    /// every report site goes through this one function.
     pub(crate) fn report(&mut self, diagnostic: Diagnostic) {
+        if diagnostic.class.aggregation() == Aggregation::PerOccurrence {
+            self.diagnostics.push(diagnostic);
+            return;
+        }
+        let key = (diagnostic.class, diagnostic.detail.clone());
+        if let Some(&index) = self.aggregated.get(&key)
+            && let Some(existing) = self.diagnostics.get_mut(index)
+        {
+            existing.absorb(diagnostic.location);
+            return;
+        }
+        self.aggregated.insert(key, self.diagnostics.len());
         self.diagnostics.push(diagnostic);
     }
 
@@ -511,6 +667,66 @@ mod tests {
             locations,
             ["/components/schemas/Pet", "/components/schemas", "/openapi"]
         );
+    }
+
+    #[test]
+    fn a_class_that_fires_at_scale_becomes_one_record_with_a_count() {
+        let mut ctx = Ctx::new();
+        assert_eq!(
+            BreakageClass::PresenceCollapse.aggregation(),
+            super::Aggregation::PerDocument
+        );
+        for index in 0..8 {
+            let location = JsonPointer::root().child("p").child(index.to_string());
+            ctx.report(Diagnostic::new(
+                BreakageClass::PresenceCollapse,
+                Action::Degrade,
+                location,
+                "collapsed",
+            ));
+        }
+        let diagnostics = ctx.into_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].occurrences().get(), 8);
+        // The first occurrence is the location; the next few are related, and then it stops
+        // collecting them.
+        assert_eq!(diagnostics[0].location().to_string(), "/p/0");
+        assert_eq!(diagnostics[0].related().len(), super::RELATED_CAP);
+        assert!(
+            diagnostics[0].to_json_line().contains(r#""occurrences":8"#),
+            "{}",
+            diagnostics[0].to_json_line()
+        );
+    }
+
+    #[test]
+    fn two_findings_of_one_aggregated_class_stay_two_records() {
+        let mut ctx = Ctx::new();
+        ctx.malformed("description", "a string");
+        ctx.malformed("url", "a string");
+        ctx.malformed("description", "a string");
+        let diagnostics = ctx.into_diagnostics();
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].occurrences().get(), 2);
+        assert_eq!(diagnostics[1].occurrences().get(), 1);
+    }
+
+    #[test]
+    fn a_class_a_reader_must_act_on_keeps_every_occurrence() {
+        let mut ctx = Ctx::new();
+        assert_eq!(
+            BreakageClass::UnregistrableRoute.aggregation(),
+            super::Aggregation::PerOccurrence
+        );
+        for _ in 0..3 {
+            ctx.report(Diagnostic::new(
+                BreakageClass::UnregistrableRoute,
+                Action::Degrade,
+                JsonPointer::root(),
+                "skipped",
+            ));
+        }
+        assert_eq!(ctx.into_diagnostics().len(), 3);
     }
 
     #[test]

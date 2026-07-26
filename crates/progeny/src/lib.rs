@@ -16,16 +16,23 @@
 //!
 //! # Status
 //!
-//! The front end is implemented: loading, dialect normalization, and the lossless document and
-//! schema model, with the model's fidelity gated by a round trip over a corpus of 78 published
-//! descriptions. No renderer exists yet, so [`generate`] returns diagnostics and no files.
+//! Implemented: loading, dialect normalization, the lossless document and schema model, reference
+//! resolution, shape classification, the wire contracts, and the types renderer. The model's
+//! fidelity is gated by a round trip over a corpus of 78 published descriptions, and the generated
+//! types are gated by compiling them. The client and server renderers do not exist yet, so
+//! [`generate`] emits the shared type layer and nothing else.
 
 mod config;
+mod contract;
 mod diag;
 mod doc;
 mod load;
 mod normalize;
+mod render;
+mod resolve;
 mod schema;
+mod shape;
+mod support;
 mod value;
 
 #[cfg(feature = "harness")]
@@ -36,7 +43,10 @@ use std::collections::BTreeMap;
 
 use camino::Utf8PathBuf;
 
-pub use crate::config::{Config, Deny};
+pub use crate::config::{
+    BytesRepr, Config, DateTimeCrate, Deny, Derive, Emit, Formats, MapKind, Package, Packaging,
+    SerdeImpl, UnknownFields, UuidCrate,
+};
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
 /// Generated source, and everything progeny had to say about the document.
@@ -63,21 +73,16 @@ pub struct Output {
 /// does not implement, no operations at all. Rejection is a last resort and it is total: there is
 /// no partial rejection, so anything short of it produces output plus diagnostics.
 pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
-    // Nothing in `Config` reaches the front end: the customization set is consumed where
-    // contracts are built, and strictness is the caller's policy over the returned diagnostics.
-    // It is in the signature already so that the boundary does not change shape later.
-    let _ = config;
-
     let mut ctx = diag::Ctx::new();
     let loaded = load::load(input, &mut ctx)?;
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
     let parsed = doc::parse::document(normalized, &mut ctx);
-
-    // The renderers do not exist yet; the model does, and it is what the corpus gate measures.
-    let _ = parsed;
+    let resolved = resolve::resolve(parsed, &mut ctx);
+    let shapes = shape::classify(&resolved, &mut ctx);
+    let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
 
     Ok(Output {
-        files: BTreeMap::new(),
+        files: render::run(&contracts, config),
         diagnostics: ctx.into_diagnostics(),
     })
 }
@@ -103,9 +108,22 @@ mod tests {
     }
 
     #[test]
-    fn there_is_nothing_to_render_yet() {
+    fn the_shared_type_layer_is_generated() {
         let output = generate(PETSTORE, &Config::default()).unwrap();
-        assert!(output.files.is_empty());
+        let names: Vec<&str> = output.files.keys().map(|path| path.as_str()).collect();
+        assert_eq!(names, ["Cargo.toml", "src/lib.rs", "src/types.rs"]);
+        let types = &output.files[camino::Utf8Path::new("src/types.rs")];
+        assert!(types.contains("pub struct Pet"), "{types}");
+        // Every rendered file has to parse as Rust, or the compile gate is the first thing to
+        // find out.
+        syn::parse_file(types).unwrap();
+    }
+
+    #[test]
+    fn a_rejected_configuration_stops_generation_rather_than_producing_half_of_it() {
+        let config: Config = toml::from_str("[type-derives]\nPet = [\"copy\"]\n").unwrap();
+        let error = generate(PETSTORE, &config).unwrap_err();
+        assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
     }
 
     #[test]

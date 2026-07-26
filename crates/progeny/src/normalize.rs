@@ -5,11 +5,18 @@
 //! function: independently testable, and structurally incapable of the lossy mid-pipeline
 //! conversion that a second parser would invite.
 //!
-//! The walk is **positional**: it descends through the places a 3.0 document keeps schemas
-//! rather than rewriting any object that happens to contain a `nullable` member. That
-//! distinction is load-bearing. A pattern-matching rewrite would corrupt example payloads and
-//! vendor extensions that contain such keys innocently — `nullable`, `example` and `format` are
-//! all ordinary words that appear inside `example:` blocks all over the corpus.
+//! The walk is **positional**: it descends through the places a document keeps schemas rather
+//! than rewriting any object that happens to contain a `nullable` member. That distinction is
+//! load-bearing. A pattern-matching rewrite would corrupt example payloads and vendor extensions
+//! that contain such keys innocently — `nullable`, `example` and `format` are all ordinary words
+//! that appear inside `example:` blocks all over the corpus.
+//!
+//! Two of the rewrites are **not** dialect conversions and run whatever version the document
+//! declares, because the form they repair is invalid in every version: the draft-04 tuple
+//! `items: [A, B]` (`webflow` writes 651 of them in a document declaring 3.1) and the boolean
+//! `exclusiveMinimum` (`openai` writes 7). Version-gating a repair for a form that is never valid
+//! would help nobody. Those two are diagnosed where they are defects; the dialect rows are silent,
+//! because for a 3.0 document they are the documented normalization rather than a finding.
 
 use serde_json::{Map, Value};
 
@@ -97,13 +104,11 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
         ));
     }
 
-    match version.minor {
-        0 => document(&mut root),
-        1 => {}
-        // A minor version from the future is read as 3.1 rather than rejected: 3.1 is the
-        // dialect the parser implements, the model is a superset that holds members it does not
-        // interpret, and a document is more useful read imperfectly than not at all.
-        _ => ctx.report(Diagnostic::new(
+    // A minor version from the future is read as 3.1 rather than rejected: 3.1 is the dialect the
+    // parser implements, the model is a superset that holds members it does not interpret, and a
+    // document is more useful read imperfectly than not at all.
+    if version.minor > 1 {
+        ctx.report(Diagnostic::new(
             BreakageClass::UnsupportedDialect,
             Action::Warn,
             JsonPointer::root().child("openapi"),
@@ -112,8 +117,15 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
                  are preserved but not interpreted",
                 version.text
             ),
-        )),
+        ));
     }
+
+    Walk {
+        ctx,
+        at: JsonPointer::root(),
+        dialect_30: version.minor == 0,
+    }
+    .document(&mut root);
 
     Ok(Normalized {
         value: Value::Object(root),
@@ -191,187 +203,325 @@ const SUBSCHEMA_MAP: [&str; 5] = [
     "properties",
 ];
 
-fn document(root: &mut Map<String, Value>) {
-    if let Some(Value::Object(paths)) = root.get_mut("paths") {
-        for (key, item) in paths.iter_mut() {
-            if !is_extension(key) {
-                path_item(item);
-            }
-        }
-    }
-    if let Some(Value::Object(webhooks)) = root.get_mut("webhooks") {
-        for (key, item) in webhooks.iter_mut() {
-            if !is_extension(key) {
-                path_item(item);
-            }
-        }
-    }
-    if let Some(Value::Object(components)) = root.get_mut("components") {
-        for (key, entries) in components.iter_mut() {
-            let Value::Object(entries) = entries else {
-                continue;
-            };
-            let visit: fn(&mut Value) = match key.as_str() {
-                "schemas" => schema,
-                "responses" => response,
-                "parameters" | "headers" => parameter,
-                "requestBodies" => request_body,
-                "callbacks" => callback,
-                "pathItems" => path_item,
-                // `examples`, `links` and `securitySchemes` hold no schemas.
-                _ => continue,
-            };
-            for entry in entries.values_mut() {
-                visit(entry);
-            }
-        }
-    }
-}
-
-fn path_item(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    if let Some(Value::Array(parameters)) = map.get_mut("parameters") {
-        for entry in parameters {
-            parameter(entry);
-        }
-    }
-    for method in METHODS {
-        if let Some(entry) = map.get_mut(method) {
-            operation(entry);
-        }
-    }
-}
-
-fn operation(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    if let Some(Value::Array(parameters)) = map.get_mut("parameters") {
-        for entry in parameters {
-            parameter(entry);
-        }
-    }
-    if let Some(entry) = map.get_mut("requestBody") {
-        request_body(entry);
-    }
-    if let Some(Value::Object(responses)) = map.get_mut("responses") {
-        for (key, entry) in responses.iter_mut() {
-            if !is_extension(key) {
-                response(entry);
-            }
-        }
-    }
-    if let Some(Value::Object(callbacks)) = map.get_mut("callbacks") {
-        for (key, entry) in callbacks.iter_mut() {
-            if !is_extension(key) {
-                callback(entry);
-            }
-        }
-    }
-}
-
-fn callback(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    for (key, entry) in map.iter_mut() {
-        if !is_extension(key) {
-            path_item(entry);
-        }
-    }
-}
-
-/// Parameters and headers are the same node bar the `name` and `in` members.
-fn parameter(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    if let Some(entry) = map.get_mut("schema") {
-        schema(entry);
-    }
-    content(map);
-}
-
-fn request_body(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    content(map);
-}
-
-fn response(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    if let Some(Value::Object(headers)) = map.get_mut("headers") {
-        for entry in headers.values_mut() {
-            parameter(entry);
-        }
-    }
-    content(map);
-}
-
-fn content(map: &mut Map<String, Value>) {
-    let Some(Value::Object(media_types)) = map.get_mut("content") else {
-        return;
-    };
-    for entry in media_types.values_mut() {
-        media_type(entry);
-    }
-}
-
-fn media_type(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    if let Some(entry) = map.get_mut("schema") {
-        schema(entry);
-    }
-    if let Some(Value::Object(encodings)) = map.get_mut("encoding") {
-        for entry in encodings.values_mut() {
-            let Value::Object(encoding) = entry else {
-                continue;
-            };
-            if let Some(Value::Object(headers)) = encoding.get_mut("headers") {
-                for header in headers.values_mut() {
-                    parameter(header);
-                }
-            }
-        }
-    }
-}
-
-/// Rewrite one schema and descend into its subschemas.
+/// Which kind of node a `components` section holds.
 ///
-/// Boolean schemas and anything that is not an object have nothing to rewrite.
-fn schema(value: &mut Value) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    nullable(map);
-    exclusive_bounds(map);
-    example(map);
-    string_format(map);
+/// A named section rather than a function pointer so that the walk's recursion stays visible in
+/// the source: every arm below is a place a schema can hide.
+#[derive(Clone, Copy)]
+enum Section {
+    Schemas,
+    Responses,
+    /// Parameters and headers are the same node bar the `name` and `in` members.
+    Parameters,
+    RequestBodies,
+    Callbacks,
+    PathItems,
+}
 
-    for key in SUBSCHEMA {
-        if let Some(entry) = map.get_mut(key) {
-            schema(entry);
+impl Section {
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "schemas" => Some(Self::Schemas),
+            "responses" => Some(Self::Responses),
+            "parameters" | "headers" => Some(Self::Parameters),
+            "requestBodies" => Some(Self::RequestBodies),
+            "callbacks" => Some(Self::Callbacks),
+            "pathItems" => Some(Self::PathItems),
+            // `examples`, `links` and `securitySchemes` hold no schemas.
+            _ => None,
         }
     }
-    for key in SUBSCHEMA_ARRAY {
-        if let Some(Value::Array(entries)) = map.get_mut(key) {
-            for entry in entries {
-                schema(entry);
+}
+
+/// The positional walk: where it is, and which rewrites apply.
+struct Walk<'a> {
+    ctx: &'a mut Ctx,
+    at: JsonPointer,
+    /// Whether the document declares 3.0, in which case the dialect rows apply and their
+    /// rewriting is the documented normalization rather than a finding worth reporting.
+    dialect_30: bool,
+}
+
+impl Walk<'_> {
+    /// Descend into `token`, restoring the location afterwards.
+    fn scoped(&mut self, token: &str, visit: impl FnOnce(&mut Self)) {
+        self.at.push(token);
+        visit(self);
+        self.at.pop();
+    }
+
+    fn report(&mut self, class: BreakageClass, at: JsonPointer, detail: &str) {
+        self.ctx
+            .report(Diagnostic::new(class, Action::Repair, at, detail));
+    }
+
+    fn document(&mut self, root: &mut Map<String, Value>) {
+        for section in ["paths", "webhooks"] {
+            if let Some(Value::Object(items)) = root.get_mut(section) {
+                self.scoped(section, |walk| {
+                    for (key, item) in items.iter_mut() {
+                        if !is_extension(key) {
+                            walk.scoped(key, |walk| walk.path_item(item));
+                        }
+                    }
+                });
+            }
+        }
+        if let Some(Value::Object(components)) = root.get_mut("components") {
+            self.scoped("components", |walk| {
+                for (key, entries) in components.iter_mut() {
+                    let Value::Object(entries) = entries else {
+                        continue;
+                    };
+                    let Some(section) = Section::of(key) else {
+                        continue;
+                    };
+                    walk.scoped(key, |walk| {
+                        for (name, entry) in entries.iter_mut() {
+                            walk.scoped(name, |walk| walk.section(section, entry));
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    fn section(&mut self, section: Section, value: &mut Value) {
+        match section {
+            Section::Schemas => self.schema(value),
+            Section::Responses => self.response(value),
+            Section::Parameters => self.parameter(value),
+            Section::RequestBodies => self.request_body(value),
+            Section::Callbacks => self.callback(value),
+            Section::PathItems => self.path_item(value),
+        }
+    }
+
+    fn path_item(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        self.parameter_array(map);
+        for method in METHODS {
+            if let Some(entry) = map.get_mut(method) {
+                self.scoped(method, |walk| walk.operation(entry));
             }
         }
     }
-    for key in SUBSCHEMA_MAP {
-        if let Some(Value::Object(entries)) = map.get_mut(key) {
-            for entry in entries.values_mut() {
-                schema(entry);
+
+    fn operation(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        self.parameter_array(map);
+        if let Some(entry) = map.get_mut("requestBody") {
+            self.scoped("requestBody", |walk| walk.request_body(entry));
+        }
+        for (key, section) in [
+            ("responses", Section::Responses),
+            ("callbacks", Section::Callbacks),
+        ] {
+            if let Some(Value::Object(entries)) = map.get_mut(key) {
+                self.scoped(key, |walk| {
+                    for (name, entry) in entries.iter_mut() {
+                        if !is_extension(name) {
+                            walk.scoped(name, |walk| walk.section(section, entry));
+                        }
+                    }
+                });
             }
+        }
+    }
+
+    fn parameter_array(&mut self, map: &mut Map<String, Value>) {
+        if let Some(Value::Array(parameters)) = map.get_mut("parameters") {
+            self.scoped("parameters", |walk| {
+                for (index, entry) in parameters.iter_mut().enumerate() {
+                    walk.scoped(&index.to_string(), |walk| walk.parameter(entry));
+                }
+            });
+        }
+    }
+
+    fn callback(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        for (key, entry) in map.iter_mut() {
+            if !is_extension(key) {
+                self.scoped(key, |walk| walk.path_item(entry));
+            }
+        }
+    }
+
+    fn parameter(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        if let Some(entry) = map.get_mut("schema") {
+            self.scoped("schema", |walk| walk.schema(entry));
+        }
+        self.content(map);
+    }
+
+    fn request_body(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        self.content(map);
+    }
+
+    fn response(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        self.header_map(map);
+        self.content(map);
+    }
+
+    fn header_map(&mut self, map: &mut Map<String, Value>) {
+        if let Some(Value::Object(headers)) = map.get_mut("headers") {
+            self.scoped("headers", |walk| {
+                for (name, entry) in headers.iter_mut() {
+                    walk.scoped(name, |walk| walk.parameter(entry));
+                }
+            });
+        }
+    }
+
+    fn content(&mut self, map: &mut Map<String, Value>) {
+        let Some(Value::Object(media_types)) = map.get_mut("content") else {
+            return;
+        };
+        self.scoped("content", |walk| {
+            for (name, entry) in media_types.iter_mut() {
+                walk.scoped(name, |walk| walk.media_type(entry));
+            }
+        });
+    }
+
+    fn media_type(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        if let Some(entry) = map.get_mut("schema") {
+            self.scoped("schema", |walk| walk.schema(entry));
+        }
+        if let Some(Value::Object(encodings)) = map.get_mut("encoding") {
+            self.scoped("encoding", |walk| {
+                for (name, entry) in encodings.iter_mut() {
+                    let Value::Object(encoding) = entry else {
+                        continue;
+                    };
+                    walk.scoped(name, |walk| walk.header_map(encoding));
+                }
+            });
+        }
+    }
+
+    /// Rewrite one schema and descend into its subschemas.
+    ///
+    /// Boolean schemas and anything that is not an object have nothing to rewrite.
+    fn schema(&mut self, value: &mut Value) {
+        let Value::Object(map) = value else {
+            return;
+        };
+        if self.dialect_30 {
+            nullable(map);
+            exclusive_bounds(map);
+            example(map);
+            string_format(map);
+        } else {
+            self.repair_exclusive_bounds(map);
+        }
+        self.repair_tuple_items(map);
+
+        for key in SUBSCHEMA {
+            if let Some(entry) = map.get_mut(key) {
+                self.scoped(key, |walk| walk.schema(entry));
+            }
+        }
+        for key in SUBSCHEMA_ARRAY {
+            if let Some(Value::Array(entries)) = map.get_mut(key) {
+                self.scoped(key, |walk| {
+                    for (index, entry) in entries.iter_mut().enumerate() {
+                        walk.scoped(&index.to_string(), |walk| walk.schema(entry));
+                    }
+                });
+            }
+        }
+        for key in SUBSCHEMA_MAP {
+            if let Some(Value::Object(entries)) = map.get_mut(key) {
+                self.scoped(key, |walk| {
+                    for (name, entry) in entries.iter_mut() {
+                        walk.scoped(name, |walk| walk.schema(entry));
+                    }
+                });
+            }
+        }
+    }
+
+    /// The draft-04 tuple form, in a document of any version.
+    ///
+    /// `items: [A, B]` constrains an array positionally; 2020-12 spells that `prefixItems`, and
+    /// reads an array in `items` as an error. This is the corpus's single largest source of
+    /// findings — 652 occurrences, all in documents declaring 3.1 — and it is the row that takes
+    /// tuples from a rarity worth degrading to real support worth having.
+    fn repair_tuple_items(&mut self, map: &mut Map<String, Value>) {
+        if !matches!(map.get("items"), Some(Value::Array(_))) {
+            return;
+        }
+        // A document writing both spellings is saying two different things; rewriting would
+        // discard one of them, so leave it for the parser to preserve verbatim and diagnose.
+        if map.contains_key("prefixItems") {
+            return;
+        }
+        let location = self.at.child("items");
+        if let Some(tuple) = map.remove("items") {
+            map.insert("prefixItems".to_owned(), tuple);
+        }
+        // draft-04's `additionalItems` constrains the elements past the tuple, which is exactly
+        // what 2020-12's `items` means once `prefixItems` is present.
+        if let Some(rest) = map.remove("additionalItems") {
+            map.insert("items".to_owned(), rest);
+        }
+        self.report(
+            BreakageClass::LegacyTupleItems,
+            location,
+            "`items` holds an array of schemas, which is the draft-04 tuple form; rewrote it as \
+             `prefixItems` (and any `additionalItems` as `items`), so the element types are kept",
+        );
+    }
+
+    /// The 3.0 boolean bound flag, in a document that does not declare 3.0.
+    ///
+    /// Identical rewriting to [`exclusive_bounds`], but reported: in a 3.0 document this is the
+    /// documented normalization, and anywhere else it is a defect that would otherwise leave the
+    /// bound uninterpretable.
+    fn repair_exclusive_bounds(&mut self, map: &mut Map<String, Value>) {
+        for (flag, bound) in [
+            ("exclusiveMinimum", "minimum"),
+            ("exclusiveMaximum", "maximum"),
+        ] {
+            let Some(Value::Bool(exclusive)) = map.get(flag) else {
+                continue;
+            };
+            let exclusive = *exclusive;
+            let location = self.at.child(flag);
+            map.remove(flag);
+            if exclusive && let Some(value) = map.remove(bound) {
+                map.insert(flag.to_owned(), value);
+            }
+            // The detail carries no values: two occurrences of one finding have to render
+            // identically or they cannot be aggregated into one record.
+            self.report(
+                BreakageClass::LegacyExclusiveBound,
+                location,
+                &format!(
+                    "`{flag}` is a boolean, which is the 3.0 form modifying a sibling `{bound}`; \
+                     2020-12 has no boolean there, so it was rewritten as the numeric bound"
+                ),
+            );
         }
     }
 }
@@ -506,8 +656,25 @@ mod tests {
         json!({"openapi": "3.0.3", "paths": {}, "components": {"schemas": {"S": schema}}})
     }
 
+    /// The same, declaring 3.1, where the dialect rows do not apply.
+    fn with_schema_31(schema: &Value) -> Value {
+        json!({"openapi": "3.1.0", "paths": {}, "components": {"schemas": {"S": schema}}})
+    }
+
     fn normalized_schema(schema: &Value) -> Value {
         normalized(with_schema(schema))["components"]["schemas"]["S"].clone()
+    }
+
+    /// Normalize a 3.1 document with one schema, keeping the diagnostics.
+    fn normalized_schema_31(schema: &Value) -> (Value, Vec<crate::Diagnostic>) {
+        let mut ctx = Ctx::new();
+        let out = normalize(with_schema_31(schema), &mut ctx)
+            .unwrap()
+            .into_value();
+        (
+            out["components"]["schemas"]["S"].clone(),
+            ctx.into_diagnostics(),
+        )
     }
 
     #[test]
@@ -733,6 +900,138 @@ mod tests {
             },
         });
         assert_eq!(normalized(document.clone()), document);
+    }
+
+    #[test]
+    fn the_draft_04_tuple_form_becomes_prefix_items_whatever_the_version_says() {
+        let (rewritten, diagnostics) = normalized_schema_31(&json!({
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "integer"}],
+        }));
+        assert_eq!(
+            rewritten,
+            json!({"type": "array", "prefixItems": [{"type": "string"}, {"type": "integer"}]})
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].class(), BreakageClass::LegacyTupleItems);
+        assert_eq!(diagnostics[0].action(), Action::Repair);
+        assert_eq!(
+            diagnostics[0].location().to_string(),
+            "/components/schemas/S/items"
+        );
+
+        // A 3.0 document writes the same defect, and gets the same repair.
+        assert_eq!(
+            normalized_schema(&json!({"items": [{"type": "string"}]})),
+            json!({"prefixItems": [{"type": "string"}]})
+        );
+    }
+
+    #[test]
+    fn additional_items_becomes_the_constraint_on_the_rest() {
+        let (rewritten, _) = normalized_schema_31(&json!({
+            "items": [{"type": "string"}],
+            "additionalItems": false,
+        }));
+        assert_eq!(
+            rewritten,
+            json!({"prefixItems": [{"type": "string"}], "items": false})
+        );
+    }
+
+    #[test]
+    fn a_document_writing_both_tuple_spellings_is_left_for_the_parser() {
+        let both = json!({"items": [{"type": "string"}], "prefixItems": [{"type": "integer"}]});
+        let (rewritten, diagnostics) = normalized_schema_31(&both);
+        assert_eq!(rewritten, both);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn the_tuple_repair_reaches_nested_positions_and_aggregates() {
+        let (rewritten, diagnostics) = normalized_schema_31(&json!({
+            "type": "object",
+            "properties": {
+                "a": {"items": [{"type": "string"}]},
+                "b": {"items": [{"type": "integer"}]},
+            },
+        }));
+        assert!(rewritten["properties"]["a"]["prefixItems"].is_array());
+        assert!(rewritten["properties"]["b"]["prefixItems"].is_array());
+        // One record for the document, not one per site: this class fires 651 times in `webflow`.
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].occurrences().get(), 2);
+        assert_eq!(
+            diagnostics[0].location().to_string(),
+            "/components/schemas/S/properties/a/items"
+        );
+        assert_eq!(
+            diagnostics[0].related()[0].to_string(),
+            "/components/schemas/S/properties/b/items"
+        );
+    }
+
+    #[test]
+    fn a_boolean_bound_flag_outside_30_is_repaired_and_reported() {
+        let (rewritten, diagnostics) = normalized_schema_31(&json!({
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+        }));
+        assert_eq!(rewritten, json!({"type": "integer", "exclusiveMinimum": 0}));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].class(), BreakageClass::LegacyExclusiveBound);
+        assert_eq!(diagnostics[0].action(), Action::Repair);
+
+        // The same rewriting in a 3.0 document is the documented normalization, so it says
+        // nothing: a finding there would fire on every well-formed 3.0 document in the corpus.
+        let mut ctx = Ctx::new();
+        normalize(
+            with_schema(&json!({"minimum": 0, "exclusiveMinimum": true})),
+            &mut ctx,
+        )
+        .unwrap();
+        assert!(ctx.into_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn a_31_document_with_nothing_to_repair_is_untouched() {
+        // The walk now visits 3.1 documents too, so the decoys have to hold there as well.
+        let document = json!({
+            "openapi": "3.1.0",
+            "x-defaults": {"items": [1, 2], "exclusiveMinimum": true},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "d",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"type": "object", "nullable": true},
+                                        "example": {"items": [1, 2], "exclusiveMinimum": true},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "components": {
+                "schemas": {
+                    "S": {
+                        "type": "object",
+                        "properties": {"items": {"type": "array"}},
+                        "examples": [{"items": [1], "exclusiveMinimum": true}],
+                        "default": {"items": [1]},
+                    },
+                },
+            },
+        });
+        let mut ctx = Ctx::new();
+        let out = normalize(document.clone(), &mut ctx).unwrap().into_value();
+        assert_eq!(out, document);
+        assert!(ctx.into_diagnostics().is_empty());
     }
 
     #[test]

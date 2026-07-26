@@ -57,6 +57,9 @@ fn core(out: &mut Builder, store: &SchemaStore, object: &SchemaObject) {
     out.set_with("$defs", object.defs.as_ref(), |defs| {
         schema_map(store, defs)
     });
+    out.set_with("definitions", object.definitions.as_ref(), |defs| {
+        schema_map(store, defs)
+    });
 }
 
 fn applicators(out: &mut Builder, store: &SchemaStore, object: &SchemaObject) {
@@ -258,6 +261,7 @@ mod tests {
       "$dynamicRef": "#meta",
       "$comment": "c",
       "$defs": {"Inner": {"type": "string"}},
+      "definitions": {"Legacy": {"type": "string"}},
       "allOf": [{"type": "object"}],
       "anyOf": [true, false],
       "oneOf": [{"const": 1}],
@@ -342,6 +346,35 @@ mod tests {
             object.unknown.keys().collect::<Vec<_>>(),
             ["unmodelledKeyword", "x-vendor"]
         );
+    }
+
+    #[test]
+    fn walking_children_reaches_every_schema_in_the_store() {
+        // `SchemaObject::children` is the only description of the schema graph's shape, and
+        // resolution, cycle detection and classification all read the graph through it. A
+        // subschema field it forgot would simply be invisible to all three, with no other
+        // symptom — so the fixture that holds every keyword is asserted to be fully reachable.
+        let mut store = SchemaStore::default();
+        let mut ctx = Ctx::new();
+        let root = parse::schema(
+            serde_json::from_str(EVERY_KEYWORD).unwrap(),
+            &mut store,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let mut seen = std::collections::BTreeSet::from([root]);
+        let mut queue = vec![root];
+        while let Some(id) = queue.pop() {
+            if let crate::schema::Schema::Object(object) = store.get(id).clone() {
+                object.children(|child| {
+                    if seen.insert(child) {
+                        queue.push(child);
+                    }
+                });
+            }
+        }
+        assert_eq!(seen.len(), store.len());
     }
 
     #[test]

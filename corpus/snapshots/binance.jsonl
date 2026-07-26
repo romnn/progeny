@@ -1,0 +1,2 @@
+{"document":"sha256:0dd2f133e12dac2510cf5db1a4eb5de6e3c30c86b24c08867322030939df5e1c","diagnostics":1}
+{"class":"malformed-member","action":"degrade","location":"/paths/~1sapi~1v1~1convert~1limit~1placeOrder/post/responses/200/description","detail":"`description` should be a string; kept the member verbatim and ignored it for generation"}

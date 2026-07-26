@@ -1,0 +1,71 @@
+# The other half of the pair with `dialects.3.0.yaml`: the same API, written in 3.1 by hand.
+# Hand-written rather than generated, so that it is an independent statement of what the
+# normalization is supposed to mean rather than a recording of what it currently does.
+openapi: 3.1.0
+info:
+  title: Convergence
+  version: "1.0"
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      parameters:
+        - name: dry
+          in: query
+          schema:
+            type: [boolean, "null"]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Widget"
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                upload:
+                  type: string
+                  contentMediaType: application/octet-stream
+                notes:
+                  type: string
+      responses:
+        "200":
+          description: made one
+          headers:
+            X-Rate-Limit:
+              schema:
+                type: integer
+                exclusiveMinimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Widget"
+              example:
+                nullable: true
+                format: binary
+                exclusiveMinimum: true
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          examples: [a widget]
+        colour:
+          type: [string, "null"]
+          enum: [red, green, null]
+        size:
+          type: integer
+          exclusiveMaximum: 100
+        blob:
+          type: string
+          contentEncoding: base64
+        parent:
+          $ref: "#/components/schemas/Widget"
+        nullable:
+          type: boolean
+      default:
+        nullable: true
+        example: 1

@@ -25,10 +25,12 @@ pub(crate) fn schema(
     ctx: &mut Ctx,
 ) -> Result<SchemaId, Value> {
     match value {
-        Value::Bool(flag) => Ok(store.insert(Schema::Bool(flag))),
+        Value::Bool(flag) => Ok(store.insert(Schema::Bool(flag), ctx.here().clone())),
         Value::Object(map) => {
             let object = object(Members::new(map), store, ctx);
-            Ok(store.insert(Schema::Object(Box::new(object))))
+            // After reading the children, so `ctx` is back at this schema's own position. The
+            // children hold lower ids than their parent, which nothing depends on.
+            Ok(store.insert(Schema::Object(Box::new(object)), ctx.here().clone()))
         }
         other => Err(other),
     }
@@ -133,6 +135,7 @@ fn core(node: &mut Members, schema: &mut SchemaObject, store: &mut SchemaStore, 
     schema.dynamic_reference = node.string("$dynamicRef", ctx);
     schema.comment = node.string("$comment", ctx);
     schema.defs = member_map(node, "$defs", store, ctx);
+    schema.definitions = member_map(node, "definitions", store, ctx);
 
     // Dynamic scoping is held exactly as written and then resolved as though it were the plain
     // form. Building 2020-12's dynamic-scope machinery for a construct no published OpenAPI

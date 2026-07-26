@@ -28,6 +28,11 @@ pub fn specs_root() -> Utf8PathBuf {
     corpus_root().join("specs")
 }
 
+/// Pairs of documents describing one API in both dialects. Committed, hand-written, hermetic.
+pub fn convergence_root() -> Utf8PathBuf {
+    corpus_root().join("convergence")
+}
+
 pub fn library_root() -> Utf8PathBuf {
     workspace_root().join("crates/progeny")
 }

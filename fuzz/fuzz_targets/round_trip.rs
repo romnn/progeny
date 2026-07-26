@@ -9,6 +9,9 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // The loader catches a panic from the C-derived YAML parser and rejects the document; the
+    // fuzzer's own hook would abort before that could happen. See `allow_caught_panics`.
+    progeny::harness::allow_caught_panics();
     if let Ok(result) = progeny::harness::round_trip(data) {
         assert!(
             result.is_clean(),

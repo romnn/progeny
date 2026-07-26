@@ -1,0 +1,3 @@
+{"document":"sha256:bf8a8e6af90bd8b130757c9794fa6870188ded9c9cd6936b31f13aa8fa55fc14","diagnostics":2}
+{"class":"colliding-type-name","action":"warn","location":"/components/schemas/EntityIndicesInclusiveInclusive","detail":"the name this shape's position asks for is taken already, so it was given a numeric suffix; a `names` entry in the configuration can give it a better one"}
+{"class":"discriminator-edge-case","action":"degrade","location":"/components/schemas/ActivityStreamingResponsePayload","detail":"this union is told apart by the `../event_type` property, and its variants cannot be distinguished by their required properties alone"}

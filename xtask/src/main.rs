@@ -6,8 +6,11 @@
 
 mod bench;
 mod corpus;
+mod differential;
+mod generated;
 mod layers;
 mod paths;
+mod snapshot;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -31,6 +34,10 @@ enum Command {
     BenchCompile(bench::Args),
     /// Check that the pipeline's module graph only ever points leftward.
     LintLayers(layers::Args),
+    /// Re-record every document's diagnostics snapshot.
+    RegenSnapshots(corpus::Args),
+    /// Assert the derive and the hand-written serde path agree, and count function bodies.
+    Differential(differential::Args),
 }
 
 fn main() -> Result<()> {
@@ -39,5 +46,11 @@ fn main() -> Result<()> {
         Command::Corpus(args) => corpus::run(&args),
         Command::BenchCompile(args) => bench::run(&args),
         Command::LintLayers(args) => layers::run(&args),
+        Command::Differential(args) => differential::run(&args),
+        // The same run as `corpus`, writing what it would otherwise compare against.
+        Command::RegenSnapshots(mut args) => {
+            args.write_snapshots = true;
+            corpus::run(&args)
+        }
     }
 }

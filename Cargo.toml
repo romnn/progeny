@@ -70,6 +70,12 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 # strings) and exact number literals despite the lenient parse.
 libyaml-safer = "0.3"
 camino = { version = "1", features = ["serde1"] }
+# Identifier case conversion. Sanitizing a wire name into a Rust identifier has to be total and
+# stable; a hand-rolled converter would be neither.
+heck = "0.5"
+# Rendering: tokens to a `syn::File` to formatted source, with no rustfmt at generation time.
+quote = "1"
+prettyplease = "0.2"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
@@ -79,4 +85,7 @@ syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 toml = "1"
 ureq = "3"
+# Snapshots are keyed by the hash of the document they were taken from, which is what tells
+# "upstream republished" apart from "we regressed" for documents that are fetched, not committed.
+sha2 = "0.10"
 nix = { version = "0.31", features = ["resource"] }

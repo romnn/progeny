@@ -1,0 +1,2 @@
+{"document":"sha256:0e027f4cb96b659e41d7c0fa65845439df0c5a8d9374b9de813fdef171d09578","diagnostics":1}
+{"class":"presence-collapse","action":"degrade","location":"/components/schemas/CustomTagUsageReportData/properties/next_page","detail":"the property may be absent and may be null, and the document says those are different; both become `None`, so a value that was explicitly null is written back as an absent member"}

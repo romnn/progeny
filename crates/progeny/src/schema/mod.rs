@@ -11,6 +11,7 @@
 //! expansion — which is why the predecessor's recursive-expansion failure mode cannot occur
 //! here at all.
 
+pub(crate) mod cycles;
 pub(crate) mod parse;
 // Reached only through the document serializer, which is itself only called by the round-trip
 // check. See the note there.
@@ -24,16 +25,24 @@ pub(crate) mod parse;
 pub(crate) mod serialize;
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use serde_json::{Number, Value};
+
+use crate::diag::JsonPointer;
 
 /// A schema's address in the [`SchemaStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SchemaId(u32);
 
 impl SchemaId {
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
+    }
+
+    /// The id as a graph node index, for the cycle analysis.
+    pub(crate) fn raw(self) -> u32 {
+        self.0
     }
 }
 
@@ -52,6 +61,14 @@ pub(crate) enum Schema {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SchemaStore {
     schemas: Vec<Schema>,
+    /// Where each schema was written, parallel to `schemas`.
+    ///
+    /// Recorded at parse time because it is the only moment the position is known, and it earns
+    /// its keep three times over: resolution turns a `$ref` into an id by matching addresses,
+    /// diagnostics point at documents rather than at ids, and a generated type's name stays
+    /// stable under unrelated edits because it derives from the address rather than from visit
+    /// order.
+    addresses: Vec<JsonPointer>,
 }
 
 /// The schema an out-of-store id degrades to.
@@ -62,11 +79,12 @@ pub(crate) struct SchemaStore {
 static ANY: Schema = Schema::Bool(true);
 
 impl SchemaStore {
-    pub(crate) fn insert(&mut self, schema: Schema) -> SchemaId {
+    pub(crate) fn insert(&mut self, schema: Schema, at: JsonPointer) -> SchemaId {
         // A store larger than `u32::MAX` schemas would need a document larger than any
         // machine can load; saturating keeps the id total instead of panicking on overflow.
         let id = SchemaId(u32::try_from(self.schemas.len()).unwrap_or(u32::MAX));
         self.schemas.push(schema);
+        self.addresses.push(at);
         id
     }
 
@@ -74,24 +92,19 @@ impl SchemaStore {
         self.schemas.get(id.index()).unwrap_or(&ANY)
     }
 
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
+    /// Where the schema was written. The root pointer for an id from no store, which is the same
+    /// answer [`SchemaStore::get`] gives: an impossible id degrades rather than panicking.
+    pub(crate) fn address(&self, id: SchemaId) -> &JsonPointer {
+        static ROOT: OnceLock<JsonPointer> = OnceLock::new();
+        self.addresses
+            .get(id.index())
+            .unwrap_or_else(|| ROOT.get_or_init(JsonPointer::root))
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.schemas.len()
     }
 
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (SchemaId, &Schema)> {
         self.schemas
             .iter()
@@ -191,6 +204,15 @@ pub(crate) struct SchemaObject {
     pub(crate) dynamic_reference: Option<String>,
     pub(crate) comment: Option<String>,
     pub(crate) defs: Option<BTreeMap<String, SchemaId>>,
+    /// draft-04's spelling of `$defs`, which is not a 2020-12 keyword and is written by every
+    /// tool that lowered a JSON Schema into an OpenAPI document.
+    ///
+    /// Modelled rather than left among the uninterpreted members for one concrete reason: real
+    /// documents *reference into* it. `codat-accounting` writes 72 distinct
+    /// `#/components/schemas/X/definitions/Y` references, and a keyword held verbatim has no
+    /// address for those to resolve to, so all of them would degrade to "accept anything". The
+    /// normalizer already descends into it; this is what makes the parser agree.
+    pub(crate) definitions: Option<BTreeMap<String, SchemaId>>,
 
     pub(crate) all_of: Option<Vec<SchemaId>>,
     pub(crate) any_of: Option<Vec<SchemaId>>,
@@ -255,6 +277,52 @@ pub(crate) struct SchemaObject {
     pub(crate) unknown: BTreeMap<String, Value>,
 }
 
+impl SchemaObject {
+    /// Every subschema this one holds, in a fixed order.
+    ///
+    /// The one place that knows the shape of the schema graph: resolution builds its edge list
+    /// from this, the shape layer bounds its traversals with it, and a field added to
+    /// [`SchemaObject`] that is not listed here would make a subschema invisible to both. The
+    /// `EVERY_KEYWORD` fixture in the serializer's tests pins the coverage, by asserting that
+    /// walking from the root reaches every schema the store holds.
+    pub(crate) fn children(&self, mut visit: impl FnMut(SchemaId)) {
+        for id in [
+            self.not,
+            self.if_schema,
+            self.then_schema,
+            self.else_schema,
+            self.additional_properties,
+            self.property_names,
+            self.items,
+            self.contains,
+            self.unevaluated_items,
+            self.unevaluated_properties,
+            self.content_schema,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(id);
+        }
+        for group in [&self.all_of, &self.any_of, &self.one_of, &self.prefix_items] {
+            for &id in group.iter().flatten() {
+                visit(id);
+            }
+        }
+        for group in [
+            &self.defs,
+            &self.definitions,
+            &self.dependent_schemas,
+            &self.properties,
+            &self.pattern_properties,
+        ] {
+            for (_, &id) in group.iter().flatten() {
+                visit(id);
+            }
+        }
+    }
+}
+
 /// The OpenAPI discriminator: which property names the variant, and how names map to schemas.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Discriminator {
@@ -285,25 +353,28 @@ pub(crate) struct ExternalDocs {
 
 #[cfg(test)]
 mod tests {
-    use super::{OneOrMany, Schema, SchemaId, SchemaStore, TypeName};
+    use super::{JsonPointer, OneOrMany, Schema, SchemaId, SchemaStore, TypeName};
 
     #[test]
     fn ids_address_what_was_inserted() {
         let mut store = SchemaStore::default();
-        let yes = store.insert(Schema::Bool(true));
-        let no = store.insert(Schema::Bool(false));
+        let at = JsonPointer::root().child("components").child("schemas");
+        let yes = store.insert(Schema::Bool(true), at.child("Yes"));
+        let no = store.insert(Schema::Bool(false), at.child("No"));
         assert_ne!(yes, no);
         assert_eq!(store.get(yes), &Schema::Bool(true));
         assert_eq!(store.get(no), &Schema::Bool(false));
         assert_eq!(store.len(), 2);
+        assert_eq!(store.address(yes).to_string(), "/components/schemas/Yes");
     }
 
     #[test]
     fn an_id_from_no_store_degrades_to_accept_anything() {
         let store = SchemaStore::default();
         let mut other = SchemaStore::default();
-        let stranger = other.insert(Schema::Bool(false));
+        let stranger = other.insert(Schema::Bool(false), JsonPointer::root());
         assert_eq!(store.get(stranger), &Schema::Bool(true));
+        assert!(store.address(stranger).is_root());
     }
 
     #[test]
@@ -330,7 +401,7 @@ mod tests {
     #[test]
     fn schema_ids_are_copyable_so_cycles_are_free() {
         let mut store = SchemaStore::default();
-        let id: SchemaId = store.insert(Schema::Bool(true));
+        let id: SchemaId = store.insert(Schema::Bool(true), JsonPointer::root());
         let copy = id;
         assert_eq!(id, copy);
     }

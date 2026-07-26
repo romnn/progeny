@@ -60,8 +60,16 @@ jobs:
       # infrastructure rather than a gate.
       - name: Fetch corpus
         run: task corpus:fetch
-      - name: Round-trip every corpus spec
+      # Round-trip, reference resolution, dialect convergence, generation, determinism and the
+      # diagnostics snapshots, for all 78.
+      - name: Run the corpus
         run: task corpus
+      # Compiling 78 generated crates is minutes-to-hours, so pull requests compile the reviewed
+      # 8-document tier and the full matrix is a deliberate, on-demand run.
+      - name: Compile the generated crates for the quick tier
+        run: task corpus:compile
+      - name: Differential serde harness
+        run: task differential
 
   publish:
     name: publish (dry-run)

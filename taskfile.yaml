@@ -48,10 +48,30 @@ tasks:
     cmds:
       - cargo run -p xtask --release -- corpus --fetch {{.CLI_ARGS}}
 
+  corpus:compile:
+    desc: "generate a crate per quick-tier document and compile it"
+    cmds:
+      - cargo run -p xtask --release -- corpus --quick --compile {{.CLI_ARGS}}
+
+  corpus:snapshots:
+    desc: "re-record every document's diagnostics snapshot (read the diff first)"
+    cmds:
+      - cargo run -p xtask --release -- regen-snapshots {{.CLI_ARGS}}
+
   corpus:stats:
     desc: "query the parsed corpus (the model-level histograms behind the open questions)"
     cmds:
       - cargo run -p xtask --release -- corpus --stats {{.CLI_ARGS}}
+
+  differential:
+    desc: "assert the derive and the hand-written serde path agree on every case"
+    cmds:
+      - cargo run -p xtask --release -- differential {{.CLI_ARGS}}
+
+  bodies:
+    desc: "count function bodies per type, derive against hand-written; needs nightly"
+    cmds:
+      - cargo run -p xtask --release -- differential --bodies {{.CLI_ARGS}}
 
   bench:compile:
     desc: "A/B the generated-crate cargo check cost (CPU + peak RSS); needs an idle machine"

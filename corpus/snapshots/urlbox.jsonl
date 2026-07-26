@@ -1,0 +1,2 @@
+{"document":"sha256:b9942a13e3b2270d133d733b72dac112b606f0456e56e7a0e7171b96d9ccc3b0","diagnostics":1}
+{"class":"missing-final-line-break","action":"repair","location":"","detail":"the document's last line has no line break and ends inside a block scalar; supplied the break, so that scalar keeps one trailing newline more than the document wrote"}

@@ -1,0 +1,2 @@
+{"document":"sha256:f6719eee5cb27cbc18716594359e4b9eb47fea9ee274d96399cbf52281dc6525","diagnostics":1}
+{"class":"colliding-type-name","action":"warn","location":"/components/schemas/ModifiedDates/allOf/0","detail":"the name this shape's position asks for is taken already, so it was given a numeric suffix; a `names` entry in the configuration can give it a better one"}

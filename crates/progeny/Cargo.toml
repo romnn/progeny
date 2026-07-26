@@ -19,9 +19,14 @@ harness = []
 
 [dependencies]
 camino.workspace = true
+heck.workspace = true
 libyaml-safer.workspace = true
+prettyplease.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syn.workspace = true
 # `Config` is what a `progeny.toml` deserializes into. Only the `progeny` binary and the
 # configuration's own tests read TOML; the library itself never touches a file.
 toml.workspace = true

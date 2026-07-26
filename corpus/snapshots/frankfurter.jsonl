@@ -1,0 +1,2 @@
+{"document":"sha256:e38804965823bcbd7db06471aa6a2b8b19b4dfc5f26f95d14aae8cfad1fb46a6","diagnostics":1}
+{"class":"unsupported-construct","action":"degrade","location":"/components/schemas/ratesByDate","detail":"`propertyNames` narrow which values are valid in a way no Rust type expresses; the generated type accepts more than the document allows","occurrences":3,"related":["/components/schemas/rates","/components/schemas/currencies"]}

@@ -12,8 +12,10 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+pub use crate::resolve::Counts as Resolution;
+
 use crate::diag::{Ctx, Diagnostic, JsonPointer, RejectError};
-use crate::{doc, load, normalize};
+use crate::{doc, load, normalize, resolve};
 
 /// What a round trip through the model found.
 #[derive(Debug, Clone)]
@@ -36,6 +38,8 @@ pub struct RoundTrip {
     pub yaml: bool,
     /// The `openapi` version the document declared, exactly as written.
     pub declared_version: String,
+    /// What resolving the document's references found.
+    pub resolution: Resolution,
 }
 
 impl RoundTrip {
@@ -70,6 +74,10 @@ pub fn round_trip(input: &[u8]) -> Result<RoundTrip, RejectError> {
 
     let parsed = doc::parse::document(normalized, &mut ctx);
     let reserialized = doc::serialize::document(&parsed);
+    let schema_count = parsed.schemas.len();
+    // Resolution runs after the comparison value has been taken, because it consumes the parsed
+    // document — and the round trip is a property of the parsed model, not of the resolved one.
+    let resolution = resolve::resolve(parsed, &mut ctx).counts();
 
     let mut differences = Vec::new();
     diff(
@@ -84,10 +92,100 @@ pub fn round_trip(input: &[u8]) -> Result<RoundTrip, RejectError> {
         reserialized,
         differences,
         diagnostics: ctx.into_diagnostics(),
-        schema_count: parsed.schemas.len(),
+        schema_count,
         yaml,
         declared_version,
+        resolution,
     })
+}
+
+/// Make a caught panic stop being fatal, for the fuzz targets.
+///
+/// The loader deliberately contains a panic boundary: `libyaml-safer` is a port of a C library and
+/// panics on a few adversarial inputs, and progeny turns that into an ordinary rejection because "no
+/// input panics the generator" is the invariant that matters. `libfuzzer-sys` installs a panic hook
+/// that **aborts**, and a hook runs before unwinding — so under a fuzzer the boundary never gets to
+/// act, and every such input is reported as a crash.
+///
+/// This replaces the hook with one that reports and returns. A panic the library catches then costs
+/// a line on stderr; a panic that *escapes* still unwinds out of the fuzz target's `extern "C"`
+/// entry point and still aborts, so the property under test is unchanged.
+///
+/// Only a fuzz target should call this. A library has no business touching a process-wide hook, and
+/// this one is behind the same feature gate and the same no-semver promise as the rest of the module.
+pub fn allow_caught_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            eprintln!("progeny: caught a panic and turned it into a rejection: {info}");
+        }));
+    });
+}
+
+/// What comparing a 3.0 document with its hand-written 3.1 equivalent found.
+#[derive(Debug, Clone)]
+pub struct Convergence {
+    /// Where the two models disagree. Empty means the normalization did its job.
+    pub differences: Vec<Difference>,
+    /// Everything progeny said about either document.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Convergence {
+    /// Whether the two documents produced the same model.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.differences.is_empty()
+    }
+}
+
+/// Check that a 3.0 document and its 3.1 equivalent produce the same model.
+///
+/// The two dialects are supposed to converge on one lowering, and a normalization row that is
+/// merely *self-consistent* would satisfy the round-trip property while still meaning the wrong
+/// thing. This is the check that the rewriting agrees with an independent statement of the same
+/// API — which is why the 3.1 half of each pair is hand-written rather than generated.
+///
+/// The `openapi` member is excluded from the comparison: it is the one member the two documents
+/// are *supposed* to disagree about, and normalization deliberately does not rewrite it.
+///
+/// # Errors
+///
+/// Returns [`RejectError`] when either document is unusable.
+pub fn convergence(three_zero: &[u8], three_one: &[u8]) -> Result<Convergence, RejectError> {
+    let mut ctx = Ctx::new();
+    let mut model = |input: &[u8]| -> Result<Value, RejectError> {
+        let loaded = load::load(input, &mut ctx)?;
+        let normalized = normalize::normalize(loaded.value, &mut ctx)?;
+        let parsed = doc::parse::document(normalized, &mut ctx);
+        let mut value = doc::serialize::document(&parsed);
+        if let Value::Object(root) = &mut value {
+            root.remove("openapi");
+        }
+        Ok(value)
+    };
+    let old = model(three_zero)?;
+    let new = model(three_one)?;
+
+    let mut differences = Vec::new();
+    diff(&new, &old, &JsonPointer::root(), &mut differences);
+    Ok(Convergence {
+        differences,
+        diagnostics: ctx.into_diagnostics(),
+    })
+}
+
+/// Resolve a document's references and report the accounting.
+///
+/// # Errors
+///
+/// Returns [`RejectError`] when the document is unusable.
+pub fn resolution(input: &[u8]) -> Result<Resolution, RejectError> {
+    let mut ctx = Ctx::new();
+    let loaded = load::load(input, &mut ctx)?;
+    let normalized = normalize::normalize(loaded.value, &mut ctx)?;
+    let parsed = doc::parse::document(normalized, &mut ctx);
+    Ok(resolve::resolve(parsed, &mut ctx).counts())
 }
 
 /// Run the front end for its diagnostics only.
@@ -104,6 +202,7 @@ pub fn front_end(input: &[u8]) -> Result<Vec<Diagnostic>, RejectError> {
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
     let parsed = doc::parse::document(normalized, &mut ctx);
     let _ = doc::serialize::document(&parsed);
+    let _ = resolve::resolve(parsed, &mut ctx);
     Ok(ctx.into_diagnostics())
 }
 
@@ -307,6 +406,37 @@ mod tests {
         );
         assert_eq!(differences.len(), 1);
         assert!(differences[0].detail.contains("invented"));
+    }
+
+    #[test]
+    fn the_two_dialects_converge_on_one_model() {
+        // The committed pair, so the check runs offline in `task test` as well as in the corpus.
+        const OLD: &[u8] = include_bytes!("../../../corpus/convergence/dialects.3.0.yaml");
+        const NEW: &[u8] = include_bytes!("../../../corpus/convergence/dialects.3.1.yaml");
+        let result = super::convergence(OLD, NEW).unwrap();
+        assert!(result.is_clean(), "{:#?}", result.differences);
+        // The 3.1 half is already in the dialect the parser reads, so nothing about it is a
+        // finding; the 3.0 half's rewriting is the documented normalization and says nothing
+        // either.
+        assert!(
+            result.diagnostics.is_empty(),
+            "{:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn every_reference_is_accounted_for() {
+        let counts = super::resolution(PETSTORE).unwrap();
+        assert_eq!(
+            counts.references,
+            counts.resolved + counts.repaired + counts.dangling + counts.external
+        );
+        assert!(counts.references > 0);
     }
 
     #[test]

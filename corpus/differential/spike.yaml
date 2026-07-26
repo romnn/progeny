@@ -1,0 +1,56 @@
+# The one shape the hand-written serde path is spiked on: a plain struct with a required member,
+# an optional one, and one whose wire name is not a Rust identifier. Small on purpose — the point
+# of the spike is to find out whether the wire contract holds everything the buffered deserializer
+# needs, and a bigger fixture would not answer that question any better.
+#
+# `Closed` is the same shape with undeclared members refused, so both unknown-member policies are
+# exercised. `State` is a fieldless enum, which takes the no-buffering path.
+openapi: 3.1.0
+info:
+  title: Spike
+  version: "1.0"
+paths:
+  /spike:
+    post:
+      operationId: postSpike
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Spike"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Spike"
+components:
+  schemas:
+    Spike:
+      type: object
+      required: [required]
+      properties:
+        required:
+          type: string
+        optional:
+          type: integer
+        wireName:
+          type: boolean
+        limit:
+          type: integer
+          default: 20
+        state:
+          $ref: "#/components/schemas/State"
+    Closed:
+      type: object
+      required: [required]
+      additionalProperties: false
+      properties:
+        required:
+          type: string
+        optional:
+          type: integer
+    State:
+      type: string
+      enum: [in-progress, done]

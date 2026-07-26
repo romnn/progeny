@@ -1,0 +1,2 @@
+{"document":"sha256:fe6a1f3faaeef8eac671593e74739b94a90459aa4150165b79fd0d5c9ce87c6c","diagnostics":1}
+{"class":"unsupported-construct","action":"degrade","location":"/components/schemas/UserPermissions/properties/modules","detail":"`propertyNames` narrow which values are valid in a way no Rust type expresses; the generated type accepts more than the document allows","occurrences":3,"related":["/components/schemas/UserPermissions/properties/modules/additionalProperties","/components/schemas/ServiceTargetOptions/properties/custom_headers"]}
