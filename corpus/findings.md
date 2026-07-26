@@ -164,31 +164,32 @@ here on rather than from stage 8.
 | | |
 | --- | --- |
 | documents generated | 78/78 |
-| lines of Rust | 980,381 (983,029 before stage 4 taught the union table what it may not do) |
+| lines of Rust | 979,603 (983,029 before stage 4 taught the union table what it may not do, 980,390 before the review pass after it) |
 | generated crates that compile | 78/78 |
 | generation is deterministic | every document generated twice per run, byte-compared |
 
 ### What the type layer had to say about the corpus
 
-31,056 findings, aggregated into **346 records** — which is the aggregation requirement earning its
+31,110 findings, aggregated into **353 records** — which is the aggregation requirement earning its
 keep: unaggregated, the snapshot suite would be thirty thousand lines and nobody would read it.
 
-The "before" column is stage 3, so the two together are what stage 4 did to the corpus.
+The "before" column is stage 3, so the two together are what stage 4 did to the corpus, including
+the review pass that followed it ("the 76", below).
 
 | class | before | after | reading |
 | --- | ---: | ---: | --- |
-| `presence-collapse` | 26,748 | 27,044 | Optional-and-nullable members, collapsed onto one `Option`. Larger than the 16,100 the earlier histogram reported because that count and the `anyOf` nullable-emulation count (10,752) were of the same phenomenon written two ways; this is the number of *fields* it affects. It **rose** in stage 4 because 288 branches that read as "constrains nothing" turned out to be null arms, which makes their properties nullable. |
-| `colliding-type-name` | 1,087 | 1,042 | Two positions asking for one name. Common in large documents, and the reason `names` is in the configuration. |
+| `presence-collapse` | 26,748 | 27,037 | Optional-and-nullable members, collapsed onto one `Option`. Larger than the 16,100 the earlier histogram reported because that count and the `anyOf` nullable-emulation count (10,752) were of the same phenomenon written two ways; this is the number of *fields* it affects. It **rose** in stage 4 because 288 branches that read as "constrains nothing" turned out to be null arms, which makes their properties nullable. |
+| `colliding-type-name` | 1,087 | 1,041 | Two positions asking for one name. Common in large documents, and the reason `names` is in the configuration. |
 | `legacy-tuple-items` | 643 | 643 | The draft-04 tuple form, rewritten. |
 | `dangling-ref` | 614 | 614 | All document-level, all vendor defects (see above). |
 | `irreconcilable-all-of` | 442 | 441 | Branches that cannot all hold — 250 of them one `cloudflare` shape whose `allOf` intersects two unions. |
-| `wild-union` | **0** | **394** | The class that had a definition, an action, an aggregation — and **no reporting site**. Every one of these was previously emitted as an untagged enum that takes whichever branch parses first, which is the one forbidden failure mode. See below. |
+| `wild-union` | **0** | **453** | The class that had a definition, an action, an aggregation — and **no reporting site**. Every one of these was previously emitted as an untagged enum that takes whichever branch parses first, which is the one forbidden failure mode. 394 when the reporting site was written, 453 once the test behind it was asked in declaration order. See below, twice. |
 | `nullable-union-branch` | — | 288 | New class. A 3.0 union branch whose only content is `nullable: true`. |
-| `unsupported-construct` | 247 | 248 | `propertyNames`, `unevaluatedProperties`, `not`, a mixed-type `enum`, a `type` naming two kinds. |
+| `unsupported-construct` | 247 | 230 | `propertyNames`, `unevaluatedProperties`, `not`, a mixed-type `enum`, a `type` naming two kinds. It **fell** because a union that degrades takes its branches out of the generated crate with it, and a branch nothing else references stops being something to report about. |
 | `invalid-default` | 105 | 105 | Defaults that are not values of their own property's type. |
 | `discriminator-edge-case` | 376 | **93** | Discriminated unions progeny still cannot represent. What is left is 79 with a non-object variant, 7 with a variant the mapping never names, 5 with a variant used outside the union (where the tag property really is on the wire), 2 whose variants would carry the same tag, 1 declaring the tag as a non-string. |
 | `malformed-member` | 88 | 88 | Members whose value has the wrong shape, held verbatim. |
-| `multi-parent-discriminator` | **0** | 30 | Also previously unreported. A variant named by two unions' mappings: it joins both and carries the tag in neither. |
+| `multi-parent-discriminator` | **0** | 34 | Also previously unreported. A variant named by two unions' mappings: it joins both and carries the tag in neither. Reported against the variant, which is the type that loses the property; against the union it was several byte-identical records, which is what a per-occurrence class must never produce. |
 | `unknown-schema-type` | 16 | 16 | A `type` that is not one of the seven. |
 | `legacy-exclusive-bound` | 9 | 9 | The 3.0 boolean bound flag in a 3.1 document. |
 | `missing-final-line-break` | 1 | 1 | `urlbox`. |
@@ -212,7 +213,8 @@ stage fails.
 ### Records are positions; types are what survives dedup
 
 Worth stating because the two numbers look inconsistent and are not. The 376 `discriminator-edge-case`
-records fell to 93, and yet the whole corpus emits only **15 internally tagged enums**. Both are
+records fell to 93, and yet the whole corpus emits only **22 internally tagged enums**, against
+2,738 untagged ones. Both are
 right: classification runs per *schema position*, and `okta` writes the same inline role union at
 fifteen response positions, so one union that could not be represented was fifteen records. Dedup
 runs afterwards and collapses the identical ones into one type. So a per-occurrence class counts
@@ -265,12 +267,72 @@ the names hide. Reading a degradation and asking "is the document really wrong?"
 diagnostics are for — and it is the same question that turned 288 `qdrant`-style null arms from
 degradations into `Option<T>`.
 
-**One of these started out as progeny's bug, not the corpus's.** `github`'s workflow-job payloads
-write `allOf: [{type: number}, {type: integer}]`, which was reported as an irreconcilable conflict:
-the merge treated JSON Schema's type names as opaque, and they are not — `integer` is a subset of
-`number`, so a value that must be both is an integer. The intersection now knows the one containment
-the names hide. Reading a degradation and asking "is the document really wrong?" is what the
-diagnostics are for.
+## The 59 the review found the first fix had left behind
+
+`wild-union` went from 394 to **453** on a re-read of the test that produces it, and the 59 are the
+same failure mode the 394 were: an untagged enum reading a payload as the wrong branch and dropping
+what that branch did not name. What the first implementation asked was whether *something*
+distinguished two object branches. What it had to ask is whether the branch tried **first** turns the
+other's payloads down — and those are different questions, because serde takes the first variant that
+deserializes:
+
+`clerk` is the exhibit, and it is not a toy. Its JWKS list is a seven-branch `oneOf` that runs
+`ed25519.PublicKey` first and `ed25519.PrivateKey` fourth. The two declare the same `kty: OKP` and
+`crv: Ed25519` constants and the same required members, except that the private key also requires
+`d` — the private key material:
+
+```
+in:   {"kid":…,"alg":…,"use":…,"kty":"OKP","crv":"Ed25519","x":…,"d":…}
+read: PublicKey { … }        # every member it requires is present; `d` is not one it declares
+out:  {"kid":…,"alg":…,"use":…,"kty":"OKP","crv":"Ed25519","x":…}
+```
+
+`d` does tell the two apart, which is why a symmetric test passed them — but it tells them apart in
+the useless direction, and what falls out of the payload is the secret. Reversed, the same pair is
+exact: a public key has no `d` for the private branch to find. One pair, two orders, two answers, so
+a test that cannot see order cannot be right about both. Closing the earlier branch is the other
+repair, and it now counts as one.
+
+The second half of the same review: **a branch is judged by the type progeny emits for it, not by
+its schema.** A branch that degrades is rendered `serde_json::Value`, which accepts every payload
+each of its siblings does — so answering "object" from the keywords it still has claims a
+discrimination the emitted type cannot perform. A degrading branch now counts as constraining
+nothing, which makes it legal last and a swallow anywhere else, the same rule the catch-all row
+already had.
+
+Two smaller ones found the same way, both silent:
+
+- **A bare `{"enum": [1, 2, 3]}` was `serde_json::Value`**, with no diagnostic — the `type` keyword
+  was the only thing consulted, so string enumerations worked and numeric ones did not. Now `i64`.
+  Both halves of that mattered: the type was lost, *and* the `Value` swallowed union siblings.
+- **`enum: ["a", "b", "a"]` emitted two variants renamed `"a"`.** The second is unreachable coming
+  in and indistinguishable going out, so it round-tripped as the first. `Vec::dedup` only drops
+  repeats that are adjacent, and documents do not write them adjacently.
+
+And a fifth, which the corpus contains **zero** of and which is the reason a fixture is not the same
+thing as a count. A discriminated union may only consume its tag when no variant is used anywhere
+the property really is on the wire — the union table has always said so, and the check walked the
+edges *between shapes* to decide it. An API-surface position has no such edge pointing at it. So a
+component that is both a variant of a tagged union and, by `$ref`, the schema of a `200` response
+had `kind` taken off it, and the response type silently lost the member coming in and omitted it
+going out:
+
+```
+components.schemas.FromFile   ← variant of Source (discriminator: kind)
+paths./file.get.200.schema    ← $ref to FromFile, where `kind` is on the wire
+emitted:  pub struct FromFile { pub location: String }     // and no `kind`
+```
+
+An API-surface root now counts as a use. A `components.schemas` entry still does not — being named
+is not being on the wire, and treating it as one would refuse every discriminated union whose
+variants a document bothered to name. The corpus has no document that does this, so **no count
+moved**: 453, 93 and 34 are identical before and after. That is the finding, not a footnote to it —
+a safety condition with no occurrences in 78 documents is still a safety condition, and the only
+thing that can hold it is a fixture written from the rule.
+
+None of the five was caught by the corpus compiling, the snapshots matching, or the round-trips
+passing: every one of them generates code that builds and runs, and is wrong only about payloads.
+What found them was generating a fixture per claim and reading what serde actually did with it.
 
 ## The serde spike, measured
 
@@ -346,6 +408,17 @@ discarded rather than averaged in (7 of 36 were); and free memory never fell bel
 2.1 GiB peak, so no reading is a reclaim artefact. The checked-in `corpus/baseline.toml` records
 kept and discarded counts, the load, and the core count beside every entry — a baseline may be
 written on a shared machine, but never silently.
+
+**And the conditions are why these are not yet the number.** The harness refuses above load 1.0 by
+default; it was overridden to take these. CPU-seconds are not load-immune — memory-bandwidth
+contention inflates them, by up to 2.6× at load 17 — and the largest subject is the thinnest cell:
+`okta.hand-written` kept **one** repetition of three, against two for `okta.derive`. Both sides ran
+at comparable load, which is what makes the row directionally sound, and the mechanism behind it is
+confirmed by a deterministic count that no amount of load can move. But **−63…−68% is provisional
+until it is re-taken on a quiet machine** — `--max-load 5` or lower, four kept repetitions — and
+nothing downstream should cite the figure before that. The claim these numbers establish is "the
+mechanism reproduces, with room to spare", which is what the measurement was moved forward to find
+out; "by 67%" is a further claim and is not yet earned.
 
 ### Stage 4 did not change what the output costs to compile
 
