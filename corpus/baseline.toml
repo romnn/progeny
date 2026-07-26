@@ -1,0 +1,47 @@
+["jellyfin.derive"]
+cpu_seconds = 6.147892333333334
+peak_rss_bytes = 723454634
+kept = 3
+discarded = 0
+load = 12.68
+cores = 48
+
+["jellyfin.hand-written"]
+cpu_seconds = 2.00536
+peak_rss_bytes = 384366592
+kept = 2
+discarded = 1
+load = 11.99
+cores = 48
+
+["okta.derive"]
+cpu_seconds = 25.517045500000002
+peak_rss_bytes = 2259802112
+kept = 2
+discarded = 1
+load = 17.53
+cores = 48
+
+["okta.hand-written"]
+cpu_seconds = 8.304731
+peak_rss_bytes = 1003913216
+kept = 1
+discarded = 2
+load = 18.18
+cores = 48
+
+["oxide.derive"]
+cpu_seconds = 7.4224265
+peak_rss_bytes = 717524992
+kept = 2
+discarded = 1
+load = 15.86
+cores = 48
+
+["oxide.hand-written"]
+cpu_seconds = 2.6181330000000003
+peak_rss_bytes = 357419690
+kept = 3
+discarded = 0
+load = 16.11
+cores = 48

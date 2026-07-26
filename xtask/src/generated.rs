@@ -24,7 +24,7 @@ pub fn scratch_root() -> Utf8PathBuf {
 }
 
 /// A shared target directory, so the dependencies are compiled once rather than once per document.
-fn shared_target() -> Utf8PathBuf {
+pub fn shared_target() -> Utf8PathBuf {
     scratch_root().join("target")
 }
 

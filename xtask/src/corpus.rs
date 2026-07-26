@@ -62,8 +62,8 @@ pub struct Args {
 /// One entry of `corpus/manifest.toml`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Spec {
-    name: String,
+pub struct Spec {
+    pub name: String,
     /// The OpenAPI version family the document declares, for cross-checking what was parsed.
     version: Option<String>,
     /// Upstream source. Absent for committed documents.
@@ -198,7 +198,7 @@ pub fn run(args: &Args) -> Result<()> {
     verdict(&outcomes)
 }
 
-fn load_manifest() -> Result<Vec<Spec>> {
+pub fn load_manifest() -> Result<Vec<Spec>> {
     let path = paths::corpus_root().join("manifest.toml");
     let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
     let manifest: Manifest = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
@@ -244,11 +244,8 @@ fn select(specs: &[Spec], args: &Args) -> Result<Vec<Spec>> {
         return Ok(selected);
     }
     if args.quick {
-        let path = paths::corpus_root().join("tier.toml");
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
-        let tier: Tier = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
         let mut selected = Vec::new();
-        for name in &tier.quick {
+        for name in &quick_tier()? {
             let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
                 bail!("the quick tier names `{name}`, which is not in the manifest");
             };
@@ -266,7 +263,7 @@ fn select(specs: &[Spec], args: &Args) -> Result<Vec<Spec>> {
 /// extension guessed from the URL — several corpus documents are served from extensionless URLs,
 /// and one of those serves YAML from a name that ends up `.json`, which is why nothing downstream
 /// may dispatch on the extension.
-fn document_path(spec: &Spec) -> Utf8PathBuf {
+pub fn document_path(spec: &Spec) -> Utf8PathBuf {
     if spec.local {
         let file = spec.file.clone().unwrap_or_else(|| spec.name.clone());
         return paths::specs_root().join(file);
@@ -520,7 +517,7 @@ fn check(spec: &Spec, args: &Args, totals: &mut Stats, counted: &mut usize) -> R
 ///
 /// Deliberately the defaults, plus a crate name: the corpus measures what a caller gets without
 /// having to know anything, and a gate that only passes under a tuned configuration is not a gate.
-fn config_for(spec: &Spec) -> progeny::Config {
+pub fn config_for(spec: &Spec) -> progeny::Config {
     progeny::Config {
         package: progeny::Package {
             name: format!("corpus-{}", spec.name),
@@ -528,6 +525,18 @@ fn config_for(spec: &Spec) -> progeny::Config {
         },
         ..progeny::Config::default()
     }
+}
+
+/// The documents `corpus/tier.toml` names as the quick tier.
+///
+/// The expensive per-document assertions — compiling a generated crate, measuring what it costs —
+/// run over this list rather than over all 78, and the caller says so out loud rather than
+/// sampling silently.
+pub fn quick_tier() -> Result<Vec<String>> {
+    let path = paths::corpus_root().join("tier.toml");
+    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
+    let tier: Tier = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+    Ok(tier.quick)
 }
 
 /// Print the per-document lines and the summary, and count the documents that failed.
