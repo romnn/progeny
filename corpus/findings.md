@@ -11,7 +11,12 @@ task corpus            # round trip, references, dialect convergence, generation
 task corpus:stats      # the model-level histograms
 task corpus:compile    # generate the quick tier and compile it
 task differential      # the two serde renderings, asserted equivalent
+task bench:compile -- --ab --reps 3 oxide jellyfin okta   # what each rendering costs to compile
 ```
+
+The last one needs a machine with nothing else on it; on a shared one it refuses rather than
+reporting a number about the machine. `--max-load` raises the bar it refuses at, and every figure it
+then produces carries the conditions it was taken under.
 
 ## The front end holds every document
 
@@ -116,7 +121,7 @@ Counts over all 78 documents.
 
 | pattern | count | share |
 | --- | --- | --- |
-| `[T, {"type": "null"}]` — nullable emulation | 10,752 | 83.1% |
+| `[T, {"type": "null"}]` — nullable emulation | 10,752 → **11,023** | 83.1% → 85.2% |
 | every branch a `const` or single-valued `enum` | 161 | 1.2% |
 | every branch a different `type` | 754 | 5.8% |
 | something else | 1,267 | 9.8% |
@@ -124,6 +129,11 @@ Counts over all 78 documents.
 **Consequence.** Five sixths of all `anyOf`s are asking for `Option<T>` and have an exact
 translation. Under a tenth are candidates for degradation, and the union policy is written against
 the four rows above rather than against "any combination may match" in general.
+
+The first row grew by 271 in stage 4, and the growth is the finding rather than a correction: those
+branches spell the null arm `{nullable: true}`, which is the only spelling 3.0 has, and until stage
+4 read them as such they counted as "something else". Five sixths was already the answer; it is now
+a slightly larger five sixths.
 
 ### Everything else
 
@@ -154,30 +164,106 @@ here on rather than from stage 8.
 | | |
 | --- | --- |
 | documents generated | 78/78 |
-| lines of Rust | 983,029 |
-| generated crates that compile | 8/8 of the reviewed quick tier, `cloudflare`'s among them: 89,740 schemas, 126,596 lines |
+| lines of Rust | 980,381 (983,029 before stage 4 taught the union table what it may not do) |
+| generated crates that compile | 78/78 |
 | generation is deterministic | every document generated twice per run, byte-compared |
 
 ### What the type layer had to say about the corpus
 
-30,376 findings, aggregated into **549 records across 71 documents** — which is the aggregation
-requirement earning its keep: unaggregated, the snapshot suite would be thirty thousand lines and
-nobody would read it.
+31,056 findings, aggregated into **346 records** — which is the aggregation requirement earning its
+keep: unaggregated, the snapshot suite would be thirty thousand lines and nobody would read it.
 
-| class | occurrences | reading |
-| --- | --- | --- |
-| `presence-collapse` | 26,748 | Optional-and-nullable members, collapsed onto one `Option`. Larger than the 16,100 the earlier histogram reported because that count and the `anyOf` nullable-emulation count (10,752) were of the same phenomenon written two ways; this is the number of *fields* it actually affects. |
-| `colliding-type-name` | 1,087 | Two positions asking for one name. Common in large documents, and the reason `names` is in the configuration. |
-| `legacy-tuple-items` | 643 | The draft-04 tuple form, rewritten. |
-| `dangling-ref` | 614 | All document-level, all vendor defects (see above). |
-| `irreconcilable-all-of` | 442 | Branches that cannot all hold — 250 of them one `cloudflare` shape whose `allOf` intersects two unions. |
-| `discriminator-edge-case` | 376 | Discriminated unions whose variants cannot be told apart structurally, degraded rather than guessed at. Consuming the tag is stage 4. |
-| `unsupported-construct` | 247 | `propertyNames`, `unevaluatedProperties`, `not`, a mixed-type `enum`, a `type` naming two kinds. |
-| `invalid-default` | 105 | Defaults that are not values of their own property's type. |
-| `malformed-member` | 88 | Members whose value has the wrong shape, held verbatim. |
-| `unknown-schema-type` | 16 | A `type` that is not one of the seven. |
-| `legacy-exclusive-bound` | 9 | The 3.0 boolean bound flag in a 3.1 document. |
-| `missing-final-line-break` | 1 | `urlbox`. |
+The "before" column is stage 3, so the two together are what stage 4 did to the corpus.
+
+| class | before | after | reading |
+| --- | ---: | ---: | --- |
+| `presence-collapse` | 26,748 | 27,044 | Optional-and-nullable members, collapsed onto one `Option`. Larger than the 16,100 the earlier histogram reported because that count and the `anyOf` nullable-emulation count (10,752) were of the same phenomenon written two ways; this is the number of *fields* it affects. It **rose** in stage 4 because 288 branches that read as "constrains nothing" turned out to be null arms, which makes their properties nullable. |
+| `colliding-type-name` | 1,087 | 1,042 | Two positions asking for one name. Common in large documents, and the reason `names` is in the configuration. |
+| `legacy-tuple-items` | 643 | 643 | The draft-04 tuple form, rewritten. |
+| `dangling-ref` | 614 | 614 | All document-level, all vendor defects (see above). |
+| `irreconcilable-all-of` | 442 | 441 | Branches that cannot all hold — 250 of them one `cloudflare` shape whose `allOf` intersects two unions. |
+| `wild-union` | **0** | **394** | The class that had a definition, an action, an aggregation — and **no reporting site**. Every one of these was previously emitted as an untagged enum that takes whichever branch parses first, which is the one forbidden failure mode. See below. |
+| `nullable-union-branch` | — | 288 | New class. A 3.0 union branch whose only content is `nullable: true`. |
+| `unsupported-construct` | 247 | 248 | `propertyNames`, `unevaluatedProperties`, `not`, a mixed-type `enum`, a `type` naming two kinds. |
+| `invalid-default` | 105 | 105 | Defaults that are not values of their own property's type. |
+| `discriminator-edge-case` | 376 | **93** | Discriminated unions progeny still cannot represent. What is left is 79 with a non-object variant, 7 with a variant the mapping never names, 5 with a variant used outside the union (where the tag property really is on the wire), 2 whose variants would carry the same tag, 1 declaring the tag as a non-string. |
+| `malformed-member` | 88 | 88 | Members whose value has the wrong shape, held verbatim. |
+| `multi-parent-discriminator` | **0** | 30 | Also previously unreported. A variant named by two unions' mappings: it joins both and carries the tag in neither. |
+| `unknown-schema-type` | 16 | 16 | A `type` that is not one of the seven. |
+| `legacy-exclusive-bound` | 9 | 9 | The 3.0 boolean bound flag in a 3.1 document. |
+| `missing-final-line-break` | 1 | 1 | `urlbox`. |
+
+### The 394 that stage 4 found progeny had been getting wrong
+
+`wild-union` was in the catalogue from the start with an action and an aggregation assigned, and
+nothing ever reported it: the classification only tested whether variants were distinguishable when
+a **discriminator** was declared, so 394 unions that declared none were emitted as untagged enums
+regardless. serde takes the first variant that deserializes, and an open struct accepts a payload
+with members it does not declare — so a payload meant for a later branch was read as an earlier one
+and quietly lost whatever that branch did not name. Silently wrong output, in the shape the design
+documents name as the only forbidden one, produced by the gap between a catalogue entry and a call
+site.
+
+Two things found it, and neither was a test: writing the fixture that a catalogue row demands, and
+reading the corpus counts for a class that should not have been zero. The catalogue now audits
+itself — the class list is read out of the enum, and a class with neither a fixture nor a recorded
+stage fails.
+
+### Records are positions; types are what survives dedup
+
+Worth stating because the two numbers look inconsistent and are not. The 376 `discriminator-edge-case`
+records fell to 93, and yet the whole corpus emits only **15 internally tagged enums**. Both are
+right: classification runs per *schema position*, and `okta` writes the same inline role union at
+fifteen response positions, so one union that could not be represented was fifteen records. Dedup
+runs afterwards and collapses the identical ones into one type. So a per-occurrence class counts
+what a reader has to go and look at, which is positions — and the generated crate counts what a
+consumer compiles, which is types.
+
+The second reason the tagged count is small is the better one: most of those unions did not need
+tagging at all. Their variants carry disjoint `const` tags, which the old distinguishability test
+could not see because it only compared *required property names*. Seeing constants turns them into
+exact untagged enums that keep every property the document declared — strictly better than tagging,
+which would have taken the tag property off each variant.
+
+### The tagged enums, checked by running one
+
+Compiling proves a generated type *type-checks*; it does not prove serde accepts the shape, and
+internally tagged enums are the corner of serde with the most runtime-only restrictions. So one was
+run. `jellyfin`'s `GroupUpdate` is a nine-variant websocket union whose variants every one declared
+the same nine-valued `Type` enum — which is why nothing structural ever told them apart:
+
+```
+in:   {"Type":"GroupJoined","GroupId":"abc","Data":null}
+read: GroupJoined(SyncPlayGroupJoinedUpdate { data: None, group_id: Some("abc") })
+out:  {"Type":"GroupJoined","GroupId":"abc"}
+```
+
+Four things that had to hold, and do: the right variant is chosen from the tag; the tag is written
+back exactly once (a variant that had kept its own `Type` member would have emitted it twice);
+`{"Type":"GroupLeft", …}` with byte-identical members reads as `GroupLeft`, which is the case that
+degraded before; and an unmapped tag is an error naming all nine, rather than a silent pick.
+
+### The three refinements
+
+Each followed from reading the first run's degradations rather than accepting them, and together
+they took the count from 821 to 394 without weakening the test:
+
+- **Nested unions are flattened.** `oneOf: [A, {oneOf: [B, C]}]` accepts what `oneOf: [A, B, C]`
+  accepts. Treating the inner union as one opaque branch reported an ambiguity where the question
+  had not been asked yet. (821 → 738)
+- **A branch that constrains nothing is a catch-all when it is last.** serde tries variants in
+  order, so `anyOf: [array of Condition, array of anything]` — `sentry` writes it — loses nothing.
+  Anywhere but last, the same branch swallows every branch after it. (450 → 394)
+- **`{nullable: true}` alone in a 3.0 union is the null arm**, not a branch that says nothing. See
+  the new catalogue row; this is the largest of the three. (738 → 450)
+
+**One of these started out as progeny's bug, not the corpus's.** `github`'s workflow-job payloads
+write `allOf: [{type: number}, {type: integer}]`, which was reported as an irreconcilable conflict:
+the merge treated JSON Schema's type names as opaque, and they are not — `integer` is a subset of
+`number`, so a value that must be both is an integer. The intersection now knows the one containment
+the names hide. Reading a degradation and asking "is the document really wrong?" is what the
+diagnostics are for — and it is the same question that turned 288 `qdrant`-style null arms from
+degradations into `Option<T>`.
 
 **One of these started out as progeny's bug, not the corpus's.** `github`'s workflow-job payloads
 write `allOf: [{type: number}, {type: integer}]`, which was reported as an irreconcilable conflict:
@@ -227,6 +313,54 @@ things it found that no unit test would have:
 fact the buffered deserializer wanted — wire names, presence, arity, which members carry defaults —
 was already in the record; only the renderer had to pass more of it along. The contract's shape is
 the shape its one consumer wants.
+
+## The compile-cost claim, measured four stages early
+
+The headline claim — hand-written serde against the derive, **−37…−46% CPU and −30…−40% peak
+RSS** — was inherited from the predecessor. The body count (10 serde bodies → 3) confirmed the
+*mechanism* under the new contract shape; it did not confirm the *effect*. Both renderings coexist
+by `Config` design, so the effect can be measured as soon as the corpus generates compiling crates,
+which is now — with only the type renderer to rework if it had not reproduced.
+
+`task bench:compile -- --ab`, three documents, three repetitions each, A-B-B-A, `--jobs 1`, one
+fresh measuring process per repetition:
+
+| document | lines | CPU | peak RSS |
+| --- | ---: | ---: | ---: |
+| `oxide` | 7,219 | 6.01 → 2.21 s (**−63%**) | 690 → 343 MiB (**−50%**) |
+| `jellyfin` | 8,574 | 6.15 → 2.01 s (**−67%**) | 690 → 367 MiB (**−47%**) |
+| `okta` | 29,119 | 25.52 → 8.30 s (**−68%**) | 2.10 → 0.96 GiB (**−56%**) |
+
+Run twice, independently, and the two runs agree within 4 points on every figure. **It reproduces,
+and it is larger than the target range** — but the denominator is why, and the honest reading needs
+it: these are **type-only** crates. The predecessor measured full client crates, where request
+plumbing, builders and the response machinery are compile work the serde change does not touch. As
+stages 5 to 7 add that surface the percentage should fall back toward the inherited range, and the
+number to watch is the absolute saving rather than the ratio.
+
+**Conditions, because they are part of the measurement.** This machine has 48 cores and was shared
+throughout; the one-minute load average ran between 12 and 18, and one attempt was abandoned when
+something else took it to 416. Three things make the figures usable anyway: variants alternate
+A-B-B-A so drift cannot masquerade as a difference; a repetition whose load *rose* while it ran is
+discarded rather than averaged in (7 of 36 were); and free memory never fell below 20 GiB against a
+2.1 GiB peak, so no reading is a reclaim artefact. The checked-in `corpus/baseline.toml` records
+kept and discarded counts, the load, and the core count beside every entry — a baseline may be
+written on a shared machine, but never silently.
+
+### Stage 4 did not change what the output costs to compile
+
+The derive-only tree as it stood at the end of stage 3 is archived, so the "A" side of every future
+comparison survives both `git clean` and any amount of generator drift. Measured against the
+current tree on the same machine within the same few minutes:
+
+| `oxide`, derive rendering | CPU | peak RSS |
+| --- | ---: | ---: |
+| stage 3, archived | 6.63 s | 684.9 MiB |
+| stage 4 | 6.01–7.42 s across two runs | 684.3 MiB |
+
+The spread between two runs of the *same* tree is wider than the difference between the two trees,
+and peak RSS agrees to within 0.1%. Stage 4 changed which unions are representable; it did not
+change what the result costs.
 
 ## Diagnostics the corpus produces
 
