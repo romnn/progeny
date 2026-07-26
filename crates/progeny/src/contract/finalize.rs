@@ -135,6 +135,18 @@ fn decide(
                         DeserStrategy::HandWrittenBuffered
                     }
                 }
+                // Tagging is a property of the union above a type, not of the struct itself, so
+                // nothing builds this today. Ruled rather than made unrepresentable because the
+                // ruling is the interesting part: the buffered deserializer assigns members by
+                // name and has no notion of one having been consumed before it started, so a
+                // struct that did carry its own tag would need the derive, not this path.
+                #[expect(
+                    clippy::match_same_arms,
+                    reason = "one arm per serde-relevant combination is the mechanism: merging \
+                              two arms that happen to rule the same way today would let the next \
+                              variant added inherit a ruling nobody made"
+                )]
+                (Tagging::Internal { .. }, _) => DeserStrategy::Derive,
             },
             // Data-carrying enums, wrappers, tuples and aliases: all derived in v1.
             ContractKind::Enum { .. }

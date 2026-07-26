@@ -65,7 +65,7 @@ fn guard(converted: &str, fallback: &str) -> String {
     if cleaned.starts_with(|character: char| character.is_ascii_digit()) {
         cleaned.insert(0, '_');
     }
-    if RESERVED.contains(&cleaned.as_str()) {
+    if RESERVED.contains(&cleaned.as_str()) || SHADOWED.contains(&cleaned.as_str()) {
         cleaned.push('_');
     }
     cleaned
@@ -82,6 +82,20 @@ const RESERVED: [&str; 51] = [
     "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
     "return", "self", "Self", "static", "struct", "super", "trait", "true", "try", "type",
     "typeof", "unsafe", "unsized", "use", "virtual", "where", "while",
+];
+
+/// Every name the generated source itself writes unqualified.
+///
+/// Rust accepts these as identifiers, which is exactly the problem: a component named `Vec` becomes
+/// `pub type Vec = Vec<Collection>;`, where the second `Vec` resolves to the first and rustc
+/// reports a cycle. `chroma` publishes precisely that. Everything the renderer can qualify it does
+/// — maps are `std::collections::BTreeMap`, arbitrary JSON is `serde_json::Value` — so this list is
+/// the residue that has nowhere to be qualified to: the prelude names and the primitives.
+///
+/// A suffix rather than a qualification because the collision is with a *name we chose to use*, and
+/// renaming ours would move the problem to whichever type is unlucky enough to be next.
+const SHADOWED: [&str; 12] = [
+    "Box", "Option", "Result", "String", "Vec", "bool", "char", "f32", "f64", "i64", "str", "u64",
 ];
 
 /// Hands out type names, keeping them unique.
@@ -211,6 +225,27 @@ mod tests {
         assert_eq!(RustIdent::field("self").as_str(), "self_");
         assert_eq!(RustIdent::field("Self").as_str(), "self_");
         assert_eq!(RustIdent::type_name(&["type".to_owned()]).as_str(), "Type");
+    }
+
+    #[test]
+    fn a_name_the_generated_source_already_uses_gets_out_of_its_own_way() {
+        // `chroma` publishes a component called `Vec`, which produced
+        // `pub type Vec = Vec<Collection>;` — accepted as an identifier, then rejected by rustc as
+        // a cycle, because the second `Vec` resolves to the first.
+        assert_eq!(RustIdent::type_name(&["Vec".to_owned()]).as_str(), "Vec_");
+        assert_eq!(
+            RustIdent::type_name(&["Option".to_owned()]).as_str(),
+            "Option_"
+        );
+        assert_eq!(
+            RustIdent::type_name(&["String".to_owned()]).as_str(),
+            "String_"
+        );
+        // A name that merely starts the same way is not a collision.
+        assert_eq!(
+            RustIdent::type_name(&["Vector".to_owned()]).as_str(),
+            "Vector"
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@
 //! Documentation is read at the position that carries it and travels with the field.
 
 mod classify;
+mod discriminate;
 mod merge;
 mod roots;
 
@@ -190,11 +191,24 @@ pub(crate) struct Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Variant {
     pub(crate) shape: ShapeRef,
+    /// The value this variant's tag property takes, for a union that carries its tag internally.
+    ///
+    /// Set exactly when the enclosing [`Union::tag`] is set. It comes from the discriminator's
+    /// explicit mapping where there is one and from the variant's component name otherwise, which
+    /// is the resolution order OpenAPI defines.
+    pub(crate) tag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Union {
     pub(crate) variants: Vec<Variant>,
+    /// The property that says which variant a payload is, for a union progeny tags internally.
+    ///
+    /// `None` is the common case and means the variants are told apart by their shape. A union is
+    /// only tagged when structural matching would be *unsound* — see [`super::discriminate`] —
+    /// because tagging costs the variant types the tag property itself, and paying that when the
+    /// shapes already distinguish the variants would be a loss for nothing.
+    pub(crate) tag: Option<String>,
 }
 
 /// What a schema says about itself, for the doc comments a renderer writes.
@@ -237,6 +251,32 @@ impl Shapes {
     pub(crate) fn keys(&self) -> impl Iterator<Item = &ShapeKey> {
         self.by_key.keys()
     }
+
+    /// Every key and its shape, in a deterministic order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&ShapeKey, &Shape)> {
+        self.by_key.iter()
+    }
+
+    /// Replace what a key classified as.
+    ///
+    /// The one mutation classification allows after the fact, and it exists for one caller:
+    /// [`discriminate`] can only tell whether a proposed tag is affordable once every shape is
+    /// known, so the union it demotes was necessarily classified before the answer existed.
+    pub(crate) fn replace(&mut self, key: &ShapeKey, shape: Shape) {
+        if let Some(slot) = self.by_key.get_mut(key) {
+            *slot = shape;
+        }
+    }
+
+    /// Drop a property from a struct, because the union above it now carries that property itself.
+    ///
+    /// A no-op on anything that is not a struct with that member, so a caller that has already
+    /// stripped the property — a variant shared by two unions with the same tag — stays correct.
+    pub(crate) fn strip_property(&mut self, key: &ShapeKey, wire: &str) {
+        if let Some(Shape::Struct(structure)) = self.by_key.get_mut(key) {
+            structure.fields.retain(|field| field.wire != wire);
+        }
+    }
 }
 
 /// Classify every shape the document's API surface reaches.
@@ -277,6 +317,10 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
         }
         shapes.by_key.insert(key, shape);
     }
+    // Every shape exists now, which is the earliest moment a proposed discriminator tag can be
+    // priced: what it costs is a property off each variant type, and whether that is affordable
+    // depends on where else those types are used.
+    discriminate::run(resolved, &mut shapes, ctx);
     shapes
 }
 
@@ -628,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn a_discriminated_union_whose_variants_look_alike_degrades_rather_than_guessing() {
+    fn a_discriminated_union_whose_variants_look_alike_consumes_its_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
             "B": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
@@ -640,15 +684,191 @@ mod tests {
                 "discriminator": {"propertyName": "kind"},
             },
         })));
-        // Matching these structurally would pick whichever deserialized first, which is the one
-        // forbidden failure mode. Consuming the tag is stage 4.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(either) = shape_of(&shapes, "Either") else {
+            panic!("expected a union");
+        };
+        // Matching these structurally would pick whichever deserialized first, so the tag is what
+        // decides, and the mapping is implicit: a variant is known by its component name.
+        assert_eq!(either.tag.as_deref(), Some("kind"));
+        let tags: Vec<Option<&str>> = either
+            .variants
+            .iter()
+            .map(|variant| variant.tag.as_deref())
+            .collect();
+        assert_eq!(tags, [Some("A"), Some("B")]);
+        // And the property the tag rides in comes off the variants, because serde consumes it
+        // before the variant ever sees the payload.
+        let Shape::Struct(a) = shape_of(&shapes, "A") else {
+            panic!("expected a struct");
+        };
+        let names: Vec<&str> = a.fields.iter().map(|field| field.wire.as_str()).collect();
+        assert_eq!(names, ["shared"]);
+    }
+
+    #[test]
+    fn a_constant_tag_beats_the_discriminator_because_it_costs_the_variants_nothing() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Cat": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {"kind": {"const": "cat"}, "shared": {"type": "string"}},
+            },
+            "Dog": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {"kind": {"const": "dog"}, "shared": {"type": "string"}},
+            },
+            "Animal": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/Cat"},
+                    {"$ref": "#/components/schemas/Dog"},
+                ],
+                "discriminator": {"propertyName": "kind"},
+            },
+        })));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(animal) = shape_of(&shapes, "Animal") else {
+            panic!("expected a union");
+        };
+        // The constants already tell a payload apart, so nothing is tagged and nothing is taken
+        // away: `Cat` keeps `kind`, and is still usable outside the union.
+        assert_eq!(animal.tag, None);
+        let Shape::Struct(cat) = shape_of(&shapes, "Cat") else {
+            panic!("expected a struct");
+        };
+        let names: Vec<&str> = cat.fields.iter().map(|field| field.wire.as_str()).collect();
+        assert_eq!(names, ["kind", "shared"]);
+    }
+
+    #[test]
+    fn a_variant_used_outside_its_union_keeps_its_tag_property_and_the_union_degrades() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "B": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "Either": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ],
+                "discriminator": {"propertyName": "kind"},
+            },
+            // The use that makes stripping a loss: here `kind` really is on the wire.
+            "Holder": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
+        })));
         assert_eq!(shape_of(&shapes, "Either"), &Shape::Any);
+        let Shape::Struct(a) = shape_of(&shapes, "A") else {
+            panic!("expected a struct");
+        };
+        assert_eq!(a.fields.len(), 2);
+        let reported = diagnostics
+            .iter()
+            .find(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase)
+            .expect("the refusal should be reported");
+        assert!(
+            reported.detail().contains("outside this union"),
+            "{reported}"
+        );
+    }
+
+    #[test]
+    fn a_union_nothing_tells_apart_is_not_matched_against_whichever_branch_parses_first() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": {"type": "object", "properties": {"shared": {"type": "string"}}},
+            "B": {"type": "object", "properties": {"shared": {"type": "string"}, "extra": {"type": "string"}}},
+            // No discriminator, no required property either declares alone, no constants: an
+            // untagged enum would read every `B` payload as an `A` and drop `extra`.
+            "Either": {"oneOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/B"},
+            ]},
+        })));
+        assert_eq!(shape_of(&shapes, "Either"), &Shape::Any);
+        let reported = diagnostics
+            .iter()
+            .find(|d| d.class() == crate::BreakageClass::WildUnion)
+            .expect("the wild union should be reported");
+        assert!(reported.detail().contains("no discriminator"), "{reported}");
+    }
+
+    #[test]
+    fn branches_of_different_kinds_still_need_no_tag() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Either": {"anyOf": [
+                {"type": "string"},
+                {"type": "integer"},
+                {"type": "array", "items": {"type": "string"}},
+            ]},
+        })));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(either) = shape_of(&shapes, "Either") else {
+            panic!("expected a union");
+        };
+        // 754 of the corpus's `anyOf`s are this. Nothing is lost by matching them structurally,
+        // and degrading them would be a large loss for a hazard that does not apply.
+        assert_eq!(either.variants.len(), 3);
+        assert_eq!(either.tag, None);
+    }
+
+    #[test]
+    fn an_unmapped_variant_is_refused_rather_than_named_after_its_rust_type() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Holder": {
+                "type": "object",
+                "properties": {
+                    "either": {
+                        "oneOf": [
+                            {"type": "object", "properties": {"kind": {"type": "string"}, "a": {"type": "string"}}},
+                            {"type": "object", "properties": {"kind": {"type": "string"}, "b": {"type": "string"}}},
+                        ],
+                        "discriminator": {"propertyName": "kind"},
+                    },
+                },
+            },
+        })));
+        let Shape::Struct(holder) = shape_of(&shapes, "Holder") else {
+            panic!("expected a struct");
+        };
+        let ShapeRef::Key(either) = &holder.fields[0].shape else {
+            panic!("expected a key");
+        };
+        // Inline branches have no component name, and the mapping names nothing either, so there
+        // is no string the tag would hold that the document actually stated.
+        assert_eq!(shapes.get(either), Some(&Shape::Any));
         assert!(
             diagnostics
                 .iter()
                 .any(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn an_explicit_mapping_names_the_variants_the_document_chose() {
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "B": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "Either": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    // Both spellings OpenAPI allows, side by side.
+                    "mapping": {"first": "#/components/schemas/A", "second": "B"},
+                },
+            },
+        })));
+        let Shape::Union(either) = shape_of(&shapes, "Either") else {
+            panic!("expected a union");
+        };
+        let tags: Vec<Option<&str>> = either
+            .variants
+            .iter()
+            .map(|variant| variant.tag.as_deref())
+            .collect();
+        assert_eq!(tags, [Some("first"), Some("second")]);
     }
 
     #[test]

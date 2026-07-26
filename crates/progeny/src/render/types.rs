@@ -65,22 +65,11 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
             }
         }
         ContractKind::Enum { variants } => {
-            let tagging = match (contract.deser(), contract.tagging()) {
-                (DeserStrategy::Derive, Tagging::Untagged) => quote! { #[serde(untagged)] },
-                _ => quote! {},
-            };
-            let arms = variants.iter().map(|variant| {
-                let name = ident(&variant.rust_name);
-                let ty = type_ref(&variant.ty, contracts, config);
-                quote! { #name(#ty), }
-            });
+            let body = data_enum(variants, contract, contracts, config);
             quote! {
                 #docs
                 #derives
-                #tagging
-                pub enum #name {
-                    #(#arms)*
-                }
+                #body
             }
         }
         ContractKind::StringEnum { variants } => {
@@ -128,6 +117,44 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                 #docs
                 pub type #name = #ty;
             }
+        }
+    }
+}
+
+/// A data-carrying enum: how it says which variant it is, and what each variant holds.
+///
+/// The tagging attribute and the per-variant rename are two readings of one contract field, which
+/// is why they are written together: `Untagged` has no variant names on the wire to rename, and
+/// `Internal` has exactly one name per variant and no choice about using it.
+fn data_enum(
+    variants: &[crate::contract::VariantContract],
+    contract: &TypeContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    let name = ident(contract.rust_name());
+    let tagging = match (contract.deser(), contract.tagging()) {
+        (DeserStrategy::Derive, Tagging::Untagged) => quote! { #[serde(untagged)] },
+        (DeserStrategy::Derive, Tagging::Internal { tag }) => quote! { #[serde(tag = #tag)] },
+        // The hand-written path reads the same contract and consults no attributes, so leaving one
+        // on would be a second source of truth — and would not resolve without the derive anyway.
+        (DeserStrategy::HandWrittenBuffered | DeserStrategy::HandWrittenFieldless, _) => quote! {},
+    };
+    let with_serde = contract.deser() == DeserStrategy::Derive;
+    let arms = variants.iter().map(|variant| {
+        let variant_ident = ident(&variant.rust_name);
+        let ty = type_ref(&variant.ty, contracts, config);
+        let rename = variant
+            .tag_value
+            .as_deref()
+            .filter(|wire| with_serde && variant_ident != *wire)
+            .map(|wire| quote! { #[serde(rename = #wire)] });
+        quote! { #rename #variant_ident(#ty), }
+    });
+    quote! {
+        #tagging
+        pub enum #name {
+            #(#arms)*
         }
     }
 }

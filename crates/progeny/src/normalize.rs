@@ -120,6 +120,12 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
         ));
     }
 
+    if let Some(Value::String(dialect)) = root.get("jsonSchemaDialect")
+        && !is_known_dialect(dialect)
+    {
+        report_dialect(ctx, JsonPointer::root().child("jsonSchemaDialect"), dialect);
+    }
+
     Walk {
         ctx,
         at: JsonPointer::root(),
@@ -426,7 +432,17 @@ impl Walk<'_> {
         let Value::Object(map) = value else {
             return;
         };
+        // A schema may declare its own dialect. Progeny implements one; anything else is read as
+        // that one, which is sound where the dialects agree and worth saying where they might not.
+        if let Some(Value::String(dialect)) = map.get("$schema")
+            && !is_known_dialect(dialect)
+        {
+            let location = self.at.child("$schema");
+            report_dialect(self.ctx, location, dialect);
+        }
         if self.dialect_30 {
+            // Before `nullable` runs on the branches themselves and takes the evidence away.
+            self.repair_null_branches(map);
             nullable(map);
             exclusive_bounds(map);
             example(map);
@@ -457,6 +473,43 @@ impl Walk<'_> {
                         walk.scoped(name, |walk| walk.schema(entry));
                     }
                 });
+            }
+        }
+    }
+
+    /// A 3.0 union branch whose only content is `nullable: true`.
+    ///
+    /// 3.0 has no `"null"` type, so this is the only spelling available for the null arm of a
+    /// union, and it is the one tools generating 3.0 emit. Read literally it is something else
+    /// entirely: `nullable` modifies "the defined schema", a branch that declares no `type` defines
+    /// nothing, and a branch constraining nothing accepts every payload its siblings do — which
+    /// costs the whole union its type. `qdrant` writes exactly this 277 times in one response.
+    ///
+    /// Repair rather than degrade, and the distinction is the point: the literal reading makes the
+    /// union meaningless, so the evident intent is not a guess between two readings but the only
+    /// one under which the document says anything at all.
+    fn repair_null_branches(&mut self, map: &mut Map<String, Value>) {
+        for key in ["anyOf", "oneOf"] {
+            let Some(Value::Array(branches)) = map.get_mut(key) else {
+                continue;
+            };
+            for (index, branch) in branches.iter_mut().enumerate() {
+                let Value::Object(branch) = branch else {
+                    continue;
+                };
+                if !is_bare_nullable(branch) {
+                    continue;
+                }
+                branch.remove("nullable");
+                branch.insert("type".to_owned(), Value::String("null".to_owned()));
+                let location = self.at.child(key).child(index.to_string());
+                self.report(
+                    BreakageClass::NullableUnionBranch,
+                    location,
+                    "this branch of the union says only `nullable: true`, which is 3.0's one \
+                     spelling for the null arm; read it as `type: null`, because the literal \
+                     reading is a branch that constrains nothing and would cost the union its type",
+                );
             }
         }
     }
@@ -524,6 +577,56 @@ impl Walk<'_> {
             );
         }
     }
+}
+
+/// Whether a declared dialect is one progeny reads as itself.
+///
+/// 2020-12 and OpenAPI 3.1's own base dialect, with or without the empty fragment both are written
+/// with. Everything else is read *as* 2020-12 anyway — the model holds keywords it does not
+/// interpret — so the finding is a warning about a possible disagreement rather than a refusal.
+fn is_known_dialect(declared: &str) -> bool {
+    const KNOWN: [&str; 2] = [
+        "https://json-schema.org/draft/2020-12/schema",
+        "https://spec.openapis.org/oas/3.1/dialect/base",
+    ];
+    KNOWN.contains(&declared.trim_end_matches('#'))
+}
+
+fn report_dialect(ctx: &mut Ctx, at: JsonPointer, declared: &str) {
+    ctx.report(Diagnostic::new(
+        BreakageClass::UnsupportedDialect,
+        Action::Warn,
+        at,
+        format!(
+            "`{declared}` is not a dialect progeny implements; the schema is read as 2020-12, so \
+             any keyword the two dialects disagree about is held but not interpreted"
+        ),
+    ));
+}
+
+/// Whether a schema declares itself nullable and says nothing else about the value.
+///
+/// The test is an allowlist of the members that annotate rather than constrain, so a keyword
+/// progeny has not considered means "this branch says something", and the repair does not fire.
+/// Getting that direction wrong would rewrite a branch that had real content into `type: null`.
+fn is_bare_nullable(map: &Map<String, Value>) -> bool {
+    const ANNOTATIONS: [&str; 10] = [
+        "default",
+        "deprecated",
+        "description",
+        "example",
+        "externalDocs",
+        "readOnly",
+        "title",
+        "writeOnly",
+        "xml",
+        "nullable",
+    ];
+    if map.get("nullable") != Some(&Value::Bool(true)) {
+        return false;
+    }
+    map.keys()
+        .all(|key| ANNOTATIONS.contains(&key.as_str()) || key.starts_with("x-"))
 }
 
 /// `nullable: true` becomes `"null"` in the type — and in the enum.

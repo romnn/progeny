@@ -211,6 +211,40 @@ mod tests {
     }
 
     #[test]
+    fn a_union_that_shape_cannot_decide_renders_its_tag() {
+        let rendered = types(
+            with_schemas(json!({
+                "Cat": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+                "Dog": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+                "Animal": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/Cat"},
+                        {"$ref": "#/components/schemas/Dog"},
+                    ],
+                    "discriminator": {"propertyName": "kind", "mapping": {"a cat": "#/components/schemas/Cat"}},
+                },
+            })),
+            &Config::default(),
+        );
+        assert!(rendered.contains(r#"#[serde(tag = "kind")]"#), "{rendered}");
+        assert!(rendered.contains("pub enum Animal"), "{rendered}");
+        // The mapped name where the document gave one, the component name where it did not.
+        assert!(
+            rendered.contains(r#"#[serde(rename = "a cat")]"#),
+            "{rendered}"
+        );
+        assert!(rendered.contains("ACat(Cat)"), "{rendered}");
+        assert!(rendered.contains("Dog(Dog)"), "{rendered}");
+        // And the property serde consumes is gone from the variants, because a variant that still
+        // declared it would be handed a payload the tag had already been taken out of.
+        assert!(!rendered.contains("pub kind:"), "{rendered}");
+        assert!(
+            rendered.contains("pub shared: Option<String>"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn a_default_is_rendered_as_a_value_rather_than_recorded_and_forgotten() {
         let rendered = types(
             with_schemas(json!({

@@ -158,10 +158,14 @@ pub(crate) enum SkipRule {
 /// How a union carries which variant it is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Tagging {
-    /// Matched by shape. Every union in v1: consuming a declared discriminator as a serde tag is
-    /// stage 4's work, and a union whose variants cannot be told apart by shape degrades rather
-    /// than guessing ([`crate::shape`]).
+    /// Matched by shape, and the common case: the variants differ in a way a payload shows.
     Untagged,
+    /// The payload names its own variant in a member, which the union consumes.
+    ///
+    /// Used only where matching by shape would be unsound, because consuming the tag costs each
+    /// variant type the property that carries it ([`crate::shape`]). The variants' `tag_value`s
+    /// are the names this member takes.
+    Internal { tag: String },
 }
 
 /// Which `Deserialize` implementation a type gets.
@@ -226,6 +230,11 @@ pub(crate) struct FieldContract {
 pub(crate) struct VariantContract {
     pub(crate) rust_name: RustIdent,
     pub(crate) ty: TypeRef,
+    /// The exact bytes the tag member holds for this variant.
+    ///
+    /// Set exactly when the enclosing contract's [`Tagging`] is `Internal`; the pairing is what
+    /// lets the renderer write a `rename` without asking whether it should.
+    pub(crate) tag_value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

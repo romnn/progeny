@@ -323,10 +323,20 @@ impl Lower<'_> {
                 let variants = union
                     .variants
                     .iter()
-                    .map(|variant| self.reference(&variant.shape, key, ctx))
+                    .map(|variant| {
+                        (
+                            self.reference(&variant.shape, key, ctx),
+                            variant.tag.clone(),
+                        )
+                    })
                     .collect::<Vec<_>>();
+                if let Some(tag) = &union.tag
+                    && let Some(slot) = self.types.get_mut(index.index())
+                {
+                    slot.tagging = Tagging::Internal { tag: tag.clone() };
+                }
                 ContractKind::Enum {
-                    variants: self.variants(variants),
+                    variants: self.variants(variants, union.tag.is_some()),
                 }
             }
             Shape::Tuple { items, .. } => ContractKind::Tuple {
@@ -516,16 +526,28 @@ impl Lower<'_> {
         None
     }
 
-    /// Give every variant a distinct name, preferring the name of the type it holds.
-    fn variants(&self, types: Vec<TypeRef>) -> Vec<VariantContract> {
+    /// Give every variant a distinct name, and record the tag value where there is one.
+    ///
+    /// A tagged union names its variants after the tag values, because that is what the document
+    /// calls them and what a reader of a payload sees; an untagged one has no such name to use and
+    /// falls back to the type each variant holds.
+    fn variants(
+        &self,
+        types: Vec<(TypeRef, Option<String>)>,
+        tagged: bool,
+    ) -> Vec<VariantContract> {
         let mut used = Namer::default();
         types
             .into_iter()
-            .map(|ty| {
-                let wanted = self.variant_name(&ty);
+            .map(|(ty, tag)| {
+                let wanted = match &tag {
+                    Some(value) if tagged => value.clone(),
+                    _ => self.variant_name(&ty),
+                };
                 VariantContract {
                     rust_name: used.unique(RustIdent::variant(&wanted)),
                     ty,
+                    tag_value: tagged.then_some(tag).flatten(),
                 }
             })
             .collect()

@@ -102,6 +102,9 @@ pub enum BreakageClass {
     /// The 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` form in a document that declares
     /// 3.1, where a boolean there is never valid.
     LegacyExclusiveBound,
+    /// A 3.0 union branch whose only content is `nullable: true`: the one spelling 3.0 has for the
+    /// null arm of a union, read literally as a branch that constrains nothing at all.
+    NullableUnionBranch,
     /// A schema construct progeny does not interpret — `not`, `if`/`then`/`else`,
     /// `dependentSchemas`, `unevaluated*`, non-uniform `patternProperties`, a mixed-type `enum`.
     /// Held losslessly and typed as `serde_json::Value`.
@@ -140,6 +143,7 @@ impl BreakageClass {
             Self::UnregistrableRoute => "unregistrable-route",
             Self::LegacyTupleItems => "legacy-tuple-items",
             Self::LegacyExclusiveBound => "legacy-exclusive-bound",
+            Self::NullableUnionBranch => "nullable-union-branch",
             Self::UnsupportedConstruct => "unsupported-construct",
             Self::IrreconcilableAllOf => "irreconcilable-all-of",
             Self::PresenceCollapse => "presence-collapse",
@@ -176,6 +180,7 @@ impl BreakageClass {
             | Self::InvalidDefault
             | Self::LegacyTupleItems
             | Self::LegacyExclusiveBound
+            | Self::NullableUnionBranch
             | Self::UnsupportedConstruct
             | Self::IrreconcilableAllOf
             | Self::PresenceCollapse

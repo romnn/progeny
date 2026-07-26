@@ -102,6 +102,17 @@ fn constrains(object: &SchemaObject) -> bool {
         || object.discriminator.is_some()
 }
 
+/// A declared discriminator: which property names the variant, and what each name points at.
+///
+/// The mapping is carried as the document wrote it — a `$ref` string, or the bare component name
+/// OpenAPI also allows — because turning it into a schema is resolution's job and reporting what a
+/// mapping *said* when it names nothing is the diagnostic's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Discriminated {
+    pub(crate) property: String,
+    pub(crate) mapping: BTreeMap<String, String>,
+}
+
 /// Every part of a key, folded into one statement about the value.
 #[derive(Debug, Default)]
 pub(crate) struct View {
@@ -130,8 +141,8 @@ pub(crate) struct View {
     pub(crate) content_encoding: Option<String>,
     pub(crate) content_media_type: Option<String>,
     pub(crate) union: Option<Vec<ShapeKey>>,
-    /// The property a discriminated union is told apart by, when one is declared.
-    pub(crate) discriminator: Option<String>,
+    /// The declared discriminator, when there is one.
+    pub(crate) discriminator: Option<Discriminated>,
     /// Set when two parts each declare a union: an intersection of two unions has no faithful
     /// Rust type, and pretending otherwise is the "wild union" failure mode.
     pub(crate) unions_collide: bool,
@@ -279,8 +290,12 @@ fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocume
     }
     if let Some(discriminator) = &object.discriminator
         && view.discriminator.is_none()
+        && let Some(property) = discriminator.property_name.clone()
     {
-        view.discriminator = discriminator.property_name.clone();
+        view.discriminator = Some(Discriminated {
+            property,
+            mapping: discriminator.mapping.clone().unwrap_or_default(),
+        });
     }
     for branches in [&object.one_of, &object.any_of] {
         let Some(branches) = branches else {
