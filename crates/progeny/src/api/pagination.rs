@@ -41,10 +41,15 @@ pub(crate) fn attach(
     config: &Config,
 ) -> Result<(), RejectError> {
     for (name, declared) in &config.pagination {
-        // By generated method name or by the operation's position in the document, which is the
-        // same pair of keys `names` and `type-derives` accept for types.
+        // The one `Address` grammar every keyed map resolves through: a `/`-prefixed key is the
+        // operation's position in the document, anything else is the generated method name — the
+        // operation's namespace, as a component name is a type's.
+        let address = crate::config::Address::parse(name);
         let Some(operation) = operations.iter_mut().find(|operation| {
-            operation.rust_name.as_str() == name || operation.origin.to_string() == *name
+            address.names(
+                Some(operation.rust_name.as_str()),
+                &operation.origin.to_string(),
+            )
         }) else {
             return Err(RejectError::new(
                 RejectKind::UnsatisfiableConfig,

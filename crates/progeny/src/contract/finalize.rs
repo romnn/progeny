@@ -101,9 +101,10 @@ pub(super) fn run(
     })
 }
 
-/// Whether a configuration key names this type.
+/// Whether a configuration key names this type, under the one [`Address`] grammar.
 fn matches(contract: &Provisional, key: &str) -> bool {
-    contract.component.as_deref() == Some(key) || contract.origin.to_string() == key
+    crate::config::Address::parse(key)
+        .names(contract.component.as_deref(), &contract.origin.to_string())
 }
 
 /// **The eligibility function.** Exhaustive, with no wildcard arm.

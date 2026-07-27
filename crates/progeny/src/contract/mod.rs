@@ -363,6 +363,26 @@ pub(crate) fn build(
     ctx: &mut Ctx,
 ) -> Result<Contracts, crate::diag::RejectError> {
     let mut lowered = lower::run(resolved, shapes, config, ctx);
+    // Validated against the shapes that were actually reserved, which is exactly the universe the
+    // keyed lookups consulted during lowering — a key that matched nothing here matched nothing
+    // anywhere, and honoring the configuration around it would be a silent no-op.
+    let unmatched = config.unmatched_keys(|address| {
+        lowered.types.iter().any(|provisional| {
+            address.names(
+                provisional.component.as_deref(),
+                &provisional.origin.to_string(),
+            )
+        })
+    });
+    if let Some((key, table)) = unmatched.first() {
+        return Err(crate::diag::RejectError::new(
+            crate::diag::RejectKind::UnsatisfiableConfig,
+            format!(
+                "the configuration's `{table}` names `{key}`, which is neither a component name \
+                 nor the JSON Pointer of any schema in this document"
+            ),
+        ));
+    }
     let deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
     let mut contracts = finalize::run(deduped, config, ctx)?;
     contracts.by_shape = lowered.by_shape;
@@ -794,6 +814,58 @@ mod tests {
         let error = build(&resolved, &shapes, &config, &mut ctx).unwrap_err();
         assert_eq!(error.kind(), crate::RejectKind::UnsatisfiableConfig);
         assert!(error.detail().contains("Eq"), "{error}");
+    }
+
+    /// A key that names nothing is a typo, and a typo must not be a silent no-op.
+    ///
+    /// Before this refusal, `names = { "Peet" = "Pet" }` generated exactly as though the entry were
+    /// not there: the caller asked for a rename and got nothing, with nothing saying so — the
+    /// forbidden failure mode applied to the configuration instead of to the document. The message
+    /// names the key and the map it sits in, because the caller's next step is to fix one of them.
+    #[test]
+    fn a_config_key_that_names_nothing_stops_generation() {
+        let document = with_schemas(json!({
+            "Thing": {"type": "object", "properties": {"ratio": {"type": "number"}}},
+        }));
+        let config = Config {
+            names: [("Thingg".to_owned(), "Item".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = shape::classify(&resolved, &mut ctx);
+        let error = build(&resolved, &shapes, &config, &mut ctx).unwrap_err();
+        assert_eq!(error.kind(), crate::RejectKind::UnsatisfiableConfig);
+        assert!(error.detail().contains("`Thingg`"), "{error}");
+        assert!(error.detail().contains("names"), "{error}");
+    }
+
+    /// Both spellings of the one grammar reach the same type.
+    #[test]
+    fn a_pointer_key_and_a_name_key_reach_the_same_type() {
+        let document = with_schemas(json!({
+            "Thing": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }));
+        for key in ["Thing", "/components/schemas/Thing"] {
+            let config = Config {
+                names: [(key.to_owned(), "Renamed".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Config::default()
+            };
+            let (contracts, _) = contracts_of(document.clone(), &config);
+            assert!(
+                contracts
+                    .types()
+                    .iter()
+                    .any(|it| it.rust_name().as_str() == "Renamed"),
+                "key `{key}` did not rename the type"
+            );
+        }
     }
 
     #[test]

@@ -345,6 +345,40 @@ pub struct Deny {
     pub classes: BTreeSet<BreakageClass>,
 }
 
+/// How a configuration key names a thing in the document.
+///
+/// **One grammar for every keyed map**, parsed here and nowhere else. A key starting with `/` is a
+/// JSON Pointer to where the thing is written — `/components/schemas/Pet`, `/paths/~1pets/get`.
+/// Anything else is a name in the thing's own namespace: the `components.schemas` name for a type,
+/// the generated method name for an operation. Before this type existed each keyed map grew its own
+/// matcher, and `pagination` had drifted into a second dialect — the grammar was four
+/// implementations claiming to be one convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Address<'a> {
+    /// Where it is written: a JSON Pointer, recognized by its leading `/`.
+    Pointer(&'a str),
+    /// What it is called, in the namespace of the map the key appears in.
+    Name(&'a str),
+}
+
+impl<'a> Address<'a> {
+    pub(crate) fn parse(key: &'a str) -> Self {
+        if key.starts_with('/') {
+            Self::Pointer(key)
+        } else {
+            Self::Name(key)
+        }
+    }
+
+    /// Whether this key names the thing called `name` written at `origin`.
+    pub(crate) fn names(self, name: Option<&str>, origin: &str) -> bool {
+        match self {
+            Self::Pointer(pointer) => pointer == origin,
+            Self::Name(named) => name == Some(named),
+        }
+    }
+}
+
 impl Config {
     /// Whichever of these derives the caller asked for by name, for a type named either by its
     /// component name or by its JSON Pointer.
@@ -370,8 +404,10 @@ impl Config {
 
     /// Look a type up by component name first, then by address.
     ///
-    /// Both spellings are accepted because both are how a caller thinks about a type: `Pet` for a
-    /// component, and the pointer for a shape the document never named.
+    /// The [`Address`] grammar, with the name spelling given priority when both keys are present:
+    /// both are accepted because both are how a caller thinks about a type — `Pet` for a component,
+    /// and the pointer for a shape the document never named. The direct `get`s are equivalent to
+    /// parsing each key, because a component name never starts with `/` and a pointer always does.
     fn keyed<'a, T>(
         table: &'a BTreeMap<String, T>,
         component: Option<&str>,
@@ -380,6 +416,44 @@ impl Config {
         component
             .and_then(|name| table.get(name))
             .or_else(|| table.get(address))
+    }
+
+    /// Every key in the type-keyed maps that names nothing in `named`, with the map it sits in.
+    ///
+    /// A key that matches no shape is a typo, and honoring the rest of the configuration around it
+    /// would be a silent no-op — the caller asked for a rename or a policy and got nothing, with
+    /// nothing saying so. That is the exact defect class this module's charter exists to prevent,
+    /// and `pagination` already refuses its unmatched keys; this brings the type maps to the same
+    /// standard.
+    pub(crate) fn unmatched_keys<'a>(
+        &'a self,
+        named: impl Fn(Address<'_>) -> bool,
+    ) -> Vec<(&'a str, &'static str)> {
+        let tables: [(&dyn Fn() -> Vec<&'a str>, &'static str); 3] = [
+            (&|| self.names.keys().map(String::as_str).collect(), "names"),
+            (
+                &|| self.type_derives.keys().map(String::as_str).collect(),
+                "type-derives",
+            ),
+            (
+                &|| {
+                    self.type_unknown_fields
+                        .keys()
+                        .map(String::as_str)
+                        .collect()
+                },
+                "type-unknown-fields",
+            ),
+        ];
+        let mut unmatched = Vec::new();
+        for (keys, table) in tables {
+            for key in keys() {
+                if !named(Address::parse(key)) {
+                    unmatched.push((key, table));
+                }
+            }
+        }
+        unmatched
     }
 
     /// The diagnostics this configuration refuses to accept.
