@@ -66,7 +66,9 @@ jobs:
         run: task corpus
       # Compiling 78 generated crates is minutes-to-hours, so pull requests compile the reviewed
       # 8-document tier and the full matrix is a deliberate, on-demand run.
-      - name: Compile the generated crates for the quick tier
+      # This lints them too, with warnings denied: a warning in generated code is a defect its
+      # consumer meets in their own build, about source they did not write.
+      - name: Compile and lint the generated crates for the quick tier
         run: task corpus:compile
       - name: Differential serde harness
         run: task differential
