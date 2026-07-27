@@ -63,6 +63,11 @@ tasks:
     cmds:
       - cargo run -p xtask --release -- corpus --stats {{.CLI_ARGS}}
 
+  payloads:
+    desc: "round-trip every example payload in the corpus through the generated types"
+    cmds:
+      - cargo run -p xtask --release -- payloads {{.CLI_ARGS}}
+
   differential:
     desc: "assert the derive and the hand-written serde path agree on every case"
     cmds:

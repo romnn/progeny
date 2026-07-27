@@ -36,7 +36,6 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
     let mut demote: Vec<(ShapeKey, String)> = Vec::new();
 
     for (union_key, property) in proposed {
-        let at = address(resolved, shapes, &union_key);
         let Some(Shape::Union(union)) = shapes.get(&union_key) else {
             continue;
         };
@@ -84,7 +83,11 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
                                      because each union writes it itself"
                                 ),
                             )
-                            .with_related([address(resolved, shapes, first), at.clone()]),
+                            .with_related(
+                                addresses(resolved, shapes, first)
+                                    .into_iter()
+                                    .chain(addresses(resolved, shapes, &union_key)),
+                            ),
                         );
                     } else {
                         claimed.insert(variant.clone(), (property.clone(), union_key.clone()));
@@ -214,14 +217,18 @@ fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
 /// position where the payload really does contain the property, so a type reached that way must
 /// keep it.
 ///
-/// Edges between shapes are only half of it. A schema the API surface names directly — a response
+/// Edges between shapes are only half of it. A schema an *operation* names directly — a response
 /// body, a request body, a parameter, a header — is a wire position with no edge pointing at it, so
 /// a walk over shapes alone cannot see it, and taking the tag off a type that is *itself* a `200`
-/// response makes the client drop the property coming in and omit it going out. So an API-surface
-/// root counts as a use, exactly like a struct member does.
+/// response makes the client drop the property coming in and omit it going out. So a
+/// [`RootKind::Position`] root counts as a use, exactly like a struct member does.
 ///
-/// A `components.schemas` entry does not, because being named is not being on the wire; counting it
-/// would refuse every discriminated union whose variants the document bothered to name.
+/// Being *named* does not, because being named is not being on the wire: a `components.schemas`
+/// entry, and equally a `components.responses` or `components.parameters` entry no operation
+/// references, describes a payload nobody sends. Counting those would refuse every discriminated
+/// union whose variants the document bothered to declare under `components`. Anything an operation
+/// really does reference is reached through that operation and carries a `Position` root there, so
+/// nothing on the wire is lost by ignoring the declaration.
 fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
     let mut borrowed = BTreeSet::new();
     for (_, shape) in shapes.entries() {
@@ -235,11 +242,31 @@ fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
         }
     }
     for root in shapes.roots() {
-        if root.kind == RootKind::Inline {
+        if root.kind == RootKind::Position {
             borrowed.insert(root.key.clone());
         }
     }
     borrowed
+}
+
+/// Where a shape was written, for a diagnostic a reader navigates from.
+///
+/// Every part, not only the anchor. A merged key is the classification of several schemas at once
+/// and takes its *name* from the first of them, which is deterministic and enough for a name — but
+/// two different merges that share a first part then report at one pointer, and `influxdb` does
+/// exactly that: four `multi-parent-discriminator` records whose related pointers read as the same
+/// string twice, for what must be different unions. Harmless while a reader only counts them, and
+/// actively misleading now that a pointer is meant to lead somewhere.
+fn addresses(resolved: &ResolvedDocument, shapes: &Shapes, key: &ShapeKey) -> Vec<JsonPointer> {
+    let mut out: Vec<JsonPointer> = key
+        .parts()
+        .iter()
+        .map(|&id| resolved.schemas().address(id).clone())
+        .collect();
+    if out.is_empty() {
+        out.push(address(resolved, shapes, key));
+    }
+    out
 }
 
 fn address(resolved: &ResolvedDocument, shapes: &Shapes, key: &ShapeKey) -> JsonPointer {

@@ -30,6 +30,16 @@ use crate::resolve::ResolvedDocument;
 use crate::schema::cycles::Sccs;
 use crate::shape::{Docs, Extra, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes};
 
+/// One property whose optional-and-nullable distinction was collapsed onto a single `Option`.
+///
+/// Held rather than reported because the diagnostic wants to say which half of the API it affects,
+/// and that is a question about positions — see [`crate::api::presence`].
+#[derive(Debug, Clone)]
+pub(crate) struct Collapse {
+    pub(crate) owner: TypeIndex,
+    pub(crate) at: JsonPointer,
+}
+
 /// A contract before the caller's policy and the eligibility rules have been applied.
 #[derive(Debug, Clone)]
 pub(super) struct Provisional {
@@ -49,12 +59,16 @@ pub(super) struct Provisional {
     pub(super) component: Option<String>,
 }
 
+/// Lower every shape, and say which type each one became.
+///
+/// The second half of the return value is what the API model reads: an operation names a schema,
+/// and the only sound answer to "which Rust type is that" is the one the type layer already gave.
 pub(super) fn run(
     resolved: &ResolvedDocument,
     shapes: &Shapes,
     config: &Config,
     ctx: &mut Ctx,
-) -> Vec<Provisional> {
+) -> Lowered {
     let mut lower = Lower {
         resolved,
         shapes,
@@ -66,6 +80,7 @@ pub(super) fn run(
         by_address: BTreeMap::new(),
         components: BTreeMap::new(),
         needs_name: BTreeSet::new(),
+        collapses: Vec::new(),
     };
 
     for root in shapes.roots() {
@@ -103,7 +118,18 @@ pub(super) fn run(
     for root in shapes.roots() {
         lower.key(&root.key, ctx);
     }
-    lower.types
+    Lowered {
+        types: lower.types,
+        by_shape: lower.done,
+        collapses: lower.collapses,
+    }
+}
+
+/// Everything lowering produced.
+pub(super) struct Lowered {
+    pub(super) types: Vec<Provisional>,
+    pub(super) by_shape: BTreeMap<ShapeKey, TypeRef>,
+    pub(super) collapses: Vec<Collapse>,
 }
 
 /// Which keys have to become named types.
@@ -167,6 +193,8 @@ struct Lower<'a> {
     components: BTreeMap<String, String>,
     /// Every key that has to become a named type.
     needs_name: BTreeSet<ShapeKey>,
+    /// Properties whose optional-and-nullable distinction was collapsed, awaiting a position.
+    collapses: Vec<Collapse>,
 }
 
 /// A wrapper peeled off a shape before its core is named.
@@ -431,14 +459,14 @@ impl Lower<'_> {
                     SkipRule::WhenNone,
                 ),
                 (false, true) => {
-                    ctx.report(Diagnostic::new(
-                        BreakageClass::PresenceCollapse,
-                        Action::Degrade,
-                        origin.child("properties").child(field.wire.clone()),
-                        "the property may be absent and may be null, and the document says those \
-                         are different; both become `None`, so a value that was explicitly null is \
-                         written back as an absent member",
-                    ));
+                    // Recorded rather than reported. The finding is real here, but *which half of
+                    // the API it costs* is not knowable here: a collapse on the way in loses a
+                    // caller's explicit null, and one on the way out loses a server's — different
+                    // consequences, and nothing knows a position until the API model exists.
+                    self.collapses.push(Collapse {
+                        owner: index,
+                        at: origin.child("properties").child(field.wire.clone()),
+                    });
                     (Presence::OptionalNullable, inner, SkipRule::WhenNone)
                 }
             };

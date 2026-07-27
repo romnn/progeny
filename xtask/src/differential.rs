@@ -133,6 +133,13 @@ fn render(document: &[u8], strategy: SerdeImpl) -> Result<String> {
     let config = Config {
         serde_impl: strategy,
         packaging: Packaging::Module,
+        // The two serde renderings are a question about the shared type layer; a client would be
+        // the same source in both halves and an HTTP stack compiled twice to prove it.
+        emit: progeny::Emit {
+            client: false,
+            server: false,
+            ..progeny::Emit::default()
+        },
         package: Package {
             name: "spike".to_owned(),
             version: "0.0.0".to_owned(),

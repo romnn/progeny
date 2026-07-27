@@ -29,6 +29,11 @@ impl RustIdent {
         Self(guard(&name.to_snake_case(), "field"))
     }
 
+    /// A function or method name, from name segments.
+    pub(crate) fn method(segments: &[String]) -> Self {
+        Self(guard(&segments.join(" ").to_snake_case(), "call"))
+    }
+
     /// A variant name.
     pub(crate) fn variant(name: &str) -> Self {
         Self(guard(&name.to_upper_camel_case(), "Variant"))

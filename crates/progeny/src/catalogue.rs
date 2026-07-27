@@ -135,18 +135,58 @@ fn wiring(class: BreakageClass) -> Wiring {
             "a YAML document whose bytes end inside a block scalar, which is a property of the \
              bytes rather than of the model; the loader's own tests hold it",
         ),
-        BreakageClass::InvalidExample => {
-            Wiring::Arrives("payload round-trips, which arrive with the API model at stage 5")
-        }
-        BreakageClass::CollidingOperationId => {
-            Wiring::Arrives("operations, which arrive with the API model at stage 5")
-        }
-        BreakageClass::QuerySerializationStyle => {
-            Wiring::Arrives("parameter styles, which arrive with the API model at stage 5")
-        }
-        BreakageClass::UnregistrableRoute => {
-            Wiring::Arrives("the router, which arrives with the server renderer at stage 7")
-        }
+        BreakageClass::InvalidExample => Wiring::Fixture(paths(json!({
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "responses": {"200": {
+                        "description": "ok",
+                        "content": {"application/json": {
+                            "schema": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
+                            "example": {"nickname": "Rex"},
+                        }},
+                    }},
+                },
+            },
+        }))),
+        BreakageClass::MultiMediaType => Wiring::Fixture(paths(json!({
+            "/pets": {
+                "post": {
+                    "operationId": "createPet",
+                    "requestBody": {"content": {
+                        "application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+                        "application/xml": {"schema": {"type": "string"}},
+                    }},
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+        }))),
+        BreakageClass::CollidingOperationId => Wiring::Fixture(paths(json!({
+            "/a": {"get": {"operationId": "list-pets", "responses": {"200": {"description": "ok"}}}},
+            "/b": {"get": {"operationId": "list_pets", "responses": {"200": {"description": "ok"}}}},
+        }))),
+        BreakageClass::QuerySerializationStyle => Wiring::Fixture(paths(json!({
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    // deepObject over an array: the one combination the specification names and
+                    // explicitly declines to define.
+                    "parameters": [{
+                        "name": "filter", "in": "query", "style": "deepObject",
+                        "schema": {"type": "array", "items": {"type": "string"}},
+                    }],
+                    "responses": {"200": {"description": "ok"}},
+                },
+            },
+        }))),
+        // Half of this class: a template no parameter can fill, which is a property of one
+        // operation. The other half — two routes colliding under a router's matching rules — is a
+        // property of a router, and there is none before stage 7.
+        BreakageClass::UnregistrableRoute => Wiring::Fixture(paths(json!({
+            "/pets/{petId}": {
+                "get": {"operationId": "getPet", "responses": {"200": {"description": "ok"}}},
+            },
+        }))),
     }
 }
 
@@ -281,6 +321,14 @@ fn declaring(version: &str, schemas: Value) -> Value {
     root.insert("openapi".to_owned(), Value::String(version.to_owned()));
     root.insert("paths".to_owned(), Value::Object(serde_json::Map::new()));
     root.insert("components".to_owned(), Value::Object(components));
+    Value::Object(root)
+}
+
+/// A document whose findings are about its operations rather than its schemas.
+fn paths(paths: Value) -> Value {
+    let mut root = serde_json::Map::new();
+    root.insert("openapi".to_owned(), Value::String("3.1.0".to_owned()));
+    root.insert("paths".to_owned(), paths);
     Value::Object(root)
 }
 

@@ -87,7 +87,13 @@ pub enum BreakageClass {
     DiscriminatorEdgeCase,
     /// A union whose "any combination may match" semantics has no faithful Rust type.
     WildUnion,
-    /// Two operations that sanitize to the same method name.
+    /// An operation whose method name the document did not choose: it declared no `operationId`,
+    /// or declared one that sanitizes to a name another operation already has.
+    ///
+    /// Aggregated, because the first case is a property of a document rather than of an operation —
+    /// 1,052 of the corpus's 1,058 records are it, and a record each would be a snapshot nobody
+    /// reads. A genuine collision names the two identifiers and so stays its own record, which
+    /// falls out of aggregating on the sentence rather than on the class alone.
     CollidingOperationId,
     /// A (location, style, explode, shape) parameter combination OpenAPI leaves undefined.
     QuerySerializationStyle,
@@ -105,6 +111,13 @@ pub enum BreakageClass {
     /// A 3.0 union branch whose only content is `nullable: true`: the one spelling 3.0 has for the
     /// null arm of a union, read literally as a branch that constrains nothing at all.
     NullableUnionBranch,
+    /// A position declaring several media types, of which progeny generates one.
+    ///
+    /// Not a defect in the document: declaring a body in two encodings is legal and sometimes
+    /// useful. It is a `Degrade` because generating one faithful body beats generating several
+    /// half-faithful ones, and the alternates are named so a caller who needs one knows progeny
+    /// saw it and chose another.
+    MultiMediaType,
     /// A schema construct progeny does not interpret — `not`, `if`/`then`/`else`,
     /// `dependentSchemas`, `unevaluated*`, non-uniform `patternProperties`, a mixed-type `enum`.
     /// Held losslessly and typed as `serde_json::Value`.
@@ -135,6 +148,7 @@ impl BreakageClass {
             Self::UnknownSchemaType => "unknown-schema-type",
             Self::MultiParentDiscriminator => "multi-parent-discriminator",
             Self::DiscriminatorEdgeCase => "discriminator-edge-case",
+            Self::MultiMediaType => "multi-media-type",
             Self::WildUnion => "wild-union",
             Self::CollidingOperationId => "colliding-operation-id",
             Self::QuerySerializationStyle => "query-serialization-style",
@@ -180,11 +194,13 @@ impl BreakageClass {
             | Self::InvalidDefault
             | Self::LegacyTupleItems
             | Self::LegacyExclusiveBound
+            | Self::MultiMediaType
             | Self::NullableUnionBranch
             | Self::UnsupportedConstruct
             | Self::IrreconcilableAllOf
             | Self::PresenceCollapse
             | Self::CollidingTypeName
+            | Self::CollidingOperationId
             | Self::UnsatisfiableDerive => Aggregation::PerDocument,
             // The first can occur at most once per document by construction; each of the rest names
             // a distinct set of document locations a reader has to look at, with no useful count to
@@ -192,7 +208,6 @@ impl BreakageClass {
             Self::MissingFinalLineBreak
             | Self::MultiParentDiscriminator
             | Self::DiscriminatorEdgeCase
-            | Self::CollidingOperationId
             | Self::UnregistrableRoute => Aggregation::PerOccurrence,
         }
     }
@@ -255,9 +270,18 @@ impl Diagnostic {
 
     /// Attach the other document locations this diagnostic is about, such as the second of
     /// two colliding operations.
+    ///
+    /// Repeats are dropped, order kept. A pointer listed twice carries no information a reader can
+    /// use and reliably reads as a bug — which is how the merged-key addressing defect was found in
+    /// the first place: a shape that is the classification of several schemas can legitimately
+    /// contribute a pointer another part of the same record already named.
     #[must_use]
     pub fn with_related(mut self, related: impl IntoIterator<Item = JsonPointer>) -> Self {
-        self.related.extend(related);
+        for pointer in related {
+            if pointer != self.location && !self.related.contains(&pointer) {
+                self.related.push(pointer);
+            }
+        }
         self
     }
 
@@ -600,6 +624,23 @@ mod tests {
         assert_eq!(
             diagnostic.to_json_line(),
             r#"{"class":"malformed-member","action":"degrade","location":"/info/title","detail":"found \"x\"\nkept it"}"#
+        );
+    }
+
+    #[test]
+    fn a_related_pointer_is_listed_once_and_never_repeats_the_location() {
+        let at = |token: &str| JsonPointer::root().child("components").child(token);
+        let diagnostic = Diagnostic::new(
+            BreakageClass::MultiParentDiscriminator,
+            Action::Warn,
+            at("Variant"),
+            "detail",
+        )
+        .with_related([at("First"), at("First"), at("Second"), at("Variant")]);
+        assert_eq!(
+            diagnostic.related(),
+            [at("First"), at("Second")],
+            "a repeated pointer carries nothing and reads as a bug"
         );
     }
 

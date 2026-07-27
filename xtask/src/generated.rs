@@ -71,6 +71,10 @@ pub fn check(directory: &Utf8Path, clippy: bool) -> Result<Compiled> {
         .env_remove("RUSTFLAGS")
         .arg(if clippy { "clippy" } else { "check" })
         .arg("--all-targets")
+        // The client module sits behind a cargo feature so a consumer of the shared types alone
+        // does not compile an HTTP stack. Without this the gate would check everything *except*
+        // the half of the output that has a network protocol in it.
+        .arg("--all-features")
         .arg("--quiet");
     if clippy {
         // Generated warnings are product defects a user sees, so they fail the gate.
@@ -86,9 +90,17 @@ pub fn check(directory: &Utf8Path, clippy: bool) -> Result<Compiled> {
         });
     }
     let text = String::from_utf8_lossy(&output.stderr);
-    let complaint = text
-        .lines()
-        .filter(|line| line.starts_with("error") || line.starts_with("warning"))
+    // Errors before warnings, always. rustc prints them interleaved in source order, so a crate
+    // with a warning near the top and an error near the bottom reports as four warnings — which
+    // reads as "this compiles, with grumbling" and is the opposite of what happened.
+    let lines = |prefix: &str| -> Vec<&str> {
+        text.lines()
+            .filter(|line| line.starts_with(prefix))
+            .collect()
+    };
+    let complaint = lines("error")
+        .into_iter()
+        .chain(lines("warning"))
         .take(4)
         .collect::<Vec<_>>()
         .join("; ");

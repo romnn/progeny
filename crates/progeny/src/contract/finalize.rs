@@ -5,7 +5,7 @@
 //! phase here — [`run`] consumes the provisional contracts and the caller's configuration together
 //! and returns records with private fields.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::dedup::references_mut;
 use super::lower::Provisional;
@@ -94,7 +94,11 @@ pub(super) fn run(
             origin: contract.origin.clone(),
         });
     }
-    Ok(Contracts { types: frozen })
+    Ok(Contracts {
+        types: frozen,
+        by_shape: BTreeMap::new(),
+        collapses: Vec::new(),
+    })
 }
 
 /// Whether a configuration key names this type.

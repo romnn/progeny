@@ -22,6 +22,7 @@
 //! types are gated by compiling them. The client and server renderers do not exist yet, so
 //! [`generate`] emits the shared type layer and nothing else.
 
+mod api;
 mod catalogue;
 mod config;
 mod contract;
@@ -81,9 +82,14 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
     let resolved = resolve::resolve(parsed, &mut ctx);
     let shapes = shape::classify(&resolved, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
+    // Built whether or not a client will be rendered. Its diagnostics are findings about the
+    // document — two operations that collide, an example that contradicts its own schema, which
+    // half of the API a presence collapse costs — and a caller who asked for types only is still
+    // entitled to them.
+    let api = api::build(&resolved, &shapes, &contracts, config, &mut ctx);
 
     Ok(Output {
-        files: render::run(&contracts, config),
+        files: render::run(&contracts, &api, config),
         diagnostics: ctx.into_diagnostics(),
     })
 }
@@ -109,15 +115,59 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_type_layer_is_generated() {
+    fn the_shared_type_layer_and_the_client_are_generated() {
         let output = generate(PETSTORE, &Config::default()).unwrap();
         let names: Vec<&str> = output.files.keys().map(|path| path.as_str()).collect();
-        assert_eq!(names, ["Cargo.toml", "src/lib.rs", "src/types.rs"]);
+        assert_eq!(
+            names,
+            [
+                "Cargo.toml",
+                "src/client.rs",
+                "src/lib.rs",
+                "src/support.rs",
+                "src/types.rs"
+            ]
+        );
         let types = &output.files[camino::Utf8Path::new("src/types.rs")];
         assert!(types.contains("pub struct Pet"), "{types}");
+        let client = &output.files[camino::Utf8Path::new("src/client.rs")];
+        assert!(client.contains("pub struct Client"), "{client}");
+        assert!(client.contains("pub fn list_pets"), "{client}");
         // Every rendered file has to parse as Rust, or the compile gate is the first thing to
         // find out.
-        syn::parse_file(types).unwrap();
+        for (path, text) in &output.files {
+            if path.extension() == Some("rs") {
+                syn::parse_file(text)
+                    .unwrap_or_else(|error| panic!("{path} does not parse: {error}"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_description_with_no_operations_generates_no_client() {
+        let types_only = generate(
+            br#"{"openapi":"3.1.0","paths":{},"components":{"schemas":{"Pet":{"type":"object"}}}}"#,
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(
+            !types_only
+                .files
+                .contains_key(camino::Utf8Path::new("src/client.rs"))
+        );
+
+        // The case that makes this a decision rather than an accident: the document *has* an
+        // operation, and it is unfillable, so nothing is left to call. A client with no methods —
+        // and the whole HTTP dependency behind it — would still be emitted if emission were keyed
+        // on the configuration rather than on there being something to call.
+        let output = generate(
+            br#"{"openapi":"3.1.0","paths":{"/pets/{id}":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+            &Config::default(),
+        )
+        .unwrap();
+        let names: Vec<&str> = output.files.keys().map(|path| path.as_str()).collect();
+        assert_eq!(names, ["Cargo.toml", "src/lib.rs", "src/types.rs"]);
+        assert!(!output.files[camino::Utf8Path::new("Cargo.toml")].contains("reqwest"));
     }
 
     #[test]

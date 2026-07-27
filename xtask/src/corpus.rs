@@ -393,15 +393,27 @@ fn check_convergence() -> Result<usize> {
         let new_bytes = std::fs::read(&new).with_context(|| format!("reading {new}"))?;
         match harness::convergence(&old_bytes, &new_bytes) {
             Ok(result) if result.is_clean() => {
-                println!("  ok        {name:<24} the two dialects agree");
+                println!("  ok        {name:<24} the two dialects agree, model and source");
             }
             Ok(result) => {
                 failures += 1;
+                // Named separately because they mean different things: a model difference is a
+                // normalization defect, and a source difference with the models agreeing is a
+                // defect in a stage after it.
                 println!(
-                    "  DIFFERS   {name:<24} {} differences between the dialects",
-                    result.differences.len()
+                    "  DIFFERS   {name:<24} {} in the model, {} in the generated source, {} \
+                     one-sided losses",
+                    result.differences.len(),
+                    result.output.len(),
+                    result.asymmetric.len()
                 );
-                for difference in result.differences.iter().take(5) {
+                for difference in result
+                    .differences
+                    .iter()
+                    .chain(&result.output)
+                    .chain(&result.asymmetric)
+                    .take(5)
+                {
                     println!(
                         "              {} — {}",
                         difference.location, difference.detail

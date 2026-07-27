@@ -99,11 +99,15 @@ fn an_explicit_null_and_an_absent_member_are_treated_alike_by_both() {
 }
 
 #[test]
-fn a_declared_default_is_applied_by_both() {
+fn a_declared_default_is_applied_by_neither() {
     let (left, right) = both(r#"{"required":"a"}"#).expect("both should accept it");
     assert_eq!(left, right);
-    // The document says the member is 20 when it is absent, and both renderings have to say so.
-    assert!(left.contains("\"limit\":20"), "{left}");
+    // OpenAPI's `default` says what the *server* assumes when a member is absent. Filling it in on
+    // the way in means writing it on the way out, which turns "the caller said nothing" into "the
+    // caller said 20" — a different request, sent silently. Both renderings decline, and the value
+    // is stated in the member's documentation instead.
+    assert!(!left.contains("\"limit\""), "{left}");
+    assert!(!right.contains("\"limit\""), "{right}");
 }
 
 #[test]

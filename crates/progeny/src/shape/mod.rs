@@ -329,6 +329,15 @@ pub(crate) fn docs_of(resolved: &ResolvedDocument, key: &ShapeKey) -> Docs {
     classify::docs(resolved, key)
 }
 
+/// The key a schema classifies under.
+///
+/// The API model's way in: an operation holds a `SchemaId` and needs the shape — and therefore the
+/// type — that id became. Going through the same function classification used is what keeps the two
+/// from disagreeing about which schemas are one shape.
+pub(crate) fn key_of(resolved: &ResolvedDocument, id: SchemaId) -> ShapeKey {
+    merge::key_of(resolved, id)
+}
+
 /// Every key a shape refers to.
 pub(crate) fn child_keys(shape: &Shape) -> Vec<ShapeKey> {
     let mut out = Vec::new();
@@ -1062,6 +1071,72 @@ mod tests {
         assert!(
             reported.detail().contains("outside this union"),
             "{reported}"
+        );
+    }
+
+    #[test]
+    fn a_variant_only_a_declared_component_points_at_is_not_on_the_wire() {
+        // The same document, with the `200` moved into a `components.responses` entry that no
+        // operation references. Being *declared* is not being on the wire — the same reason a
+        // `components.schemas` entry does not count — so the tag is affordable here and the union
+        // keeps its type instead of degrading to arbitrary JSON.
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/source": {"get": {
+                    "operationId": "getSource",
+                    "responses": {"200": {
+                        "description": "the union itself",
+                        "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/Source"},
+                        }},
+                    }},
+                }},
+            },
+            "components": {
+                "responses": {
+                    "TheFile": {
+                        "description": "declared and never used",
+                        "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/FromFile"},
+                        }},
+                    },
+                },
+                "schemas": {
+                    "FromFile": {
+                        "type": "object", "required": ["kind", "location"],
+                        "properties": {"kind": {"type": "string"}, "location": {"type": "string"}},
+                    },
+                    "FromUrl": {
+                        "type": "object", "required": ["kind", "location"],
+                        "properties": {"kind": {"type": "string"}, "location": {"type": "string"}},
+                    },
+                    "Source": {
+                        "oneOf": [
+                            {"$ref": "#/components/schemas/FromFile"},
+                            {"$ref": "#/components/schemas/FromUrl"},
+                        ],
+                        "discriminator": {"propertyName": "kind"},
+                    },
+                },
+            },
+        });
+        let (shapes, _) = shapes_of(document);
+        let Shape::Union(union) = shape_of(&shapes, "Source") else {
+            panic!(
+                "the union should have kept its type: {:?}",
+                shape_of(&shapes, "Source")
+            );
+        };
+        assert_eq!(union.tag.as_deref(), Some("kind"));
+        // And the variant gave the property up, because nothing else carries it.
+        let Shape::Struct(from_file) = shape_of(&shapes, "FromFile") else {
+            panic!("expected a struct");
+        };
+        assert!(
+            !from_file.fields.iter().any(|field| field.wire == "kind"),
+            "{from_file:?}"
         );
     }
 

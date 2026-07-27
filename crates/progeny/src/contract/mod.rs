@@ -27,9 +27,10 @@ use serde_json::Value;
 use crate::config::{Config, Derive, UnknownFields};
 use crate::diag::{Ctx, JsonPointer};
 use crate::resolve::ResolvedDocument;
-use crate::shape::{Docs, Format, Shapes};
+use crate::shape::{Docs, Format, ShapeKey, Shapes};
 
-pub(crate) use name::RustIdent;
+pub(crate) use lower::Collapse;
+pub(crate) use name::{Namer, RustIdent};
 
 /// Which generated type, by position in [`Contracts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -104,6 +105,13 @@ impl TypeRef {
             | Self::Format(_)
             | Self::Value => {}
         }
+    }
+
+    /// Every named type this reference reaches, however it is wrapped.
+    pub(crate) fn named(&self, out: &mut Vec<TypeIndex>) {
+        let mut reached = Vec::new();
+        self.reaches(false, &mut reached);
+        out.extend(reached.into_iter().map(|(index, _)| index));
     }
 
     /// Rewrite every named reference through `remap`, which dedup fills in.
@@ -209,6 +217,19 @@ pub(crate) enum ContractKind {
     },
 }
 
+impl ContractKind {
+    /// Every type reference this kind holds.
+    pub(crate) fn references(&self) -> Vec<&TypeRef> {
+        match self {
+            Self::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
+            Self::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
+            Self::StringEnum { .. } => Vec::new(),
+            Self::Newtype { inner } | Self::Alias { target: inner } => vec![inner],
+            Self::Tuple { items } => items.iter().collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FieldContract {
     pub(crate) rust_name: RustIdent,
@@ -295,6 +316,16 @@ impl TypeContract {
 #[derive(Debug, Default)]
 pub(crate) struct Contracts {
     types: Vec<TypeContract>,
+    /// The type each classified shape lowered to.
+    ///
+    /// The API model's only way in: an operation holds a `SchemaId`, the shape layer turns that
+    /// into a [`ShapeKey`], and this says which Rust type the key became — after dedup, so a body
+    /// and a component that classified alike name the one type that survived. Keeping it here
+    /// rather than recomputing means the API model cannot disagree with the type layer about what
+    /// a schema is.
+    by_shape: BTreeMap<ShapeKey, TypeRef>,
+    /// Optional-and-nullable collapses, still waiting for the position that says what each cost.
+    collapses: Vec<Collapse>,
 }
 
 impl Contracts {
@@ -304,6 +335,16 @@ impl Contracts {
 
     pub(crate) fn get(&self, index: TypeIndex) -> Option<&TypeContract> {
         self.types.get(index.index())
+    }
+
+    /// The type a classified shape became, if it was reached at all.
+    pub(crate) fn type_of(&self, key: &ShapeKey) -> Option<&TypeRef> {
+        self.by_shape.get(key)
+    }
+
+    /// Every optional-and-nullable collapse, with the type it happened in.
+    pub(crate) fn collapses(&self) -> &[Collapse] {
+        &self.collapses
     }
 }
 
@@ -320,9 +361,12 @@ pub(crate) fn build(
     config: &Config,
     ctx: &mut Ctx,
 ) -> Result<Contracts, crate::diag::RejectError> {
-    let provisional = lower::run(resolved, shapes, config, ctx);
-    let deduped = dedup::run(provisional);
-    finalize::run(deduped, config, ctx)
+    let mut lowered = lower::run(resolved, shapes, config, ctx);
+    let deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
+    let mut contracts = finalize::run(deduped, config, ctx)?;
+    contracts.by_shape = lowered.by_shape;
+    contracts.collapses = lowered.collapses;
+    Ok(contracts)
 }
 
 #[cfg(test)]
@@ -663,12 +707,16 @@ mod tests {
                 ("plain", super::Presence::Required, super::SkipRule::Never),
             ]
         );
-        // The collapse of the last case onto one `Option` is recorded rather than silent.
-        let collapse = diagnostics
-            .iter()
-            .find(|d| d.class() == crate::BreakageClass::PresenceCollapse)
-            .expect("the collapse should be reported");
-        assert_eq!(collapse.occurrences().get(), 1);
+        // The collapse of the last case onto one `Option` is recorded rather than silent — and
+        // recorded rather than *reported*, because what it costs depends on whether the type is on
+        // the way in or on the way out, and nothing here knows a position. The API model turns
+        // these into diagnostics ([`crate::api::presence`]); the contract's job is not to lose them.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(contracts.collapses().len(), 1);
+        assert_eq!(
+            contracts.collapses()[0].at.to_string(),
+            "/components/schemas/Thing/properties/both"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::config::{Config, UnknownFields};
+use crate::config::UnknownFields;
 use crate::contract::{ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TypeContract};
 
 /// Whether any type takes a hand-written path, and therefore whether the support module is needed.
@@ -24,18 +24,15 @@ pub(super) fn needed(contracts: &Contracts) -> bool {
         .any(|contract| contract.deser() != DeserStrategy::Derive)
 }
 
-pub(super) fn render(contracts: &Contracts, config: &Config) -> TokenStream {
-    let items = contracts
-        .types()
-        .iter()
-        .map(|contract| one(contract, contracts, config));
+pub(super) fn render(contracts: &Contracts) -> TokenStream {
+    let items = contracts.types().iter().map(one);
     quote! { #(#items)* }
 }
 
-fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> TokenStream {
+fn one(contract: &TypeContract) -> TokenStream {
     match (contract.deser(), contract.kind()) {
         (DeserStrategy::HandWrittenBuffered, ContractKind::Struct { fields }) => {
-            buffered(contract, fields, contracts, config)
+            buffered(contract, fields)
         }
         (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants }) => {
             fieldless(contract, variants)
@@ -47,12 +44,7 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
     }
 }
 
-fn buffered(
-    contract: &TypeContract,
-    fields: &[crate::contract::FieldContract],
-    contracts: &Contracts,
-    config: &Config,
-) -> TokenStream {
+fn buffered(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -> TokenStream {
     let name = ident(contract.rust_name());
     let literal_name = contract.rust_name().as_str();
     let wire_names: Vec<&str> = fields
@@ -67,16 +59,15 @@ fn buffered(
 
     let defaulted = fields
         .iter()
-        .map(|field| super::types::default_path(field, contract, contracts, config).is_some());
+        // Always false: a declared default is documentation about the server, not an instruction
+        // to fill the member in on the way in — see `types::with_default`. The flag stays in the
+        // shipped trait because the *sequence* form of a struct needs it to tell a short sequence
+        // from a defaulted tail, and both serde paths have to answer that question the same way.
+        .map(|_| false);
     let reads = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let wire = field.wire_name.as_str();
-        if let Some(path) = super::types::default_path(field, contract, contracts, config) {
-            let helper = format_ident!("{path}");
-            quote! { #member: buffer.take_or(#wire, #helper)?, }
-        } else {
-            quote! { #member: buffer.take(#wire)?, }
-        }
+        quote! { #member: buffer.take(#wire)?, }
     });
 
     // The count a struct is serialized with has to match what is actually written, so a skipped

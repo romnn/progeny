@@ -10,6 +10,7 @@ mod differential;
 mod generated;
 mod layers;
 mod paths;
+mod payloads;
 mod snapshot;
 
 use anyhow::Result;
@@ -38,6 +39,8 @@ enum Command {
     RegenSnapshots(corpus::Args),
     /// Assert the derive and the hand-written serde path agree, and count function bodies.
     Differential(differential::Args),
+    /// Round-trip every example payload the corpus documents carry through the generated types.
+    Payloads(payloads::Args),
 }
 
 fn main() -> Result<()> {
@@ -47,6 +50,7 @@ fn main() -> Result<()> {
         Command::BenchCompile(args) => bench::run(&args),
         Command::LintLayers(args) => layers::run(&args),
         Command::Differential(args) => differential::run(&args),
+        Command::Payloads(args) => payloads::run(&args),
         // The same run as `corpus`, writing what it would otherwise compare against.
         Command::RegenSnapshots(mut args) => {
             args.write_snapshots = true;

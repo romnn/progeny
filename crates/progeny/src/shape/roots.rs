@@ -22,8 +22,20 @@ use super::ShapeKey;
 pub(crate) enum RootKind {
     /// A `components.schemas` entry: the document named it, so progeny uses that name.
     Component,
-    /// A schema inline in the API surface, named from its position.
-    Inline,
+    /// A schema at a position an operation really sends or receives.
+    ///
+    /// The distinction from [`RootKind::Named`] is load-bearing rather than descriptive: a
+    /// discriminated union may only consume its tag when no variant type is used anywhere the tag
+    /// property is genuinely on the wire, and this is what "on the wire" means
+    /// ([`super::discriminate`]).
+    Position,
+    /// A schema named for the sake of having a name, not because a payload carries it.
+    ///
+    /// A `components.parameters` or `components.responses` entry the document declares and no
+    /// operation references is exactly as much on the wire as a `components.schemas` entry — which
+    /// is to say not at all. Anything an operation *does* reference is reached through the
+    /// operation as well, and gets a [`RootKind::Position`] root there.
+    Named,
 }
 
 /// A schema position that needs a name, before classification.
@@ -48,6 +60,7 @@ pub(crate) fn discover(resolved: &ResolvedDocument) -> Vec<Site> {
     let mut walk = Walk {
         resolved,
         sites: Vec::new(),
+        kind: RootKind::Position,
     };
     walk.document(resolved.document());
     walk.sites
@@ -56,6 +69,9 @@ pub(crate) fn discover(resolved: &ResolvedDocument) -> Vec<Site> {
 struct Walk<'a> {
     resolved: &'a ResolvedDocument,
     sites: Vec<Site>,
+    /// Which kind the positions reached from here are, so the walk says it once rather than
+    /// threading it through every method that can reach a schema.
+    kind: RootKind,
 }
 
 impl Walk<'_> {
@@ -70,6 +86,11 @@ impl Walk<'_> {
             for (name, &id) in components.schemas.iter().flatten() {
                 self.push(id, vec![name.clone()], RootKind::Component);
             }
+            // The component sections are walked for the *names* they give, with `Named` rather
+            // than `Position`: an entry no operation references is no more on the wire than a
+            // `components.schemas` entry is, and one that is referenced is reached again through
+            // the operation that references it.
+            self.kind = RootKind::Named;
             for (name, body) in components.request_bodies.iter().flatten() {
                 if let Some(body) = self.resolved.request_body(body) {
                     self.content(body.content.as_ref(), std::slice::from_ref(name));
@@ -83,7 +104,7 @@ impl Walk<'_> {
             for (name, parameter) in components.parameters.iter().flatten() {
                 if let Some(parameter) = self.resolved.parameter(parameter) {
                     if let Some(id) = parameter.schema {
-                        self.push(id, vec![name.clone()], RootKind::Inline);
+                        self.push(id, vec![name.clone()], RootKind::Named);
                     }
                     self.content(parameter.content.as_ref(), std::slice::from_ref(name));
                 }
@@ -91,11 +112,12 @@ impl Walk<'_> {
             for (name, header) in components.headers.iter().flatten() {
                 if let Some(header) = self.resolved.header(header) {
                     if let Some(id) = header.schema {
-                        self.push(id, vec![name.clone()], RootKind::Inline);
+                        self.push(id, vec![name.clone()], RootKind::Named);
                     }
                     self.content(header.content.as_ref(), std::slice::from_ref(name));
                 }
             }
+            self.kind = RootKind::Position;
         }
 
         let paths = document
@@ -171,7 +193,7 @@ impl Walk<'_> {
                 None => name.to_vec(),
             };
             if let Some(id) = parameter.schema {
-                self.push(id, hint.clone(), RootKind::Inline);
+                self.push(id, hint.clone(), self.kind);
             }
             self.content(parameter.content.as_ref(), &hint);
         }
@@ -183,7 +205,7 @@ impl Walk<'_> {
             if let Some(node) = self.resolved.header(node) {
                 let hint = extend(name, header);
                 if let Some(id) = node.schema {
-                    self.push(id, hint.clone(), RootKind::Inline);
+                    self.push(id, hint.clone(), self.kind);
                 }
                 self.content(node.content.as_ref(), &hint);
             }
@@ -210,7 +232,7 @@ impl Walk<'_> {
             } else {
                 name.to_vec()
             };
-            self.push(id, hint, RootKind::Inline);
+            self.push(id, hint, self.kind);
         }
     }
 }

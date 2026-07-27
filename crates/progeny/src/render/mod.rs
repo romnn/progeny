@@ -9,6 +9,7 @@
 //! render byte-identical source. Everything here iterates `BTreeMap`s and `Vec`s in a fixed order,
 //! and the corpus harness generates every document twice per run and compares.
 
+mod client;
 mod manifest;
 mod serde_impl;
 mod types;
@@ -19,36 +20,53 @@ use camino::Utf8PathBuf;
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use crate::api::ApiModel;
 use crate::config::{Config, Packaging};
 use crate::contract::Contracts;
 
-/// Render the contracts into the files a caller writes out.
-pub(crate) fn run(contracts: &Contracts, config: &Config) -> BTreeMap<Utf8PathBuf, String> {
+/// Render the contracts and the API model into the files a caller writes out.
+pub(crate) fn run(
+    contracts: &Contracts,
+    api: &ApiModel,
+    config: &Config,
+) -> BTreeMap<Utf8PathBuf, String> {
     let mut files = BTreeMap::new();
     if !config.emit.types {
         return files;
     }
     let mut body = types::render(contracts, config);
-    body.extend(serde_impl::render(contracts, config));
+    body.extend(serde_impl::render(contracts));
     let mut modules = vec![("types", body)];
+
+    // An operation nobody can call is not worth a module: a description with no paths generates a
+    // type layer and stops there, rather than emitting a `Client` with no methods and the whole
+    // HTTP dependency behind it.
+    let http = config.emit.client && !api.operations().is_empty();
+    if http {
+        modules.push(("client", client::render(api, contracts, config)));
+    }
     // Emitted only when something calls into it: an unused module is compile time the consumer did
     // not ask for.
-    if serde_impl::needed(contracts) {
-        modules.push(("support", crate::support::tokens()));
+    if http || serde_impl::needed(contracts) {
+        modules.push((
+            "support",
+            crate::support::tokens(http, config.packaging == Packaging::Crate),
+        ));
     }
 
     match config.packaging {
         Packaging::Crate => {
             files.insert(
                 Utf8PathBuf::from("Cargo.toml"),
-                manifest::render(contracts, config),
+                manifest::render(contracts, config, http),
             );
             let declarations = modules.iter().map(|(name, _)| {
                 let ident = quote::format_ident!("{name}");
                 // The support module is not part of the generated crate's public API; it is
                 // reachable because the type modules call into it and for no other reason.
                 let hidden = (*name == "support").then(|| quote! { #[doc(hidden)] });
-                quote! { #hidden pub mod #ident; }
+                let gated = (*name == "client").then(|| quote! { #[cfg(feature = "client")] });
+                quote! { #hidden #gated pub mod #ident; }
             });
             files.insert(
                 Utf8PathBuf::from("src/lib.rs"),
@@ -109,11 +127,33 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, config, &mut ctx).unwrap();
-        let files = super::run(&contracts, config);
+        let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx);
+        let files = super::run(&contracts, &api, config);
         files
             .get(camino::Utf8Path::new("src/types.rs"))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Generate the client module for a document.
+    fn client(document: Value) -> String {
+        let config = Config::default();
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = shape::classify(&resolved, &mut ctx);
+        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
+        let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx);
+        let files = super::run(&contracts, &api, &config);
+        let rendered = files
+            .get(camino::Utf8Path::new("src/client.rs"))
+            .cloned()
+            .unwrap_or_default();
+        // The renderer falls back to unformatted tokens when a stream does not parse, which is the
+        // right call for a build and the wrong one for a test that then greps the text.
+        syn::parse_file(&rendered).expect("the client module should parse");
+        rendered
     }
 
     fn with_schemas(schemas: Value) -> Value {
@@ -245,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn a_default_is_rendered_as_a_value_rather_than_recorded_and_forgotten() {
+    fn a_declared_default_is_documented_rather_than_applied_on_the_way_in() {
         let rendered = types(
             with_schemas(json!({
                 "Options": {
@@ -258,19 +298,22 @@ mod tests {
             })),
             &Config::default(),
         );
+        // `#[serde(default = "…")]` would fill the member in on the way *in*, and it would then be
+        // written on the way *out* — turning "the caller said nothing" into "the caller said 20" on
+        // every request. The payload gate caught exactly that over the corpus.
+        assert!(!rendered.contains("default = "), "{rendered}");
+        assert!(!rendered.contains("fn default_options_limit"), "{rendered}");
+        // Nothing is lost quietly: the server's assumption is stated where a reader will find it.
         assert!(
-            rendered.contains(r#"default = "default_options_limit""#),
+            rendered.contains("The server assumes `20` when this member is absent."),
             "{rendered}"
         );
         assert!(
-            rendered.contains("fn default_options_limit() -> Option<i64>"),
+            rendered.contains(r#"The server assumes `"unnamed"` when this member is absent."#),
             "{rendered}"
         );
-        assert!(rendered.contains("Some(20i64)"), "{rendered}");
-        assert!(
-            rendered.contains(r#"Some("unnamed".to_owned())"#),
-            "{rendered}"
-        );
+        // And an absent member still deserializes, because every optional field is an `Option`.
+        assert!(rendered.contains("pub limit: Option<i64>"), "{rendered}");
     }
 
     #[test]
@@ -324,7 +367,8 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &module, &mut ctx).unwrap();
-        let files = super::run(&contracts, &module);
+        let api = crate::api::build(&resolved, &shapes, &contracts, &module, &mut ctx);
+        let files = super::run(&contracts, &api, &module);
         assert_eq!(files.len(), 1);
         let nested = files
             .get(camino::Utf8Path::new("progeny.rs"))
@@ -334,6 +378,329 @@ mod tests {
         // The same struct, indented into a module: one renderer behind both packagings.
         assert!(nested.contains("pub struct Pet"), "{nested}");
         assert!(as_crate.contains("pub struct Pet"), "{as_crate}");
+    }
+
+    #[test]
+    fn a_path_parameter_is_filled_in_and_refused_when_it_was_never_set() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets/{petId}": {"get": {
+                "operationId": "showPetById",
+                "parameters": [{"name": "petId", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "ok"}},
+            }}},
+        }));
+        assert!(rendered.contains("pub fn show_pet_by_id"), "{rendered}");
+        assert!(
+            rendered.contains("pub struct ShowPetById<'a>"),
+            "{rendered}"
+        );
+        // The separator, the literal segment, the separator, the variable.
+        assert!(rendered.contains(r"url.push('/')"), "{rendered}");
+        assert!(rendered.contains(r#"url.push_str("pets")"#), "{rendered}");
+        assert!(rendered.contains("support::path_segment"), "{rendered}");
+        // A required parameter is an ordinary setter and a check at `send`, which is what
+        // "runtime-checked rather than typestate" means in the output.
+        assert!(rendered.contains("support::Unset::new"), "{rendered}");
+    }
+
+    #[test]
+    fn a_named_type_is_qualified_wherever_it_is_not_the_types_module() {
+        // A schema called `Error`: unqualified, this renders `Error<Error>` whose two `Error`s are
+        // different types — the support module's and this one — and it compiles.
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}}},
+                    "404": {"description": "gone", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                },
+            }}},
+            "components": {"schemas": {
+                "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "Error": {"type": "object", "properties": {"message": {"type": "string"}}},
+            }},
+        }));
+        assert!(
+            rendered.contains("ResponseValue<super::types::Pet>"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Error<super::types::Error>"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn several_declared_failures_become_an_enum_and_one_does_not() {
+        let two = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok"},
+                    "404": {"description": "gone"},
+                    "429": {"description": "slow down", "content": {"application/json": {"schema": {"type": "string"}}}},
+                },
+            }}},
+        }));
+        assert!(two.contains("pub enum ListPetsError"), "{two}");
+        assert!(two.contains("NotFound(())"), "{two}");
+        assert!(two.contains("TooManyRequests(String)"), "{two}");
+
+        // One failure needs no enum: its payload type is the error type.
+        let one = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok"},
+                    "404": {"description": "gone", "content": {"application/json": {"schema": {"type": "string"}}}},
+                },
+            }}},
+        }));
+        assert!(!one.contains("pub enum ListPetsError"), "{one}");
+        assert!(one.contains("Error<String>"), "{one}");
+    }
+
+    #[test]
+    fn a_default_that_claims_success_is_still_a_failure_variant() {
+        // `weather-gov` writes a `302` and a `default` and no `2XX`, so the `default` is both the
+        // success arm and the catch-all failure. Two answers about that used to disagree: the error
+        // type counted two failure arms and declared an enum, while `send` counted one and decoded
+        // the body straight into it — asking an enum that derives only `Debug, Clone` to
+        // deserialize. The client did not compile, and no document in the quick tier had the shape.
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/briefing": {"get": {
+                "operationId": "getBriefing",
+                "responses": {
+                    "302": {"description": "found"},
+                    "default": {"description": "problem", "content": {"application/json": {"schema": {"type": "string"}}}},
+                },
+            }}},
+        }));
+        assert!(rendered.contains("pub enum GetBriefingError"), "{rendered}");
+        // Every failure path puts the body in a variant rather than handing the enum to serde.
+        assert!(
+            rendered.contains("GetBriefingError::Status302"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("GetBriefingError::Default"), "{rendered}");
+    }
+
+    #[test]
+    fn a_deprecated_operation_does_not_warn_in_the_consumers_crate() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/artists": {"get": {
+                "operationId": "getArtists",
+                "deprecated": true,
+                "responses": {"200": {"description": "ok"}},
+            }}},
+        }));
+        assert!(rendered.contains("#[deprecated]"), "{rendered}");
+        // The builder is deprecated, so its own `impl` block uses a deprecated type — a warning
+        // about code the consumer did not write. An `impl` cannot be deprecated, so it says the
+        // only thing that distinguishes "this is the deprecated thing" from "this uses one".
+        assert!(
+            rendered.contains("#[allow(deprecated)]\nimpl<'a> GetArtists<'a>"),
+            "{rendered}"
+        );
+
+        // The accessor is the same problem one level up: it is `#[deprecated]` itself, and it both
+        // returns the deprecated builder and constructs one. Carrying the attribute exempts it from
+        // nothing — rustc lints the signature and the body — so it needs the allowance too.
+        assert!(
+            rendered.contains("#[allow(deprecated)]\n    #[must_use]\n    pub fn get_artists"),
+            "{rendered}"
+        );
+
+        // And an operation the document does not deprecate carries neither.
+        let plain = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/artists": {"get": {"operationId": "getArtists", "responses": {"200": {"description": "ok"}}}}},
+        }));
+        assert!(!plain.contains("deprecated"), "{plain}");
+    }
+
+    #[test]
+    fn a_type_that_names_a_deprecated_type_does_not_warn_in_the_consumers_crate() {
+        // `okta` deprecates the `MtlsTrustCredentialsRevocation` component and not the `revocation`
+        // property that holds one. Both renderings are faithful — and rustc lints the use anyway,
+        // so the generated crate warned on every build about code its consumer did not write.
+        let rendered = types(
+            with_schemas(json!({
+                "Retired": {"type": "string", "enum": ["a", "b"], "deprecated": true},
+                "Holder": {
+                    "type": "object",
+                    "properties": {"revocation": {"$ref": "#/components/schemas/Retired"}},
+                },
+            })),
+            &Config::default(),
+        );
+        // On the item, not the field: a field-level allowance does not reach the `Deserialize` the
+        // derive expands from it, which names the same type at the same span.
+        let declaration = rendered
+            .split_once("pub struct Holder")
+            .map(|(before, _)| before)
+            .expect("the holder should be rendered");
+        assert!(declaration.contains("#[allow(deprecated)]"), "{rendered}");
+
+        // A holder of something the document did not deprecate carries nothing.
+        let plain = types(
+            with_schemas(json!({
+                "Live": {"type": "string", "enum": ["a", "b"]},
+                "Holder": {
+                    "type": "object",
+                    "properties": {"revocation": {"$ref": "#/components/schemas/Live"}},
+                },
+            })),
+            &Config::default(),
+        );
+        assert!(!plain.contains("allow(deprecated)"), "{plain}");
+    }
+
+    #[test]
+    fn an_operation_whose_only_response_is_default_still_has_a_success_path() {
+        // `default` means "anything not otherwise claimed". With no `2XX` beside it, a `200` is
+        // exactly that — so treating the arm as a failure would report every successful call as
+        // one, which is what the first implementation did.
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {"default": {
+                    "description": "whatever happens",
+                    "content": {"application/json": {"schema": {"type": "string"}}},
+                }},
+            }}},
+        }));
+        assert!(
+            rendered.contains("ResponseValue<String>, Error<String>"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("200..=299 => ::std::result::Result::Ok"),
+            "{rendered}"
+        );
+
+        // With a declared success beside it, `default` goes back to being the failure it claims.
+        let with_success = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok"},
+                    "default": {"description": "anything else", "content": {"application/json": {"schema": {"type": "string"}}}},
+                },
+            }}},
+        }));
+        assert!(
+            !with_success.contains("200..=299 => ::std::result::Result::Ok"),
+            "{with_success}"
+        );
+        assert!(
+            with_success.contains("ResponseValue<()>, Error<String>"),
+            "{with_success}"
+        );
+    }
+
+    #[test]
+    fn only_a_server_url_a_client_could_actually_use_becomes_a_default() {
+        let with_server = |servers: Value| {
+            let mut document = json!({
+                "openapi": "3.1.0",
+                "paths": {"/pets": {"get": {"operationId": "listPets", "responses": {"200": {"description": "ok"}}}}},
+            });
+            document
+                .as_object_mut()
+                .unwrap()
+                .insert("servers".to_owned(), servers);
+            client(document)
+        };
+
+        let absolute = with_server(json!([{"url": "https://example.invalid/v1"}]));
+        assert!(
+            absolute.contains("impl ::std::default::Default"),
+            "{absolute}"
+        );
+        assert!(
+            absolute.contains("https://example.invalid/v1"),
+            "{absolute}"
+        );
+
+        // A relative URL is what the description is served next to, and only the caller knows what
+        // that was; a templated one has variables progeny does not substitute. Both are perfectly
+        // good things for a document to say and neither is a default a client could send to.
+        for servers in [
+            json!([{"url": "/api/v3"}]),
+            json!([{"url": "https://{region}.example.invalid"}]),
+        ] {
+            let rendered = with_server(servers);
+            assert!(
+                !rendered.contains("impl ::std::default::Default"),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_undeclared_status_is_handed_back_raw_rather_than_given_a_shape() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {"200": {"description": "ok"}},
+            }}},
+        }));
+        assert!(
+            rendered.contains("Error::UnexpectedStatus(response)"),
+            "{rendered}"
+        );
+
+        // …unless the document declares a `default` arm, which is exactly what claims the rest.
+        let with_default = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok"},
+                    "default": {"description": "anything else"},
+                },
+            }}},
+        }));
+        assert!(
+            !with_default.contains("Error::UnexpectedStatus(response)"),
+            "{with_default}"
+        );
+    }
+
+    #[test]
+    fn a_query_parameter_carries_the_style_the_document_asked_for() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "parameters": [
+                    {"name": "tags", "in": "query", "style": "pipeDelimited", "explode": false,
+                     "schema": {"type": "array", "items": {"type": "string"}}},
+                    {"name": "x-trace", "in": "header", "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "ok"}},
+            }}},
+        }));
+        assert!(
+            rendered.contains("support::Style::PipeDelimited"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("support::query_pairs("), "{rendered}");
+        assert!(rendered.contains(r#""tags""#), "{rendered}");
+        assert!(
+            rendered.contains(r#".header("x-trace", support::header_value"#),
+            "{rendered}"
+        );
     }
 
     #[test]

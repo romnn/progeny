@@ -1,0 +1,313 @@
+//! The payload gate: run serde against the documents' own example payloads.
+//!
+//! Every other gate in this project asks a question about *source*. This one asks a question about
+//! *data*, and it is the only one that can: the five defects stage 4's review found all generated
+//! code that compiled, snapshotted and round-tripped its document, and were wrong only about
+//! payloads.
+//!
+//! It works by generating a crate and then generating a test *into* that crate, because the check
+//! has to name the generated types statically — there is no way to deserialize into a type chosen
+//! at run time. The library says which type each example belongs to and what a faithful round trip
+//! keeps; this turns that into Rust and runs it.
+//!
+//! Two rules it is built with, both learned rather than assumed:
+//!
+//! * **Compare against the original payload, never a second round of the type's own output.** A
+//!   member the type drops uniformly survives an idempotence check forever.
+//! * **Carry a vendor verdict from the start.** 19 corpus documents write examples that contradict
+//!   their own schemas. A harness with no verdict for them reports 19 failures nobody can fix.
+
+use std::fmt::Write as _;
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use clap::Args as ClapArgs;
+use progeny::harness::{Payload, Payloads};
+
+#[derive(Debug, ClapArgs)]
+pub struct Args {
+    /// Corpus documents to check. Defaults to the quick tier.
+    #[arg(value_name = "SPEC")]
+    specs: Vec<String>,
+
+    /// Check every document in the manifest rather than the quick tier.
+    #[arg(long)]
+    all: bool,
+
+    /// Write the generated test crates and stop, without compiling or running anything.
+    #[arg(long)]
+    generate_only: bool,
+}
+
+/// What one document's payloads did.
+#[derive(Debug, Default)]
+struct Outcome {
+    checked: usize,
+    failures: Vec<String>,
+    vendor: Vec<String>,
+    skipped: Payloads,
+}
+
+pub fn run(args: &Args) -> Result<()> {
+    crate::generated::require_cargo()?;
+    let specs = crate::corpus::load_manifest()?;
+    let wanted = if !args.specs.is_empty() {
+        args.specs.clone()
+    } else if args.all {
+        specs.iter().map(|spec| spec.name.clone()).collect()
+    } else {
+        crate::corpus::quick_tier()?
+    };
+
+    println!("payloads: {} documents", wanted.len());
+    let mut failures = 0usize;
+    let mut totals = (0usize, 0usize, 0usize);
+    for name in &wanted {
+        let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
+            bail!("no corpus document named `{name}`");
+        };
+        let path = crate::corpus::document_path(spec);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                println!("  skipped   {name:<24} {path}: {error}");
+                continue;
+            }
+        };
+
+        let outcome = check(name, spec, &bytes, args)?;
+        totals.0 += outcome.checked;
+        totals.1 += outcome.vendor.len();
+        totals.2 += outcome.skipped.opaque + outcome.skipped.unnamed + outcome.skipped.captures;
+        if outcome.failures.is_empty() {
+            println!(
+                "  ok        {name:<24} {} payloads round-tripped, {} vendor defects, {} not \
+                 checkable",
+                outcome.checked,
+                outcome.vendor.len(),
+                outcome.skipped.opaque + outcome.skipped.unnamed + outcome.skipped.captures,
+            );
+        } else {
+            failures += 1;
+            println!(
+                "  FAILED    {name:<24} {} of {} payloads did not round-trip",
+                outcome.failures.len(),
+                outcome.checked
+            );
+            for failure in outcome.failures.iter().take(5) {
+                println!("              {failure}");
+            }
+        }
+        // Never silent about what was left out: a gate that skips quietly reads as coverage it
+        // does not have.
+        if outcome.skipped.opaque + outcome.skipped.unnamed + outcome.skipped.captures > 0 {
+            println!(
+                "              not checkable: {} arbitrary JSON, {} unnamed types, {} capture \
+                 undeclared members",
+                outcome.skipped.opaque, outcome.skipped.unnamed, outcome.skipped.captures
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "payloads: {} checked, {} vendor defects tolerated, {} positions not checkable",
+        totals.0, totals.1, totals.2
+    );
+    if failures > 0 {
+        bail!("{failures} documents have payloads that do not round-trip");
+    }
+    Ok(())
+}
+
+fn check(name: &str, spec: &crate::corpus::Spec, bytes: &[u8], args: &Args) -> Result<Outcome> {
+    let mut config = crate::corpus::config_for(spec);
+    // Types only: the payload question is about the shared type layer, and compiling an HTTP stack
+    // per document to ask it would be minutes of nothing.
+    config.emit.client = false;
+    config.emit.server = false;
+
+    let collected = progeny::harness::payloads(bytes, &config)
+        .with_context(|| format!("collecting payloads from {name}"))?;
+    let mut outcome = Outcome {
+        skipped: Payloads {
+            payloads: Vec::new(),
+            ..collected
+        },
+        ..Outcome::default()
+    };
+    if collected.payloads.is_empty() {
+        return Ok(outcome);
+    }
+    outcome.checked = collected.payloads.len();
+
+    let output = progeny::generate(bytes, &config)
+        .with_context(|| format!("generating {name} for the payload gate"))?;
+    let directory = crate::generated::write(&format!("payloads-{name}"), &output)?;
+    let tests = directory.join("tests");
+    std::fs::create_dir_all(&tests).with_context(|| format!("creating {tests}"))?;
+    let source = test_source(&config.package.name, &collected.payloads);
+    let file = tests.join("payloads.rs");
+    std::fs::write(&file, source).with_context(|| format!("writing {file}"))?;
+
+    if args.generate_only {
+        println!("  {name} → {file}");
+        return Ok(outcome);
+    }
+
+    let run = Command::new("cargo")
+        .current_dir(&directory)
+        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
+        .env_remove("RUSTFLAGS")
+        // `--nocapture`, because the report travels on stdout and libtest swallows the stdout of a
+        // test that passes — without it a document with vendor defects and no real failures would
+        // report zero of both, which is the reading that looks like success.
+        .args(["test", "--quiet", "--test", "payloads", "--", "--nocapture"])
+        .output()
+        .with_context(|| format!("running the payload test for {name}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    if !run.status.success() && !text.contains("PAYLOAD ") {
+        bail!("the payload test for {name} did not run:\n{text}");
+    }
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("PAYLOAD FAIL ") {
+            outcome.failures.push(rest.to_owned());
+        } else if let Some(rest) = line.trim().strip_prefix("PAYLOAD VENDOR ") {
+            outcome.vendor.push(rest.to_owned());
+        }
+    }
+    Ok(outcome)
+}
+
+/// The test that goes into the generated crate.
+///
+/// One `check::<T>` call per payload, because the type has to be named at compile time. Failures
+/// are printed rather than asserted one by one, so a document reports every payload that did not
+/// round-trip instead of only the first.
+fn test_source(package: &str, payloads: &[Payload]) -> String {
+    let krate = package.replace('-', "_");
+    let mut out = String::new();
+    out.push_str(
+        "//! Generated by `cargo xtask payloads`. Every example payload the document carries,\n\
+         //! deserialized into the type progeny generated for it and serialized back.\n\
+         #![allow(unused_imports, clippy::all, clippy::pedantic)]\n\n",
+    );
+    let _ = writeln!(out, "use {krate}::types;\n");
+    out.push_str(RUNNER);
+    out.push_str("\n#[test]\nfn every_example_payload_round_trips() {\n");
+    out.push_str("    let mut report = Report::default();\n");
+    for payload in payloads {
+        let _ = writeln!(
+            out,
+            "    check::<types::{}>(&mut report, {:?}, {:?}, {:?}, {});",
+            payload.type_name,
+            payload.location,
+            payload.original.to_string(),
+            payload.expected.to_string(),
+            payload.vendor_defect,
+        );
+    }
+    out.push_str("    report.finish();\n}\n");
+    out
+}
+
+/// The comparison, shipped into the generated test.
+///
+/// Numbers are compared as numbers: a document writing `1` for a field progeny typed `f64` gets
+/// `1.0` back, and `serde_json::Value` equality would call that a loss. It is not one — the value
+/// survived, and JSON has one number type.
+const RUNNER: &str = r#"
+#[derive(Default)]
+struct Report {
+    failures: usize,
+}
+
+impl Report {
+    fn finish(&self) {
+        assert_eq!(self.failures, 0, "{} payloads did not round-trip", self.failures);
+    }
+}
+
+fn check<T>(report: &mut Report, location: &str, original: &str, expected: &str, vendor_defect: bool)
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let original: serde_json::Value = serde_json::from_str(original).expect("a payload is JSON");
+    let expected: serde_json::Value = serde_json::from_str(expected).expect("a payload is JSON");
+    let outcome = (|| -> Result<(), String> {
+        let typed: T = serde_json::from_value(original.clone())
+            .map_err(|error| format!("does not deserialize: {error}"))?;
+        let again = serde_json::to_value(&typed)
+            .map_err(|error| format!("does not serialize: {error}"))?;
+        match difference(&expected, &again, "") {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
+    })();
+    if let Err(reason) = outcome {
+        if vendor_defect {
+            // The document contradicts itself here, which progeny already reported as
+            // `invalid-example`. Counted, never failed: it is a finding about the vendor.
+            println!("PAYLOAD VENDOR {location}: {reason}");
+        } else {
+            report.failures += 1;
+            println!("PAYLOAD FAIL {location}: {reason}");
+        }
+    }
+}
+
+/// Where the round trip lost or changed something, if it did.
+fn difference(expected: &serde_json::Value, actual: &serde_json::Value, at: &str) -> Option<String> {
+    use serde_json::Value;
+    match (expected, actual) {
+        (Value::Object(expected), Value::Object(actual)) => {
+            for (key, value) in expected {
+                let at = format!("{at}/{key}");
+                match actual.get(key) {
+                    Some(other) => {
+                        if let Some(reason) = difference(value, other, &at) {
+                            return Some(reason);
+                        }
+                    }
+                    None => return Some(format!("the round trip dropped `{at}`")),
+                }
+            }
+            for key in actual.keys() {
+                if !expected.contains_key(key) {
+                    return Some(format!("the round trip invented `{at}/{key}`"));
+                }
+            }
+            None
+        }
+        (Value::Array(expected), Value::Array(actual)) => {
+            if expected.len() != actual.len() {
+                return Some(format!(
+                    "`{at}` had {} elements and came back with {}",
+                    expected.len(),
+                    actual.len()
+                ));
+            }
+            for (index, (value, other)) in expected.iter().zip(actual).enumerate() {
+                if let Some(reason) = difference(value, other, &format!("{at}/{index}")) {
+                    return Some(reason);
+                }
+            }
+            None
+        }
+        (Value::Number(expected), Value::Number(actual)) => {
+            // JSON has one number type; `1` and `1.0` are the same value written twice.
+            match (expected.as_f64(), actual.as_f64()) {
+                (Some(left), Some(right)) if left == right => None,
+                _ if expected == actual => None,
+                _ => Some(format!("`{at}` was {expected} and came back {actual}")),
+            }
+        }
+        (expected, actual) if expected == actual => None,
+        (expected, actual) => Some(format!("`{at}` was {expected} and came back {actual}")),
+    }
+}
+"#;

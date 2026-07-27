@@ -7,9 +7,20 @@
 //! In a generated crate it is `#[doc(hidden)]` and never part of that crate's public API.
 
 mod buffered;
+mod style;
 
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
 const BUFFERED: &str = include_str!("buffered.rs");
+
+/// Parameter serialization, one function per style row.
+const STYLE: &str = include_str!("style.rs");
+
+/// The client runtime: `Error`, `ResponseValue`, and the body decoders.
+///
+/// The one shipped file progeny cannot compile itself, because it names `reqwest` and progeny does
+/// not depend on it. The corpus compile gate type-checks it instead, on every generated crate in
+/// the tier, which is why that gate passes `--all-features`.
+const HTTP: &str = include_str!("http.rs");
 
 /// The support source as tokens, so it composes with the rendered items.
 ///
@@ -17,16 +28,117 @@ const BUFFERED: &str = include_str!("buffered.rs");
 /// rather than a consumer's compile error. A file that does not parse falls back to being emitted
 /// verbatim, which is what a caller would want anyway — but the module's own tests compile it, so
 /// that cannot happen unnoticed.
-pub(crate) fn tokens() -> proc_macro2::TokenStream {
-    match syn::parse_file(BUFFERED) {
-        Ok(file) => quote::quote! { #file },
-        Err(_) => BUFFERED.parse().unwrap_or_default(),
+pub(crate) fn tokens(http: bool, gated: bool) -> proc_macro2::TokenStream {
+    let buffered = source(BUFFERED);
+    if !http {
+        return buffered;
     }
+    // Gated only in crate mode. A module tree is `include!`d into somebody else's crate, which has
+    // no `client` feature to speak of and never asked for one; the caller opted in by configuring
+    // the client, and that is the whole of the decision there.
+    let gate = gated.then(|| quote::quote! { #[cfg(feature = "client")] });
+    let style = items(STYLE);
+    let wire = items(HTTP);
+    // Nested behind the same feature as the client module, and re-exported so callers still write
+    // `support::Error`. A consumer who turned the client off must not pay for `reqwest`, and these
+    // are the only shipped items that name it — putting them in their own module is what lets one
+    // attribute cover all of them rather than one per item.
+    quote::quote! {
+        #buffered
+
+        #gate
+        #[allow(dead_code)]
+        mod wire {
+            #(#style)*
+            #(#wire)*
+        }
+
+        #gate
+        pub use wire::*;
+    }
+}
+
+/// One shipped file as tokens, without the tests that verify it here.
+///
+/// The tests belong beside the code they test and have no business in a consumer's crate: they
+/// would be compile time nobody asked for, in a module a consumer cannot even read the source of.
+fn source(text: &str) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    file.items.retain(|item| !is_test_module(item));
+    quote::quote! { #file }
+}
+
+/// The same, as items alone.
+///
+/// A file's own `#![doc]` and `#![allow]` are *inner* attributes, and inner attributes may only
+/// open a block. Two files nested into one module would put the second file's inner attributes
+/// after the first file's items, which is not Rust — and the failure is quiet, because the renderer
+/// falls back to emitting unparsed tokens rather than failing a build.
+fn items(text: &str) -> Vec<syn::Item> {
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    file.items
+        .into_iter()
+        .filter(|item| !is_test_module(item))
+        .collect()
+}
+
+fn is_test_module(item: &syn::Item) -> bool {
+    let syn::Item::Mod(module) = item else {
+        return false;
+    };
+    module.attrs.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && quote::ToTokens::to_token_stream(attribute)
+                .to_string()
+                .contains("test")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use serde::de::{Deserialize, Deserializer};
+
+    /// The shipped source has to parse as a file, both ways.
+    ///
+    /// It is checked here because the renderer's fallback is to emit unparsed tokens rather than
+    /// fail a build — the right call for a formatting failure, and the reason a *composition*
+    /// failure would otherwise reach a consumer as one very long line that happens not to compile.
+    #[test]
+    fn the_shipped_module_parses_as_a_file() {
+        for http in [false, true] {
+            for gated in [false, true] {
+                let tokens = super::tokens(http, gated);
+                syn::parse2::<syn::File>(tokens.clone()).unwrap_or_else(|error| {
+                    panic!(
+                        "support(http = {http}, gated = {gated}) does not parse: {error}\n{tokens}"
+                    )
+                });
+            }
+        }
+        // And the client half is really there when it was asked for, so the check above is not
+        // passing because there is nothing to compose.
+        assert!(
+            super::tokens(true, true)
+                .to_string()
+                .contains("ResponseValue")
+        );
+        assert!(
+            !super::tokens(false, true)
+                .to_string()
+                .contains("ResponseValue")
+        );
+        // In module mode nothing is gated: there is no crate whose feature could turn it on.
+        assert!(super::tokens(true, true).to_string().contains("client"));
+        assert!(
+            !super::tokens(true, false)
+                .to_string()
+                .contains("cfg (feature")
+        );
+    }
 
     use super::buffered::{
         Assemble, Buffer, BufferVisitor, Content, ContentDeserializer, Missing, Unknown,

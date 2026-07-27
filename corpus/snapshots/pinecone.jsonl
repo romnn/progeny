@@ -1,1 +1,2 @@
-{"document":"sha256:5f94a68d89a9f7032556aab8699c1f463e003510b2f2b2b8e2d73ce3dc69c61b","diagnostics":0}
+{"document":"sha256:5f94a68d89a9f7032556aab8699c1f463e003510b2f2b2b8e2d73ce3dc69c61b","diagnostics":1}
+{"class":"invalid-example","action":"warn","location":"/paths/~1restore-jobs/get/responses/200/content/application~1json/examples/no-restore-jobs","detail":"the example contradicts the schema it illustrates: at `pagination`, the schema says an object, the example is null. Generation is unaffected — an example is documentation — but a payload test built from this one is testing the document, not the generated code","occurrences":2,"related":["/paths/~1restore-jobs/get/responses/200/content/application~1json/examples/non-paginated-restore-jobs"]}
