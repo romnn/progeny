@@ -1,8 +1,8 @@
 //! The client runtime: what every generated operation returns.
 //!
-//! Shipped verbatim into generated crates. Unlike [`super::style`] this cannot be compiled inside
-//! progeny, because it names `reqwest` and progeny does not depend on it — so the corpus compile
-//! gate is what type-checks it, with `--all-features`, on every generated crate in the tier.
+//! Shipped verbatim into generated crates. It names `reqwest`, which progeny only carries as a
+//! dev-dependency, so it compiles here under `cfg(test)` — same bytes tested as shipped — and again
+//! on every generated crate the corpus compile gate checks, with `--all-features`.
 //!
 //! `Display` and `std::error::Error` are written out rather than derived: a derive dependency for
 //! impls this stable would re-buy the macro-expansion cost the whole project is measuring.
@@ -20,7 +20,11 @@ pub struct ResponseValue<T> {
 
 impl<T> ResponseValue<T> {
     #[doc(hidden)]
-    pub fn new(status: ::reqwest::StatusCode, headers: ::reqwest::header::HeaderMap, value: T) -> Self {
+    pub fn new(
+        status: ::reqwest::StatusCode,
+        headers: ::reqwest::header::HeaderMap,
+        value: T,
+    ) -> Self {
         Self {
             status,
             headers,
@@ -71,7 +75,7 @@ pub enum Error<E> {
     /// The request never completed: DNS, TLS, connection, timeout.
     Request(::reqwest::Error),
     /// A status the document declares as an error, with its payload parsed.
-    ErrorResponse(ResponseValue<E>),
+    Declared(ResponseValue<E>),
     /// A status the document does not declare at all, handed back raw.
     ///
     /// Undeclared rather than unexpected in the ordinary sense: a document that lists only `200`
@@ -87,7 +91,7 @@ impl<E> Error<E> {
     pub fn status(&self) -> Option<::reqwest::StatusCode> {
         match self {
             Self::Request(error) => error.status(),
-            Self::ErrorResponse(response) => Some(response.status()),
+            Self::Declared(response) => Some(response.status()),
             Self::UnexpectedStatus(response) => Some(response.status()),
             Self::Decode(_) => None,
         }
@@ -110,7 +114,7 @@ impl<E> ::std::fmt::Display for Error<E> {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         match self {
             Self::Request(error) => write!(f, "the request failed: {error}"),
-            Self::ErrorResponse(response) => {
+            Self::Declared(response) => {
                 write!(f, "the server answered {}", response.status())
             }
             Self::UnexpectedStatus(response) => write!(
@@ -128,7 +132,7 @@ impl<E: ::std::fmt::Debug> ::std::error::Error for Error<E> {
         match self {
             Self::Request(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::ErrorResponse(_) | Self::UnexpectedStatus(_) => None,
+            Self::Declared(_) | Self::UnexpectedStatus(_) => None,
         }
     }
 }

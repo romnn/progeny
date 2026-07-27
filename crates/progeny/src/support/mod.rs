@@ -8,10 +8,27 @@
 
 mod buffered;
 mod multipart;
-// Compiled here because it names nothing progeny does not depend on. Its axum-facing other half,
-// `router.rs`, is shipped-only for the same reason `http.rs` is.
 mod serve;
 mod style;
+
+// The two files that name an HTTP crate, compiled under `cfg(test)` against dev-dependencies so
+// that the property this module is arranged around — the file progeny tests is the file it ships —
+// holds for all six shipped files rather than four. Before this they were type-checked only by the
+// corpus compile gate: minutes-later feedback, on the two files most coupled to external crates.
+// `dead_code` is expected rather than fixed because nothing in progeny calls into them; existing is
+// their whole job here.
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "compiled to be type-checked and linted, not called"
+)]
+mod http;
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "compiled to be type-checked and linted, not called"
+)]
+mod router;
 
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
 const BUFFERED: &str = include_str!("buffered.rs");
@@ -27,12 +44,11 @@ const SERVE: &str = include_str!("serve.rs");
 
 /// The client runtime: `Error`, `ResponseValue`, and the body decoders.
 ///
-/// One of the two shipped files progeny cannot compile itself, because it names `reqwest` and
-/// progeny does not depend on it. The corpus compile gate type-checks it instead, on every
-/// generated crate in the tier, which is why that gate passes `--all-features`.
+/// Names `reqwest`, so it compiles here under `cfg(test)` against a dev-dependency — see the module
+/// declarations above — and again in every generated crate the corpus compile gate checks.
 const HTTP: &str = include_str!("http.rs");
 
-/// The serving runtime, and the other file progeny cannot compile: it names `axum`.
+/// The serving runtime, compiled the same two ways: it names `axum`.
 const ROUTER: &str = include_str!("router.rs");
 
 /// The support source as tokens, so it composes with the rendered items.
@@ -114,6 +130,13 @@ pub(crate) fn tokens(
 /// compiles and is unit-tested here with its own default in place. The alternative — a placeholder
 /// only meaningful after substitution — would mean the source progeny tests is not the source it
 /// ships, which is the property this whole module is arranged around.
+///
+/// **This mechanism is for one knob, and deliberately so.** Each constant it rewrites needs its own
+/// surgery here and its own test pinning that the configured value arrives, so it scales by
+/// hand-work. The day a *second* shipped constant becomes configuration, replace it — a generated
+/// `support::consts` module the shipped files `use`, one mechanism for every knob — rather than
+/// adding a second rewrite beside this one. Building that module today, for one knob, would be the
+/// speculative generality this project refuses everywhere else.
 fn with_body_limit(
     items: Vec<syn::Item>,
     limit: crate::config::BodyLimit,

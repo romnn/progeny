@@ -198,18 +198,30 @@ pub fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> 
     serde_json::from_value(retyped(value)).map_err(|_| first)
 }
 
-/// Every string leaf re-read as the JSON scalar it spells, where it spells one.
+/// Every string leaf re-read as the JSON value it spells, where it spells one.
 ///
-/// Deliberately not recursive into objects: an object arrives from `deepObject` or a form body,
-/// where the *member* names are what the description constrains and a member's own type is asked
-/// for by the same rule one level down. Arrays are, because an exploded array of integers is a list
-/// of strings and every element needs the same reading.
+/// Scalars, and — since the wire probe — compounds too. The first version stopped at numbers and
+/// booleans, reasoning that "a string that happens to spell an object is a string the description
+/// asked for as a string". That reasoning missed what the *writer* does: the generated client has
+/// exactly one spelling for a compound element in a query pair or a text part, and it is the
+/// element's JSON (`style::scalar`). `posthog` sends `properties=` with one JSON-encoded filter
+/// object per occurrence, and the reader handed serde the text where the struct belonged. The two
+/// halves are one rule read from two ends, so the reader now inverts precisely what the writer
+/// emits.
+///
+/// The safety argument is unchanged and it is the order of attempts: the as-is reading runs first,
+/// so a member the description types as a string keeps its text — commas, braces and all — and this
+/// second reading only runs after serde has already refused.
+///
+/// Deliberately not recursive into a parsed compound: the client encodes a whole element once, so
+/// one level of unspelling is exactly its inverse. Arrays of leaves recurse, because an exploded
+/// array of integers is a list of strings and every element needs the same reading.
 fn retyped(value: Value) -> Value {
     match value {
         Value::String(text) => match serde_json::from_str::<Value>(&text) {
-            // Only a scalar. A string that happens to spell an object is a string the description
-            // asked for as a string, and re-reading it would invent a shape from its contents.
-            Ok(parsed @ (Value::Number(_) | Value::Bool(_))) => parsed,
+            Ok(
+                parsed @ (Value::Number(_) | Value::Bool(_) | Value::Object(_) | Value::Array(_)),
+            ) => parsed,
             _ => Value::String(text),
         },
         Value::Array(items) => Value::Array(items.into_iter().map(retyped).collect()),
@@ -273,7 +285,33 @@ pub fn optional_body<T>(
 mod tests {
     use serde_json::json;
 
-    use super::{Rejection, RejectionResponse, optional_body, read, required_body};
+    use super::{Rejection, RejectionResponse, optional_body, read, required_body, typed};
+
+    /// The reader inverts exactly what the writer emits, one compound level deep.
+    ///
+    /// The wire probe's `posthog` find: the client's one spelling for a compound element in a query
+    /// pair is the element's JSON, and the reader refused it — `properties=` carried a JSON-encoded
+    /// filter per occurrence and serde was handed the text where the struct belonged. The guard in
+    /// the other direction matters as much: a member the description types as a *string* keeps its
+    /// braces, because the as-is reading accepts it before this one runs.
+    #[test]
+    fn a_string_spelling_a_compound_is_reread_where_a_compound_is_expected() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Filter {
+            key: String,
+        }
+        let arrived = json!(["{\"key\":\"a\"}"]);
+        let parsed: Vec<Filter> = typed(arrived).unwrap();
+        assert_eq!(
+            parsed,
+            vec![Filter {
+                key: "a".to_owned()
+            }]
+        );
+
+        let stays_text: String = typed(json!("{\"key\":\"a\"}")).unwrap();
+        assert_eq!(stays_text, "{\"key\":\"a\"}");
+    }
 
     #[test]
     fn an_absent_optional_parameter_is_none_and_an_absent_required_one_is_a_rejection() {

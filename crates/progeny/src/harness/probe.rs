@@ -1,0 +1,415 @@
+//! The wire-differential plan: every operation of a document, ready to be sent by its own client.
+//!
+//! The example gate proved that the only assertions which catch request-line defects are the ones
+//! that *send a request* — and it covered one document. This closes the gap for the rest: from the
+//! same frozen contracts the renderers read, it synthesizes a value for every parameter, body and
+//! response of every servable operation, so `xtask probe` can generate the recorder double and the
+//! driver tests for any corpus document instead of hand-writing them for petstore.
+//!
+//! The plan deliberately does not assert value equality. The two defects the example crate caught —
+//! path parameters read from the wrong place, no coercion of the text a URL carries — both surfaced
+//! as *rejections of a well-formed request*. So the probe's claim is exactly that: a request built
+//! by the generated client, with every declared parameter set, extracts cleanly in the generated
+//! server, reaches the handler with every optional parameter present, and the declared response
+//! decodes back in the client. Anything an operation needs that cannot be synthesized — a recursive
+//! type with no optional escape, a success the document never declares — is a *named skip*, counted
+//! out loud, never a silent cap.
+
+use crate::api::{BodyContract, Location, OperationContract, StatusPattern};
+use crate::config::Config;
+use crate::contract::{ContractKind, Contracts, Tagging, TypeIndex, TypeRef};
+use crate::diag::{Ctx, RejectError};
+use crate::shape::Format;
+use crate::{api, contract, doc, load, normalize, render, resolve, shape};
+
+/// Everything `xtask probe` needs to write the double and the driver for one document.
+#[derive(Debug, Clone)]
+pub struct Probe {
+    /// One entry per operation the router accepted, probed or skipped.
+    pub operations: Vec<ProbeOp>,
+}
+
+/// One operation: the trait method the double implements, and the request the driver sends.
+#[derive(Debug, Clone)]
+pub struct ProbeOp {
+    /// The generated client method, which is also the trait method's name.
+    pub method: String,
+    /// The grouped parameter arguments, in trait-signature order.
+    pub groups: Vec<ProbeGroup>,
+    /// The body argument, when the operation takes one.
+    pub body: Option<ProbeBody>,
+    /// One call per parameter, then `.body(...)` when there is one.
+    pub setters: Vec<ProbeSetter>,
+    /// What the double answers, and what the driver expects back.
+    pub response: ProbeResponse,
+    /// Why this operation is implemented as `unimplemented!()` and never driven, when it is.
+    pub skip: Option<String>,
+}
+
+/// One location's group struct in the trait signature.
+#[derive(Debug, Clone)]
+pub struct ProbeGroup {
+    /// The argument name: `path`, `query`, `header` or `cookie`.
+    pub arg: &'static str,
+    /// The struct's name inside the generated `server` module.
+    pub ty: String,
+    /// The fields the document made optional, which the driver always sets — so the double
+    /// asserts each arrived `Some`, which is what catches a parameter dropped in transit.
+    pub optional_fields: Vec<String>,
+}
+
+/// The request body the driver sets.
+#[derive(Debug, Clone)]
+pub struct ProbeBody {
+    /// The Rust path of the body type, spelled from inside the generated crate.
+    pub ty: String,
+    /// A JSON value of that type, synthesized from its contract.
+    pub json: String,
+    /// Whether the document marked it required. An optional body reaches the trait as an
+    /// `Option`, so the double's signature and its presence assertion both turn on this.
+    pub required: bool,
+}
+
+/// One builder call the driver makes.
+#[derive(Debug, Clone)]
+pub struct ProbeSetter {
+    /// The setter's name, which is the parameter's Rust name.
+    pub setter: String,
+    /// The Rust path of the parameter's type.
+    pub ty: String,
+    /// A JSON value of that type.
+    pub json: String,
+}
+
+/// The response the double constructs, and the status the driver asserts came back.
+#[derive(Debug, Clone)]
+pub struct ProbeResponse {
+    /// The response enum's name inside the generated `server` module.
+    pub enum_name: String,
+    /// The variant for the arm the double answers with.
+    pub variant: String,
+    /// The Rust path of the arm's payload type.
+    pub ty: String,
+    /// A JSON value of that payload.
+    pub json: String,
+    /// The status the client must see.
+    pub status: u16,
+}
+
+/// Build the probe plan for one document.
+///
+/// # Errors
+///
+/// Returns [`RejectError`] when the document itself is unusable, exactly as [`crate::generate`]
+/// would; a merely unprobeable *operation* is a named skip in the plan instead.
+pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
+    let mut ctx = Ctx::new();
+    let loaded = load::load(input, &mut ctx)?;
+    let normalized = normalize::normalize(loaded.value, &mut ctx)?;
+    let parsed = doc::parse::document(normalized, &mut ctx);
+    let resolved = resolve::resolve(parsed, &mut ctx);
+    let shapes = shape::classify(&resolved, &mut ctx);
+    let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
+    let model = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
+
+    let operations = model
+        .operations()
+        .iter()
+        .filter(|operation| operation.registrable.is_some())
+        .map(|operation| plan(operation, &contracts, config))
+        .collect();
+    Ok(Probe { operations })
+}
+
+/// The plan for one servable operation, with the reason when it cannot be driven.
+fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -> ProbeOp {
+    let path = |ty: &TypeRef| render::types::type_path(ty, contracts, config).to_string();
+
+    let groups = render::server::LOCATIONS
+        .iter()
+        .filter_map(|&(location, suffix)| {
+            let mut any = false;
+            let optional_fields: Vec<String> = operation
+                .params_at(location)
+                .inspect(|_| any = true)
+                .filter(|param| !param.required)
+                // An exploded `form` object cannot be read back by name — the encoding erases the
+                // parameter's name from the wire — so the probe neither sets nor asserts it. Not a
+                // narrowing of the operation: everything recoverable is still exercised.
+                .filter(|param| !param.style.erased_by_explosion())
+                .map(|param| param.rust_name.as_str().to_owned())
+                .collect();
+            any.then(|| ProbeGroup {
+                arg: argument_of(location),
+                ty: render::server::group_name(operation, suffix).to_string(),
+                optional_fields,
+            })
+        })
+        .collect();
+
+    let body = operation.body.as_ref().map(|body| ProbeBody {
+        ty: render::client::body_type(body, contracts, config).to_string(),
+        json: String::new(),
+        required: body.required(),
+    });
+
+    // Skips are decided after the signature is known, because the double has to *implement* a
+    // skipped operation's trait method either way — only the driver test is dropped.
+    let mut skip = None;
+
+    let mut setters = Vec::new();
+    for param in &operation.params {
+        if param.style.erased_by_explosion() {
+            continue;
+        }
+        match synthesize(&param.ty, contracts, &mut Vec::new()) {
+            Ok(value) => setters.push(ProbeSetter {
+                setter: param.rust_name.as_str().to_owned(),
+                ty: path(&param.ty),
+                json: value.to_string(),
+            }),
+            Err(reason) => {
+                skip.get_or_insert(format!(
+                    "parameter `{}` cannot be synthesized: {reason}",
+                    param.wire_name
+                ));
+            }
+        }
+    }
+
+    let body = body.map(|mut planned| {
+        let ty = match operation.body.as_ref() {
+            Some(
+                BodyContract::Json { ty, .. }
+                | BodyContract::Form { ty, .. }
+                | BodyContract::Multipart { ty, .. },
+            ) => Some(ty),
+            Some(BodyContract::Text { .. } | BodyContract::Bytes { .. }) | None => None,
+        };
+        match ty.map(|ty| synthesize(ty, contracts, &mut Vec::new())) {
+            Some(Ok(value)) => planned.json = value.to_string(),
+            Some(Err(reason)) => {
+                skip.get_or_insert(format!("the body cannot be synthesized: {reason}"));
+            }
+            // `Text`: the body is a `String`, and a JSON string deserializes into it. `Bytes` is
+            // `Vec<u8>`, which serde reads from a sequence, so the probe spells its bytes out.
+            None => {
+                planned.json = if matches!(operation.body, Some(BodyContract::Bytes { .. })) {
+                    "[112,114,111,98,101]".to_owned()
+                } else {
+                    "\"probe\"".to_owned()
+                };
+            }
+        }
+        planned
+    });
+
+    let response = if let Some((variant, ty, status)) = success_arm(operation) {
+        match synthesize(&ty, contracts, &mut Vec::new()) {
+            Ok(value) => ProbeResponse {
+                enum_name: render::server::response_name(operation).to_string(),
+                variant,
+                ty: path(&ty),
+                json: value.to_string(),
+                status,
+            },
+            Err(reason) => {
+                skip.get_or_insert(format!("the response cannot be synthesized: {reason}"));
+                unprobed(operation)
+            }
+        }
+    } else {
+        skip.get_or_insert(
+            "no declared success status; only `default` or errors, and which status a `default` \
+             answers with is the handler's choice rather than the description's"
+                .to_owned(),
+        );
+        unprobed(operation)
+    };
+
+    ProbeOp {
+        method: operation.rust_name.as_str().to_owned(),
+        groups,
+        body,
+        setters,
+        response,
+        skip,
+    }
+}
+
+/// A placeholder response for an operation the driver never calls.
+fn unprobed(operation: &OperationContract) -> ProbeResponse {
+    ProbeResponse {
+        enum_name: render::server::response_name(operation).to_string(),
+        variant: String::new(),
+        ty: String::new(),
+        json: String::new(),
+        status: 0,
+    }
+}
+
+/// The first arm the driver can wait for: an exact 2xx, or a 2XX range.
+///
+/// Not `default` — that variant carries its own status precisely because the description does not
+/// say which one it means, and a probe asserting a number the description never stated would be
+/// testing the double rather than the wire.
+fn success_arm(operation: &OperationContract) -> Option<(String, TypeRef, u16)> {
+    let exact = operation
+        .responses
+        .arms
+        .iter()
+        .find_map(|arm| match arm.status {
+            StatusPattern::Exact(code) if (200..300).contains(&code) => {
+                Some((arm.rust_name.as_str().to_owned(), arm.ty.clone(), code))
+            }
+            _ => None,
+        });
+    exact.or_else(|| {
+        operation.responses.arms.iter().find_map(|arm| {
+            matches!(arm.status, StatusPattern::Range(2))
+                .then(|| (arm.rust_name.as_str().to_owned(), arm.ty.clone(), 200))
+        })
+    })
+}
+
+fn argument_of(location: Location) -> &'static str {
+    match location {
+        Location::Path => "path",
+        Location::Query => "query",
+        Location::Header => "header",
+        Location::Cookie => "cookie",
+    }
+}
+
+/// A JSON value of the given type, built from the same contracts the deserializer was.
+///
+/// Every choice here is the least surprising member of the type: the first declared variant, one
+/// element, every member present — optional ones included, because a probe that omits what it may
+/// omit is not exercising the reader. The one legitimate failure is recursion with no optional
+/// escape: a value of such a type has no finite spelling, and the operation is skipped by name.
+fn synthesize(
+    ty: &TypeRef,
+    contracts: &Contracts,
+    visiting: &mut Vec<TypeIndex>,
+) -> Result<serde_json::Value, String> {
+    use serde_json::{Map, Value, json};
+    Ok(match ty {
+        TypeRef::Unit => Value::Null,
+        TypeRef::Bool => json!(true),
+        TypeRef::I64 | TypeRef::U64 => json!(7),
+        TypeRef::F64 => json!(0.5),
+        TypeRef::String => json!("a"),
+        TypeRef::Value => json!({"probe": true}),
+        TypeRef::Format(format) => match format {
+            // The dependency-free defaults render every format as text, but the *content* still has
+            // to be the format's, so a typed configuration parses the same probe.
+            Format::DateTime => json!("2020-01-01T00:00:00Z"),
+            Format::Date => json!("2020-01-01"),
+            Format::Time => json!("12:00:00"),
+            Format::Uuid => json!("00000000-0000-0000-0000-000000000000"),
+            Format::Base64 => json!("cHJvYmU="),
+            Format::Binary => json!("probe"),
+        },
+        TypeRef::Option(inner) | TypeRef::Boxed(inner) => synthesize(inner, contracts, visiting)?,
+        TypeRef::Vec(inner) => json!([synthesize(inner, contracts, visiting)?]),
+        // One member, not none: an empty map writes nothing on the wire, and a probe that sends
+        // nothing asserts nothing — `jellyfin`'s `deepObject` maps only round-trip because this
+        // carries a byte.
+        TypeRef::Map(inner) => json!({"probe": synthesize(inner, contracts, visiting)?}),
+        TypeRef::Array(inner, len) => {
+            let element = synthesize(inner, contracts, visiting)?;
+            Value::Array(std::iter::repeat_n(element, *len as usize).collect())
+        }
+        TypeRef::Tuple(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| synthesize(item, contracts, visiting))
+                .collect::<Result<_, _>>()?,
+        ),
+        TypeRef::Named(index) => {
+            let Some(contract) = contracts.get(*index) else {
+                return Err("an unresolvable type index".to_owned());
+            };
+            if visiting.contains(index) {
+                return Err(format!(
+                    "`{}` is recursive with no optional escape on this path",
+                    contract.rust_name()
+                ));
+            }
+            // Pushed here and popped here, whatever `synthesize_named` returns — keeping the
+            // cleanup in one frame is what lets that function use `?` freely.
+            visiting.push(*index);
+            let value = synthesize_named(contract, contracts, visiting);
+            visiting.pop();
+            value?
+        }
+    })
+}
+
+/// A value of one named contract. The caller owns the recursion guard.
+fn synthesize_named(
+    contract: &crate::contract::TypeContract,
+    contracts: &Contracts,
+    visiting: &mut Vec<TypeIndex>,
+) -> Result<serde_json::Value, String> {
+    use serde_json::{Map, Value, json};
+    Ok(match contract.kind() {
+        ContractKind::Struct { fields } => {
+            let mut members = Map::new();
+            for field in fields {
+                // The capture member is the landing place for undeclared members, and the probe
+                // sends none.
+                if field.flatten {
+                    continue;
+                }
+                match synthesize(&field.ty, contracts, visiting) {
+                    Ok(value) => {
+                        members.insert(field.wire_name.clone(), value);
+                    }
+                    // An optional member that cannot be synthesized — a recursive type reaching
+                    // itself — is legitimately absent; that is what the escape *is*. A required
+                    // one fails the whole value.
+                    Err(reason) => {
+                        if !matches!(field.ty, TypeRef::Option(_)) {
+                            return Err(reason);
+                        }
+                    }
+                }
+            }
+            Value::Object(members)
+        }
+        ContractKind::StringEnum { variants } => match variants.first() {
+            Some(variant) => json!(variant.wire_name),
+            None => {
+                return Err(format!(
+                    "`{}` is an enum with no variants",
+                    contract.rust_name()
+                ));
+            }
+        },
+        ContractKind::Enum { variants } => {
+            let Some(variant) = variants.first() else {
+                return Err(format!(
+                    "`{}` is a union with no variants",
+                    contract.rust_name()
+                ));
+            };
+            let mut value = synthesize(&variant.ty, contracts, visiting)?;
+            if let (Tagging::Internal { tag }, Value::Object(members), Some(name)) =
+                (contract.tagging(), &mut value, variant.tag_value.as_deref())
+            {
+                members.insert(tag.clone(), json!(name));
+            }
+            value
+        }
+        ContractKind::Newtype { inner } | ContractKind::Alias { target: inner } => {
+            synthesize(inner, contracts, visiting)?
+        }
+        ContractKind::Tuple { items } => Value::Array(
+            items
+                .iter()
+                .map(|item| synthesize(item, contracts, visiting))
+                .collect::<Result<_, _>>()?,
+        ),
+    })
+}

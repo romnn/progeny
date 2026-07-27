@@ -303,7 +303,7 @@ pub(super) fn deprecated_use<'a>(
 /// client module re-exports `Error` from the support module, and a document with a schema called
 /// `Error` — the petstore has one — would otherwise produce `Error<Error>` whose two `Error`s are
 /// different types. The bug is silent, because it still compiles.
-pub(super) fn type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
+pub(crate) fn type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
     reference(ty, contracts, config, true)
 }
 

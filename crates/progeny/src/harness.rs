@@ -6,6 +6,7 @@
 //! here is a question about a document, never a way to reach into the model: exposing the model
 //! itself would recreate the general-purpose-library surface progeny exists not to have.
 
+mod probe;
 mod stats;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,7 @@ use camino::Utf8PathBuf;
 use serde_json::Value;
 
 pub use crate::resolve::Counts as Resolution;
+pub use probe::{Probe, ProbeBody, ProbeGroup, ProbeOp, ProbeResponse, ProbeSetter, probe};
 
 use crate::diag::{Ctx, Diagnostic, JsonPointer, RejectError};
 use crate::{api, contract, doc, load, normalize, render, resolve, shape};

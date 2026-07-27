@@ -133,7 +133,7 @@ fn argument_list(
 }
 
 /// The parameter locations that become grouped structs, in the order a handler reads them.
-const LOCATIONS: [(Location, &str); 4] = [
+pub(crate) const LOCATIONS: [(Location, &str); 4] = [
     (Location::Path, "Path"),
     (Location::Query, "Query"),
     (Location::Header, "Header"),
@@ -395,9 +395,12 @@ fn handler_fn(operation: &OperationContract, contracts: &Contracts) -> TokenStre
             let required = param.required;
             let style = super::client::style_tokens(param.style.style());
             let explode = param.style.explode();
+            // The schema's shape rides along because the wire alone cannot say whether `ids=a,b`
+            // is an array or a scalar with a comma in it.
+            let array = param.style.array();
             let source = match location {
                 Location::Path => quote! { incoming.path_value(#wire) },
-                Location::Query => quote! { incoming.query_value(#wire, #style, #explode) },
+                Location::Query => quote! { incoming.query_value(#wire, #style, #explode, #array) },
                 Location::Header => quote! { incoming.header_value(#wire) },
                 Location::Cookie => quote! { incoming.cookie_value(#wire) },
             };
@@ -478,11 +481,11 @@ fn body_extraction(body: &BodyContract, operation: &str) -> TokenStream {
     }
 }
 
-fn group_name(operation: &OperationContract, suffix: &str) -> proc_macro2::Ident {
+pub(crate) fn group_name(operation: &OperationContract, suffix: &str) -> proc_macro2::Ident {
     format_ident!("{}{suffix}", type_stem(operation))
 }
 
-fn response_name(operation: &OperationContract) -> proc_macro2::Ident {
+pub(crate) fn response_name(operation: &OperationContract) -> proc_macro2::Ident {
     format_ident!("{}Response", type_stem(operation))
 }
 

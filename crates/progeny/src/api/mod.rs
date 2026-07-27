@@ -263,6 +263,10 @@ pub(crate) struct FormSpec {
     pub(crate) wire_name: String,
     pub(crate) style: Style,
     pub(crate) explode: bool,
+    /// Whether the member's schema says it is an array — the same fact a query parameter carries
+    /// in its [`StyleContract`], for the same reason: a single-occurrence exploded array on the
+    /// wire is byte-identical to a scalar, and only the schema can tell the reader which it was.
+    pub(crate) array: bool,
 }
 
 /// What each declared status yields.
@@ -322,7 +326,7 @@ pub(crate) fn build(
     config: &Config,
     ctx: &mut Ctx,
 ) -> Result<ApiModel, crate::diag::RejectError> {
-    let mut model = operation::run(resolved, shapes, contracts, config, ctx);
+    let mut model = operation::run(resolved, contracts, config, ctx);
     model.servers = servers(resolved);
     // After the operations exist and before anything renders: a declaration that the document
     // cannot support has to stop generation rather than produce a method that cannot work.

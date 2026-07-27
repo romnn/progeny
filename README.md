@@ -73,6 +73,7 @@ task corpus:compile -- --serde derive        # and through the escape hatch
 task payloads               # serde against the payloads the documents carry
 task differential           # the two serde renderings, equivalent on the wire
 task example                # the generated client against the generated server, over a socket
+task probe                  # the same, generated: every servable operation of the tier
 task audit && task unused   # advisories, and dependencies nothing uses
 task bench:compile -- --ab --reuse --reps 6 --max-load 5 --write-baseline   # needs an idle machine
 ```

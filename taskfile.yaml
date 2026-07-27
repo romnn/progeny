@@ -87,6 +87,15 @@ tasks:
     cmds:
       - cargo run -p xtask --release -- example {{.CLI_ARGS}}
 
+  probe:
+    desc: "the wire differential: every servable operation of the tier, client against server"
+    # The generated form of `task example`, for any document. On its first three documents it found
+    # a server that panicked at startup (the classifier modelled axum's router sharding wrongly),
+    # arrays unreadable from a query string (the row alone cannot say whether `ids=a,b` is an
+    # array), and HEAD responses being decoded (HTTP strips those bodies).
+    cmds:
+      - cargo run -p xtask --release -- probe {{.CLI_ARGS}}
+
   differential:
     desc: "assert the derive and the hand-written serde path agree on every case"
     cmds:

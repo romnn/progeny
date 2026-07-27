@@ -9,11 +9,14 @@
 //! render byte-identical source. Everything here iterates `BTreeMap`s and `Vec`s in a fixed order,
 //! and the corpus harness generates every document twice per run and compares.
 
-mod client;
+// `client`, `server` and `types` are crate-visible rather than private because the probe harness
+// reuses their naming — type paths, group and response names — instead of growing a second copy
+// that could drift from what is actually rendered.
+pub(crate) mod client;
 mod manifest;
 mod serde_impl;
-mod server;
-mod types;
+pub(crate) mod server;
+pub(crate) mod types;
 
 use std::collections::BTreeMap;
 

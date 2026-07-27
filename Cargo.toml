@@ -83,8 +83,14 @@ prettyplease = "0.2"
 # major version axum depends on; `crates/progeny/src/api/registrable.rs` has the test that says so.
 matchit = "0.8"
 # Only to check that claim, which needs the version axum actually resolves rather than the one this
-# workspace names.
-axum = { version = "0.8", default-features = false }
+# workspace names — and, with reqwest below, to compile the two shipped support files that name an
+# HTTP crate. Until they compiled here, they were the only two files whose tested source was not
+# their shipped source.
+axum = { version = "0.8", default-features = false, features = ["json"] }
+# The API surface only: `json` is the one feature the shipped client runtime's signatures need.
+# The runtime features a consumer gets (`charset`, `http2`, `rustls-tls`) change behaviour, not
+# types, and compiling a TLS stack to type-check a file would be minutes bought for nothing.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

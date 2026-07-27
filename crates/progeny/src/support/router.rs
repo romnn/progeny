@@ -1,9 +1,9 @@
 //! What a generated handler does with an `axum` request, and what it sends back.
 //!
 //! The half of the serving runtime that names `axum`, kept apart from [`super::serve`] for the same
-//! reason the client runtime is kept apart from the style table: progeny does not depend on `axum`,
-//! so this file is type-checked by the corpus compile gate on every generated crate rather than by
-//! progeny's own build. The rules that can be tested here are, and they are next door.
+//! reason the client runtime is kept apart from the style table: `axum` is a dev-dependency only,
+//! so this file compiles under `cfg(test)` here and in every generated crate the corpus compile
+//! gate checks. The rules that can be unit-tested without a socket live next door in `serve`.
 
 use std::collections::BTreeMap;
 
@@ -51,21 +51,41 @@ impl Incoming {
     ///
     /// # Errors
     /// Never; the signature matches the other three so one `read` serves all four locations.
+    // `allow` rather than `expect`: this file is compiled again in consumer crates, under a clippy
+    // that never runs the pedantic group, and an unfulfilled expectation there is its own warning.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "uniform signature with the header and cookie accessors, which do fail"
+    )]
     pub fn path_value(&self, name: &str) -> Result<Option<Value>, String> {
-        Ok(self.path.get(name).map(|found| Value::String(found.clone())))
+        Ok(self
+            .path
+            .get(name)
+            .map(|found| Value::String(found.clone())))
     }
 
     /// A query parameter, read by the row the description gave it.
     ///
     /// # Errors
     /// Never; an unreadable value is absent, and whether that costs anything is the caller's rule.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "uniform signature with the header and cookie accessors, which do fail"
+    )]
     pub fn query_value(
         &self,
         name: &str,
         style: super::style::Style,
         explode: bool,
+        array: bool,
     ) -> Result<Option<Value>, String> {
-        Ok(super::style::from_query(&self.query, name, style, explode))
+        Ok(super::style::from_query(
+            &self.query,
+            name,
+            style,
+            explode,
+            array,
+        ))
     }
 
     /// A header, as the text it carries.

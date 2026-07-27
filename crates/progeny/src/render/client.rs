@@ -836,8 +836,9 @@ pub(super) fn form_specs(specs: &[FormSpec]) -> TokenStream {
         let name = &spec.wire_name;
         let style = style_tokens(spec.style);
         let explode = spec.explode;
+        let array = spec.array;
         quote! {
-            support::style::FormSpec { name: #name, style: #style, explode: #explode }
+            support::style::FormSpec { name: #name, style: #style, explode: #explode, array: #array }
         }
     });
     quote! { &[#(#rows),*] }
@@ -880,7 +881,7 @@ fn dispatch(
         // A `default` beside declared successes catches what they do not, which is a failure.
         (Some(arm), false) => {
             let decoded = decode(arm, failure, wrapped_failure);
-            quote! { _ => ::std::result::Result::Err(Error::ErrorResponse(#decoded)), }
+            quote! { _ => ::std::result::Result::Err(Error::Declared(#decoded)), }
         }
         // A `default` and nothing else: it is the whole contract, so a 2xx through it succeeded.
         (Some(arm), true) => {
@@ -888,7 +889,7 @@ fn dispatch(
             let err = decode(arm, failure, wrapped_failure);
             quote! {
                 200..=299 => ::std::result::Result::Ok(#ok),
-                _ => ::std::result::Result::Err(Error::ErrorResponse(#err)),
+                _ => ::std::result::Result::Err(Error::Declared(#err)),
             }
         }
     };
@@ -934,7 +935,7 @@ fn arm_matches(
         let decoded = decode(arm, ty, wrapped);
         out.push(if is_error {
             quote! {
-                #pattern => ::std::result::Result::Err(Error::ErrorResponse(#decoded)),
+                #pattern => ::std::result::Result::Err(Error::Declared(#decoded)),
             }
         } else {
             quote! { #pattern => ::std::result::Result::Ok(#decoded), }
@@ -955,7 +956,7 @@ fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool) -> TokenStream {
     quote! { support::decode(response).await?.map(#ty::#variant) }
 }
 
-pub(super) fn body_type(
+pub(crate) fn body_type(
     body: &BodyContract,
     contracts: &Contracts,
     config: &Config,

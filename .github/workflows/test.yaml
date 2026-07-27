@@ -96,6 +96,11 @@ jobs:
       # that no amount of reading the emitted source had.
       - name: The generated client against the generated server
         run: task example
+      # The generated form of the step above, for every servable operation of two small documents;
+      # the whole tier runs nightly in `corpus-full`. Its first run found a generated server that
+      # panicked at startup, which no gate that does not call `router()` could have seen.
+      - name: The wire differential over the small documents
+        run: task probe -- petstore-31 oxide
       - name: Differential serde harness
         run: task differential
 
@@ -123,6 +128,8 @@ jobs:
         run: task corpus:fetch
       - name: Compile and lint every generated crate
         run: task corpus:compile:all
+      - name: The wire differential over the whole tier
+        run: task probe
 
   publish:
     name: publish (dry-run)

@@ -12,6 +12,7 @@ mod generated;
 mod layers;
 mod paths;
 mod payloads;
+mod probe;
 mod snapshot;
 
 use anyhow::Result;
@@ -44,6 +45,8 @@ enum Command {
     Payloads(payloads::Args),
     /// Generate one description's client and server and make them talk to each other.
     Example(example::Args),
+    /// The same, generated for any document: every servable operation, driven over a socket.
+    Probe(probe::Args),
 }
 
 fn main() -> Result<()> {
@@ -55,6 +58,7 @@ fn main() -> Result<()> {
         Command::Differential(args) => differential::run(&args),
         Command::Payloads(args) => payloads::run(&args),
         Command::Example(args) => example::run(&args),
+        Command::Probe(args) => probe::run(&args),
         // The same run as `corpus`, writing what it would otherwise compare against.
         Command::RegenSnapshots(mut args) => {
             args.write_snapshots = true;

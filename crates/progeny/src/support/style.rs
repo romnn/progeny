@@ -99,6 +99,8 @@ pub struct FormSpec {
     pub name: &'static str,
     pub style: Style,
     pub explode: bool,
+    /// Whether the member's schema declares an array, which the wire alone cannot say.
+    pub array: bool,
 }
 
 /// An `application/x-www-form-urlencoded` body.
@@ -125,6 +127,17 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
             .iter()
             .find(|spec| spec.name == name)
             .map_or((Style::Form, true), |spec| (spec.style, spec.explode));
+        // An object-valued member goes as one `name=<json>` pair rather than through the query
+        // rule. Exploding an object is *spec'd* behaviour for a query parameter — the erasure of
+        // the parameter's name is what `explode` means there — but as a default for a body member
+        // it writes the member's contents under bare keys no reader can ever reassemble, which the
+        // wire probe demonstrated on `posthog`'s `Table`: three nested members exploded into each
+        // other. JSON text is the one spelling whose reader is exact, and it is the same rule a
+        // compound query element already follows. `deepObject` keeps its addressable form.
+        if matches!(member, Value::Object(_)) && style != Style::DeepObject {
+            pairs.push((name.clone(), scalar(member)));
+            continue;
+        }
         pairs.extend(query_pairs(name, member, style, explode));
     }
     pairs
@@ -144,7 +157,13 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
 /// `None` means the query string did not carry the parameter at all, which is a different answer
 /// from "carried it empty" and the caller decides what each costs.
 #[must_use]
-pub fn from_query(query: &str, name: &str, style: Style, explode: bool) -> Option<Value> {
+pub fn from_query(
+    query: &str,
+    name: &str,
+    style: Style,
+    explode: bool,
+    array: bool,
+) -> Option<Value> {
     let pairs: Vec<(String, String)> = query
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -173,16 +192,30 @@ pub fn from_query(query: &str, name: &str, style: Style, explode: bool) -> Optio
         .map(|(_, value)| value)
         .collect();
     let first = mine.first()?;
-    // Repetition is what an exploded array looks like; one occurrence of a style that joins is what
-    // a joined one looks like. Both are decided by the row rather than by what happens to have
-    // arrived, so a single-element exploded array stays an array.
-    Some(match (style, explode) {
-        // The two delimited styles are the only ones that put a whole array in one occurrence;
-        // every exploded style, `form` included, repeats the key instead, so they share an arm.
-        (Style::SpaceDelimited, false) => split_one(first, ' '),
-        (Style::PipeDelimited, false) => split_one(first, '|'),
-        (_, true) if mine.len() > 1 => split_values(&mine),
-        _ => Value::String((*first).clone()),
+    // The schema decides *whether* this is an array and the row decides *how* one is spelled —
+    // neither alone is enough, which the wire probe proved on `jellyfin`: `ids=a,b` under
+    // `style: form, explode: false` is byte-identical to a scalar that contains a comma, so a
+    // reader working from the row alone either splits scalars it must not or returns arrays as
+    // one joined string, and this returned the string. The same shape-blindness made a
+    // single-element exploded array — `ids=a`, one occurrence — indistinguishable from a scalar.
+    // A URL carries no types; the schema supplies them, here as everywhere.
+    Some(if array {
+        match (style, explode) {
+            (Style::SpaceDelimited, false) => split_one(first, ' '),
+            (Style::PipeDelimited, false) => split_one(first, '|'),
+            // `simple`, `label` and `matrix` do not reach a query string, but the row is data a
+            // caller supplies; comma-joined is what each of them does to an array elsewhere.
+            (
+                Style::Form | Style::DeepObject | Style::Simple | Style::Label | Style::Matrix,
+                false,
+            ) => split_one(first, ','),
+            // Exploded: one occurrence per element, however many arrived — a one-element array
+            // reaches the handler as a one-element array, not as its element.
+            (_, true) => split_values(&mine),
+        }
+    } else {
+        // A scalar is the first occurrence's text, commas and all.
+        Value::String((*first).clone())
     })
 }
 
@@ -254,11 +287,25 @@ pub fn query_object(query: &str, specs: &[FormSpec]) -> Value {
         if members.contains_key(&name) {
             continue;
         }
-        let (style, explode) = specs
-            .iter()
-            .find(|spec| spec.name == name)
-            .map_or((Style::Form, true), |spec| (spec.style, spec.explode));
-        if let Some(value) = from_query(query, &name, style, explode) {
+        let spec = specs.iter().find(|spec| spec.name == name);
+        let (style, explode) = spec.map_or((Style::Form, true), |spec| (spec.style, spec.explode));
+        // The spec table now carries every declared member's shape, derived from the body's own
+        // contract — the wire probe caught the cost of guessing on `posthog`, where a one-element
+        // array member is byte-identical to a scalar. The repetition heuristic survives only for
+        // members outside the table: an `additionalProperties` member has no declared shape
+        // anywhere, and repetition is the one signal the wire itself offers.
+        let array = spec.map_or_else(
+            || {
+                query
+                    .split('&')
+                    .filter_map(|pair| pair.split_once('='))
+                    .filter(|(key, _)| decode(key) == name)
+                    .count()
+                    > 1
+            },
+            |spec| spec.array,
+        );
+        if let Some(value) = from_query(query, &name, style, explode, array) {
             members.insert(name, value);
         }
     }
@@ -517,7 +564,7 @@ mod tests {
             .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
             .collect::<Vec<_>>()
             .join("&");
-        super::from_query(&query, "p", style, explode)
+        super::from_query(&query, "p", style, explode, value.is_array())
     }
 
     use serde_json as json_types;
@@ -553,10 +600,13 @@ mod tests {
     fn a_parameter_the_query_never_carried_is_absent_rather_than_empty() {
         // The distinction the whole optional-parameter rule rests on: a server has to tell "not
         // sent" from "sent empty", and only `None` says the first.
-        assert_eq!(super::from_query("", "p", Style::Form, true), None);
-        assert_eq!(super::from_query("q=1", "p", Style::Form, true), None);
+        assert_eq!(super::from_query("", "p", Style::Form, true, false), None);
         assert_eq!(
-            super::from_query("p=", "p", Style::Form, true),
+            super::from_query("q=1", "p", Style::Form, true, false),
+            None
+        );
+        assert_eq!(
+            super::from_query("p=", "p", Style::Form, true, false),
             Some(json!(""))
         );
     }
@@ -564,22 +614,22 @@ mod tests {
     #[test]
     fn what_arrives_percent_encoded_comes_back_as_it_was_written() {
         assert_eq!(
-            super::from_query("p=a%20b%26c", "p", Style::Form, true),
+            super::from_query("p=a%20b%26c", "p", Style::Form, true, false),
             Some(json!("a b&c"))
         );
         // `+` is the older spelling of a space. progeny writes `%20` and reads both, because what
         // arrives was written by somebody else's client.
         assert_eq!(
-            super::from_query("p=a+b", "p", Style::Form, true),
+            super::from_query("p=a+b", "p", Style::Form, true, false),
             Some(json!("a b"))
         );
         assert_eq!(
-            super::from_query("p=100%25", "p", Style::Form, true),
+            super::from_query("p=100%25", "p", Style::Form, true, false),
             Some(json!("100%"))
         );
         // A `%` that is not an escape is a `%`, which is the only alternative to refusing.
         assert_eq!(
-            super::from_query("p=50%zz", "p", Style::Form, true),
+            super::from_query("p=50%zz", "p", Style::Form, true, false),
             Some(json!("50%zz"))
         );
     }
@@ -614,8 +664,23 @@ mod tests {
             name: "tag",
             style: Style::SpaceDelimited,
             explode: false,
+            array: true,
         }];
         assert_eq!(form_body(&json!({"tag": ["a", "b"]}), &specs), "tag=a%20b");
+    }
+
+    /// An object member keeps its name on the wire, holding its JSON.
+    ///
+    /// The wire probe's `posthog` find: exploding an object member wrote its *contents* under bare
+    /// keys — three nested members exploded into each other, and no reader can reassemble what has
+    /// no name. One pair per member, JSON for the value, is the spelling whose reader is exact.
+    #[test]
+    fn an_object_member_of_a_form_body_survives_as_one_pair() {
+        let body = form_body(&json!({"cfg": {"a": 1}, "name": "x"}), &[]);
+        assert_eq!(body, "cfg=%7B%22a%22%3A1%7D&name=x");
+        let read = super::query_object(&body, &[]);
+        assert_eq!(read["cfg"], json!("{\"a\":1}"));
+        assert_eq!(read["name"], json!("x"));
     }
 
     #[test]

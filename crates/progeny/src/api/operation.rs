@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 
+use super::Style;
 use super::route::{self, PathTemplate};
 use super::style::{self, Location, ParamShape};
 use super::{
@@ -27,19 +28,17 @@ use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MaybeRef, MediaType, Operation, Parameter, PathItem, Response};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Docs, Shape, Shapes};
+use crate::shape::Docs;
 
 /// Every operation the document declares, named and lowered.
 pub(super) fn run(
     resolved: &ResolvedDocument,
-    shapes: &Shapes,
     contracts: &Contracts,
     _config: &Config,
     ctx: &mut Ctx,
 ) -> ApiModel {
     let mut build = Build {
         resolved,
-        shapes,
         contracts,
         namer: Namer::default(),
     };
@@ -70,7 +69,6 @@ pub(super) fn run(
 
 struct Build<'a> {
     resolved: &'a ResolvedDocument,
-    shapes: &'a Shapes,
     contracts: &'a Contracts,
     /// Method names, kept unique across the whole client.
     namer: Namer,
@@ -159,13 +157,28 @@ impl Build<'_> {
         }
 
         let rust_name = self.name(operation, method, route, at, ctx);
+        // Body first, then responses: the order the struct literal used to evaluate them in, kept
+        // so that hoisting the calls does not reorder their diagnostics under the fold cap.
+        let body = self.body(operation, at, ctx);
+        let mut responses = self.responses(operation, at, ctx);
+        if method == Method::Head {
+            // A `HEAD` response has no body on the wire — the transport strips it, whatever the
+            // handler wrote — so the schemas these arms declare document the `GET` twin, not
+            // anything this operation can receive. Decoding them is how the wire probe found this:
+            // every `HEAD` in `jellyfin` failed on a body that HTTP guarantees is absent. The arms
+            // and their statuses stay; only the payload type becomes what a bodiless response
+            // actually carries.
+            for arm in responses.arms.iter_mut().chain(responses.default.as_mut()) {
+                arm.ty = crate::contract::TypeRef::Unit;
+            }
+        }
         Some(OperationContract {
             rust_name,
             method,
             path: template.clone(),
             params,
-            body: self.body(operation, at, ctx),
-            responses: self.responses(operation, at, ctx),
+            body,
+            responses,
             docs: docs_of(operation),
             // Filled in once every operation exists: whether a route collides is a question about
             // the whole set, so it cannot be answered while the set is still being built.
@@ -342,13 +355,13 @@ impl Build<'_> {
             .type_of(&key)
             .cloned()
             .unwrap_or(TypeRef::String);
-        let shape = match self.shapes.get(&key) {
-            Some(Shape::Array { .. } | Shape::FixedArray { .. } | Shape::Tuple { .. }) => {
-                ParamShape::Array
-            }
-            Some(Shape::Struct(_) | Shape::Map { .. }) => ParamShape::Object,
-            _ => ParamShape::Primitive,
-        };
+        // Derived from the *type the extraction decodes into*, not from the classified shape. The
+        // two disagreed for orb's `status[]`: a nullable array classifies as a union, which is not
+        // `Shape::Array`, so the shape said "primitive" while the rendered type was
+        // `Option<Vec<String>>` — and the server, told it was reading a scalar, handed the typed
+        // read a string it rejected. One source answering both questions is the fix, not a second
+        // case in the old match.
+        let shape = param_shape(&ty, self.contracts);
         (ty, shape)
     }
 
@@ -398,7 +411,7 @@ impl Build<'_> {
         }
         match base.as_str() {
             "application/x-www-form-urlencoded" => BodyContract::Form {
-                specs: Self::form_specs(entry, at, ctx),
+                specs: self.form_specs(&ty, entry, at, ctx),
                 ty,
                 required,
             },
@@ -458,9 +471,22 @@ impl Build<'_> {
         }
     }
 
-    /// What the body's `encoding` says about individual members of a form body.
-    fn form_specs(entry: &MediaType, at: &JsonPointer, ctx: &mut Ctx) -> Vec<FormSpec> {
-        let mut specs = Vec::new();
+    /// One spec per declared member of a form body: the row from `encoding` where the document
+    /// wrote one, and the member's shape from the contract always.
+    ///
+    /// The first version carried only the `encoding`-named members — one body in the whole corpus —
+    /// which left the reader shape-blind for everything else, and the wire probe caught the cost on
+    /// `posthog`: a one-element array member arrives as one occurrence, byte-identical to a scalar,
+    /// and was handed to serde as its element. The shape lives in the contract either way; now the
+    /// reader gets it for every member, the same way a query parameter does.
+    fn form_specs(
+        &self,
+        ty: &TypeRef,
+        entry: &MediaType,
+        at: &JsonPointer,
+        ctx: &mut Ctx,
+    ) -> Vec<FormSpec> {
+        let mut declared: BTreeMap<String, (Style, bool)> = BTreeMap::new();
         for (name, encoding) in entry.encoding.iter().flatten() {
             if encoding.style.is_none() && encoding.explode.is_none() {
                 continue;
@@ -468,13 +494,36 @@ impl Build<'_> {
             let at = at.child("content").child("encoding").child(name);
             // The same classifier a query parameter goes through, because a form body is a query
             // string in the body position and an undefined combination is undefined in both.
-            let Some((style, explode)) = style::form_member(encoding, &at, ctx) else {
-                continue;
-            };
+            if let Some((style, explode)) = style::form_member(encoding, &at, ctx) {
+                declared.insert(name.clone(), (style, explode));
+            }
+        }
+
+        let mut specs = Vec::new();
+        if let TypeRef::Named(index) = ty
+            && let Some(contract) = self.contracts.get(*index)
+            && let ContractKind::Struct { fields } = contract.kind()
+        {
+            for field in fields {
+                let (style, explode) = declared
+                    .remove(field.wire_name.as_str())
+                    .unwrap_or((Style::Form, true));
+                specs.push(FormSpec {
+                    wire_name: field.wire_name.clone(),
+                    style,
+                    explode,
+                    array: matches!(param_shape(&field.ty, self.contracts), ParamShape::Array),
+                });
+            }
+        }
+        // `encoding` entries that name no declared member — a captured `additionalProperties`
+        // member can still carry a row — keep the reach the encoding-only version had.
+        for (name, (style, explode)) in declared {
             specs.push(FormSpec {
-                wire_name: name.clone(),
+                wire_name: name,
                 style,
                 explode,
+                array: false,
             });
         }
         specs
@@ -793,6 +842,45 @@ fn docs_of(operation: &Operation) -> Docs {
         title: operation.summary.clone(),
         description: operation.description.clone(),
         deprecated: operation.deprecated.unwrap_or(false),
+    }
+}
+
+/// Which of the three serialization shapes a parameter's *type* has.
+///
+/// The type, not the classified schema shape, because the two can disagree and the type is the one
+/// the extraction decodes into: orb's `status[]` is a nullable array, which classifies as a union
+/// rather than as `Shape::Array`, so the old shape-side derivation said "primitive" while the
+/// rendered field was `Option<Vec<String>>` — and the server rejected the very requests its own
+/// client builds. Wrappers that do not change what the wire carries are looked through; named
+/// types are looked *into*, because an alias of an array is an array on the wire.
+fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
+    match ty {
+        TypeRef::Option(inner) | TypeRef::Boxed(inner) => param_shape(inner, contracts),
+        TypeRef::Vec(_) | TypeRef::Array(..) | TypeRef::Tuple(_) => ParamShape::Array,
+        TypeRef::Map(_) => ParamShape::Object,
+        TypeRef::Named(index) => match contracts
+            .get(*index)
+            .map(crate::contract::TypeContract::kind)
+        {
+            Some(ContractKind::Struct { .. }) => ParamShape::Object,
+            Some(ContractKind::Tuple { .. }) => ParamShape::Array,
+            Some(ContractKind::Newtype { inner } | ContractKind::Alias { target: inner }) => {
+                param_shape(inner, contracts)
+            }
+            // String enums and unions serialize as whatever scalar their value is; `None` is an
+            // unresolvable index, which the type path renderer also treats as opaque.
+            Some(ContractKind::StringEnum { .. } | ContractKind::Enum { .. }) | None => {
+                ParamShape::Primitive
+            }
+        },
+        TypeRef::Unit
+        | TypeRef::Bool
+        | TypeRef::I64
+        | TypeRef::U64
+        | TypeRef::F64
+        | TypeRef::String
+        | TypeRef::Format(_)
+        | TypeRef::Value => ParamShape::Primitive,
     }
 }
 
