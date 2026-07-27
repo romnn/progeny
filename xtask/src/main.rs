@@ -7,6 +7,7 @@
 mod bench;
 mod corpus;
 mod differential;
+mod example;
 mod generated;
 mod layers;
 mod paths;
@@ -41,6 +42,8 @@ enum Command {
     Differential(differential::Args),
     /// Round-trip every example payload the corpus documents carry through the generated types.
     Payloads(payloads::Args),
+    /// Generate one description's client and server and make them talk to each other.
+    Example(example::Args),
 }
 
 fn main() -> Result<()> {
@@ -51,6 +54,7 @@ fn main() -> Result<()> {
         Command::LintLayers(args) => layers::run(&args),
         Command::Differential(args) => differential::run(&args),
         Command::Payloads(args) => payloads::run(&args),
+        Command::Example(args) => example::run(&args),
         // The same run as `corpus`, writing what it would otherwise compare against.
         Command::RegenSnapshots(mut args) => {
             args.write_snapshots = true;

@@ -58,6 +58,59 @@ pub struct Config {
     /// What to call the emitted crate, when emitting one.
     #[serde(default)]
     pub package: Package,
+    /// How much of a request body a generated server will read into memory.
+    #[serde(default)]
+    pub body_limit: BodyLimit,
+    /// Which operations paginate, and how, keyed by operation id.
+    ///
+    /// Declared and never detected. 62 of the corpus's 78 documents paginate and **no two agree**
+    /// on how to say so — the cursor parameter is called `offset` 541 times, `page` 319, `cursor`
+    /// 213, `after` 198, and on through `page_token`, `page[cursor]` and `PageToken` — so detection
+    /// would be a table of vendor spellings pretending to be a rule. That is what the predecessor
+    /// did and what did not generalize. See [`Pagination`].
+    #[serde(default)]
+    pub pagination: BTreeMap<String, Pagination>,
+}
+
+/// How one operation paginates.
+///
+/// Every field is validated against the document when generating: a name that does not resolve is
+/// a hard error rather than a generated method that cannot work. The caller stated an intent about
+/// a specific operation, so a silent no-op would be the worst of the three options.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Pagination {
+    /// The query parameter carrying the cursor, by its **wire** name.
+    ///
+    /// The wire name rather than the Rust one, because it is the document that says `page[cursor]`
+    /// and the configuration should quote the document rather than progeny's rendering of it.
+    pub cursor_param: String,
+    /// Where the next cursor is in the success response, as a dotted member path.
+    ///
+    /// `next_cursor`, or `meta.next` — the members are wire names, and each one is resolved
+    /// against the type the response actually has.
+    pub next_cursor: String,
+    /// Where the page's items are, as a dotted member path. Its element type becomes the stream's.
+    pub items: String,
+}
+
+/// How much of a request body a generated server will read into memory, in bytes.
+///
+/// A *ceiling*, and a decision rather than a default: a generated server must not become a
+/// denial-of-service target because a description said `type: string`. `axum`'s `DefaultBodyLimit`
+/// does not raise it — that layer inserts an extension only extractors calling `with_limited_body`
+/// consult, and the generated support code reads the body with `to_bytes` and this number — so this
+/// is the knob, and it exists because saying so in a comment was not enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct BodyLimit(pub usize);
+
+impl Default for BodyLimit {
+    fn default() -> Self {
+        // Two mebibytes. Large enough for the request bodies this corpus describes, small enough
+        // that an unauthenticated caller cannot make a server hold much.
+        Self(2 * 1024 * 1024)
+    }
 }
 
 /// Which halves of the interface to emit.
@@ -228,11 +281,20 @@ pub enum UnknownFields {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SerdeImpl {
-    /// The derive, always. The escape hatch, and it has to stay reachable: buffering requires a
-    /// self-describing format, and a caller may feed generated types to one that is not.
-    #[default]
+    /// The derive, always.
+    ///
+    /// **The escape hatch, and it has to stay reachable**: the buffered path requires a
+    /// self-describing format, and a caller may feed generated types to one that is not — `bincode`
+    /// and `postcard` cannot tell this deserializer what a member is called. Set this and every type
+    /// goes back to the derive. It is also the one-flag A/B the differential harness is built on.
     DeriveAlways,
     /// The hand-written implementation wherever the eligibility function allows it.
+    ///
+    /// The default, because the compile-time saving is the point of generating this code at all and
+    /// a payoff behind a flag is not one: measured on the type layer, 65–67% less CPU and 47–55%
+    /// less peak RSS than the derive. Fieldless enums take a path that never buffers, so they keep
+    /// working with any format; structs are the ones that need a self-describing one.
+    #[default]
     HandWrittenWhereEligible,
 }
 

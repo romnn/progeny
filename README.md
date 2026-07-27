@@ -20,8 +20,13 @@ Under construction. What exists today:
 - **The type layer.** Schemas are classified into one closed set of shapes, `allOf` is merged, names
   are derived from document positions, structurally identical types are deduplicated, and every
   generated type is described by exactly one wire-contract record.
-- **The types renderer**, emitting either a complete crate or one module to `include!`, with the
-  serde derive or with hand-written implementations.
+- **The types renderer**, emitting either a complete crate or one module to `include!`, with
+  hand-written serde implementations by default or the derive on request.
+- **The client renderer.** One method per operation, with the URL, query string, headers and cookies
+  built from the description's own parameter styles, and a typed response per declared status.
+- **The server renderer.** An `Api` trait to implement, an `axum` router, and a rejection envelope —
+  emitting a handler only for routes a router will actually accept, which is asked of `matchit`
+  rather than guessed from the template's shape.
 - **The conformance corpus.** 78 real-world published API descriptions: round-tripped through the
   model and compared by value, references resolved and accounted for, generated twice and
   byte-compared, with every finding recorded in a hash-keyed snapshot. What those measurements
@@ -29,8 +34,52 @@ Under construction. What exists today:
 - **The harnesses the later stages are measured by**: the corpus runner, the compile-cost benchmark,
   the differential serde harness, the module-layer lint, and three fuzz targets.
 
-The client and server renderers do not exist yet: `generate` emits the shared type layer, and
-reports everything it had to repair or could not represent.
+`generate` reports everything it had to repair or could not represent, every time.
+
+**One caveat worth knowing before you start.** Structs deserialize through a buffered hand-written
+implementation, which needs a *self-describing* format — one that names its members, as JSON, YAML
+and TOML do. If you feed generated structs to `bincode` or `postcard`, set `serde-impl =
+"derive-always"` and every type goes back to the serde derive. Nothing else changes: the two
+strategies are asserted equivalent on the wire, and they agree on every payload in the corpus.
+
+## Streams over paginated listings
+
+Declared, never detected. 62 of the 78 corpus documents paginate and no two agree on how to say so
+— the cursor parameter is `offset` 541 times, `page` 319, `cursor` 213, `after` 198 — so progeny
+asks rather than guesses:
+
+```toml
+[pagination.list_pets]
+cursor-param = "cursor"     # the query parameter, by its wire name
+next-cursor = "next"        # where the next cursor is in the success response
+items = "items"             # where the page's items are; their element type is the stream's
+```
+
+Every name is checked against the document before anything is generated, and a name that does not
+resolve says what it looked for and what the document had instead. The operation then gains a
+`stream()` beside its `send()` — never instead of it — and the generated crate depends on
+`futures-core` and `futures-util` only because you asked for one.
+
+## Releasing
+
+```sh
+task test:all               # unit, integration and doc tests
+task lint:fc                # every feature combination × target, warnings denied
+task lint:layers            # the one-directional layer rule
+task typos                  # prose, excluding the vendor documents and their snapshots
+task corpus                 # all 78: round-trip, resolve, generate, snapshot
+task corpus:compile         # the quick tier, compiled and linted, in the default serde mode
+task corpus:compile -- --serde derive        # and through the escape hatch
+task payloads               # serde against the payloads the documents carry
+task differential           # the two serde renderings, equivalent on the wire
+task example                # the generated client against the generated server, over a socket
+task audit && task unused   # advisories, and dependencies nothing uses
+task bench:compile -- --ab --reuse --reps 6 --max-load 5 --write-baseline   # needs an idle machine
+```
+
+The benchmark is last and separate on purpose: it is the only step whose result depends on what
+else the machine is doing, and the harness refuses to record a figure taken outside its own
+discipline rather than quietly writing one down.
 
 ## Layout
 

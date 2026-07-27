@@ -112,6 +112,14 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::LegacyExclusiveBound => Wiring::Fixture(document(json!({
             "Bounded": {"type": "integer", "minimum": 1, "exclusiveMinimum": true},
         }))),
+        // A 3.1 document writing 3.0's `format: binary`, which is how a multipart body says which
+        // property is a file. 110 occurrences across 15 documents that declare 3.1.
+        BreakageClass::LegacyStringFormat => Wiring::Fixture(document(json!({
+            "Upload": {
+                "type": "object",
+                "properties": {"file": {"type": "string", "format": "binary"}},
+            },
+        }))),
         BreakageClass::NullableUnionBranch => Wiring::Fixture(dialect_30(json!({
             "Usage": {"type": "object", "properties": {"total": {"type": "integer"}}},
             "MaybeUsage": {"anyOf": [{"$ref": "#/components/schemas/Usage"}, {"nullable": true}]},
@@ -182,9 +190,28 @@ fn wiring(class: BreakageClass) -> Wiring {
         // Half of this class: a template no parameter can fill, which is a property of one
         // operation. The other half — two routes colliding under a router's matching rules — is a
         // property of a router, and there is none before stage 7.
+        // Both halves, in one fixture. The first path names a variable no parameter declares, so
+        // the *client* cannot build its URL and the operation is skipped; the second and third are
+        // one route under two names, which only a *router* can object to, so they keep their client
+        // methods and the second loses its server handler. The two halves landed a stage apart and
+        // are two different sentences about two different things.
         BreakageClass::UnregistrableRoute => Wiring::Fixture(paths(json!({
             "/pets/{petId}": {
                 "get": {"operationId": "getPet", "responses": {"200": {"description": "ok"}}},
+            },
+            "/toys/{toyId}": {
+                "get": {
+                    "operationId": "getToy",
+                    "parameters": [{"name": "toyId", "in": "path", "required": true, "schema": {"type": "string"}}],
+                    "responses": {"200": {"description": "ok"}},
+                },
+            },
+            "/toys/{toyName}": {
+                "get": {
+                    "operationId": "getToyByName",
+                    "parameters": [{"name": "toyName", "in": "path", "required": true, "schema": {"type": "string"}}],
+                    "responses": {"200": {"description": "ok"}},
+                },
             },
         }))),
     }

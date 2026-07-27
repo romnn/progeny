@@ -21,22 +21,26 @@ impl RustIdent {
     /// A type or variant name, from name segments.
     pub(crate) fn type_name(segments: &[String]) -> Self {
         let joined = segments.join(" ");
-        Self(guard(&joined.to_upper_camel_case(), "Type"))
+        Self(guard(&joined.to_upper_camel_case(), "Type", Case::Upper))
     }
 
     /// A field name.
     pub(crate) fn field(name: &str) -> Self {
-        Self(guard(&name.to_snake_case(), "field"))
+        Self(guard(&name.to_snake_case(), "field", Case::Snake))
     }
 
     /// A function or method name, from name segments.
     pub(crate) fn method(segments: &[String]) -> Self {
-        Self(guard(&segments.join(" ").to_snake_case(), "call"))
+        Self(guard(
+            &segments.join(" ").to_snake_case(),
+            "call",
+            Case::Snake,
+        ))
     }
 
     /// A variant name.
     pub(crate) fn variant(name: &str) -> Self {
-        Self(guard(&name.to_upper_camel_case(), "Variant"))
+        Self(guard(&name.to_upper_camel_case(), "Variant", Case::Upper))
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -55,15 +59,34 @@ impl std::fmt::Display for RustIdent {
     }
 }
 
+/// Which shape of identifier a name is being made into.
+///
+/// Needed because dropping the non-ASCII characters can change the *case* of what is left. `vapi`
+/// enumerates a voice called `Étienne`: it camel-cases to `Étienne`, loses its `É`, and what
+/// remains is `tienne` — which rustc accepts and clippy rejects, in a crate the consumer did not
+/// write. Re-applying the case after the filter is the only way the guard's answer is still in the
+/// case its caller asked for.
+#[derive(Debug, Clone, Copy)]
+enum Case {
+    Upper,
+    Snake,
+}
+
 /// Make a case-converted string into something Rust will accept.
 ///
 /// `fallback` is used when there is nothing left to work with — a property named `"-"` or `""`,
-/// which real documents do contain.
-fn guard(converted: &str, fallback: &str) -> String {
-    let mut cleaned: String = converted
+/// which real documents do contain, and now also a name written entirely outside ASCII.
+fn guard(converted: &str, fallback: &str, case: Case) -> String {
+    let filtered: String = converted
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
         .collect();
+    // Idempotent on anything the filter did not disturb: heck's own output is already in this case,
+    // so this only moves names the filter changed.
+    let mut cleaned = match case {
+        Case::Upper => filtered.to_upper_camel_case(),
+        Case::Snake => filtered.to_snake_case(),
+    };
     if cleaned.is_empty() {
         cleaned = fallback.to_owned();
     }
@@ -221,6 +244,22 @@ mod tests {
         assert_eq!(RustIdent::field("petName").as_str(), "pet_name");
         assert_eq!(RustIdent::field("pet-name").as_str(), "pet_name");
         assert_eq!(RustIdent::variant("in-progress").as_str(), "InProgress");
+    }
+
+    #[test]
+    fn dropping_a_leading_accent_does_not_drop_the_case_with_it() {
+        // `vapi` enumerates a voice called `Étienne`. Filtering the non-ASCII characters left
+        // `tienne`, which rustc accepts and clippy rejects — in the consumer's build, about a name
+        // they did not choose. The wire name is untouched either way; only the Rust side moves.
+        assert_eq!(RustIdent::variant("Étienne").as_str(), "Tienne");
+        assert_eq!(RustIdent::variant("Hélène").as_str(), "Hlne");
+        assert_eq!(
+            RustIdent::type_name(&["Ökonomie".to_owned()]).as_str(),
+            "Konomie"
+        );
+        // A name with nothing ASCII left falls back rather than vanishing.
+        assert_eq!(RustIdent::variant("日本語").as_str(), "Variant");
+        assert_eq!(RustIdent::field("Ärger").as_str(), "rger");
     }
 
     #[test]

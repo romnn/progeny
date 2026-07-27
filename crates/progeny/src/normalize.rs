@@ -449,6 +449,7 @@ impl Walk<'_> {
             string_format(map);
         } else {
             self.repair_exclusive_bounds(map);
+            self.repair_string_format(map);
         }
         self.repair_tuple_items(map);
 
@@ -576,6 +577,49 @@ impl Walk<'_> {
                 ),
             );
         }
+    }
+
+    /// `format: byte` or `format: binary` inside a document declaring 3.1.
+    ///
+    /// 2020-12 removed both — the facts moved to `contentEncoding` and `contentMediaType` — so a
+    /// 3.1 document writing them is writing the 3.0 spelling, and reading it as one loses nothing.
+    /// The same argument as the boolean `exclusiveMinimum` repair beside it, and the corpus says
+    /// the same thing twice: **110 occurrences across 15 documents that declare 3.1**, `telnyx`,
+    /// `openai` and `langsmith` at the head of them.
+    ///
+    /// It matters most for a multipart body, where `format: binary` is the only thing marking
+    /// *which property* is a file — a fact the media-type key cannot carry. Left unread, those
+    /// members become text parts, which is a request built wrong rather than a type named oddly.
+    fn repair_string_format(&mut self, map: &mut Map<String, Value>) {
+        let Some(format) = map.get("format").and_then(Value::as_str) else {
+            return;
+        };
+        let (key, value) = match format {
+            "byte" => ("contentEncoding", "base64"),
+            "binary" => ("contentMediaType", "application/octet-stream"),
+            _ => return,
+        };
+        if !type_includes(map, "string") {
+            return;
+        }
+        let location = self.at.child("format");
+        map.remove("format");
+        let already = map.contains_key(key);
+        map.entry(key.to_owned())
+            .or_insert_with(|| Value::String(value.to_owned()));
+        // The detail carries no values: two occurrences of one finding have to render identically
+        // or they cannot be aggregated into one record.
+        self.report(
+            BreakageClass::LegacyStringFormat,
+            location,
+            if already {
+                "`format` is the 3.0 spelling of a fact 2020-12 keeps elsewhere, and the 2020-12 \
+                 member is already present; the `format` was dropped"
+            } else {
+                "`format` is the 3.0 spelling of a fact 2020-12 moved to another member; 2020-12 \
+                 defines no such format, so it was rewritten as that member"
+            },
+        );
     }
 }
 

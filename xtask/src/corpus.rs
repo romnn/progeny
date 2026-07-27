@@ -57,6 +57,36 @@ pub struct Args {
     /// Write a per-document timing report here, as JSON.
     #[arg(long, value_name = "PATH")]
     timings: Option<Utf8PathBuf>,
+
+    /// Which serde strategy to generate with, rather than the configuration default.
+    ///
+    /// The escape hatch is only real if somebody runs it, so both modes have to be reachable from
+    /// the gate that runs 78 documents. Until stage 8 the hand-written path had met exactly one
+    /// 56-line fixture, which is not a claim about the corpus.
+    #[arg(long, value_name = "STRATEGY")]
+    serde: Option<SerdeChoice>,
+}
+
+/// The two serde strategies, as a command-line word.
+///
+/// Its own enum rather than `progeny::SerdeImpl` because that type is public API deserialized from
+/// a configuration file; teaching it to parse a CLI token would put `clap` in the library's
+/// dependency list to save one `match`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum SerdeChoice {
+    /// The derive, always.
+    Derive,
+    /// The hand-written implementation wherever the eligibility function allows it.
+    HandWritten,
+}
+
+impl From<SerdeChoice> for progeny::SerdeImpl {
+    fn from(choice: SerdeChoice) -> Self {
+        match choice {
+            SerdeChoice::Derive => Self::DeriveAlways,
+            SerdeChoice::HandWritten => Self::HandWrittenWhereEligible,
+        }
+    }
 }
 
 /// One entry of `corpus/manifest.toml`.
@@ -478,7 +508,10 @@ fn check(spec: &Spec, args: &Args, totals: &mut Stats, counted: &mut usize) -> R
     // Generation, not just the round trip, is what the snapshot records: the shape and contract
     // layers have plenty to say, and a snapshot that only covered the front end would go quiet
     // exactly where the interesting decisions moved to.
-    let config = config_for(spec);
+    let mut config = config_for(spec);
+    if let Some(choice) = args.serde {
+        config.serde_impl = choice.into();
+    }
     let output = match progeny::generate(&bytes, &config) {
         Ok(output) => output,
         Err(error) => return Ok(Outcome::Rejected(error.to_string())),

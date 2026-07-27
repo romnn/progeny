@@ -18,6 +18,7 @@
 
 mod examples;
 mod operation;
+mod pagination;
 // The payload gate is the only caller, and it is feature-gated. The module stays compiled in every
 // combination so its own tests keep running; only the re-export follows the feature.
 #[cfg_attr(
@@ -29,6 +30,7 @@ mod operation;
 )]
 mod payload;
 mod presence;
+mod registrable;
 mod route;
 mod style;
 
@@ -41,6 +43,8 @@ use crate::diag::{Ctx, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::shape::{Docs, Shapes};
 
+pub(crate) use pagination::PaginationContract;
+pub(crate) use registrable::RegistrableRoute;
 pub(crate) use route::{PathTemplate, Piece};
 pub(crate) use style::{Location, Style, StyleContract};
 
@@ -78,6 +82,16 @@ pub(crate) struct OperationContract {
     pub(crate) body: Option<BodyContract>,
     pub(crate) responses: ResponseContract,
     pub(crate) docs: Docs,
+    /// The route a router accepted for this operation, when it accepted one.
+    ///
+    /// `None` is a collision, and it costs the operation its place in the generated *server* and
+    /// nothing else: a colliding route is still perfectly callable, and only a router has to tell
+    /// two of them apart. Carried as a type only the classifier constructs, so an unregistrable
+    /// route cannot reach the server renderer at all.
+    pub(crate) registrable: Option<RegistrableRoute>,
+    /// How this operation paginates, when the configuration declared it and the document supported
+    /// the declaration. Never detected — see [`pagination`].
+    pub(crate) pagination: Option<PaginationContract>,
     /// Where the operation was written, for diagnostics that point at it.
     pub(crate) origin: JsonPointer,
 }
@@ -162,6 +176,32 @@ pub(crate) enum BodyContract {
         ty: TypeRef,
         required: bool,
     },
+    /// `application/x-www-form-urlencoded`: the same typed value as a JSON body, encoded with the
+    /// form style row instead of as JSON. 109 bodies across 11 corpus documents, 103 of them an
+    /// object with declared properties.
+    Form {
+        ty: TypeRef,
+        /// What the body's `encoding` said about individual members, when it said anything. Empty
+        /// for all but one corpus body.
+        specs: Vec<FormSpec>,
+        required: bool,
+    },
+    /// `multipart/form-data`: one part per member of the typed value. 278 bodies across 27 corpus
+    /// documents, which makes it the largest non-JSON body by a wide margin.
+    Multipart {
+        ty: TypeRef,
+        /// What the document was specific about, member by member. Not the list of members: an
+        /// `additionalProperties` member is real and absent from it, so the runtime walks the value
+        /// and consults this rather than the other way round.
+        parts: Vec<PartSpec>,
+        required: bool,
+    },
+    /// A body that is text on the wire: `text/plain` and its relatives. 14 bodies across 5
+    /// documents, all of them declaring `text/plain` and nothing else.
+    Text {
+        content_type: String,
+        required: bool,
+    },
     /// Anything progeny does not yet give a typed form: sent as bytes under the media type the
     /// document declared, which is faithful about the request and silent about its shape.
     Bytes {
@@ -173,9 +213,56 @@ pub(crate) enum BodyContract {
 impl BodyContract {
     pub(crate) fn required(&self) -> bool {
         match self {
-            Self::Json { required, .. } | Self::Bytes { required, .. } => *required,
+            Self::Json { required, .. }
+            | Self::Form { required, .. }
+            | Self::Multipart { required, .. }
+            | Self::Text { required, .. }
+            | Self::Bytes { required, .. } => *required,
         }
     }
+
+    /// The type the builder's `body` field holds, when the body has one.
+    pub(crate) fn ty(&self) -> Option<&TypeRef> {
+        match self {
+            Self::Json { ty, .. } | Self::Form { ty, .. } | Self::Multipart { ty, .. } => Some(ty),
+            Self::Text { .. } | Self::Bytes { .. } => None,
+        }
+    }
+}
+
+/// How one member of a multipart body becomes a part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartKind {
+    /// Written as its text.
+    Text,
+    /// Written as its bytes, with a `filename`: what the document marked binary.
+    File,
+    /// Written as JSON, which is what every corpus body that names a `contentType` for a structured
+    /// member names.
+    Json,
+}
+
+/// What the document said about one member of a multipart body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartSpec {
+    pub(crate) wire_name: String,
+    pub(crate) kind: PartKind,
+    /// Whether the member is an array, and therefore becomes one part per element.
+    ///
+    /// Carried beside the kind rather than folded into it: the kind describes what one part holds
+    /// and this describes how many there are, and a member typed `Value` that happens to hold an
+    /// array at run time is one JSON part rather than several.
+    pub(crate) repeated: bool,
+    /// The per-part content type the body's `encoding` declared, if it declared one.
+    pub(crate) content_type: Option<String>,
+}
+
+/// What the document's `encoding` said about one member of a form body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FormSpec {
+    pub(crate) wire_name: String,
+    pub(crate) style: Style,
+    pub(crate) explode: bool,
 }
 
 /// What each declared status yields.
@@ -234,12 +321,15 @@ pub(crate) fn build(
     contracts: &Contracts,
     config: &Config,
     ctx: &mut Ctx,
-) -> ApiModel {
+) -> Result<ApiModel, crate::diag::RejectError> {
     let mut model = operation::run(resolved, shapes, contracts, config, ctx);
     model.servers = servers(resolved);
+    // After the operations exist and before anything renders: a declaration that the document
+    // cannot support has to stop generation rather than produce a method that cannot work.
+    pagination::attach(&mut model.operations, contracts, config)?;
     presence::report(contracts, &model, ctx);
     examples::report(resolved, shapes, contracts, ctx);
-    model
+    Ok(model)
 }
 
 fn servers(resolved: &ResolvedDocument) -> Vec<ServerEntry> {
@@ -276,7 +366,7 @@ pub(crate) mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let model = build(&resolved, &shapes, &contracts, &config, &mut ctx);
+        let model = build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
         (model, ctx.into_diagnostics())
     }
 

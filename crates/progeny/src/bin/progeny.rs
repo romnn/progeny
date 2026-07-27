@@ -25,6 +25,12 @@ fn run() -> Result<ExitCode, String> {
         println!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
     }
+    // Worth its own flag because the intended workflow checks generated source in: the reviewer of
+    // a diff needs to know which progeny produced it, and the file itself does not say.
+    if arguments.version {
+        println!("progeny {}", env!("CARGO_PKG_VERSION"));
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let Some(spec) = &arguments.spec else {
         return Err(format!("no description given\n\n{USAGE}"));
@@ -110,6 +116,7 @@ arguments:
   --config <path>      a progeny.toml
   --out-dir <path>     where to write the generated files
   -h, --help           this message
+  -V, --version        the version that would generate the output
 
 Exits non-zero when a diagnostic is denied by the configuration, so a build can refuse to \
 proceed on, say, any degradation.";
@@ -124,6 +131,7 @@ struct Arguments {
     config: Option<String>,
     out_dir: Option<String>,
     help: bool,
+    version: bool,
 }
 
 impl Arguments {
@@ -133,6 +141,7 @@ impl Arguments {
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "-h" | "--help" => parsed.help = true,
+                "-V" | "--version" => parsed.version = true,
                 "--config" => {
                     parsed.config = Some(
                         arguments
@@ -190,5 +199,11 @@ mod tests {
     #[test]
     fn help_needs_no_description() {
         assert!(parse(&["--help"]).unwrap().help);
+    }
+
+    #[test]
+    fn version_needs_no_description_either() {
+        assert!(parse(&["--version"]).unwrap().version);
+        assert!(parse(&["-V"]).unwrap().version);
     }
 }

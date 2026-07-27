@@ -108,6 +108,9 @@ pub enum BreakageClass {
     /// The 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` form in a document that declares
     /// 3.1, where a boolean there is never valid.
     LegacyExclusiveBound,
+    /// The 3.0 `format: byte`/`format: binary` spelling in a document that declares 3.1, where
+    /// 2020-12 defines neither and keeps both facts on other members.
+    LegacyStringFormat,
     /// A 3.0 union branch whose only content is `nullable: true`: the one spelling 3.0 has for the
     /// null arm of a union, read literally as a branch that constrains nothing at all.
     NullableUnionBranch,
@@ -157,6 +160,7 @@ impl BreakageClass {
             Self::UnregistrableRoute => "unregistrable-route",
             Self::LegacyTupleItems => "legacy-tuple-items",
             Self::LegacyExclusiveBound => "legacy-exclusive-bound",
+            Self::LegacyStringFormat => "legacy-string-format",
             Self::NullableUnionBranch => "nullable-union-branch",
             Self::UnsupportedConstruct => "unsupported-construct",
             Self::IrreconcilableAllOf => "irreconcilable-all-of",
@@ -194,6 +198,7 @@ impl BreakageClass {
             | Self::InvalidDefault
             | Self::LegacyTupleItems
             | Self::LegacyExclusiveBound
+            | Self::LegacyStringFormat
             | Self::MultiMediaType
             | Self::NullableUnionBranch
             | Self::UnsupportedConstruct
@@ -201,14 +206,21 @@ impl BreakageClass {
             | Self::PresenceCollapse
             | Self::CollidingTypeName
             | Self::CollidingOperationId
+            // Moved here at stage 7, when the router turned it into a scale class. A refusal names
+            // the router's *reason* and not the route, so a document with a habit folds into one
+            // record: `twilio-api-v2010` puts `.json` after a path variable in 99 operations and
+            // `anthropic` writes `?beta=true` into 41 path templates. A genuine collision
+            // names what it collided with and so stays its own record — the same split
+            // `colliding-operation-id` has, and it falls out of aggregating on the sentence rather
+            // than on the class.
+            | Self::UnregistrableRoute
             | Self::UnsatisfiableDerive => Aggregation::PerDocument,
             // The first can occur at most once per document by construction; each of the rest names
             // a distinct set of document locations a reader has to look at, with no useful count to
             // report instead.
             Self::MissingFinalLineBreak
             | Self::MultiParentDiscriminator
-            | Self::DiscriminatorEdgeCase
-            | Self::UnregistrableRoute => Aggregation::PerOccurrence,
+            | Self::DiscriminatorEdgeCase => Aggregation::PerOccurrence,
         }
     }
 }
@@ -761,18 +773,46 @@ mod tests {
     fn a_class_a_reader_must_act_on_keeps_every_occurrence() {
         let mut ctx = Ctx::new();
         assert_eq!(
-            BreakageClass::UnregistrableRoute.aggregation(),
+            BreakageClass::MultiParentDiscriminator.aggregation(),
             super::Aggregation::PerOccurrence
         );
         for _ in 0..3 {
             ctx.report(Diagnostic::new(
-                BreakageClass::UnregistrableRoute,
+                BreakageClass::MultiParentDiscriminator,
                 Action::Degrade,
                 JsonPointer::root(),
                 "skipped",
             ));
         }
         assert_eq!(ctx.into_diagnostics().len(), 3);
+    }
+
+    #[test]
+    fn a_habit_folds_and_a_finding_that_names_something_does_not() {
+        // `unregistrable-route` carries both shapes. A refusal names the router's reason and so
+        // folds — `anthropic` writes one habit into 19 templates. A collision names what it
+        // collided with, which differs per route, so those stay separate records. The split falls
+        // out of aggregating on the *sentence*, which is why it needs no rule of its own.
+        let mut ctx = Ctx::new();
+        for index in 0..4 {
+            ctx.report(Diagnostic::new(
+                BreakageClass::UnregistrableRoute,
+                Action::Degrade,
+                JsonPointer::root().child(index.to_string()),
+                "the path is not one the router accepts",
+            ));
+        }
+        for name in ["/a/{x}", "/a/{y}"] {
+            ctx.report(Diagnostic::new(
+                BreakageClass::UnregistrableRoute,
+                Action::Degrade,
+                JsonPointer::root().child(name),
+                format!("`GET {name}` cannot be registered beside something else"),
+            ));
+        }
+        let found = ctx.into_diagnostics();
+        assert_eq!(found.len(), 3, "{found:#?}");
+        assert_eq!(found[0].occurrences().get(), 4);
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! *Enforcement:* [`StyleContract`] has no public constructor. A renderer cannot be handed a
 //! (location, style) pair that was never classified, because there is no way to build one.
 
+use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::Parameter;
 
 /// Where a parameter rides.
@@ -179,6 +180,62 @@ pub(crate) fn classify(
         explode,
         shape,
     })
+}
+
+/// Classify one member of an `application/x-www-form-urlencoded` body's `encoding`.
+///
+/// A form body is a query string in the body position, so its members answer to the query row of
+/// the same table — which is why this asks that table rather than carrying rules of its own. The
+/// value's shape is unknown here (the member's type is a fact about the body type, not about the
+/// encoding entry), so the shape is not consulted: what an `encoding` can say is `style` and
+/// `explode`, and a style the query location does not define at all is refused.
+pub(crate) fn form_member(
+    encoding: &crate::doc::Encoding,
+    at: &JsonPointer,
+    ctx: &mut Ctx,
+) -> Option<(Style, bool)> {
+    let style = match encoding.style.as_deref() {
+        None => Style::Form,
+        Some(written) => {
+            let Some(style) = Style::parse(written) else {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::QuerySerializationStyle,
+                    Action::Degrade,
+                    at.clone(),
+                    format!(
+                        "`style: {written}` is not a style OpenAPI defines; the member is encoded \
+                         as exploded `form`, which is what a form body defaults to"
+                    ),
+                ));
+                return None;
+            };
+            style
+        }
+    };
+    // Every query style is defined for *some* shape; one defined for none would have no reading at
+    // all in a form body either.
+    if !matches!(
+        style,
+        Style::Form | Style::SpaceDelimited | Style::PipeDelimited | Style::DeepObject
+    ) {
+        ctx.report(Diagnostic::new(
+            BreakageClass::QuerySerializationStyle,
+            Action::Degrade,
+            at.clone(),
+            format!(
+                "OpenAPI defines no `style: {}` for a form body's members; the member is encoded \
+                 as exploded `form`",
+                name(style)
+            ),
+        ));
+        return None;
+    }
+    Some((
+        style,
+        encoding
+            .explode
+            .unwrap_or_else(|| style.explodes_by_default()),
+    ))
 }
 
 /// The table itself: which (location, style, shape) triples OpenAPI defines.

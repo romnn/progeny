@@ -74,7 +74,10 @@ pub(crate) fn collect(
 
     for operation in model.operations() {
         let at = &operation.origin;
-        if let Some(BodyContract::Json { .. }) = &operation.body {
+        // Every body that has a type, not only the JSON one. A multipart body's example is an
+        // object describing its parts and deserializes into the same generated struct, so leaving
+        // it out was coverage the gate could have had for nothing.
+        if operation.body.as_ref().and_then(BodyContract::ty).is_some() {
             collector.position(
                 &at.child("requestBody"),
                 request_content(resolved, operation),
@@ -394,7 +397,7 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx);
+        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
         super::collect(&resolved, &shapes, &contracts, &model).0
     }
 
@@ -505,7 +508,7 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx);
+        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
         let (found, skipped) = super::collect(&resolved, &shapes, &contracts, &model);
         assert!(found.is_empty());
         // Counted rather than dropped: a gate that omits silently reads as coverage it lacks.

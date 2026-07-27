@@ -7,6 +7,10 @@
 //! In a generated crate it is `#[doc(hidden)]` and never part of that crate's public API.
 
 mod buffered;
+mod multipart;
+// Compiled here because it names nothing progeny does not depend on. Its axum-facing other half,
+// `router.rs`, is shipped-only for the same reason `http.rs` is.
+mod serve;
 mod style;
 
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
@@ -15,12 +19,21 @@ const BUFFERED: &str = include_str!("buffered.rs");
 /// Parameter serialization, one function per style row.
 const STYLE: &str = include_str!("style.rs");
 
+/// `multipart/form-data` body assembly.
+const MULTIPART: &str = include_str!("multipart.rs");
+
+/// Extraction rules and the rejection envelope, which have no HTTP crate in them.
+const SERVE: &str = include_str!("serve.rs");
+
 /// The client runtime: `Error`, `ResponseValue`, and the body decoders.
 ///
-/// The one shipped file progeny cannot compile itself, because it names `reqwest` and progeny does
-/// not depend on it. The corpus compile gate type-checks it instead, on every generated crate in
-/// the tier, which is why that gate passes `--all-features`.
+/// One of the two shipped files progeny cannot compile itself, because it names `reqwest` and
+/// progeny does not depend on it. The corpus compile gate type-checks it instead, on every
+/// generated crate in the tier, which is why that gate passes `--all-features`.
 const HTTP: &str = include_str!("http.rs");
+
+/// The serving runtime, and the other file progeny cannot compile: it names `axum`.
+const ROUTER: &str = include_str!("router.rs");
 
 /// The support source as tokens, so it composes with the rendered items.
 ///
@@ -28,34 +41,91 @@ const HTTP: &str = include_str!("http.rs");
 /// rather than a consumer's compile error. A file that does not parse falls back to being emitted
 /// verbatim, which is what a caller would want anyway — but the module's own tests compile it, so
 /// that cannot happen unnoticed.
-pub(crate) fn tokens(http: bool, gated: bool) -> proc_macro2::TokenStream {
+pub(crate) fn tokens(
+    client: bool,
+    server: bool,
+    gated: bool,
+    body_limit: crate::config::BodyLimit,
+) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
-    if !http {
+    if !client && !server {
         return buffered;
     }
+    // The shipped tree keeps **progeny's own module layout**: `style` and `multipart` are submodules
+    // here and submodules there, so a path that resolves while progeny compiles resolves in the
+    // consumer's crate too. Flattening them was a standing chance for the two to disagree, and the
+    // disagreement would surface as a compile error in somebody else's build.
+    let style = items(STYLE);
+    let multipart = items(MULTIPART);
+
     // Gated only in crate mode. A module tree is `include!`d into somebody else's crate, which has
     // no `client` feature to speak of and never asked for one; the caller opted in by configuring
-    // the client, and that is the whole of the decision there.
-    let gate = gated.then(|| quote::quote! { #[cfg(feature = "client")] });
-    let style = items(STYLE);
-    let wire = items(HTTP);
-    // Nested behind the same feature as the client module, and re-exported so callers still write
-    // `support::Error`. A consumer who turned the client off must not pay for `reqwest`, and these
-    // are the only shipped items that name it — putting them in their own module is what lets one
-    // attribute cover all of them rather than one per item.
+    // the halves, and that is the whole of the decision there.
+    let calling = (client && gated).then(|| quote::quote! { #[cfg(feature = "client")] });
+    let serving = (server && gated).then(|| quote::quote! { #[cfg(feature = "server")] });
+    // Nested behind their feature and re-exported, so callers still write `support::Error`. A
+    // consumer who turned a half off must not pay for its HTTP stack, and these are the only shipped
+    // items that name one — putting each in its own module is what lets one attribute cover all of
+    // them rather than one per item.
+    let wire = client.then(|| {
+        let wire = items(HTTP);
+        quote::quote! {
+            #calling
+            #[allow(dead_code)]
+            pub mod wire { #(#wire)* }
+            #calling
+            pub use wire::*;
+        }
+    });
+    let serve = server.then(|| {
+        let serve = items(SERVE);
+        let router = with_body_limit(items(ROUTER), body_limit);
+        quote::quote! {
+            #serving
+            #[allow(dead_code)]
+            pub mod serve { #(#serve)* }
+            #serving
+            #[allow(dead_code)]
+            pub mod router { #(#router)* }
+            #serving
+            pub use serve::*;
+            #serving
+            pub use router::*;
+        }
+    });
+
     quote::quote! {
         #buffered
 
-        #gate
         #[allow(dead_code)]
-        mod wire {
-            #(#style)*
-            #(#wire)*
-        }
+        pub mod style { #(#style)* }
 
-        #gate
-        pub use wire::*;
+        #[allow(dead_code)]
+        pub mod multipart { #(#multipart)* }
+
+        #wire
+        #serve
     }
+}
+
+/// Replace `BODY_LIMIT`'s value with the configured one.
+///
+/// The constant is rewritten rather than templated in, so the shipped file stays a file that
+/// compiles and is unit-tested here with its own default in place. The alternative — a placeholder
+/// only meaningful after substitution — would mean the source progeny tests is not the source it
+/// ships, which is the property this whole module is arranged around.
+fn with_body_limit(
+    items: Vec<syn::Item>,
+    limit: crate::config::BodyLimit,
+) -> impl Iterator<Item = syn::Item> {
+    let bytes = limit.0;
+    items.into_iter().map(move |item| match item {
+        syn::Item::Const(mut konst) if konst.ident == "BODY_LIMIT" => {
+            konst.expr = Box::new(syn::parse_quote! { #bytes });
+            syn::Item::Const(konst)
+        }
+        other => other,
+    })
 }
 
 /// One shipped file as tokens, without the tests that verify it here.
@@ -100,6 +170,7 @@ fn is_test_module(item: &syn::Item) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::BodyLimit;
     use serde::de::{Deserialize, Deserializer};
 
     /// The shipped source has to parse as a file, both ways.
@@ -109,34 +180,65 @@ mod tests {
     /// failure would otherwise reach a consumer as one very long line that happens not to compile.
     #[test]
     fn the_shipped_module_parses_as_a_file() {
-        for http in [false, true] {
-            for gated in [false, true] {
-                let tokens = super::tokens(http, gated);
-                syn::parse2::<syn::File>(tokens.clone()).unwrap_or_else(|error| {
-                    panic!(
-                        "support(http = {http}, gated = {gated}) does not parse: {error}\n{tokens}"
-                    )
-                });
+        for client in [false, true] {
+            for server in [false, true] {
+                for gated in [false, true] {
+                    let tokens = super::tokens(client, server, gated, BodyLimit::default());
+                    syn::parse2::<syn::File>(tokens.clone()).unwrap_or_else(|error| {
+                        panic!(
+                            "support(client = {client}, server = {server}, gated = {gated}) does \
+                             not parse: {error}\n{tokens}"
+                        )
+                    });
+                }
             }
         }
-        // And the client half is really there when it was asked for, so the check above is not
-        // passing because there is nothing to compose.
-        assert!(
-            super::tokens(true, true)
-                .to_string()
-                .contains("ResponseValue")
-        );
-        assert!(
-            !super::tokens(false, true)
-                .to_string()
-                .contains("ResponseValue")
-        );
+        // And each half is really there when it was asked for, so the check above is not passing
+        // because there was nothing to compose.
+        let both = super::tokens(true, true, true, BodyLimit::default()).to_string();
+        assert!(both.contains("ResponseValue"), "{both}");
+        assert!(both.contains("Rejection"), "{both}");
+        assert!(both.contains("cfg (feature = \"client\")"), "{both}");
+        assert!(both.contains("cfg (feature = \"server\")"), "{both}");
+
+        let calling = super::tokens(true, false, true, BodyLimit::default()).to_string();
+        assert!(calling.contains("ResponseValue"), "{calling}");
+        assert!(!calling.contains("Rejection"), "{calling}");
+
+        let serving = super::tokens(false, true, true, BodyLimit::default()).to_string();
+        assert!(!serving.contains("ResponseValue"), "{serving}");
+        assert!(serving.contains("Rejection"), "{serving}");
+
+        // Both halves need the style table and the multipart writer, so neither is behind a gate.
+        assert!(calling.contains("query_pairs"), "{calling}");
+        assert!(serving.contains("query_pairs"), "{serving}");
+
         // In module mode nothing is gated: there is no crate whose feature could turn it on.
-        assert!(super::tokens(true, true).to_string().contains("client"));
         assert!(
-            !super::tokens(true, false)
+            !super::tokens(true, true, false, BodyLimit::default())
                 .to_string()
-                .contains("cfg (feature")
+                .contains("cfg (feature"),
+        );
+    }
+
+    /// The body ceiling is a knob, and the shipped constant is what it turns.
+    ///
+    /// Carried in from stage 7, where it was a constant with a comment claiming `DefaultBodyLimit`
+    /// could raise it — which it cannot: that layer inserts an extension only extractors calling
+    /// `with_limited_body` consult, and this reads the body with `to_bytes` and its own number.
+    /// Saying so in a comment was not enough, so it became configuration.
+    #[test]
+    fn the_body_ceiling_is_the_configured_one() {
+        let rendered = super::tokens(false, true, false, BodyLimit(4096)).to_string();
+        assert!(
+            rendered.contains("BODY_LIMIT : usize = 4096"),
+            "the configured ceiling did not reach the shipped constant"
+        );
+        // And the default is still the default rather than something a caller has to know to set.
+        let fallback = super::tokens(false, true, false, BodyLimit::default()).to_string();
+        assert!(
+            fallback.contains("BODY_LIMIT : usize = 2097152"),
+            "{fallback}"
         );
     }
 

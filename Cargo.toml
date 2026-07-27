@@ -76,6 +76,15 @@ heck = "0.5"
 # Rendering: tokens to a `syn::File` to formatted source, with no rustfmt at generation time.
 quote = "1"
 prettyplease = "0.2"
+# The router the generated server registers into, used at *generation* time to ask whether a set of
+# templates can be registered at all. Asked rather than modelled: matchit rejects `/{a}x{b}` beside
+# `/{c}y{d}` and accepts `/a/{x}.jpg` beside `/a/{y}.png`, and guessing at rules like those means
+# either a server that panics at startup or routes dropped that would have worked. Must stay on the
+# major version axum depends on; `crates/progeny/src/api/registrable.rs` has the test that says so.
+matchit = "0.8"
+# Only to check that claim, which needs the version axum actually resolves rather than the one this
+# workspace names.
+axum = { version = "0.8", default-features = false }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

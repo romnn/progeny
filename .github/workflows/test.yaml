@@ -3,6 +3,10 @@ name: test
 on:
   push: {}
   workflow_call: {}
+  workflow_dispatch: {}
+  schedule:
+    # Nightly, for the full-corpus compile the pull-request tier cannot afford.
+    - cron: "0 3 * * *"
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
@@ -70,8 +74,55 @@ jobs:
       # consumer meets in their own build, about source they did not write.
       - name: Compile and lint the generated crates for the quick tier
         run: task corpus:compile
+      # Both serde strategies compile, because both ship. The step above uses the default, which is
+      # the hand-written path; this is the derive escape hatch a caller falls back to for a format
+      # that is not self-describing. An escape hatch nobody runs is not one.
+      - name: The same, with the derive escape hatch
+        run: task corpus:compile -- --serde derive
+      # Runs serde against real payloads rather than asking whether source compiles, which makes it
+      # the only gate here that can catch output that is wrong on the wire. It found a `default`
+      # rendered as `#[serde(default = "…")]`, which put members into 60 requests the caller never
+      # set — code that generated, compiled, round-tripped and snapshotted clean.
+      - name: Payload round-trips
+        run: task payloads
+      # The same payloads through the derive. The differential harness compares the two strategies
+      # on one fixture; this compares each against the payloads the vendors actually wrote, and it
+      # is the only gate that can tell them apart on the wire at corpus scale. They agree exactly:
+      # 643 checked, 34 vendor defects tolerated, 171 not checkable, both ways.
+      - name: Payload round-trips, the derive escape hatch
+        run: task payloads -- --serde derive
+      # The only gate that sends a request: the generated client of one description against the
+      # generated server of the same one, over a real socket. It found two defects on its first run
+      # that no amount of reading the emitted source had.
+      - name: The generated client against the generated server
+        run: task example
       - name: Differential serde harness
         run: task differential
+
+  corpus-full:
+    name: conformance corpus (all 78, compiled)
+    # Not on pull requests: compiling 78 generated crates is hours. Nightly and on demand, because
+    # the alternative is what already happened once — `weather-gov`'s client did not compile for a
+    # whole stage, and the 8-document tier could not see it.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+        with:
+          install: false
+          cache: true
+          env: false
+      - run: mise install task
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Fetch corpus
+        run: task corpus:fetch
+      - name: Compile and lint every generated crate
+        run: task corpus:compile:all
 
   publish:
     name: publish (dry-run)

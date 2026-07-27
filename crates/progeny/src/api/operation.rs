@@ -18,11 +18,11 @@ use std::collections::BTreeMap;
 use super::route::{self, PathTemplate};
 use super::style::{self, Location, ParamShape};
 use super::{
-    ApiModel, BodyContract, Method, OperationContract, ParamContract, ResponseArm,
-    ResponseContract, StatusPattern,
+    ApiModel, BodyContract, FormSpec, Method, OperationContract, ParamContract, PartKind, PartSpec,
+    ResponseArm, ResponseContract, StatusPattern,
 };
 use crate::config::Config;
-use crate::contract::{Contracts, Namer, RustIdent, TypeRef};
+use crate::contract::{ContractKind, Contracts, Format, Namer, RustIdent, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MaybeRef, MediaType, Operation, Parameter, PathItem, Response};
 use crate::resolve::ResolvedDocument;
@@ -61,6 +61,7 @@ pub(super) fn run(
         build.path_item(item, route, &mut operations, ctx);
     }
 
+    super::registrable::classify(&mut operations, ctx);
     ApiModel {
         operations,
         servers: Vec::new(),
@@ -166,6 +167,10 @@ impl Build<'_> {
             body: self.body(operation, at, ctx),
             responses: self.responses(operation, at, ctx),
             docs: docs_of(operation),
+            // Filled in once every operation exists: whether a route collides is a question about
+            // the whole set, so it cannot be answered while the set is still being built.
+            registrable: None,
+            pagination: None,
             origin: at.clone(),
         })
     }
@@ -370,23 +375,150 @@ impl Build<'_> {
         let required = body.required.unwrap_or(false);
         let content = body.content.as_ref()?;
         let (media_type, entry) = Self::select(content, &at, ctx)?;
-        Some(self.body_of(media_type, entry, required))
+        Some(self.body_of(media_type, entry, required, &at, ctx))
     }
 
-    fn body_of(&self, media_type: &str, entry: &MediaType, required: bool) -> BodyContract {
-        if is_json(media_type) {
-            return BodyContract::Json {
-                ty: entry
-                    .schema
-                    .map_or(TypeRef::Value, |id| self.type_at(id))
-                    .clone(),
+    fn body_of(
+        &self,
+        media_type: &str,
+        entry: &MediaType,
+        required: bool,
+        at: &JsonPointer,
+        ctx: &mut Ctx,
+    ) -> BodyContract {
+        let ty = entry.schema.map_or(TypeRef::Value, |id| self.type_at(id));
+        let base = media_type
+            .split(';')
+            .next()
+            .unwrap_or(media_type)
+            .trim()
+            .to_ascii_lowercase();
+        if is_json(&base) {
+            return BodyContract::Json { ty, required };
+        }
+        match base.as_str() {
+            "application/x-www-form-urlencoded" => BodyContract::Form {
+                specs: Self::form_specs(entry, at, ctx),
+                ty,
                 required,
+            },
+            "multipart/form-data" => BodyContract::Multipart {
+                parts: self.part_specs(&ty, entry),
+                ty,
+                required,
+            },
+            // A wildcard is not a content type, and a body with nothing but a wildcard has no
+            // other to fall back to — `preference` only sorts it last. Sending `*/*` as a header
+            // would be sending something no server can act on.
+            //
+            // Which one to send instead is decided by the schema, because a wildcard permits every
+            // content type and only one of them matches what the document typed. `telnyx` writes
+            // `*/*` over a `$ref` to a real object, and sending that as bytes would throw away a
+            // type the document gave; `jellyfin` writes `image/*` over a binary string, where
+            // bytes is exactly right.
+            wildcard if wildcard.contains('*') => {
+                let structured = !matches!(
+                    ty,
+                    TypeRef::Format(Format::Binary | Format::Base64) | TypeRef::String
+                ) && entry.schema.is_some();
+                let chosen = if structured {
+                    "application/json"
+                } else {
+                    "application/octet-stream"
+                };
+                ctx.report(Diagnostic::new(
+                    BreakageClass::MultiMediaType,
+                    Action::Degrade,
+                    at.child("content"),
+                    format!(
+                        "`{media_type}` is the only media type the body declares, and a wildcard \
+                         is not a content type to send; the body is sent as `{chosen}`, which is \
+                         the one the declared schema fits"
+                    ),
+                ));
+                if structured {
+                    BodyContract::Json { ty, required }
+                } else {
+                    BodyContract::Bytes {
+                        content_type: chosen.to_owned(),
+                        required,
+                    }
+                }
+            }
+            // Text is a `String` rather than bytes, because that is what a caller has: making them
+            // spell `.into_bytes()` buys nothing and loses the fact that the body is text.
+            text if text.starts_with("text/") => BodyContract::Text {
+                content_type: media_type.to_owned(),
+                required,
+            },
+            _ => BodyContract::Bytes {
+                content_type: media_type.to_owned(),
+                required,
+            },
+        }
+    }
+
+    /// What the body's `encoding` says about individual members of a form body.
+    fn form_specs(entry: &MediaType, at: &JsonPointer, ctx: &mut Ctx) -> Vec<FormSpec> {
+        let mut specs = Vec::new();
+        for (name, encoding) in entry.encoding.iter().flatten() {
+            if encoding.style.is_none() && encoding.explode.is_none() {
+                continue;
+            }
+            let at = at.child("content").child("encoding").child(name);
+            // The same classifier a query parameter goes through, because a form body is a query
+            // string in the body position and an undefined combination is undefined in both.
+            let Some((style, explode)) = style::form_member(encoding, &at, ctx) else {
+                continue;
             };
+            specs.push(FormSpec {
+                wire_name: name.clone(),
+                style,
+                explode,
+            });
         }
-        BodyContract::Bytes {
-            content_type: media_type.to_owned(),
-            required,
-        }
+        specs
+    }
+
+    /// What the document was specific about, member by member, for a multipart body.
+    ///
+    /// Read from the *contract* rather than from the schema: the contract is the frozen record of
+    /// what the type actually carries, and a part list derived from anything else could describe a
+    /// member the emitted type does not have.
+    fn part_specs(&self, ty: &TypeRef, entry: &MediaType) -> Vec<PartSpec> {
+        let declared: BTreeMap<&str, &str> = entry
+            .encoding
+            .iter()
+            .flatten()
+            .filter_map(|(name, encoding)| Some((name.as_str(), encoding.content_type.as_deref()?)))
+            .collect();
+        let TypeRef::Named(index) = ty else {
+            return Vec::new();
+        };
+        let Some(contract) = self.contracts.get(*index) else {
+            return Vec::new();
+        };
+        let ContractKind::Struct { fields } = contract.kind() else {
+            return Vec::new();
+        };
+        fields
+            .iter()
+            .map(|field| {
+                let (kind, repeated) = part_of(&field.ty);
+                PartSpec {
+                    kind,
+                    repeated,
+                    // A `contentType` naming several types — `cloudflare` writes ten of them separated
+                    // by commas — is a list of what the server accepts, not an instruction about what
+                    // to send. Only a single type is a decision.
+                    content_type: declared
+                        .get(field.wire_name.as_str())
+                        .filter(|declared| !declared.contains(','))
+                        .map(|declared| (*declared).to_owned()),
+                    wire_name: field.wire_name.clone(),
+                }
+            })
+            .collect()
     }
 
     /// Which media type an operation's body uses, by fixed preference.
@@ -574,6 +706,39 @@ fn preference(media_type: &str) -> u8 {
         "text/plain" => 6,
         other if other.starts_with("image/") || other.starts_with("audio/") => 5,
         _ => 7,
+    }
+}
+
+/// What one member of a multipart body becomes, and whether it becomes several.
+///
+/// The kind is the *item's* kind, which is 3.1's rule: "an array — the default is defined based on
+/// the type of the item". 3.0 said `application/json` for any array, and following the newer rule
+/// for both dialects is deliberate — sending a repeated member as repeated parts is what every
+/// multipart parser expects, and 3.0's reading would put a JSON array where a server looks for
+/// several fields.
+///
+/// The type layer renders `format: binary` as `String` — inside a JSON payload a binary property
+/// *is* a string, and the type layer has no position to tell it otherwise. Here the position
+/// exists, so the string's bytes are what the part carries. The consequence, stated because it is a
+/// real limitation rather than an oversight: a part whose content is not valid UTF-8 cannot be
+/// constructed, because the field that holds it is a `String`. Lifting that would mean the type
+/// depending on the position, which would fork a component type shared with a JSON body.
+fn part_of(ty: &TypeRef) -> (PartKind, bool) {
+    match ty {
+        TypeRef::Format(Format::Binary | Format::Base64) => (PartKind::File, false),
+        // An option says nothing about the shape on the wire; a box says nothing at all.
+        TypeRef::Option(inner) | TypeRef::Boxed(inner) => part_of(inner),
+        // The one wrapper that does say something: each element is its own part.
+        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => (part_of(inner).0, true),
+        TypeRef::Bool
+        | TypeRef::I64
+        | TypeRef::U64
+        | TypeRef::F64
+        | TypeRef::String
+        | TypeRef::Format(_) => (PartKind::Text, false),
+        // A named type, a map, a tuple or a degraded `Value` is structured, and structured members
+        // have no faithful text form.
+        _ => (PartKind::Json, false),
     }
 }
 

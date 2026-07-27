@@ -56,6 +56,14 @@ tasks:
     cmds:
       - cargo run -p xtask --release -- corpus --quick --compile --clippy {{.CLI_ARGS}}
 
+  corpus:compile:all:
+    desc: "the same, over all 78 documents; hours, not minutes"
+    # The tier is 8 documents and the corpus is 78, so a shape that occurs once is a shape the
+    # tier is blind to. `weather-gov` is the standing example: 1 document, 2 operations, a client
+    # that did not compile for a whole stage, found by an unrelated errand rather than by a gate.
+    cmds:
+      - cargo run -p xtask --release -- corpus --compile --clippy {{.CLI_ARGS}}
+
   corpus:snapshots:
     desc: "re-record every document's diagnostics snapshot (read the diff first)"
     cmds:
@@ -70,6 +78,14 @@ tasks:
     desc: "round-trip every example payload in the corpus through the generated types"
     cmds:
       - cargo run -p xtask --release -- payloads {{.CLI_ARGS}}
+
+  example:
+    desc: "run the generated client against the generated server of one description"
+    # The only gate that sends a request. Every other one checks a document, or source, or a body;
+    # whether `send()` builds the URL, query string, headers and cookies the description asks for
+    # was checked by reading the emitted source until this existed.
+    cmds:
+      - cargo run -p xtask --release -- example {{.CLI_ARGS}}
 
   differential:
     desc: "assert the derive and the hand-written serde path agree on every case"

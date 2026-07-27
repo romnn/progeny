@@ -163,6 +163,40 @@ fn an_undeclared_member_is_refused_the_same_way_when_the_schema_says_so() {
     assert_eq!(left, right);
 }
 
+/// The fixed-arity trailing-element bug class, which only the buffered path can have.
+///
+/// The tuple's own implementation is derived on both sides — the eligibility function rules tuples
+/// to the derive — so what differs is what surrounds it. In derive mode `serde_json` reads the
+/// array itself and notices the leftovers. In hand-written mode the struct **buffers** the member
+/// and replays it, which makes progeny the format: a replay that stops at the arity it was asked
+/// for and never looks again drops the rest in silence. It did exactly that until this test, and
+/// the fix is `SeqDeserializer::end()` after `visit_seq`.
+#[test]
+fn a_fixed_arity_member_given_too_many_elements_is_refused_by_both() {
+    agree(r#"{"required":"a","pair":[1,2]}"#);
+    both(r#"{"required":"a","pair":[1,2,3]}"#)
+        .expect_err("a third element must not be accepted by either");
+    both(r#"{"required":"a","pair":[1]}"#).expect_err("a short pair must not be accepted either");
+}
+
+/// A struct with no members, which is a shape three corpus documents declare.
+///
+/// The interesting part is that it *compiles*: every binding in the generated impls has nothing to
+/// do, and each one warned — an unused `buffer`, a `mut` on a count nothing increments, a `mut` on
+/// a state nothing writes to. Warnings are errors in a consumer's build about code they did not
+/// write, so this belongs in the fast gate rather than only in the tier that compiles eight
+/// documents.
+#[test]
+fn a_struct_with_no_members_round_trips_through_both() {
+    let left = serde_json::from_str::<derived::types::Empty>("{}")
+        .and_then(|value| serde_json::to_string(&value))
+        .expect("the derive reads an empty object");
+    let right = serde_json::from_str::<hand::types::Empty>("{}")
+        .and_then(|value| serde_json::to_string(&value))
+        .expect("the hand-written impl reads an empty object");
+    assert_eq!(left, right);
+}
+
 #[test]
 fn a_fieldless_enum_reads_and_writes_the_same_bytes() {
     for payload in [r#""in-progress""#, r#""done""#] {

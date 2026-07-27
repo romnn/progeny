@@ -24,9 +24,10 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::api::{
-    ApiModel, BodyContract, Location, OperationContract, ParamContract, Piece, ResponseArm, Style,
+    ApiModel, BodyContract, FormSpec, Location, OperationContract, ParamContract, PartKind,
+    PartSpec, Piece, ResponseArm, Style,
 };
-use crate::config::Config;
+use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent};
 
 use super::types::{docs as docs_of, type_path as type_tokens};
@@ -177,6 +178,7 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
     let success = success_type(operation, contracts, config);
     let failure = error_type(operation, contracts, config);
     let send = send(operation, &success.name, &failure.name, operation_name);
+    let stream = stream(operation, contracts, config);
 
     let success_decl = &success.declaration;
     let failure_decl = &failure.declaration;
@@ -222,6 +224,77 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
 
             #setters
             #send
+            #stream
+        }
+    }
+}
+
+/// The stream over every item of every page, for an operation whose pagination was declared.
+///
+/// Built on the builder's own `send`, and on the builder deriving `Clone`: each page is a fresh
+/// request with one parameter changed, which is exactly what the declaration describes. Nothing
+/// here is inferred — the cursor parameter, the member holding the next cursor and the member
+/// holding the items were all named by the caller and checked against the document before this ran.
+///
+/// The plain `send` stays. A stream is an additional way to call the operation and never the only
+/// one: a caller who wants one page asks for one page.
+fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config) -> TokenStream {
+    let Some(pagination) = &operation.pagination else {
+        return TokenStream::new();
+    };
+    let item = type_tokens(&pagination.item, contracts, config);
+    let failure = error_type(operation, contracts, config).name;
+    let cursor = ident(&pagination.cursor_param);
+    let items_path = pagination.items.iter().map(ident);
+    let next_path = pagination.next_cursor.iter().map(ident);
+    let docs = format!(
+        " Every item of every page, following `{}` until the service stops sending one.",
+        pagination.cursor_param
+    );
+
+    quote! {
+        #[doc = #docs]
+        pub fn stream(
+            self,
+        ) -> impl ::futures_core::Stream<
+            Item = ::std::result::Result<#item, Error<#failure>>,
+        > + 'a {
+            // `try_unfold` carries the builder forward as its state, so the borrow of the client
+            // lives as long as the stream rather than as long as one page.
+            let pages = ::futures_util::stream::try_unfold(
+                ::std::option::Option::Some((self, ::std::option::Option::None)),
+                |state| async move {
+                    let ::std::option::Option::Some((builder, cursor)) = state else {
+                        // The error type is named here and nowhere else in the closure: this arm
+                        // never fails, so nothing else in it tells the compiler what `E` is.
+                        return ::std::result::Result::<_, Error<#failure>>::Ok(
+                            ::std::option::Option::None,
+                        );
+                    };
+                    let mut request = ::std::clone::Clone::clone(&builder);
+                    if let ::std::option::Option::Some(cursor) = cursor {
+                        request.#cursor = ::std::option::Option::Some(cursor);
+                    }
+                    let page = request.send().await?.into_value();
+                    // Cloned before the items are moved out of the same value, and in this order
+                    // so that a next cursor living beside the items still reads.
+                    let next = ::std::clone::Clone::clone(&page #(.#next_path)*);
+                    let items = page #(.#items_path)*;
+                    // The end of the stream is the service declining to send a next cursor, which
+                    // is the only signal the declaration gives and the only one this trusts. A page
+                    // that came back empty is not the same statement and does not stop it.
+                    let state = next.map(|next| (builder, ::std::option::Option::Some(next)));
+                    ::std::result::Result::Ok(::std::option::Option::Some((items, state)))
+                },
+            );
+            ::futures_util::TryStreamExt::try_flatten(
+                ::futures_util::TryStreamExt::map_ok(pages, |items| {
+                    ::futures_util::stream::iter(
+                        ::std::iter::IntoIterator::into_iter(items)
+                            .map(::std::result::Result::Ok),
+                    )
+                }),
+            )
         }
     }
 }
@@ -292,12 +365,12 @@ struct Rendered {
 }
 
 /// Every type an operation names, for the questions that have to be asked of all of them at once.
-fn operation_types(operation: &OperationContract) -> Vec<&crate::contract::TypeRef> {
+pub(super) fn operation_types(operation: &OperationContract) -> Vec<&crate::contract::TypeRef> {
     let mut out: Vec<&crate::contract::TypeRef> =
         operation.params.iter().map(|param| &param.ty).collect();
-    if let Some(BodyContract::Json { ty, .. }) = &operation.body {
-        out.push(ty);
-    }
+    // Every body that has a type, not only the JSON one: a form or multipart body names the same
+    // kind of generated type, and a deprecated one there warns exactly as loudly.
+    out.extend(operation.body.as_ref().and_then(BodyContract::ty));
     out.extend(
         operation
             .responses
@@ -527,9 +600,9 @@ fn path_expression(operation: &OperationContract, operation_name: &str) -> Token
                     let explode = param.style.explode();
                     let wire = &param.wire_name;
                     let rendered = if param.style.style() == Style::Matrix {
-                        quote! { support::matrix_segment(#wire, &value, #explode) }
+                        quote! { support::style::matrix_segment(#wire, &value, #explode) }
                     } else {
-                        quote! { support::path_segment(&value, #style, #explode) }
+                        quote! { support::style::path_segment(&value, #style, #explode) }
                     };
                     steps.push(quote! {
                         {
@@ -573,7 +646,7 @@ fn query(operation: &OperationContract) -> TokenStream {
             let explode = param.style.explode();
             let body = quote! {
                 let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
-                query.extend(support::query_pairs(#wire, &value, #style, #explode));
+                query.extend(support::style::query_pairs(#wire, &value, #style, #explode));
             };
             optional(param, operation, &field, &body)
         })
@@ -599,7 +672,7 @@ fn headers(operation: &OperationContract) -> TokenStream {
         let explode = param.style.explode();
         let body = quote! {
             let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
-            request = request.header(#wire, support::header_value(&value, #explode));
+            request = request.header(#wire, support::style::header_value(&value, #explode));
         };
         pieces.push(optional(param, operation, &field, &body));
     }
@@ -611,7 +684,7 @@ fn headers(operation: &OperationContract) -> TokenStream {
             let wire = &param.wire_name;
             let body = quote! {
                 let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
-                cookies.push(support::cookie_pair(#wire, &value));
+                cookies.push(support::style::cookie_pair(#wire, &value));
             };
             optional(param, operation, &field, &body)
         })
@@ -672,22 +745,102 @@ fn required_guard(param: &ParamContract, operation: &OperationContract) -> Token
     }
 }
 
-fn request_body(operation: &OperationContract, _operation_name: &str) -> TokenStream {
-    match &operation.body {
-        None => TokenStream::new(),
-        Some(BodyContract::Json { .. }) => quote! {
-            if let ::std::option::Option::Some(body) = &self.body {
-                request = request.json(body);
-            }
-        },
-        Some(BodyContract::Bytes { content_type, .. }) => quote! {
-            if let ::std::option::Option::Some(body) = &self.body {
+fn request_body(operation: &OperationContract, operation_name: &str) -> TokenStream {
+    let inner = match &operation.body {
+        None => return TokenStream::new(),
+        Some(BodyContract::Json { .. }) => quote! { request = request.json(body); },
+        Some(BodyContract::Form { specs, .. }) => {
+            let specs = form_specs(specs);
+            quote! {
+                let value = support::to_value(body, #operation_name).map_err(Error::Decode)?;
                 request = request
-                    .header(::reqwest::header::CONTENT_TYPE, #content_type)
-                    .body(body.clone());
+                    .header(
+                        ::reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(support::style::form_body(&value, #specs));
             }
+        }
+        Some(BodyContract::Multipart { parts, .. }) => {
+            let parts = part_specs(parts);
+            // A multipart body whose value is not an object has no member names, so there is
+            // nothing to name the parts after. That is a body the document typed as something
+            // other than an object, and reporting it at send time is the only place it can be
+            // reported: the type is legal Rust and the failure is about this one call.
+            quote! {
+                let value = support::to_value(body, #operation_name).map_err(Error::Decode)?;
+                let (content_type, bytes) =
+                    support::multipart::body(&value, #parts).ok_or_else(|| {
+                        Error::Decode(support::DecodeError::new(
+                            ::reqwest::StatusCode::BAD_REQUEST,
+                            ::serde::de::Error::custom(support::NotAForm::new(#operation_name)),
+                        ))
+                    })?;
+                request = request
+                    .header(::reqwest::header::CONTENT_TYPE, content_type)
+                    .body(bytes);
+            }
+        }
+        // Text and bytes write the same statement; what differs is the *type* the builder holds,
+        // which `body_type` decides. `reqwest::Body` takes both a `String` and a `Vec<u8>`.
+        Some(
+            BodyContract::Text { content_type, .. } | BodyContract::Bytes { content_type, .. },
+        ) => quote! {
+            request = request
+                .header(::reqwest::header::CONTENT_TYPE, #content_type)
+                .body(body.clone());
         },
+    };
+    quote! {
+        if let ::std::option::Option::Some(body) = &self.body {
+            #inner
+        }
     }
+}
+
+/// The part table for a multipart body, as a `const` slice.
+///
+/// A table rather than a call per part: the loop lives in the shipped support module and is
+/// compiled once for the crate, instead of being unrolled into every operation that sends a form.
+pub(super) fn part_specs(parts: &[PartSpec]) -> TokenStream {
+    let rows = parts.iter().map(|part| {
+        let name = &part.wire_name;
+        let kind = format_ident!(
+            "{}",
+            match part.kind {
+                PartKind::Text => "Text",
+                PartKind::File => "File",
+                PartKind::Json => "Json",
+            }
+        );
+        let repeated = part.repeated;
+        let content_type = part.content_type.as_ref().map_or_else(
+            || quote! { ::std::option::Option::None },
+            |content_type| quote! { ::std::option::Option::Some(#content_type) },
+        );
+        quote! {
+            support::multipart::PartSpec {
+                name: #name,
+                kind: support::multipart::PartKind::#kind,
+                repeated: #repeated,
+                content_type: #content_type,
+            }
+        }
+    });
+    quote! { &[#(#rows),*] }
+}
+
+/// The same, for the members of a form body whose `encoding` said something about them.
+pub(super) fn form_specs(specs: &[FormSpec]) -> TokenStream {
+    let rows = specs.iter().map(|spec| {
+        let name = &spec.wire_name;
+        let style = style_tokens(spec.style);
+        let explode = spec.explode;
+        quote! {
+            support::style::FormSpec { name: #name, style: #style, explode: #explode }
+        }
+    });
+    quote! { &[#(#rows),*] }
 }
 
 /// Turn the response into the operation's declared arms.
@@ -802,14 +955,26 @@ fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool) -> TokenStream {
     quote! { support::decode(response).await?.map(#ty::#variant) }
 }
 
-fn body_type(body: &BodyContract, contracts: &Contracts, config: &Config) -> TokenStream {
+pub(super) fn body_type(
+    body: &BodyContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
     match body {
-        BodyContract::Json { ty, .. } => type_tokens(ty, contracts, config),
-        BodyContract::Bytes { .. } => quote! { ::std::vec::Vec<u8> },
+        BodyContract::Json { ty, .. }
+        | BodyContract::Form { ty, .. }
+        | BodyContract::Multipart { ty, .. } => type_tokens(ty, contracts, config),
+        // Text rather than bytes, because that is what the caller has. The one place the byte
+        // representation is a choice is a body the document said nothing about the shape of.
+        BodyContract::Text { .. } => quote! { ::std::string::String },
+        BodyContract::Bytes { .. } => match config.formats.bytes {
+            BytesRepr::Vec => quote! { ::std::vec::Vec<u8> },
+            BytesRepr::Bytes => quote! { ::bytes::Bytes },
+        },
     }
 }
 
-fn style_tokens(style: Style) -> TokenStream {
+pub(super) fn style_tokens(style: Style) -> TokenStream {
     let name = match style {
         Style::Form => "Form",
         Style::Simple => "Simple",
@@ -820,7 +985,7 @@ fn style_tokens(style: Style) -> TokenStream {
         Style::DeepObject => "DeepObject",
     };
     let ident = format_ident!("{name}");
-    quote! { support::Style::#ident }
+    quote! { support::style::Style::#ident }
 }
 
 fn builder_name(operation: &OperationContract) -> proc_macro2::Ident {
@@ -835,7 +1000,7 @@ fn builder_name(operation: &OperationContract) -> proc_macro2::Ident {
     )
 }
 
-fn capitalize(word: &str) -> String {
+pub(super) fn capitalize(word: &str) -> String {
     let mut characters = word.chars();
     match characters.next() {
         Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),

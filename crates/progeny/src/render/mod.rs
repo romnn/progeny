@@ -12,6 +12,7 @@
 mod client;
 mod manifest;
 mod serde_impl;
+mod server;
 mod types;
 
 use std::collections::BTreeMap;
@@ -41,16 +42,40 @@ pub(crate) fn run(
     // An operation nobody can call is not worth a module: a description with no paths generates a
     // type layer and stops there, rather than emitting a `Client` with no methods and the whole
     // HTTP dependency behind it.
-    let http = config.emit.client && !api.operations().is_empty();
+    let has_operations = !api.operations().is_empty();
+    let http = config.emit.client && has_operations;
+    // Whether any operation declared pagination, which is what decides whether the generated crate
+    // depends on the stream machinery at all.
+    let streams = http
+        && api
+            .operations()
+            .iter()
+            .any(|operation| operation.pagination.is_some());
     if http {
         modules.push(("client", client::render(api, contracts, config)));
     }
+    // The same rule on the serving side, with one extra condition: a description whose every route
+    // the router refused has no trait methods to implement, and a trait nobody can implement is not
+    // a module.
+    let serves = config.emit.server
+        && api
+            .operations()
+            .iter()
+            .any(|operation| operation.registrable.is_some());
+    if serves {
+        modules.push(("server", server::render(api, contracts, config)));
+    }
     // Emitted only when something calls into it: an unused module is compile time the consumer did
     // not ask for.
-    if http || serde_impl::needed(contracts) {
+    if http || serves || serde_impl::needed(contracts) {
         modules.push((
             "support",
-            crate::support::tokens(http, config.packaging == Packaging::Crate),
+            crate::support::tokens(
+                http,
+                serves,
+                config.packaging == Packaging::Crate,
+                config.body_limit,
+            ),
         ));
     }
 
@@ -58,14 +83,18 @@ pub(crate) fn run(
         Packaging::Crate => {
             files.insert(
                 Utf8PathBuf::from("Cargo.toml"),
-                manifest::render(contracts, config, http),
+                manifest::render(contracts, config, http, serves, streams),
             );
             let declarations = modules.iter().map(|(name, _)| {
                 let ident = quote::format_ident!("{name}");
                 // The support module is not part of the generated crate's public API; it is
                 // reachable because the type modules call into it and for no other reason.
                 let hidden = (*name == "support").then(|| quote! { #[doc(hidden)] });
-                let gated = (*name == "client").then(|| quote! { #[cfg(feature = "client")] });
+                let gated = match *name {
+                    "client" => quote! { #[cfg(feature = "client")] },
+                    "server" => quote! { #[cfg(feature = "server")] },
+                    _ => quote! {},
+                };
                 quote! { #hidden #gated pub mod #ident; }
             });
             files.insert(
@@ -127,7 +156,7 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, config, &mut ctx).unwrap();
-        let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx);
+        let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx).unwrap();
         let files = super::run(&contracts, &api, config);
         files
             .get(camino::Utf8Path::new("src/types.rs"))
@@ -144,7 +173,7 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx);
+        let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
         let files = super::run(&contracts, &api, &config);
         let rendered = files
             .get(camino::Utf8Path::new("src/client.rs"))
@@ -154,6 +183,19 @@ mod tests {
         // right call for a build and the wrong one for a test that then greps the text.
         syn::parse_file(&rendered).expect("the client module should parse");
         rendered
+    }
+
+    /// The escape hatch, named rather than defaulted to.
+    ///
+    /// The serde attributes only exist in this mode: they are helper attributes of the derive
+    /// macros, so a type on the hand-written path carries none at all. A test about how an
+    /// attribute renders has to say which mode it is about, and these did not until the default
+    /// changed under them.
+    fn derive_mode() -> Config {
+        Config {
+            serde_impl: crate::config::SerdeImpl::DeriveAlways,
+            ..Config::default()
+        }
     }
 
     fn with_schemas(schemas: Value) -> Value {
@@ -182,7 +224,7 @@ mod tests {
                     },
                 },
             })),
-            &Config::default(),
+            &derive_mode(),
         );
         assert!(rendered.contains("pub struct Pet {"), "{rendered}");
         assert!(rendered.contains("/// One pet."), "{rendered}");
@@ -206,6 +248,45 @@ mod tests {
         );
     }
 
+    /// A type on the hand-written path carries **no** `#[serde(...)]` attributes at all.
+    ///
+    /// Mandatory rather than tidy, and in two directions. They are helper attributes of the serde
+    /// derive macros, so with no derive on the item they do not resolve and the crate does not
+    /// compile. And any *other* derive that reads them would then see a different type than the wire
+    /// format has — `schemars::JsonSchema` honours `rename` and `skip_serializing_if`, so a schema
+    /// generated beside a hand-written impl would disagree with the bytes. That is the forbidden
+    /// failure mode, and it is why `DeriveSet` is a closed set of attribute-blind derives.
+    ///
+    /// The wire name has to survive the move: it stops being an attribute and becomes a string in
+    /// the generated impl, and this checks it is still there rather than merely gone from the type.
+    #[test]
+    fn a_hand_written_type_carries_no_serde_attributes_and_keeps_its_wire_name() {
+        let document = with_schemas(json!({
+            "Pet": {
+                "type": "object",
+                "required": ["petName"],
+                "properties": {
+                    "petName": {"type": "string"},
+                    "type": {"type": "string"},
+                },
+            },
+        }));
+        let rendered = types(document, &Config::default());
+        assert!(rendered.contains("pub struct Pet {"), "{rendered}");
+        assert!(
+            !rendered.contains("#[serde("),
+            "a hand-written type kept a serde attribute:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("derive(serde::Deserialize"),
+            "a hand-written type kept the derive:\n{rendered}"
+        );
+        // The wire names moved into the impl rather than being lost with the attributes.
+        assert!(rendered.contains(r#""petName""#), "{rendered}");
+        assert!(rendered.contains("pub pet_name: String"), "{rendered}");
+        assert!(rendered.contains("pub type_: Option<String>"), "{rendered}");
+    }
+
     #[test]
     fn the_rendered_source_parses_as_rust() {
         // Formatting is what proves the stream is syntactically valid: `prettyplease` only runs on
@@ -226,7 +307,7 @@ mod tests {
             with_schemas(json!({
                 "State": {"type": "string", "enum": ["in-progress", "done", "2fa"]},
             })),
-            &Config::default(),
+            &derive_mode(),
         );
         assert!(rendered.contains("pub enum State"), "{rendered}");
         assert!(
@@ -367,7 +448,7 @@ mod tests {
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &module, &mut ctx).unwrap();
-        let api = crate::api::build(&resolved, &shapes, &contracts, &module, &mut ctx);
+        let api = crate::api::build(&resolved, &shapes, &contracts, &module, &mut ctx).unwrap();
         let files = super::run(&contracts, &api, &module);
         assert_eq!(files.len(), 1);
         let nested = files
@@ -398,7 +479,10 @@ mod tests {
         // The separator, the literal segment, the separator, the variable.
         assert!(rendered.contains(r"url.push('/')"), "{rendered}");
         assert!(rendered.contains(r#"url.push_str("pets")"#), "{rendered}");
-        assert!(rendered.contains("support::path_segment"), "{rendered}");
+        assert!(
+            rendered.contains("support::style::path_segment"),
+            "{rendered}"
+        );
         // A required parameter is an ordinary setter and a check at `send`, which is what
         // "runtime-checked rather than typestate" means in the output.
         assert!(rendered.contains("support::Unset::new"), "{rendered}");
@@ -462,6 +546,162 @@ mod tests {
         }));
         assert!(!one.contains("pub enum ListPetsError"), "{one}");
         assert!(one.contains("Error<String>"), "{one}");
+    }
+
+    /// One operation with one request body of the given media type and schema.
+    fn body_client(media_type: &str, entry: &Value) -> String {
+        client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/upload": {"post": {
+                "operationId": "upload",
+                "requestBody": {"required": true, "content": {media_type: entry}},
+                "responses": {"200": {"description": "ok"}},
+            }}},
+        }))
+    }
+
+    #[test]
+    fn a_form_body_is_encoded_by_the_style_table_rather_than_as_json() {
+        let rendered = body_client(
+            "application/x-www-form-urlencoded",
+            &json!({"schema": {"type": "object", "properties": {"grant_type": {"type": "string"}}}}),
+        );
+        assert!(
+            rendered.contains("application/x-www-form-urlencoded"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("support::style::form_body("),
+            "{rendered}"
+        );
+        // The body is still the typed struct: a form body differs from a JSON one in how it is
+        // written, not in what the caller builds.
+        assert!(!rendered.contains("request.json(body)"), "{rendered}");
+    }
+
+    #[test]
+    fn a_form_bodys_encoding_reaches_the_generated_table() {
+        let rendered = body_client(
+            "application/x-www-form-urlencoded",
+            &json!({
+                "schema": {"type": "object", "properties": {"tag": {"type": "array", "items": {"type": "string"}}}},
+                "encoding": {"tag": {"style": "spaceDelimited", "explode": false}},
+            }),
+        );
+        assert!(
+            rendered.contains("support::style::FormSpec"),
+            "the encoding declaration did not reach the emitted table: {rendered}"
+        );
+        assert!(
+            rendered.contains("support::style::Style::SpaceDelimited"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("explode: false"), "{rendered}");
+    }
+
+    #[test]
+    fn a_multipart_bodys_parts_come_from_the_contract() {
+        let rendered = body_client(
+            "multipart/form-data",
+            &json!({"schema": {"type": "object", "properties": {
+                "file": {"type": "string", "format": "binary"},
+                "name": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            }}}),
+        );
+        assert!(rendered.contains("support::multipart::body("), "{rendered}");
+        // One row per member, each classified from the type the member was actually given.
+        assert!(
+            rendered.contains("name: \"file\"") && rendered.contains("PartKind::File"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("name: \"name\"") && rendered.contains("PartKind::Text"),
+            "{rendered}"
+        );
+        // An array is the item's kind, repeated — 3.1's rule. 3.0 would have said one JSON array
+        // here, which is not what a server parsing repeated fields is looking for.
+        assert!(
+            rendered.contains("name: \"tags\"") && rendered.contains("repeated: true"),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("PartKind::Text").count(), 2, "{rendered}");
+        // The boundary is chosen from the content, so the header cannot be set before the body
+        // exists — which is why both come back from one call.
+        assert!(rendered.contains("let (content_type, bytes)"), "{rendered}");
+    }
+
+    #[test]
+    fn a_multipart_encoding_names_a_parts_content_type() {
+        let rendered = body_client(
+            "multipart/form-data",
+            &json!({
+                "schema": {"type": "object", "properties": {"metadata": {"type": "object"}}},
+                "encoding": {"metadata": {"contentType": "application/json"}},
+            }),
+        );
+        assert!(
+            rendered.contains("content_type: ::std::option::Option::Some(\"application/json\")"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_content_type_listing_several_alternatives_is_not_an_instruction() {
+        // `cloudflare` writes ten comma-separated types on one part. That is the set a server
+        // accepts, not a decision about what to send, and sending the whole string as one header
+        // would be sending a content type that is not one.
+        let rendered = body_client(
+            "multipart/form-data",
+            &json!({
+                "schema": {"type": "object", "properties": {"module": {"type": "string", "format": "binary"}}},
+                "encoding": {"module": {"contentType": "text/javascript, application/wasm, text/plain"}},
+            }),
+        );
+        assert!(!rendered.contains("application/wasm"), "{rendered}");
+        assert!(
+            rendered.contains("content_type: ::std::option::Option::None"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_text_body_is_a_string_and_a_binary_one_is_bytes() {
+        let text = body_client("text/plain", &json!({"schema": {"type": "string"}}));
+        assert!(text.contains("::std::string::String"), "{text}");
+        assert!(text.contains("\"text/plain\""), "{text}");
+
+        let binary = body_client(
+            "application/octet-stream",
+            &json!({"schema": {"type": "string", "format": "binary"}}),
+        );
+        assert!(binary.contains("::std::vec::Vec<u8>"), "{binary}");
+    }
+
+    #[test]
+    fn a_body_that_declares_only_a_wildcard_sends_something_a_server_can_read() {
+        // `preference` sorts a wildcard last, which decides nothing when it is the only entry.
+        // `Content-Type: */*` is not a content type, and 9 corpus bodies declare exactly that.
+        let binary = body_client(
+            "image/*",
+            &json!({"schema": {"type": "string", "format": "binary"}}),
+        );
+        assert!(!binary.contains("\"image/*\""), "{binary}");
+        assert!(binary.contains("application/octet-stream"), "{binary}");
+        assert!(binary.contains("::std::vec::Vec<u8>"), "{binary}");
+    }
+
+    #[test]
+    fn a_wildcard_over_a_real_schema_keeps_the_type_the_document_gave() {
+        // `telnyx` writes `*/*` over a `$ref` to an object. A wildcard permits every content type,
+        // so choosing bytes there would throw away a type the document supplied for no reason —
+        // JSON is the one content type the declared schema actually fits.
+        let rendered = body_client(
+            "*/*",
+            &json!({"schema": {"type": "object", "properties": {"start": {"type": "string"}}}}),
+        );
+        assert!(rendered.contains("request.json(body)"), "{rendered}");
+        assert!(!rendered.contains("Vec<u8>"), "{rendered}");
     }
 
     #[test]
@@ -692,13 +932,16 @@ mod tests {
             }}},
         }));
         assert!(
-            rendered.contains("support::Style::PipeDelimited"),
+            rendered.contains("support::style::Style::PipeDelimited"),
             "{rendered}"
         );
-        assert!(rendered.contains("support::query_pairs("), "{rendered}");
+        assert!(
+            rendered.contains("support::style::query_pairs("),
+            "{rendered}"
+        );
         assert!(rendered.contains(r#""tags""#), "{rendered}");
         assert!(
-            rendered.contains(r#".header("x-trace", support::header_value"#),
+            rendered.contains(r#".header("x-trace", support::style::header_value"#),
             "{rendered}"
         );
     }

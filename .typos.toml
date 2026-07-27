@@ -3,6 +3,11 @@ ignore-files = true
 extend-exclude = [
   # Vendor OpenAPI documents, fetched not authored. Their prose is the publisher's.
   "corpus/cache/**",
+  # The diagnostics snapshots quote those documents back: member names, paths and titles appear
+  # verbatim inside a record's `location` and `detail`, so a publisher's misspelling lands here as
+  # a finding about progeny's own prose. `zoom` writes `timstamp`, and correcting it would make the
+  # snapshot disagree with the document it is a snapshot of.
+  "corpus/snapshots/**",
 ]
 
 [default]

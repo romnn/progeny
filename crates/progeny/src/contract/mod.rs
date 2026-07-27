@@ -27,7 +27,8 @@ use serde_json::Value;
 use crate::config::{Config, Derive, UnknownFields};
 use crate::diag::{Ctx, JsonPointer};
 use crate::resolve::ResolvedDocument;
-use crate::shape::{Docs, Format, ShapeKey, Shapes};
+pub(crate) use crate::shape::Format;
+use crate::shape::{Docs, ShapeKey, Shapes};
 
 pub(crate) use lower::Collapse;
 pub(crate) use name::{Namer, RustIdent};

@@ -442,7 +442,19 @@ pub(super) fn docs(docs: &Docs) -> TokenStream {
 /// still expanded — the lint fires there too, and four-column stops are what rustdoc would have
 /// shown anyway.
 fn wrap(text: &str) -> Vec<String> {
-    let text = text.replace('\r', "");
+    let expanded: Vec<String> = text.replace('\r', "").lines().map(expand_tabs).collect();
+    // Rustdoc removes the indentation every line of a doc comment shares before reading it as
+    // markdown, so every column measured below has to be measured after the same removal or the
+    // two disagree about what the document says. `sentry` writes a description indented twelve
+    // columns throughout: read literally that is one long indented code block, read as rustdoc
+    // reads it those are list items at column zero with lazy continuations under them — and it is
+    // rustdoc that emits the warning.
+    let common = expanded
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0);
     let mut out = Vec::new();
     let mut fence: Option<String> = None;
     // What a lazy line in the block now open should have been written with, and whether a
@@ -452,8 +464,8 @@ fn wrap(text: &str) -> Vec<String> {
     // Collapsing them loses the item at the blank line and leaves everything after it unindented.
     let mut continuation: Option<String> = None;
     let mut paragraph = false;
-    for raw in text.lines() {
-        let line = expand_tabs(raw);
+    for raw in &expanded {
+        let line = raw.get(common..).unwrap_or_default().to_owned();
         if let Some(open) = &fence {
             if closes_fence(&line, open) {
                 fence = None;
@@ -479,7 +491,12 @@ fn wrap(text: &str) -> Vec<String> {
         // indented code block, while read against its parent's content column of 2 it is what it
         // looks like. Getting that backwards flattens the sub-item and strands its continuation.
         let content = continuation.as_ref().map_or(0, String::len);
-        if indent >= content + 4 {
+        // An indented code block **cannot interrupt a paragraph** — `CommonMark` says so, and it is
+        // the difference between a code block and an over-indented continuation. `langsmith` wraps
+        // a list item's prose onto a line indented twelve columns under an item whose content
+        // starts at two; passing it through as code leaves rustdoc reading it as a list item at the
+        // wrong column, which is the warning it then emits.
+        if !paragraph && indent >= content + 4 {
             out.push(line);
             continue;
         }
@@ -645,7 +662,10 @@ mod doc_tests {
     #[test]
     fn tabs_become_spaces_because_rustdoc_does_not_define_their_width() {
         assert_eq!(normalized("a\tb"), "a   b");
-        assert_eq!(normalized("\tindented"), "    indented");
+        // Expanded before anything measures a column, so a tab-indented line is four columns in
+        // relative to its neighbours — and four columns in from a neighbour at zero, not from
+        // nothing, which is why this needs a second line to be a test of indentation at all.
+        assert_eq!(normalized("prose\n\n\tindented"), "prose\n\n    indented");
     }
 
     #[test]
@@ -662,8 +682,15 @@ mod doc_tests {
 
     #[test]
     fn an_indented_code_block_under_a_list_item_keeps_its_indentation() {
-        let found = normalized("* an item\n      code, four past the content column");
-        assert_eq!(found, "* an item\n      code, four past the content column");
+        // Four past the content column *and* after a blank line, which is what makes it code.
+        // Without the blank line it is a continuation of the item's paragraph, because an indented
+        // code block cannot interrupt one — see `paragraph_doc_tests`, and `langsmith`, where
+        // rustdoc says so out loud.
+        let found = normalized("* an item\n\n      code, four past the content column");
+        assert_eq!(
+            found,
+            "* an item\n\n      code, four past the content column"
+        );
     }
 }
 
@@ -697,6 +724,46 @@ mod nested_doc_tests {
 }
 
 #[cfg(test)]
+mod unindent_doc_tests {
+    use super::wrap;
+
+    #[test]
+    fn a_description_indented_throughout_is_read_the_way_rustdoc_reads_it() {
+        // `sentry` writes descriptions indented twelve columns from end to end. Measured against
+        // column zero every line is an indented code block; rustdoc removes the shared indentation
+        // first and sees list items with a lazy continuation, and rustdoc is the one that warns.
+        let found = wrap(
+            "            - `comparisonDelta`: the comparison delta, in minutes.\n            For example, 3600 compares against data one hour ago.",
+        )
+        .join("\n");
+        assert_eq!(
+            found,
+            "- `comparisonDelta`: the comparison delta, in minutes.\n  For example, 3600 compares against data one hour ago."
+        );
+    }
+
+    #[test]
+    fn removing_the_shared_indent_keeps_every_relative_indent() {
+        // Only what *every* line shares comes off, so a nested item stays nested and a genuine
+        // code block stays a code block.
+        let found =
+            wrap("  Prose.\n\n  - an item\n\n      code under it\n\n  Back to prose.").join("\n");
+        assert_eq!(
+            found,
+            "Prose.\n\n- an item\n\n    code under it\n\nBack to prose."
+        );
+    }
+
+    #[test]
+    fn a_blank_line_shorter_than_the_shared_indent_survives() {
+        // A truly empty line has no indentation to contribute and must not be counted, or the
+        // shared indent is always zero and nothing is ever unindented.
+        let found = wrap("    first\n\n    second").join("\n");
+        assert_eq!(found, "first\n\nsecond");
+    }
+}
+
+#[cfg(test)]
 mod paragraph_doc_tests {
     use super::wrap;
 
@@ -713,6 +780,29 @@ mod paragraph_doc_tests {
             found,
             "  * An optional filter. This is a rule.\n    See the guide.\n\n    Additionally, you can specify a key\n    you must supply when calling.\n    Each call."
         );
+    }
+
+    #[test]
+    fn an_indented_code_block_cannot_interrupt_a_paragraph() {
+        // `langsmith` wraps a list item's prose onto a line indented twelve columns, under an item
+        // whose content starts at two. Read as a code block it is passed through and rustdoc then
+        // reads it as a list item at the wrong column; `CommonMark` says an indented code block
+        // cannot interrupt a paragraph, so it is a continuation and belongs at the item's content.
+        let found = wrap(
+            "- examples: shared examples across all sessions\n            with flat array of runs",
+        )
+        .join("\n");
+        assert_eq!(
+            found,
+            "- examples: shared examples across all sessions\n  with flat array of runs"
+        );
+    }
+
+    #[test]
+    fn a_code_block_after_a_blank_line_is_still_a_code_block() {
+        // The other side of the same rule, so the fix cannot quietly reflow real code.
+        let found = wrap("Some prose.\n\n    fn main() {}\n    // still code").join("\n");
+        assert_eq!(found, "Some prose.\n\n    fn main() {}\n    // still code");
     }
 
     #[test]

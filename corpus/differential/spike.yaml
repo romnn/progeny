@@ -42,6 +42,16 @@ components:
           default: 20
         state:
           $ref: "#/components/schemas/State"
+        # A fixed-arity member, which is the trailing-element bug class. The tuple's own
+        # implementation is derived on both sides — the eligibility function rules tuples to the
+        # derive — so what this exercises is the *buffered replay* around it: in hand-written mode
+        # the struct buffers this member and replays it, and a replay that stops at the arity it was
+        # asked for drops the rest without a word unless it checks.
+        pair:
+          type: array
+          prefixItems:
+            - type: integer
+            - type: integer
     Closed:
       type: object
       required: [required]
@@ -54,3 +64,10 @@ components:
     State:
       type: string
       enum: [in-progress, done]
+    # An object with no properties, which `cloudflare`, `github-31` and `okta` all declare. It is
+    # here because it renders to code with nothing in it — no member to read, none to write — and
+    # every binding that had nothing to do became a warning in the consumer's build: an unused
+    # `buffer`, a `mut` on a count nothing increments, a `mut` on a state nothing writes to.
+    Empty:
+      type: object
+      properties: {}

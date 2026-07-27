@@ -121,7 +121,9 @@ fn decide(
     config: &Config,
 ) -> DeserStrategy {
     match config.serde_impl {
-        // The escape hatch, and the mode every corpus document is generated in today.
+        // The escape hatch. Every corpus document is generated both ways from stage 8 on, because
+        // an escape hatch nobody runs is not one — the first corpus run in the other mode failed on
+        // all eight tier documents.
         SerdeImpl::DeriveAlways => DeserStrategy::Derive,
         SerdeImpl::HandWrittenWhereEligible => match kind {
             ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
@@ -416,17 +418,47 @@ mod tests {
         }
     }
 
+    /// The escape hatch, asked for by name.
+    ///
+    /// It used to ask `Config::default()` and pass because the default *was* the derive. That made
+    /// it a test of the default rather than of the hatch, and it broke the moment the default
+    /// became the hand-written path — correctly, but for the wrong reason. A caller reaching for
+    /// the hatch names it, so this does too.
     #[test]
     fn the_escape_hatch_derives_everything() {
-        let kind = ContractKind::Struct { fields: Vec::new() };
+        let escape = Config {
+            serde_impl: SerdeImpl::DeriveAlways,
+            ..Config::default()
+        };
+        for kind in [
+            ContractKind::Struct { fields: Vec::new() },
+            ContractKind::StringEnum {
+                variants: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                decide(&kind, &Tagging::Untagged, UnknownFields::Ignore, &escape),
+                DeserStrategy::Derive,
+                "{kind:?} took a hand-written path under the escape hatch"
+            );
+        }
+    }
+
+    /// And the default is the fast one, which is the whole point of stage 8.
+    ///
+    /// Pinned because it is a product decision rather than an implementation detail: a compile-time
+    /// saving nobody gets without setting a flag is not a saving. If this ever flips back it should
+    /// be somebody's decision, announced by a failing test, rather than a quiet edit to a `#[default]`.
+    #[test]
+    fn the_default_is_the_hand_written_path() {
         assert_eq!(
             decide(
-                &kind,
+                &ContractKind::Struct { fields: Vec::new() },
                 &Tagging::Untagged,
                 UnknownFields::Ignore,
                 &Config::default()
             ),
-            DeserStrategy::Derive
+            DeserStrategy::HandWrittenBuffered
         );
     }
 

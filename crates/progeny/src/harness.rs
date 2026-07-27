@@ -215,7 +215,7 @@ fn generated(input: &[u8]) -> Result<Generated, RejectError> {
     let resolved = resolve::resolve(parsed, &mut ctx);
     let shapes = shape::classify(&resolved, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
-    let api = api::build(&resolved, &shapes, &contracts, &config, &mut ctx);
+    let api = api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
     Ok(Generated {
         model,
         files: render::run(&contracts, &api, &config),
@@ -361,7 +361,7 @@ pub fn payloads(input: &[u8], config: &crate::Config) -> Result<Payloads, Reject
     let resolved = resolve::resolve(parsed, &mut ctx);
     let shapes = shape::classify(&resolved, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
-    let model = api::build(&resolved, &shapes, &contracts, config, &mut ctx);
+    let model = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
 
     let (found, skipped) = api::payloads(&resolved, &shapes, &contracts, &model);
     let count = |wanted: api::Skipped| skipped.iter().filter(|it| **it == wanted).count();

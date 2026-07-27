@@ -225,10 +225,21 @@ where
             Content::Unit => visitor.visit_unit(),
             Content::None => visitor.visit_none(),
             Content::Some(value) => visitor.visit_some(ContentDeserializer::new(*value)),
+            // `end()` is the arity check, and it is not optional. A visitor asked for a fixed
+            // arity — a tuple, a `[T; N]` — stops as soon as it has that many and never asks
+            // again, so without this the leftovers are dropped **silently**. When the format reads
+            // the sequence itself the format notices (`serde_json` answers a three-element array
+            // read as a pair with a trailing-characters error); replay makes progeny the format,
+            // and it has to notice on its own behalf. serde's own `SeqDeserializer::deserialize_any`
+            // does exactly this, and handing the access straight to the visitor is what skips it.
             Content::Seq(items) => {
-                visitor.visit_seq(de::value::SeqDeserializer::new(items.into_iter().map(
-                    |item| -> ContentDeserializer<'de, E> { ContentDeserializer::new(item) },
-                )))
+                let mut sequence =
+                    de::value::SeqDeserializer::new(items.into_iter().map(
+                        |item| -> ContentDeserializer<'de, E> { ContentDeserializer::new(item) },
+                    ));
+                let value = visitor.visit_seq(&mut sequence)?;
+                sequence.end()?;
+                Ok(value)
             }
             Content::Map(members) => visitor.visit_map(MapReplay {
                 members: members.into_iter(),
@@ -761,5 +772,44 @@ impl<T> Visitor<'_> for NameSeed<T> {
                 &"variant index",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Content, ContentDeserializer};
+    use serde::Deserialize as _;
+
+    /// Replaying a buffered sequence into a fixed-arity target must reject the extra elements.
+    ///
+    /// The trailing-element bug class, and the reason it is specific to *buffered* replay: when the
+    /// format reads a tuple directly, the format itself notices the leftovers — `serde_json` answers
+    /// a three-element array read as a pair with a trailing-characters error. Replay makes progeny
+    /// the format, and a `SeqAccess` that stops after the arity it was asked for and never looks
+    /// again drops what is left **silently**, which is the one failure mode this project forbids.
+    /// serde's own `SeqDeserializer` exposes `end()` for exactly this and `deserialize_any` calls
+    /// it; a visitor handed the access directly skips it.
+    #[test]
+    fn a_buffered_sequence_replayed_into_a_shorter_tuple_is_refused() {
+        let content = Content::Seq(vec![Content::U64(1), Content::U64(2), Content::U64(3)]);
+        let deserializer = ContentDeserializer::<serde::de::value::Error>::new(content);
+        let read = <(u64, u64)>::deserialize(deserializer);
+        assert!(read.is_err(), "read {read:?} instead of refusing the third");
+    }
+
+    #[test]
+    fn a_buffered_sequence_replayed_into_a_shorter_array_is_refused() {
+        let content = Content::Seq(vec![Content::U64(1), Content::U64(2), Content::U64(3)]);
+        let deserializer = ContentDeserializer::<serde::de::value::Error>::new(content);
+        let read = <[u64; 2]>::deserialize(deserializer);
+        assert!(read.is_err(), "read {read:?} instead of refusing the third");
+    }
+
+    /// The arity it was promised still works, so the check above is not just a refusal.
+    #[test]
+    fn a_buffered_sequence_of_the_right_length_is_read() {
+        let content = Content::Seq(vec![Content::U64(1), Content::U64(2)]);
+        let deserializer = ContentDeserializer::<serde::de::value::Error>::new(content);
+        assert_eq!(<(u64, u64)>::deserialize(deserializer), Ok((1, 2)));
     }
 }

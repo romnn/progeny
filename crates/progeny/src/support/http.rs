@@ -200,6 +200,57 @@ impl ::std::fmt::Display for Unset {
 
 impl ::std::error::Error for Unset {}
 
+/// A form body whose value is not an object.
+///
+/// A `multipart/form-data` or form-urlencoded body names its parts after the members of an object.
+/// A document that types such a body as an array or a scalar has described something with no member
+/// names, and there is nothing to call the parts. Reported at `send()` because that is the only
+/// place it can be: the generated type is legal Rust, and only this one call is wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotAForm {
+    operation: &'static str,
+}
+
+impl NotAForm {
+    #[doc(hidden)]
+    pub fn new(operation: &'static str) -> Self {
+        Self { operation }
+    }
+}
+
+impl ::std::fmt::Display for NotAForm {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        write!(
+            f,
+            "`{}` sends a form body, which needs an object to name its parts from",
+            self.operation
+        )
+    }
+}
+
+impl ::std::error::Error for NotAForm {}
+
+/// A body as a `serde_json::Value`, so a form encoder can walk its members.
+///
+/// Returns the narrow error rather than `Error<E>`, and the caller widens it with `?`. Two things
+/// follow: this is not generic over the operation's error payload, so it is compiled once per body
+/// type instead of once per (body type × error type); and it does not carry `Error`'s largest
+/// variant — a whole `reqwest::Response` — through a return value that can never hold one.
+#[doc(hidden)]
+pub fn to_value<T: ::serde::Serialize>(
+    body: &T,
+    operation: &'static str,
+) -> ::std::result::Result<::serde_json::Value, DecodeError> {
+    ::serde_json::to_value(body).map_err(|source| {
+        DecodeError::new(
+            ::reqwest::StatusCode::BAD_REQUEST,
+            ::serde::de::Error::custom(::std::format!(
+                "`{operation}` could not serialize its body: {source}"
+            )),
+        )
+    })
+}
+
 /// Parse a successful body, or say the contract was wrong about it.
 ///
 /// One non-generic-per-operation helper rather than an inline block per `send()`: the body of this

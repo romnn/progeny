@@ -37,6 +37,14 @@ pub struct Args {
     /// Write the generated test crates and stop, without compiling or running anything.
     #[arg(long)]
     generate_only: bool,
+
+    /// Which serde strategy to generate with, rather than the configuration default.
+    ///
+    /// This gate is the only one that runs serde against real payloads, so it is the only one that
+    /// can tell the two strategies apart on the wire at corpus scale. The differential harness
+    /// compares them on one fixture; this compares each against 643 payloads the vendors wrote.
+    #[arg(long, value_name = "STRATEGY")]
+    serde: Option<crate::corpus::SerdeChoice>,
 }
 
 /// What one document's payloads did.
@@ -126,6 +134,9 @@ fn check(name: &str, spec: &crate::corpus::Spec, bytes: &[u8], args: &Args) -> R
     // per document to ask it would be minutes of nothing.
     config.emit.client = false;
     config.emit.server = false;
+    if let Some(choice) = args.serde {
+        config.serde_impl = choice.into();
+    }
 
     let collected = progeny::harness::payloads(bytes, &config)
         .with_context(|| format!("collecting payloads from {name}"))?;

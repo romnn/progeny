@@ -89,6 +89,182 @@ pub fn query_pairs(
     }
 }
 
+/// What the document said about one member of a form body, when it said anything.
+///
+/// `encoding` on an `application/x-www-form-urlencoded` body is declared exactly once in the whole
+/// corpus, and it sets `style` and `explode` — which is why those are the two fields here and there
+/// is no third.
+#[derive(Debug, Clone, Copy)]
+pub struct FormSpec {
+    pub name: &'static str,
+    pub style: Style,
+    pub explode: bool,
+}
+
+/// An `application/x-www-form-urlencoded` body.
+///
+/// The same encoder the query string uses, because they are the same encoding: a form body *is* a
+/// query string in the body position. Writing it twice would be two chances to disagree about
+/// arrays, and the style table already has the row.
+///
+/// Space becomes `%20` rather than `+`. Both are accepted everywhere — `+` is the older form and
+/// `%20` is what percent-encoding means — and reusing one encoder is worth more than matching a
+/// convention that has no reader which rejects the alternative.
+#[must_use]
+pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
+    let Some(members) = value.as_object() else {
+        // A form body that is not an object has no member names, and inventing one would be
+        // inventing the wire format. An empty body says what actually happened.
+        return String::new();
+    };
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (name, member) in members {
+        // The default for a form body is exploded `form`, which is the same default a query
+        // parameter has and for the same reason.
+        let (style, explode) = specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .map_or((Style::Form, true), |spec| (spec.style, spec.explode));
+        pairs.extend(query_pairs(name, member, style, explode));
+    }
+    pairs
+        .iter()
+        .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Read one parameter back out of a query string.
+///
+/// The inverse of [`query_pairs`], and it lives beside it for the reason the encoder lives in one
+/// place: a client that writes `a=1&a=2` and a server that reads it are two halves of one row, and
+/// two files would be two chances for the row to be read differently at each end. The round-trip is
+/// asserted per row in this module's tests.
+///
+/// `None` means the query string did not carry the parameter at all, which is a different answer
+/// from "carried it empty" and the caller decides what each costs.
+#[must_use]
+pub fn from_query(query: &str, name: &str, style: Style, explode: bool) -> Option<Value> {
+    let pairs: Vec<(String, String)> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| match pair.split_once('=') {
+            Some((key, value)) => (decode(key), decode(value)),
+            None => (decode(pair), String::new()),
+        })
+        .collect();
+
+    if style == Style::DeepObject {
+        // `a[x]=1`: the members are addressable, so the object is rebuilt from the keys.
+        let prefix = format!("{name}[");
+        let members: serde_json::Map<String, Value> = pairs
+            .iter()
+            .filter_map(|(key, value)| {
+                let member = key.strip_prefix(&prefix)?.strip_suffix(']')?;
+                Some((member.to_owned(), Value::String(value.clone())))
+            })
+            .collect();
+        return (!members.is_empty()).then_some(Value::Object(members));
+    }
+
+    let mine: Vec<&String> = pairs
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value)
+        .collect();
+    let first = mine.first()?;
+    // Repetition is what an exploded array looks like; one occurrence of a style that joins is what
+    // a joined one looks like. Both are decided by the row rather than by what happens to have
+    // arrived, so a single-element exploded array stays an array.
+    Some(match (style, explode) {
+        // The two delimited styles are the only ones that put a whole array in one occurrence;
+        // every exploded style, `form` included, repeats the key instead, so they share an arm.
+        (Style::SpaceDelimited, false) => split_one(first, ' '),
+        (Style::PipeDelimited, false) => split_one(first, '|'),
+        (_, true) if mine.len() > 1 => split_values(&mine),
+        _ => Value::String((*first).clone()),
+    })
+}
+
+/// Repeated occurrences as the array they spell. The separator is the repetition itself, which is
+/// why this takes none: the values arrived already apart.
+fn split_values(values: &[&String]) -> Value {
+    Value::Array(
+        values
+            .iter()
+            .map(|value| Value::String((*value).clone()))
+            .collect(),
+    )
+}
+
+fn split_one(value: &str, separator: char) -> Value {
+    Value::Array(
+        value
+            .split(separator)
+            .map(|part| Value::String(part.to_owned()))
+            .collect(),
+    )
+}
+
+/// Undo the percent-encoding a query string carries.
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes.get(index) {
+            // `+` is the older spelling of a space in a form-encoded query. progeny writes `%20`,
+            // but it reads both: what arrives was written by somebody else's client.
+            Some(b'+') => out.push(b' '),
+            Some(b'%') => {
+                let hex = text
+                    .get(index + 1..index + 3)
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        out.push(byte);
+                        index += 3;
+                        continue;
+                    }
+                    // A stray `%` that is not an escape is a literal `%`, which is what every
+                    // lenient reader does and the only alternative to refusing the request.
+                    None => out.push(b'%'),
+                }
+            }
+            Some(byte) => out.push(*byte),
+            None => break,
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Read a whole form-urlencoded body back into an object.
+///
+/// The inverse of [`form_body`], member by member, through the same rows. Every member arrives as
+/// text — a form body has no types either — and the caller asks serde for the shape afterwards.
+#[must_use]
+pub fn query_object(query: &str, specs: &[FormSpec]) -> Value {
+    let mut members = serde_json::Map::new();
+    for name in query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| pair.split_once('=').map(|(key, _)| decode(key)))
+    {
+        if members.contains_key(&name) {
+            continue;
+        }
+        let (style, explode) = specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .map_or((Style::Form, true), |spec| (spec.style, spec.explode));
+        if let Some(value) = from_query(query, &name, style, explode) {
+            members.insert(name, value);
+        }
+    }
+    Value::Object(members)
+}
+
 /// What one parameter puts in a path segment, already percent-encoded.
 #[must_use]
 pub fn path_segment(value: &Value, style: Style, explode: bool) -> String {
@@ -225,7 +401,8 @@ fn encode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Style, cookie_pair, encode, header_value, matrix_segment, path_segment, query_pairs,
+        FormSpec, Style, cookie_pair, encode, form_body, header_value, matrix_segment,
+        path_segment, query_pairs,
     };
     use serde_json::json;
 
@@ -326,5 +503,131 @@ mod tests {
         assert_eq!(encode("a&b=c?d#e"), "a%26b%3Dc%3Fd%23e");
         // Multi-byte input is encoded byte by byte, which is what a URL carries.
         assert_eq!(encode("é"), "%C3%A9");
+    }
+
+    /// Encode a parameter the way a generated client does, then read it the way a generated server
+    /// does, and assert the row survives the round trip.
+    fn round_trip(
+        value: &json_types::Value,
+        style: Style,
+        explode: bool,
+    ) -> Option<json_types::Value> {
+        let query = query_pairs("p", value, style, explode)
+            .iter()
+            .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        super::from_query(&query, "p", style, explode)
+    }
+
+    use serde_json as json_types;
+
+    #[test]
+    fn every_style_row_survives_the_client_writing_it_and_the_server_reading_it() {
+        // The one assertion that makes the table a table rather than two lists. Values come back as
+        // strings because a query string has no types — what a parameter *is* comes from the
+        // schema, and `read` asks serde for it afterwards.
+        assert_eq!(
+            round_trip(&json!("plain value"), Style::Form, true),
+            Some(json!("plain value"))
+        );
+        assert_eq!(
+            round_trip(&json!(["a", "b"]), Style::Form, true),
+            Some(json!(["a", "b"]))
+        );
+        assert_eq!(
+            round_trip(&json!(["a", "b"]), Style::SpaceDelimited, false),
+            Some(json!(["a", "b"]))
+        );
+        assert_eq!(
+            round_trip(&json!(["a", "b"]), Style::PipeDelimited, false),
+            Some(json!(["a", "b"]))
+        );
+        assert_eq!(
+            round_trip(&json!({"x": "1", "y": "2"}), Style::DeepObject, true),
+            Some(json!({"x": "1", "y": "2"}))
+        );
+    }
+
+    #[test]
+    fn a_parameter_the_query_never_carried_is_absent_rather_than_empty() {
+        // The distinction the whole optional-parameter rule rests on: a server has to tell "not
+        // sent" from "sent empty", and only `None` says the first.
+        assert_eq!(super::from_query("", "p", Style::Form, true), None);
+        assert_eq!(super::from_query("q=1", "p", Style::Form, true), None);
+        assert_eq!(
+            super::from_query("p=", "p", Style::Form, true),
+            Some(json!(""))
+        );
+    }
+
+    #[test]
+    fn what_arrives_percent_encoded_comes_back_as_it_was_written() {
+        assert_eq!(
+            super::from_query("p=a%20b%26c", "p", Style::Form, true),
+            Some(json!("a b&c"))
+        );
+        // `+` is the older spelling of a space. progeny writes `%20` and reads both, because what
+        // arrives was written by somebody else's client.
+        assert_eq!(
+            super::from_query("p=a+b", "p", Style::Form, true),
+            Some(json!("a b"))
+        );
+        assert_eq!(
+            super::from_query("p=100%25", "p", Style::Form, true),
+            Some(json!("100%"))
+        );
+        // A `%` that is not an escape is a `%`, which is the only alternative to refusing.
+        assert_eq!(
+            super::from_query("p=50%zz", "p", Style::Form, true),
+            Some(json!("50%zz"))
+        );
+    }
+
+    #[test]
+    fn a_form_body_is_a_query_string_in_the_body_position() {
+        assert_eq!(
+            form_body(
+                &json!({"grant_type": "client_credentials", "scope": "read"}),
+                &[]
+            ),
+            "grant_type=client_credentials&scope=read"
+        );
+        // Every value is encoded, which is the difference from the query case: there the HTTP
+        // client does it, and here there is no client between this and the socket.
+        assert_eq!(
+            form_body(&json!({"redirect uri": "https://example.test/cb?a=1"}), &[]),
+            "redirect%20uri=https%3A%2F%2Fexample.test%2Fcb%3Fa%3D1"
+        );
+    }
+
+    #[test]
+    fn a_form_bodys_array_explodes_by_default() {
+        assert_eq!(form_body(&json!({"tag": ["a", "b"]}), &[]), "tag=a&tag=b");
+    }
+
+    #[test]
+    fn a_form_bodys_encoding_selects_a_style_row() {
+        // The one corpus body that declares `encoding` on a form body sets `style` and `explode`,
+        // and this is what that declaration has to do.
+        let specs = [FormSpec {
+            name: "tag",
+            style: Style::SpaceDelimited,
+            explode: false,
+        }];
+        assert_eq!(form_body(&json!({"tag": ["a", "b"]}), &specs), "tag=a%20b");
+    }
+
+    #[test]
+    fn a_null_member_is_absent_from_a_form_body() {
+        // Same rule as a query parameter, and for the same reason: a server cannot tell an empty
+        // value from an unset one.
+        assert_eq!(form_body(&json!({"a": null, "b": 1}), &[]), "b=1");
+    }
+
+    #[test]
+    fn a_form_body_that_is_not_an_object_is_empty() {
+        assert_eq!(form_body(&json!([1, 2]), &[]), "");
+        assert_eq!(form_body(&json!("text"), &[]), "");
     }
 }

@@ -17,10 +17,38 @@
 //! # Status
 //!
 //! Implemented: loading, dialect normalization, the lossless document and schema model, reference
-//! resolution, shape classification, the wire contracts, and the types renderer. The model's
-//! fidelity is gated by a round trip over a corpus of 78 published descriptions, and the generated
-//! types are gated by compiling them. The client and server renderers do not exist yet, so
-//! [`generate`] emits the shared type layer and nothing else.
+//! resolution, shape classification, the wire contracts, and all three renderers — the shared type
+//! layer, the client, and the server. The model's fidelity is gated by a round trip over a corpus
+//! of 78 published descriptions; the generated crates are gated by compiling *and linting* them,
+//! by running serde against the payloads those descriptions carry, and by standing one generated
+//! client up against the generated server of the same document over a real socket.
+//!
+//! # Serde strategy, and the one case where it matters
+//!
+//! Types are rendered with **hand-written** `Serialize`/`Deserialize` implementations by default,
+//! wherever [`SerdeImpl`]'s eligibility rules allow. This is a compile-time decision and not a
+//! behavioural one: the two strategies are asserted equivalent on the wire by a differential
+//! harness, and they agree on every payload in the corpus. The saving is worth having — on the type
+//! layer, 65–67% less CPU and 47–55% less peak RSS than the derive.
+//!
+//! It costs one thing. The hand-written path for **structs** buffers members before assigning them,
+//! which requires a *self-describing* format — one that names its members, as JSON, YAML and TOML
+//! do. Feeding generated structs to a format that does not, such as `bincode` or `postcard`, needs
+//! [`SerdeImpl::DeriveAlways`], which puts every type back on the derive. Fieldless enums are
+//! unaffected either way: that path resolves a variant from its identifier and never buffers.
+//!
+//! # Pagination
+//!
+//! Declared per operation with [`Pagination`], and **never detected**. 62 of the 78 corpus
+//! documents paginate and no two agree on how to say so — the cursor parameter is called `offset`
+//! 541 times, `page` 319, `cursor` 213, `after` 198 — so detection would be a table of vendor
+//! spellings pretending to be a rule. A declaration names the cursor query parameter, the member
+//! holding the next cursor and the member holding the items, and every one of them is checked
+//! against the document before anything is generated: a name that does not resolve is an error
+//! that says what it looked for and what the document had instead.
+//!
+//! A declared operation gains a `stream()` beside its `send()` — never instead of it. The generated
+//! crate depends on `futures-core` and `futures-util` only when some operation declared pagination.
 
 mod api;
 mod catalogue;
@@ -46,8 +74,8 @@ use std::collections::BTreeMap;
 use camino::Utf8PathBuf;
 
 pub use crate::config::{
-    BytesRepr, Config, DateTimeCrate, Deny, Derive, Emit, Formats, MapKind, Package, Packaging,
-    SerdeImpl, UnknownFields, UuidCrate,
+    BodyLimit, BytesRepr, Config, DateTimeCrate, Deny, Derive, Emit, Formats, MapKind, Package,
+    Packaging, Pagination, SerdeImpl, UnknownFields, UuidCrate,
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
@@ -86,7 +114,7 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
     // document — two operations that collide, an example that contradicts its own schema, which
     // half of the API a presence collapse costs — and a caller who asked for types only is still
     // entitled to them.
-    let api = api::build(&resolved, &shapes, &contracts, config, &mut ctx);
+    let api = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
 
     Ok(Output {
         files: render::run(&contracts, &api, config),
@@ -124,6 +152,7 @@ mod tests {
                 "Cargo.toml",
                 "src/client.rs",
                 "src/lib.rs",
+                "src/server.rs",
                 "src/support.rs",
                 "src/types.rs"
             ]
@@ -133,6 +162,10 @@ mod tests {
         let client = &output.files[camino::Utf8Path::new("src/client.rs")];
         assert!(client.contains("pub struct Client"), "{client}");
         assert!(client.contains("pub fn list_pets"), "{client}");
+        let server = &output.files[camino::Utf8Path::new("src/server.rs")];
+        assert!(server.contains("pub trait Api"), "{server}");
+        assert!(server.contains("fn list_pets"), "{server}");
+        assert!(server.contains("pub fn router"), "{server}");
         // Every rendered file has to parse as Rust, or the compile gate is the first thing to
         // find out.
         for (path, text) in &output.files {
