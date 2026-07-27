@@ -206,13 +206,13 @@ impl BreakageClass {
             | Self::PresenceCollapse
             | Self::CollidingTypeName
             | Self::CollidingOperationId
-            // Moved here at stage 7, when the router turned it into a scale class. A refusal names
-            // the router's *reason* and not the route, so a document with a habit folds into one
-            // record: `twilio-api-v2010` puts `.json` after a path variable in 99 operations and
-            // `anthropic` writes `?beta=true` into 41 path templates. A genuine collision
-            // names what it collided with and so stays its own record — the same split
-            // `colliding-operation-id` has, and it falls out of aggregating on the sentence rather
-            // than on the class.
+            // Moved here at stage 7, when the router turned it into a scale class. A refusal folds
+            // on an explicit key ("router-refusal"), so a document with a habit is one record —
+            // `twilio-api-v2010` puts `.json` after a path variable in 99 operations, `anthropic`
+            // writes `?beta=true` into 41 templates — however the refusal sentence is worded this
+            // year. A genuine collision names what it collided with and so stays its own record:
+            // no key, and the sentence differs per route. The same split `colliding-operation-id`
+            // has.
             | Self::UnregistrableRoute
             | Self::UnsatisfiableDerive => Aggregation::PerDocument,
             // The first can occur at most once per document by construction; each of the rest names
@@ -249,6 +249,16 @@ pub struct Diagnostic {
     detail: String,
     related: Vec<JsonPointer>,
     occurrences: NonZeroU32,
+    /// What this diagnostic folds with, when that should not be the sentence.
+    ///
+    /// Aggregation identity defaults to `(class, detail)`: two records fold when they say the same
+    /// thing. That default makes the *wording* load-bearing — improving a message re-keys the
+    /// aggregation and rewrites snapshots, which is exactly what happened when the router-refusal
+    /// sentence gained its `matchit` attribution and thirteen documents re-recorded. A site whose
+    /// message may evolve independently of what the record *is* sets this to a stable key, so the
+    /// invariant lives in a field the compiler carries rather than in a comment folding has to obey.
+    /// Never serialized: identity is not output.
+    fold: Option<String>,
 }
 
 /// How many locations an aggregated diagnostic names before it stops collecting them.
@@ -277,7 +287,23 @@ impl Diagnostic {
             detail: detail.into(),
             related: Vec::new(),
             occurrences: NonZeroU32::MIN,
+            fold: None,
         }
+    }
+
+    /// Fold on `key` instead of on the sentence.
+    ///
+    /// For sites whose wording may improve independently of what the record is about — see the
+    /// `fold` field for the incident that motivated it.
+    #[must_use]
+    pub fn folded_as(mut self, key: impl Into<String>) -> Self {
+        self.fold = Some(key.into());
+        self
+    }
+
+    /// The aggregation identity: the explicit key when one was set, the sentence otherwise.
+    fn fold_key(&self) -> &str {
+        self.fold.as_deref().unwrap_or(&self.detail)
     }
 
     /// Attach the other document locations this diagnostic is about, such as the second of
@@ -591,7 +617,7 @@ impl Ctx {
             self.diagnostics.push(diagnostic);
             return;
         }
-        let key = (diagnostic.class, diagnostic.detail.clone());
+        let key = (diagnostic.class, diagnostic.fold_key().to_owned());
         if let Some(&index) = self.aggregated.get(&key)
             && let Some(existing) = self.diagnostics.get_mut(index)
         {
@@ -813,6 +839,48 @@ mod tests {
         let found = ctx.into_diagnostics();
         assert_eq!(found.len(), 3, "{found:#?}");
         assert_eq!(found[0].occurrences().get(), 4);
+    }
+
+    /// An explicit fold key survives the sentence changing, and the default does not.
+    ///
+    /// The incident this pins: the router-refusal sentence gained its `matchit` attribution, which
+    /// re-keyed the aggregation and re-recorded thirteen snapshots — correct both times, but only
+    /// because the change happened at every site at once. A site that folds on a stable key keeps
+    /// its identity through a rewording; the first phrasing reported is the one the record keeps.
+    #[test]
+    fn an_explicit_fold_key_outlives_the_wording() {
+        let mut ctx = Ctx::new();
+        for (index, wording) in ["refused (reason A)", "refused, worded differently"]
+            .iter()
+            .enumerate()
+        {
+            ctx.report(
+                Diagnostic::new(
+                    BreakageClass::UnregistrableRoute,
+                    Action::Degrade,
+                    JsonPointer::root().child(index.to_string()),
+                    *wording,
+                )
+                .folded_as("router-refusal"),
+            );
+        }
+        // The same two sentences without a key are two records: the default identity is the
+        // sentence, and that stays the right default for every site whose sentence is the finding.
+        for (index, wording) in ["refused (reason A)", "refused, worded differently"]
+            .iter()
+            .enumerate()
+        {
+            ctx.report(Diagnostic::new(
+                BreakageClass::UnregistrableRoute,
+                Action::Degrade,
+                JsonPointer::root().child(format!("unkeyed-{index}")),
+                *wording,
+            ));
+        }
+        let found = ctx.into_diagnostics();
+        assert_eq!(found.len(), 3, "{found:#?}");
+        assert_eq!(found[0].occurrences().get(), 2);
+        assert_eq!(found[0].detail(), "refused (reason A)");
     }
 
     #[test]

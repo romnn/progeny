@@ -24,7 +24,7 @@
 //! a route the router refused cannot reach rendering — the invariant is carried by a type rather
 //! than by a check somebody has to remember to run.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::{Method, OperationContract};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic};
@@ -55,15 +55,32 @@ impl RegistrableRoute {
 /// property — length, specificity, alphabetical — would be progeny inventing an intent. First
 /// written, first registered; every later one says what it lost to.
 pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
-    // One router per method, because a route is only ambiguous against another route on the same
-    // method — `axum` builds its own tree per method for exactly this reason, and sharing one here
-    // would report `GET /pets/{id}` as colliding with `DELETE /pets/{name}`.
-    let mut routers: BTreeMap<Method, matchit::Router<String>> = BTreeMap::new();
+    // **One router for every method**, because that is what `axum` has: its `Router` keeps a single
+    // path tree, and dispatching on the method happens inside a matched node. The first version of
+    // this function kept a router per method on the belief that a route is only ambiguous against
+    // another route on the same method — a model, and a wrong one, which the wire probe demolished
+    // on its second document: `jellyfin`'s `GET …/Subtitles/{language}` and
+    // `POST …/Subtitles/{subtitleId}` pass a per-method classifier and then panic the real router
+    // at startup, the exact failure this module exists to make impossible. Asked-not-modelled
+    // applies to the router's *sharding* too.
+    //
+    // Two operations on the *identical* template are fine and common — `GET` and `DELETE` of
+    // `/pets/{id}` — because the server renderer merges them into one registration; only the first
+    // occurrence of a template is inserted.
+    let mut router = matchit::Router::new();
+    let mut templates: BTreeSet<String> = BTreeSet::new();
     for operation in operations {
         let path = operation.path.to_string();
-        let router = routers.entry(operation.method).or_default();
+        if templates.contains(&path) {
+            operation.registrable = Some(RegistrableRoute {
+                path,
+                method: operation.method,
+            });
+            continue;
+        }
         match router.insert(&path, path.clone()) {
             Ok(()) => {
+                templates.insert(path.clone());
                 operation.registrable = Some(RegistrableRoute {
                     path,
                     method: operation.method,
@@ -101,15 +118,21 @@ pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
             // progeny's claim about the document — which matters more here than anywhere, because
             // this module deliberately does not model the rule well enough to say it better.
             Err(other) => {
-                ctx.report(Diagnostic::new(
-                    BreakageClass::UnregistrableRoute,
-                    Action::Degrade,
-                    operation.origin.clone(),
-                    format!(
-                        "the path is not one the router accepts (`matchit`: {other}); the \
-                         generated server omits the operation and the client keeps it"
-                    ),
-                ));
+                ctx.report(
+                    Diagnostic::new(
+                        BreakageClass::UnregistrableRoute,
+                        Action::Degrade,
+                        operation.origin.clone(),
+                        format!(
+                            "the path is not one the router accepts (`matchit`: {other}); the \
+                             generated server omits the operation and the client keeps it"
+                        ),
+                    )
+                    // Folded on a stable key rather than on the sentence, because the sentence
+                    // quotes `matchit` and has already been reworded once: identity is "the router
+                    // refused it", however the refusal is phrased this year.
+                    .folded_as("router-refusal"),
+                );
             }
         }
     }
@@ -141,18 +164,24 @@ mod tests {
         }
     }
 
-    /// What `classify` does with each of the three answers a router can give.
+    /// What `classify` does with each of the answers a router can give.
     ///
     /// The `matchit` tests below pin what the *router* says; this pins what progeny does about it,
-    /// which is the part that can regress. Note the third case: two operations of the same shape on
-    /// *different methods* are not a collision, because a router keeps a tree per method.
+    /// which is the part that can regress. The last two cases are the ones the wire probe corrected:
+    /// a conflicting shape loses its handler **whatever its method**, because `axum` keeps one path
+    /// tree for all methods — while a second method on the *identical* template is the ordinary
+    /// merged registration and keeps everything.
     #[test]
     fn a_refusal_and_a_collision_cost_the_handler_and_nothing_else() {
         let mut operations = vec![
             operation(Method::Get, "/pets/{id}"),
             operation(Method::Get, "/pets/{name}"),
             operation(Method::Get, "/thumbs/{id}.png"),
+            // The shape the first classifier waved through and the real router panicked on:
+            // a conflicting template on a *different* method.
             operation(Method::Delete, "/pets/{other}"),
+            // And the case that must keep working: another method on the identical template.
+            operation(Method::Delete, "/pets/{id}"),
         ];
         let mut ctx = Ctx::new();
         classify(&mut operations, &mut ctx);
@@ -161,7 +190,7 @@ mod tests {
             .iter()
             .map(|operation| operation.registrable.is_some())
             .collect();
-        assert_eq!(kept, [true, false, false, true]);
+        assert_eq!(kept, [true, false, false, false, true]);
         assert_eq!(
             operations[0]
                 .registrable
@@ -171,7 +200,7 @@ mod tests {
         );
 
         let found = ctx.into_diagnostics();
-        assert_eq!(found.len(), 2, "{found:#?}");
+        assert_eq!(found.len(), 3, "{found:#?}");
         // A collision names what it collided with, so a reader can find the winner.
         assert!(
             found[0].detail().contains("`/pets/{id}`"),
@@ -184,6 +213,12 @@ mod tests {
             found[1].detail().contains("`matchit`:"),
             "{}",
             found[1].detail()
+        );
+        // The cross-method collision reads like any other collision.
+        assert!(
+            found[2].detail().contains("`DELETE /pets/{other}`"),
+            "{}",
+            found[2].detail()
         );
     }
 
@@ -235,42 +270,39 @@ mod tests {
 
     /// The coupling this module is built on, asserted rather than assumed.
     ///
-    /// progeny asks *its* `matchit` and the generated crate registers with *`axum`'s*. If those are
-    /// ever different majors the answer progeny gives is about a router nobody runs, and the
-    /// failure mode is a server that panics at startup — the one thing the classifier exists to
-    /// make impossible. `axum::Router` is built here purely so cargo resolves axum's own matchit;
-    /// a mismatch shows up as a duplicate-crate build rather than as a runtime surprise.
+    /// progeny asks *its* `matchit` and the generated crate registers with *axum's*. If those
+    /// ever resolve to incompatible versions the answer progeny gives is about a router nobody
+    /// runs, and the failure mode is a server that panics at startup — the one thing the
+    /// classifier exists to make impossible. `axum::Router` is built here so the dependency this
+    /// test is about actually exists in the graph.
+    ///
+    /// Read from the checked-in lockfile rather than by shelling out to `cargo tree`, for two
+    /// reasons that both bit the previous version. A subprocess gave the test a path where it
+    /// silently passed — no `cargo` on `PATH` meant no assertion — and a test that can pass by not
+    /// running enforces nothing. And comparing *major* numbers was wrong for a `0.x` crate:
+    /// matchit 0.8 and 0.9 are semver-incompatible and both have major `0`, so the exact drift
+    /// being guarded against would have passed. Counting lockfile entries delegates compatibility
+    /// to cargo itself: it unifies versions within one compatible range, so a second `matchit`
+    /// entry appears exactly when progeny and axum stop sharing one router.
     #[test]
     fn the_router_progeny_asks_is_the_router_axum_uses() {
         let _: axum::Router<()> = axum::Router::new();
-        let versions = std::process::Command::new("cargo")
-            .args([
-                "tree",
-                "--package",
-                "progeny",
-                "--invert",
-                "matchit",
-                "--edges",
-                "normal",
-            ])
-            .output();
-        let Ok(output) = versions else {
-            // No cargo on the path is a broken environment, not a failing invariant.
-            return;
-        };
-        let tree = String::from_utf8_lossy(&output.stdout);
-        let majors: std::collections::BTreeSet<&str> = tree
+        // `include_str!` rather than a runtime read, for two reasons: the resolved dependency
+        // graph is a compile-time fact, so compile time is when to capture it; and the library's
+        // no-I/O rule is mechanical — `lint-layers` rejects `std::fs` here, tests included.
+        let lockfile = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
+        let resolved: Vec<&str> = lockfile
             .lines()
-            .filter_map(|line| {
-                line.trim_start_matches(['├', '─', '│', '└', ' '])
-                    .strip_prefix("matchit v")
-            })
-            .filter_map(|version| version.split('.').next())
+            .zip(lockfile.lines().skip(1))
+            .filter(|(name, _)| *name == "name = \"matchit\"")
+            .map(|(_, version)| version)
             .collect();
-        assert!(
-            majors.len() <= 1,
-            "progeny and axum resolve different major versions of matchit, so the classifier is \
-             answering about a router the generated server does not use: {majors:?}\n{tree}"
+        assert_eq!(
+            resolved.len(),
+            1,
+            "cargo resolved more than one `matchit`, so progeny and axum are not asking the same \
+             router and the classifier's answers are about one the generated server does not use: \
+             {resolved:?}"
         );
     }
 }
