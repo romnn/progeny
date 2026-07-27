@@ -25,7 +25,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args as ClapArgs;
 
 #[derive(Debug, ClapArgs)]
@@ -114,17 +114,54 @@ struct Sample {
     peak_rss_bytes: u64,
     load_before: f64,
     load_after: f64,
+    /// Wall-clock seconds the repetition ran for, which is what decides how much of the load
+    /// average it is answerable for itself.
+    wall_seconds: f64,
     /// Whether free memory was thin enough that the peak is an underestimate.
     pressured: bool,
 }
 
+/// How much of its wall-clock time a repetition has to spend on a processor before it counts.
+///
+/// Deliberately loose. This is not a second load ceiling — [`discipline::MAX_LOAD`] already refuses
+/// to *start* a repetition on a busy machine, and this catches only the machine getting busy
+/// afterwards, which is the part the ceiling cannot see. Half means a repetition may spend as much
+/// time waiting as running before anyone doubts it.
+const MIN_PROGRESS: f64 = 0.5;
+
 impl Sample {
-    /// Whether the machine got busier while this repetition ran.
+    /// What fraction of a processor this repetition actually got.
     ///
-    /// The tolerance is deliberately small: a run that shared the machine with something else did
-    /// not measure the code.
+    /// Above 1.0 whenever `rustc` threads inside its single job, which is common and fine: the
+    /// number is only ever compared against a floor.
+    fn progress(&self) -> f64 {
+        if self.wall_seconds <= 0.0 {
+            return f64::INFINITY;
+        }
+        self.cpu_seconds / self.wall_seconds
+    }
+
+    /// Whether something else was competing for the processor while this repetition ran.
+    ///
+    /// Asked **of the repetition, not of the machine**, and that is the whole correction. The rule
+    /// used to compare the one-minute load average before and after against a flat 0.25 — but a
+    /// repetition *is itself load*. That average is an exponentially weighted mean over sixty
+    /// seconds, so a 21-second measurement raises it by about 0.3 unaided, and `okta` duly
+    /// discarded four of six `derive` repetitions and **none** of its `hand-written` ones, the only
+    /// difference between them being 21 seconds against 7. A filter that discards the slow
+    /// variant's repetitions *because it is slow* biases the exact comparison this harness exists
+    /// to make, in the direction of a larger apparent win.
+    ///
+    /// Starvation is visible from inside the measurement, so it needs no model of the load
+    /// average's decay, nobody's thread count, and no guess about what else is running: when the
+    /// processor is contended, wall-clock time runs away from CPU time. Measured, local, and true
+    /// whatever the rest of the machine is doing.
+    ///
+    /// What this deliberately does *not* catch is memory-bandwidth contention, which inflates CPU
+    /// seconds and wall seconds together and so leaves the ratio alone. That is what the load
+    /// ceiling is for, and why both exist.
     fn crowded(&self) -> bool {
-        self.load_after > self.load_before + 0.25
+        self.progress() < MIN_PROGRESS
     }
 }
 
@@ -154,6 +191,18 @@ impl Summary {
         let total: u64 = self.kept.iter().map(|sample| sample.peak_rss_bytes).sum();
         Some(total / count)
     }
+
+    /// The busiest a kept repetition started at.
+    ///
+    /// The worst rather than the first, which is what was recorded before: taking the first
+    /// flatters a run whose *later* repetitions were the crowded ones, and it is the worst
+    /// repetition that decides whether the mean is worth anything.
+    fn worst_load(&self) -> f64 {
+        self.kept
+            .iter()
+            .map(|sample| sample.load_before)
+            .fold(0.0, f64::max)
+    }
 }
 
 /// One recorded measurement, and the conditions it was taken under.
@@ -166,15 +215,26 @@ impl Summary {
 struct BaselineEntry {
     cpu_seconds: f64,
     peak_rss_bytes: u64,
+    /// What the measured crate held, from [`scope_of`]. Two entries with different scopes are not
+    /// comparable, and `--check` refuses to pretend otherwise.
+    #[serde(default)]
+    scope: String,
     /// Repetitions kept, and repetitions thrown away because the machine got busier during them.
     kept: usize,
     discarded: usize,
-    /// The one-minute load average when the run started, and the cores it was spread over.
+    /// The busiest a kept repetition started at, and the cores it was spread over.
     load: f64,
     cores: usize,
     /// Set when free memory was thin enough that the peak is a floor rather than a result.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pressured: bool,
+    /// Empty when the entry meets the [`discipline`]; otherwise every way it does not.
+    ///
+    /// A non-empty list makes the entry provisional, and `--check` refuses a provisional entry as
+    /// the basis of a comparison: a threshold applied against a figure taken on a busy machine
+    /// convicts the machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provisional: Vec<String>,
 }
 
 /// One crate to measure, and which rendering of its document it is.
@@ -185,6 +245,13 @@ struct Target {
     variant: String,
     package: String,
     directory: Utf8PathBuf,
+    /// What this rendering held, from [`scope_of`].
+    ///
+    /// Recorded here rather than recomputed at measurement time because `--reuse` measures crates a
+    /// different tree rendered: asking today's generator what it emits would answer about the wrong
+    /// crate, which is the exact confusion the field exists to prevent.
+    #[serde(default)]
+    scope: String,
 }
 
 /// What one run rendered, and which tree it rendered from.
@@ -207,6 +274,103 @@ fn rendering_path() -> Utf8PathBuf {
 /// The serde strategy each variant renders with.
 const DERIVE: &str = "derive";
 const HAND_WRITTEN: &str = "hand-written";
+
+/// The standard a recorded baseline has to meet before its figures may be quoted as *the* number.
+///
+/// Deliberately not `--max-load`. That flag is an operator's knob: it says how long *this* run will
+/// wait for a window, and raising it is reasonable when the question is "did this get worse" rather
+/// than "what is the number". This is the standard [06] holds a recorded baseline to — and the two
+/// were the same thing once, so overriding the knob quietly lowered the standard and six entries
+/// were written at load 12.7 to 18.2 without a word of complaint. A measurement harness that
+/// records numbers it should have refused is worse than no harness, because the numbers read as
+/// authoritative to everyone who finds them later.
+///
+/// [06]: ../../../plan/06-workspace-and-validation.md
+mod discipline {
+    /// The one-minute load average a repetition may *start* at.
+    ///
+    /// CPU-seconds are not load-immune despite the unit — memory-bandwidth and cache contention
+    /// inflate them, by up to 2.6× at load 17 on this hardware.
+    pub const MAX_LOAD: f64 = 5.0;
+
+    /// Repetitions that have to survive discarding, per variant. One is an anecdote and two have no
+    /// middle; three is the least that can show a spread at all.
+    pub const MIN_KEPT: usize = 3;
+}
+
+/// Why a recorded entry may not be quoted, or empty when it meets the [`discipline`].
+///
+/// Written into the entry rather than checked once and forgotten, so the file carries its own
+/// verdict: somebody who finds `baseline.toml` and never runs the harness still sees it.
+fn shortfalls(kept: usize, load: f64, pressured: bool) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if load > discipline::MAX_LOAD {
+        reasons.push(format!(
+            "taken at load {load:.2}, above the ceiling of {:.2}",
+            discipline::MAX_LOAD
+        ));
+    }
+    if kept < discipline::MIN_KEPT {
+        reasons.push(format!(
+            "{kept} repetition{} kept, {} required",
+            if kept == 1 { "" } else { "s" },
+            discipline::MIN_KEPT
+        ));
+    }
+    if pressured {
+        reasons.push(
+            "memory was thin, so the peak resident set size is a floor rather than a result"
+                .to_owned(),
+        );
+    }
+    reasons
+}
+
+/// The layers a generated crate can hold, outermost question first.
+///
+/// `support` is deliberately absent: it is plumbing the other modules call into, not surface a
+/// reader is weighing.
+const LAYERS: [&str; 3] = ["types", "client", "server"];
+
+/// What a crate's emitted modules say it holds.
+///
+/// Derived from what was actually emitted rather than written down beside the numbers, because the
+/// hazard is precisely a scope note that stays true only until the next renderer lands. serde is a
+/// *shrinking* share of a generated crate as stages add surface the serde change never touches, so
+/// the same A/B measured against types alone and against a full client answers two different
+/// questions — and the larger number is the one that gets quoted.
+fn scope_of<'a>(modules: impl IntoIterator<Item = &'a str>) -> String {
+    let modules: Vec<&str> = modules.into_iter().collect();
+    let present: Vec<&str> = LAYERS
+        .into_iter()
+        .filter(|layer| modules.contains(layer))
+        .collect();
+    match present.as_slice() {
+        [] => UNRECORDED.to_owned(),
+        ["types"] => "types-only".to_owned(),
+        _ => present.join("+"),
+    }
+}
+
+/// The scope of a rendering taken before the harness recorded one.
+const UNRECORDED: &str = "unrecorded";
+
+/// The module stems of a crate on disk, for the `--crate-dir` path where nothing was rendered.
+fn modules_on_disk(crate_dir: &Utf8Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(crate_dir.join("src")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = Utf8PathBuf::from_path_buf(entry.path()).ok()?;
+            if path.extension() != Some("rs") {
+                return None;
+            }
+            Some(path.file_stem()?.to_owned())
+        })
+        .collect()
+}
 
 pub fn run(args: &Args) -> Result<()> {
     if !args.measure.is_empty() {
@@ -263,8 +427,12 @@ pub fn run(args: &Args) -> Result<()> {
                 if sample.crowded() {
                     summary.discarded += 1;
                     println!(
-                        "  rep {rep} {variant}: discarded, load rose {:.2} → {:.2}",
-                        sample.load_before, sample.load_after
+                        "  rep {rep} {variant}: discarded, spent {:.0}% of {:.1} s on a processor \
+                         (load {:.2} → {:.2})",
+                        sample.progress() * 100.0,
+                        sample.wall_seconds,
+                        sample.load_before,
+                        sample.load_after
                     );
                     continue;
                 }
@@ -295,7 +463,12 @@ pub fn run(args: &Args) -> Result<()> {
             .then(|| crate::paths::corpus_root().join("baseline.toml"))
     });
     if let Some(path) = path {
-        return baseline(&path, &summaries, args);
+        let scopes: BTreeMap<String, String> = subjects
+            .iter()
+            .flat_map(|(_, targets)| targets)
+            .map(|target| (key_of(target), target.scope.clone()))
+            .collect();
+        return baseline(&path, &scopes, &summaries, args);
     }
     Ok(())
 }
@@ -319,6 +492,7 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
             "bench-compile: {package} at {crate_dir}, {} reps",
             args.reps
         );
+        let modules = modules_on_disk(crate_dir);
         return Ok(vec![(
             package.clone(),
             vec![Target {
@@ -326,6 +500,7 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
                 variant: "as-is".to_owned(),
                 package,
                 directory: crate_dir.clone(),
+                scope: scope_of(modules.iter().map(String::as_str)),
             }],
         )]);
     }
@@ -368,12 +543,20 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
             };
             let output = progeny::generate(&bytes, &config)
                 .with_context(|| format!("generating {name} ({variant})"))?;
+            let scope = scope_of(
+                output
+                    .files
+                    .keys()
+                    .filter(|path| path.parent() == Some(Utf8Path::new("src")))
+                    .filter_map(|path| path.file_stem()),
+            );
             let directory = crate::generated::write(&format!("bench-{variant}-{name}"), &output)?;
             targets.push(Target {
                 subject: name.clone(),
                 variant: variant.to_owned(),
                 package: config.package.name.clone(),
                 directory,
+                scope,
             });
         }
         planned.push((name.clone(), targets));
@@ -428,7 +611,18 @@ fn reuse(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
     }
 
     let mut planned: Vec<(String, Vec<Target>)> = Vec::new();
-    for target in rendering.targets {
+    for mut target in rendering.targets {
+        // A rendering from before the harness recorded a scope says so, rather than inheriting
+        // whatever today's generator would emit — a wrong scope is worse than an absent one,
+        // because the point of the field is to refuse a comparison across scopes.
+        if target.scope.is_empty() {
+            println!(
+                "  note: this rendering predates scope recording, so {} is measured as \
+                 `{UNRECORDED}`",
+                target.subject
+            );
+            target.scope = UNRECORDED.to_owned();
+        }
         let manifest = target.directory.join("Cargo.toml");
         if !manifest.exists() {
             bail!(
@@ -514,6 +708,7 @@ fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
 
     let available_before = available_memory();
     let load_before = load_average()?;
+    let started = std::time::Instant::now();
 
     let runner = std::env::current_exe().context("locating this executable")?;
     // `--measure` takes the rest of the line, so the command follows it directly; a `--`
@@ -550,6 +745,7 @@ fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
         );
     }
 
+    let wall_seconds = started.elapsed().as_secs_f64();
     let load_after = load_average()?;
     // Peak RSS is only meaningful with headroom: under pressure the kernel reclaims and the
     // high-water mark reads low, so a "win" measured this way is an artefact.
@@ -561,6 +757,7 @@ fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
         peak_rss_bytes: reported.peak_rss_bytes,
         load_before,
         load_after,
+        wall_seconds,
         pressured,
     })
 }
@@ -645,57 +842,123 @@ fn compare(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summ
     }
 }
 
-fn baseline(path: &Utf8PathBuf, summaries: &BTreeMap<String, Summary>, args: &Args) -> Result<()> {
-    let mut entries: BTreeMap<String, BaselineEntry> = if path.exists() {
+fn baseline(
+    path: &Utf8PathBuf,
+    scopes: &BTreeMap<String, String>,
+    summaries: &BTreeMap<String, Summary>,
+    args: &Args,
+) -> Result<()> {
+    let entries: BTreeMap<String, BaselineEntry> = if path.exists() {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
         toml::from_str(&text).with_context(|| format!("parsing {path}"))?
     } else {
         BTreeMap::new()
     };
-
-    let mut regressions = Vec::new();
     println!();
+    if args.write_baseline {
+        return write_entries(path, entries, scopes, summaries);
+    }
+    check_entries(&entries, scopes, summaries, args)
+}
+
+/// Record this run, with each entry's verdict on itself.
+fn write_entries(
+    path: &Utf8PathBuf,
+    mut entries: BTreeMap<String, BaselineEntry>,
+    scopes: &BTreeMap<String, String>,
+    summaries: &BTreeMap<String, Summary>,
+) -> Result<()> {
+    let mut provisional = 0usize;
     for (key, summary) in summaries {
         let Some((cpu, rss)) = summary.mean_cpu().zip(summary.mean_rss()) else {
             continue;
         };
-        if args.write_baseline {
-            entries.insert(
-                key.clone(),
-                BaselineEntry {
-                    cpu_seconds: cpu,
-                    peak_rss_bytes: rss,
-                    kept: summary.kept.len(),
-                    discarded: summary.discarded,
-                    load: summary
-                        .kept
-                        .first()
-                        .map_or(0.0, |sample| sample.load_before),
-                    cores: std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
-                    pressured: summary.pressured > 0,
-                },
-            );
-            continue;
+        let load = summary.worst_load();
+        let shortfalls = shortfalls(summary.kept.len(), load, summary.pressured > 0);
+        if !shortfalls.is_empty() {
+            provisional += 1;
+            println!("  {key}: provisional — {}", shortfalls.join("; "));
         }
+        entries.insert(
+            key.clone(),
+            BaselineEntry {
+                cpu_seconds: cpu,
+                peak_rss_bytes: rss,
+                scope: scopes
+                    .get(key)
+                    .map_or(UNRECORDED, String::as_str)
+                    .to_owned(),
+                kept: summary.kept.len(),
+                discarded: summary.discarded,
+                load,
+                cores: std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
+                pressured: summary.pressured > 0,
+                provisional: shortfalls,
+            },
+        );
+    }
+
+    let text = toml::to_string_pretty(&entries).context("rendering the baseline")?;
+    std::fs::write(path, text).with_context(|| format!("writing {path}"))?;
+    println!("baseline written to {path}");
+    if provisional > 0 {
+        // Written and marked rather than refused outright: a directional row taken on a shared
+        // machine is worth having, and the failure this guards against is not recording one — it
+        // is recording one that reads like the finished measurement.
+        println!(
+            "  {provisional} of {} entries are provisional and may not be quoted as the number; \
+             re-take them with the load at or below {:.2} and at least {} repetitions kept",
+            entries.len(),
+            discipline::MAX_LOAD,
+            discipline::MIN_KEPT
+        );
+    }
+    Ok(())
+}
+
+/// Compare this run against what was recorded, and refuse the comparisons that are not one.
+fn check_entries(
+    entries: &BTreeMap<String, BaselineEntry>,
+    scopes: &BTreeMap<String, String>,
+    summaries: &BTreeMap<String, Summary>,
+    args: &Args,
+) -> Result<()> {
+    let mut regressions = Vec::new();
+    let mut refused = Vec::new();
+    for (key, summary) in summaries {
+        let Some((cpu, rss)) = summary.mean_cpu().zip(summary.mean_rss()) else {
+            continue;
+        };
         let Some(previous) = entries.get(key) else {
             println!("  {key}: no baseline yet");
             continue;
         };
+        let scope = scopes.get(key).map_or(UNRECORDED, String::as_str);
+        if let Some(reason) = unusable(previous, scope) {
+            println!("  {key}: {reason}");
+            refused.push(key.clone());
+            continue;
+        }
+
         let cpu_delta = percent(previous.cpu_seconds, cpu);
         let rss_delta = percent(as_f64(previous.peak_rss_bytes), as_f64(rss));
         println!("  {key}: cpu {cpu_delta:+.1}%, peak rss {rss_delta:+.1}%");
+        let load = summary.worst_load();
         // Said every time rather than only on a regression: a reader comparing two numbers is
         // entitled to know whether they were taken under comparable conditions, and finding that
         // out afterwards is what makes a bad comparison expensive.
-        let here = summary
-            .kept
-            .first()
-            .map_or(0.0, |sample| sample.load_before);
-        if (previous.load - here).abs() > 1.0 {
+        if (previous.load - load).abs() > 1.0 {
             println!(
                 "    conditions differ: the baseline was taken at load {:.2} over {} cores and \
-                 this run at load {here:.2}; a difference of a few points may be the machine",
+                 this run at load {load:.2}; a difference of a few points may be the machine",
                 previous.load, previous.cores
+            );
+        }
+        let here = shortfalls(summary.kept.len(), load, summary.pressured > 0);
+        if !here.is_empty() {
+            println!(
+                "    this run is itself out of discipline — {}",
+                here.join("; ")
             );
         }
         if previous.pressured || summary.pressured > 0 {
@@ -713,11 +976,6 @@ fn baseline(path: &Utf8PathBuf, summaries: &BTreeMap<String, Summary>, args: &Ar
         }
     }
 
-    if args.write_baseline {
-        let text = toml::to_string_pretty(&entries).context("rendering the baseline")?;
-        std::fs::write(path, text).with_context(|| format!("writing {path}"))?;
-        println!("baseline written to {path}");
-    }
     if !regressions.is_empty() {
         for regression in &regressions {
             println!("  regression: {regression}");
@@ -728,7 +986,38 @@ fn baseline(path: &Utf8PathBuf, summaries: &BTreeMap<String, Summary>, args: &Ar
             args.threshold
         );
     }
+    if args.check && !refused.is_empty() {
+        bail!(
+            "{} of {} measurements have no usable baseline to check against: {}",
+            refused.len(),
+            summaries.len(),
+            refused.join(", ")
+        );
+    }
     Ok(())
+}
+
+/// Why a recorded entry cannot serve as the basis of a comparison, if it cannot.
+///
+/// Answered before any delta is computed. A percentage against an unusable basis is exactly what
+/// gets quoted out of the caveat printed beside it, so the harness declines to produce one at all.
+fn unusable(previous: &BaselineEntry, scope: &str) -> Option<String> {
+    if !previous.provisional.is_empty() {
+        return Some(format!(
+            "the recorded baseline is provisional and is not a comparison basis — {}",
+            previous.provisional.join("; ")
+        ));
+    }
+    // An absent scope predates the field rather than claiming anything, so it is not refused: the
+    // entry was recorded when every crate was the same shape.
+    if !previous.scope.is_empty() && previous.scope != scope {
+        return Some(format!(
+            "the recorded baseline measured {} and this run measured {scope}, which is not a \
+             comparison",
+            previous.scope
+        ));
+    }
+    None
 }
 
 fn percent(before: f64, after: f64) -> f64 {
@@ -885,14 +1174,27 @@ fn measure_child(command: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sample, Summary, format_bytes, order, percent};
+    use super::{Sample, Summary, discipline, format_bytes, order, percent, scope_of, shortfalls};
 
     fn sample(cpu: f64, rss: u64, load_before: f64, load_after: f64) -> Sample {
+        // Instant, so the repetition is answerable for none of the load rise and the tests below
+        // read as statements about the machine rather than about the measurement.
+        timed_sample(cpu, rss, load_before, load_after, 0.0)
+    }
+
+    fn timed_sample(
+        cpu: f64,
+        rss: u64,
+        load_before: f64,
+        load_after: f64,
+        wall_seconds: f64,
+    ) -> Sample {
         Sample {
             cpu_seconds: cpu,
             peak_rss_bytes: rss,
             load_before,
             load_after,
+            wall_seconds,
             pressured: false,
         }
     }
@@ -910,6 +1212,7 @@ mod tests {
                 variant: super::DERIVE.to_owned(),
                 package: "corpus-okta".to_owned(),
                 directory: camino::Utf8PathBuf::from("/tmp/bench-derive-okta"),
+                scope: "types-only".to_owned(),
             }],
         };
         let text = toml::to_string_pretty(&rendering).unwrap();
@@ -919,6 +1222,17 @@ mod tests {
         assert_eq!(read.targets.len(), 1);
         assert_eq!(super::key_of(&read.targets[0]), "okta.derive");
         assert_eq!(read.targets[0].directory, "/tmp/bench-derive-okta");
+        assert_eq!(read.targets[0].scope, "types-only");
+    }
+
+    #[test]
+    fn a_rendering_from_before_the_scope_was_recorded_still_reads() {
+        // The archived stage-4 subject was written without the field, and it is the *one* rendering
+        // the corrected baseline has to be taken from. A hard parse error here would strand it.
+        let text = "revision = \"013655a\"\ndirty = true\n\n[[targets]]\nsubject = \"okta\"\n\
+                    variant = \"derive\"\npackage = \"corpus-okta\"\ndirectory = \"/tmp/x\"\n";
+        let read: super::Rendering = toml::from_str(text).unwrap();
+        assert_eq!(read.targets[0].scope, "");
     }
 
     #[test]
@@ -937,11 +1251,28 @@ mod tests {
     }
 
     #[test]
-    fn a_repetition_whose_load_rose_is_crowded() {
-        assert!(!sample(1.0, 1, 0.10, 0.20).crowded());
-        assert!(sample(1.0, 1, 0.10, 0.90).crowded());
-        // Load falling is fine: the machine got quieter, not busier.
-        assert!(!sample(1.0, 1, 0.90, 0.10).crowded());
+    fn a_repetition_that_spent_its_time_waiting_is_crowded() {
+        // Had the processor to itself: 20 CPU seconds in 21 wall seconds.
+        assert!(!timed_sample(20.0, 1, 0.10, 0.20, 21.0).crowded());
+        // Spent four fifths of its life off the processor.
+        assert!(timed_sample(4.0, 1, 0.10, 0.20, 21.0).crowded());
+        // `rustc` threading inside one job puts this above 1.0, which is not a problem.
+        assert!(!timed_sample(30.0, 1, 0.10, 0.20, 21.0).crowded());
+    }
+
+    /// A repetition is not discarded for its own footprint.
+    ///
+    /// The regression this pins actually happened: measuring `okta` threw away four of six `derive`
+    /// repetitions and none of the `hand-written` ones, purely because `derive` takes 21 seconds
+    /// against 7 and a 21-second process raises the one-minute load average by about 0.3 all by
+    /// itself. Discarding the slow variant *for being slow* biases the comparison the harness
+    /// exists to make, towards a bigger win.
+    #[test]
+    fn a_repetition_is_not_discarded_for_being_slow() {
+        // The exact shape that was discarded: load rose 3.02 → 3.61 across a 21-second repetition
+        // that was never actually starved. The long one and the short one are now judged alike.
+        assert!(!timed_sample(21.3, 1, 3.02, 3.61, 22.0).crowded());
+        assert!(!timed_sample(6.9, 1, 3.02, 3.61, 7.4).crowded());
     }
 
     #[test]
@@ -966,5 +1297,181 @@ mod tests {
     fn sizes_read_as_sizes() {
         assert_eq!(format_bytes(5 * 1024 * 1024 * 1024), "5.00 GiB");
         assert_eq!(format_bytes(3 * 1024 * 1024 / 2), "1.5 MiB");
+    }
+
+    #[test]
+    fn a_measurement_within_the_discipline_says_nothing() {
+        assert!(shortfalls(discipline::MIN_KEPT, discipline::MAX_LOAD, false).is_empty());
+        assert!(shortfalls(discipline::MIN_KEPT + 1, 0.30, false).is_empty());
+    }
+
+    #[test]
+    fn the_conditions_the_recorded_baseline_was_taken_under_are_refused() {
+        // The six entries this fix exists for: `okta.hand-written` kept one repetition of three at
+        // load 18.18, and every entry ran between 12.68 and 18.18 against a ceiling of 5.
+        let reasons = shortfalls(1, 18.18, false);
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
+        assert!(reasons[0].contains("load 18.18"), "{reasons:?}");
+        assert!(reasons[0].contains("ceiling of 5.00"), "{reasons:?}");
+        assert!(reasons[1].contains("1 repetition kept"), "{reasons:?}");
+        assert!(reasons[1].contains("3 required"), "{reasons:?}");
+
+        // Load alone is enough, even with every repetition kept.
+        assert_eq!(shortfalls(6, 12.68, false).len(), 1);
+    }
+
+    #[test]
+    fn thin_memory_disqualifies_a_measurement_taken_on_a_quiet_machine() {
+        // Not a load problem and not a replication problem: the kernel reclaims under pressure, so
+        // the peak reads *low* and the artefact points the same way as a win.
+        let reasons = shortfalls(discipline::MIN_KEPT, 0.10, true);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("floor"), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_provisional_entry_survives_the_file_and_stays_provisional() {
+        // The record has to carry its own verdict: somebody who finds `baseline.toml` and never
+        // runs the harness is exactly the reader the flag exists for.
+        let entry = super::BaselineEntry {
+            cpu_seconds: 8.30,
+            peak_rss_bytes: 1_003_913_216,
+            scope: "types-only".to_owned(),
+            kept: 1,
+            discarded: 2,
+            load: 18.18,
+            cores: 48,
+            pressured: false,
+            provisional: shortfalls(1, 18.18, false),
+        };
+        let text = toml::to_string_pretty(&entry).unwrap();
+        assert!(text.contains("provisional"), "{text}");
+        assert!(text.contains("types-only"), "{text}");
+        let read: super::BaselineEntry = toml::from_str(&text).unwrap();
+        assert_eq!(read.provisional.len(), 2);
+        assert_eq!(read.scope, "types-only");
+    }
+
+    #[test]
+    fn an_entry_that_meets_the_discipline_carries_no_flag_at_all() {
+        // `skip_serializing_if` rather than an empty list in the file: a reader scanning for the
+        // word should find it only where it means something.
+        let entry = super::BaselineEntry {
+            cpu_seconds: 1.0,
+            peak_rss_bytes: 2,
+            scope: "types-only".to_owned(),
+            kept: 4,
+            discarded: 0,
+            load: 0.42,
+            cores: 48,
+            pressured: false,
+            provisional: Vec::new(),
+        };
+        let text = toml::to_string_pretty(&entry).unwrap();
+        assert!(!text.contains("provisional"), "{text}");
+        assert!(!text.contains("pressured"), "{text}");
+    }
+
+    #[test]
+    fn the_recorded_load_is_the_worst_repetition_not_the_first() {
+        let mut summary = Summary::default();
+        summary.kept.push(sample(1.0, 1, 0.40, 0.45));
+        summary.kept.push(sample(1.0, 1, 9.10, 9.20));
+        summary.kept.push(sample(1.0, 1, 0.50, 0.55));
+        // Recording 0.40 here would describe a run that spent a third of itself at load 9 as
+        // having been taken on an idle machine.
+        assert!((summary.worst_load() - 9.10).abs() < 1e-9);
+        assert!(!shortfalls(summary.kept.len(), summary.worst_load(), false).is_empty());
+    }
+
+    #[test]
+    fn no_kept_repetitions_is_not_an_idle_machine() {
+        // `fold(0.0, max)` over nothing is 0.0, which would read as pristine. Nothing is written
+        // for an empty summary — `mean_cpu` returns `None` first — and this pins that order.
+        let summary = Summary::default();
+        assert!((summary.worst_load() - 0.0).abs() < 1e-9);
+        assert_eq!(summary.mean_cpu(), None);
+    }
+
+    fn entry(scope: &str, provisional: Vec<String>) -> super::BaselineEntry {
+        super::BaselineEntry {
+            cpu_seconds: 1.0,
+            peak_rss_bytes: 2,
+            scope: scope.to_owned(),
+            kept: 4,
+            discarded: 0,
+            load: 0.42,
+            cores: 48,
+            pressured: false,
+            provisional,
+        }
+    }
+
+    #[test]
+    fn a_provisional_baseline_is_not_a_comparison_basis() {
+        let reason = super::unusable(
+            &entry("types-only", vec!["taken at load 18.18".to_owned()]),
+            "types-only",
+        );
+        assert!(reason.is_some_and(|reason| reason.contains("load 18.18")));
+        assert!(super::unusable(&entry("types-only", Vec::new()), "types-only").is_none());
+    }
+
+    #[test]
+    fn a_baseline_from_a_different_scope_is_not_a_comparison_basis() {
+        // The whole hazard, as an assertion: the stage-4 figure is about types-only crates, and a
+        // run against a crate with a client in it answers a different question at a different
+        // denominator. Refusing is the only way the two numbers cannot be subtracted.
+        let reason = super::unusable(&entry("types-only", Vec::new()), "types+client");
+        assert!(reason.is_some_and(|reason| reason.contains("types-only")));
+    }
+
+    #[test]
+    fn a_baseline_recorded_before_scopes_existed_is_still_usable() {
+        // Absent is not a claim. Refusing here would strand every entry written before the field,
+        // which would make the fix cost more than the defect.
+        assert!(super::unusable(&entry("", Vec::new()), "types+client").is_none());
+    }
+
+    #[test]
+    fn the_checked_in_baseline_agrees_with_its_own_conditions() {
+        // The defect this whole fix exists for was a file whose numbers and whose conditions were
+        // both recorded, and which never drew the conclusion. Asserting the *consistency* rather
+        // than the current verdict is what makes this survive the corrected take: entries stop
+        // being provisional and the test keeps holding.
+        let path = crate::paths::corpus_root().join("baseline.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let entries: std::collections::BTreeMap<String, super::BaselineEntry> =
+            toml::from_str(&text).unwrap();
+        assert!(!entries.is_empty(), "{path} has no entries");
+        for (key, entry) in &entries {
+            assert!(
+                !entry.scope.is_empty(),
+                "{key} does not say what it measured, so nothing can be compared against it"
+            );
+            assert_eq!(
+                entry.provisional,
+                shortfalls(entry.kept, entry.load, entry.pressured),
+                "{key} disagrees with its own recorded conditions"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crate_says_what_it_holds() {
+        assert_eq!(scope_of(["lib", "types"]), "types-only");
+        // `support` is plumbing the other modules call into, not surface being weighed.
+        assert_eq!(scope_of(["lib", "types", "support"]), "types-only");
+        assert_eq!(
+            scope_of(["lib", "types", "client", "support"]),
+            "types+client"
+        );
+        assert_eq!(
+            scope_of(["lib", "types", "client", "server", "support"]),
+            "types+client+server"
+        );
+        // Layer order, not the order the files happened to arrive in.
+        assert_eq!(scope_of(["client", "types"]), "types+client");
+        assert_eq!(scope_of(["lib"]), super::UNRECORDED);
     }
 }

@@ -1,47 +1,53 @@
 ["jellyfin.derive"]
-cpu_seconds = 6.147892333333334
-peak_rss_bytes = 723454634
-kept = 3
+cpu_seconds = 5.369795333333333
+peak_rss_bytes = 724770133
+scope = "types-only"
+kept = 6
 discarded = 0
-load = 12.68
+load = 4.9
 cores = 48
 
 ["jellyfin.hand-written"]
-cpu_seconds = 2.00536
-peak_rss_bytes = 384366592
-kept = 2
-discarded = 1
-load = 11.99
+cpu_seconds = 1.9008783333333332
+peak_rss_bytes = 385136640
+scope = "types-only"
+kept = 6
+discarded = 0
+load = 4.89
 cores = 48
 
 ["okta.derive"]
-cpu_seconds = 25.517045500000002
-peak_rss_bytes = 2259802112
-kept = 2
-discarded = 1
-load = 17.53
+cpu_seconds = 20.670143333333332
+peak_rss_bytes = 2265201322
+scope = "types-only"
+kept = 6
+discarded = 0
+load = 4.91
 cores = 48
 
 ["okta.hand-written"]
-cpu_seconds = 8.304731
-peak_rss_bytes = 1003913216
-kept = 1
-discarded = 2
-load = 18.18
+cpu_seconds = 6.777338166666666
+peak_rss_bytes = 1011318784
+scope = "types-only"
+kept = 6
+discarded = 0
+load = 4.7
 cores = 48
 
 ["oxide.derive"]
-cpu_seconds = 7.4224265
-peak_rss_bytes = 717524992
-kept = 2
-discarded = 1
-load = 15.86
+cpu_seconds = 5.6305005
+peak_rss_bytes = 722629973
+scope = "types-only"
+kept = 6
+discarded = 0
+load = 3.25
 cores = 48
 
 ["oxide.hand-written"]
-cpu_seconds = 2.6181330000000003
-peak_rss_bytes = 357419690
-kept = 3
+cpu_seconds = 1.9585543333333335
+peak_rss_bytes = 361200981
+scope = "types-only"
+kept = 6
 discarded = 0
-load = 16.11
+load = 3.12
 cores = 48
