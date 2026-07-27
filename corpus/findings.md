@@ -418,12 +418,23 @@ fresh measuring process per repetition:
 | `jellyfin` | 8,574 | 6.15 → 2.01 s (**−67%**) | 690 → 367 MiB (**−47%**) |
 | `okta` | 29,119 | 25.52 → 8.30 s (**−68%**) | 2.10 → 0.96 GiB (**−56%**) |
 
-Run twice, independently, and the two runs agree within 4 points on every figure. **It reproduces,
-and it is larger than the target range** — but the denominator is why, and the honest reading needs
-it: these are **type-only** crates. The predecessor measured full client crates, where request
-plumbing, builders and the response machinery are compile work the serde change does not touch. As
-stages 5 to 7 add that surface the percentage should fall back toward the inherited range, and the
-number to watch is the absolute saving rather than the ratio.
+Run twice, independently, and the two runs agree within 4 points on every figure. **It reproduces —
+and the thing it reproduces is not the inherited headline.** These are **type-only** crates. The
+−37…−46% came from full client crates, where request plumbing, builders and the response machinery
+are compile work the serde change never touches. The predecessor's own **types-only** microbenchmark
+came out at **−59%**, recorded in its notes as a figure that "does not transfer" to real clients.
+
+So the honest reading of −63…−68% is: *consistent with, and slightly better than, the predecessor's
+types-only figure*. It says nothing yet about the target range, because nothing has been measured
+against a comparable crate. Putting the two side by side and reading the larger as clearing the
+smaller is the specific error this project has already made once — a types-only number quoted as an
+end-to-end one — and it is why every entry in `corpus/baseline.toml` now records its `scope`, and
+why `bench-compile --check` refuses a comparison across scopes.
+
+As stages 5 to 7 add surface the percentage should fall, and **that is arithmetic, not regression**:
+the denominator grows with code the serde change does not touch. The number to watch across stages
+is the absolute saving in seconds and bytes; the ratio is a fact about how much other code is in the
+crate.
 
 **Conditions, because they are part of the measurement.** This machine has 48 cores and was shared
 throughout; the one-minute load average ran between 12 and 18, and one attempt was abandoned when
@@ -440,10 +451,21 @@ contention inflates them, by up to 2.6× at load 17 — and the largest subject 
 `okta.hand-written` kept **one** repetition of three, against two for `okta.derive`. Both sides ran
 at comparable load, which is what makes the row directionally sound, and the mechanism behind it is
 confirmed by a deterministic count that no amount of load can move. But **−63…−68% is provisional
-until it is re-taken on a quiet machine** — `--max-load 5` or lower, four kept repetitions — and
-nothing downstream should cite the figure before that. The claim these numbers establish is "the
-mechanism reproduces, with room to spare", which is what the measurement was moved forward to find
-out; "by 67%" is a further claim and is not yet earned.
+until it is re-taken on a quiet machine** — the discipline's load 5.00 or lower, at least three kept
+repetitions — and nothing downstream should cite the figure before that. The claim these numbers
+establish is "the mechanism reproduces, with room to spare", which is what the measurement was moved
+forward to find out; "by 67%" is a further claim and is not yet earned.
+
+**The harness recorded them anyway, and that was the larger defect.** The discipline was written in
+[06](../plan/06-workspace-and-validation.md) — A-B-B-A, `--jobs 1`, load-gated idle machine — and
+nothing enforced it, because `--max-load` served as both the operator's knob for how long to wait
+and the standard a *recorded baseline* is held to. Raising the knob to get a run out silently
+lowered the standard, and six entries were written at load 12.7 to 18.2 without a word of complaint.
+The two are now separate: the discipline is a constant (load ≤ 5.00, ≥ 3 kept repetitions, no memory
+pressure), every entry that misses it is written with its shortfalls listed, and `--check` refuses a
+provisional entry as the basis of a comparison. A test asserts that the checked-in file agrees with
+its own recorded conditions, which is what the old file did not — it recorded the numbers *and* the
+load and never drew the conclusion.
 
 ### Stage 4 did not change what the output costs to compile
 
@@ -459,6 +481,15 @@ current tree on the same machine within the same few minutes:
 The spread between two runs of the *same* tree is wider than the difference between the two trees,
 and peak RSS agrees to within 0.1%. Stage 4 changed which unions are representable; it did not
 change what the result costs.
+
+**Where the archive is, because an archive nobody can find is a note.** Both sides of the stage-4
+A/B — six crates, 10 MiB — sit at `/home/roman/dev/progeny-bench-stage4/`, outside the repository so
+they survive `git clean`, with a `GENERATED_FROM.txt` recording the revision they came from and a
+`bench-rendering.toml` that `--reuse` reads for the directory list. They are the subject the
+−63…−68% claim is *about*: stage 5 added the client surface, so the same measurement taken against
+today's output would answer a different question. To re-take the corrected figure, copy them back
+into `target/generated/` and run `--reuse`; the recorded `scope = "types-only"` then travels into
+the baseline entry, and `--check` will refuse to compare it against anything with a client in it.
 
 ## What the API model found, and what it cost
 
@@ -835,6 +866,313 @@ describes — the style table is unit-tested row by row in `support/style.rs`, a
 parameter to the right row is checked only by reading the emitted source. That gap closes at stage 7
 with the example crate, which is the first thing that will have both halves of a real request. Until
 then, a claim about a request line is a claim no gate is making.
+
+## The rest of the body surface, sized before it was built
+
+Stage 6 is four items — typed multipart, form-urlencoded, binary and streaming bodies, cookie
+parameters — and the corpus was asked how big each one is before any of them was written. Request
+bodies across the 76 documents this query could parse:
+
+| media type | bodies | documents |
+| --- | ---: | ---: |
+| `application/json` and the `+json` suffix family | 5,958 | 65 |
+| **`multipart/form-data`** | **278** | **27** |
+| **`application/x-www-form-urlencoded`** | **109** | **11** |
+| `text/plain` | 14 | 5 |
+| `application/octet-stream` | 13 | 4 |
+| a wildcard and nothing else (`*/*`, `image/*`) | 9 | 3 |
+
+Three things the table decided:
+
+- **Multipart is not a footnote.** It is the largest non-JSON body by a factor of two and a half,
+  and it reaches more than a third of the corpus. **236 of the 278 are an object with declared
+  properties**, so the type layer already renders exactly the struct the parts come from — the work
+  is a writer, not a type model.
+- **`encoding` is nearly unused, and what it says is narrow.** Thirteen multipart bodies declare it,
+  and the only key they use is `contentType` — 27 uses, of which the plurality are
+  `application/json` on a structured member. One form body in the whole corpus declares `encoding`,
+  setting `style` and `explode`. So the specification tables here are for the exceptions, and the
+  defaults carry everything else.
+- **Cookie parameters were already done**, from stage 5. Counting first is what showed that; the
+  item stayed on the list from a plan written before the location existed.
+
+**A form body is a query string in the body position**, so it is encoded by the same style table
+rather than by a second encoder — one place where the array rules live, and the row-by-row tests
+already existed. The one document that declares `encoding` on a form body selects a row through the
+same classifier a query parameter goes through.
+
+**The multipart boundary is scanned, not drawn.** A random boundary is wrong with some probability,
+and the failure is a body the server silently reads as several parts — the one forbidden failure
+mode. Scanning the content for a boundary that does not occur in it is correct by construction, and
+it makes a generated request reproducible, which is what makes it testable at all.
+
+### What the parts table costs, and why it is a table
+
+One `const` slice per operation and one loop in the shipped support module, rather than a call per
+part unrolled into every `send()`. The same trade the style table makes, and it matters here for the
+same reason: `langsmith` writes an 18-member multipart body, and unrolling it would put 18 statements
+in a method that is otherwise five.
+
+The table says what the document was **specific** about; it is not the list of members. An
+`additionalProperties` member or a flattened one is real and absent from it, so the writer walks the
+value and consults the table, never the other way round.
+
+### An array is its item's kind, which is 3.1's rule and not 3.0's
+
+3.0 said any array member is `application/json`. 3.1 says "the default is defined based on the type
+of the item". progeny follows 3.1 for both dialects, deliberately: a repeated member written as
+several parts under one name is what every multipart parser expects, and 3.0's reading would put a
+JSON array where a server is looking for several fields. `anthropic` writes `files` as an array of
+binary strings, which under 3.0's rule would be one JSON array of file contents.
+
+Whether a member is repeated is carried **beside** its kind rather than folded into it, because they
+answer different questions — what one part holds, and how many parts there are. A member typed as
+arbitrary JSON that happens to hold an array at run time is one part, because nothing *declared* it
+repeated.
+
+### 110 occurrences of a 3.0 spelling inside documents that declare 3.1
+
+`format: binary` was removed in 2020-12; the fact moved to `contentMediaType`. **15 documents that
+declare 3.1 write it anyway — 110 occurrences**, led by `telnyx` (27), `openai` (24) and `langsmith`
+(18). This is the boolean-`exclusiveMinimum` situation exactly, and it gets the same answer: repair
+it, diagnose it, and do not version-gate a repair that helps everybody.
+
+It matters more here than the type it produces, which is `String` either way. In a multipart body
+`format: binary` is the only thing marking **which property is a file** — a per-property fact the
+media-type key cannot carry. Left unread, those members become text parts: a request built wrong,
+not a type named oddly. Found by writing a fixture with `format: binary` in a 3.1 document and
+watching it classify as text.
+
+### A wildcard media type follows its schema
+
+Nine bodies declare a wildcard and nothing else. `Content-Type: */*` is not a content type, and
+`preference` only sorts a wildcard last — which decides nothing when it is the only entry, so those
+nine were being sent with a header no server can act on.
+
+Which content type to send instead is decided by the **schema**, because a wildcard permits all of
+them and only one matches what the document typed. `telnyx` writes `*/*` over a `$ref` to a real
+object — sending that as bytes would discard a type the document supplied — and `jellyfin` writes
+`image/*` over a binary string, where bytes is exactly right. Reading the documents is what separated
+the two; the first pass sent both as bytes.
+
+### The limitation, stated rather than discovered later
+
+A `format: binary` member renders as `String`, because inside a JSON payload a binary property *is* a
+string and the type layer has no position to tell it otherwise. In a multipart part the bytes of that
+string are what goes on the wire, which is faithful — but **a part whose content is not valid UTF-8
+cannot be constructed**. Lifting that would mean a type depending on the position it is used in,
+which forks a component type shared with a JSON body, so it is a limitation this design accepts
+rather than a defect it has yet to fix.
+
+## The serving side, and the router's rules read rather than guessed
+
+**Route collisions are rare and they are one idiom.** 21,764 operations over 15,015 path templates
+in the 78 documents, and **exactly two of them** contain a same-shape collision: `polygon` (31
+operations) and `miro` (7). Both do the same thing — disambiguate a path by renaming its parameter,
+which changes the documentation and not the URL. `miro` writes `{board_id}` and
+`{board_id_PlatformFileUpload}` for one route; `polygon` writes `{cryptoTicker}`, `{fxTicker}`,
+`{indicesTicker}`, `{optionsTicker}` and `{stockTicker}` for one indicator endpoint, five times over.
+
+A colliding route **keeps its client method and loses its server handler**. That is the
+position-degrades rule applied to a new position: a client builds a URL and sends it, and only a
+*router* has to tell two routes apart. Deleting a working client method to fix a server's problem
+would be a worse trade than the one the collision forces.
+
+### Asking the router beat modelling it, and the corpus proved it twice
+
+The plan called for a classifier that decides registrability from a template's shape. Two
+measurements said that would have been wrong:
+
+- `matchit` — the router `axum` matches with — **accepts** `/Videos/{itemId}/stream.{container}` and
+  **refuses** `/Videos/{itemId}/Trickplay/{width}/{index}.jpg`. A parameter may have literal text
+  before it in its segment, may have none after it, and may not share a segment with another. None
+  of that follows from anything OpenAPI says, and all of it is fine by the client's fill rule.
+- The rule **moves between patch releases**. A scratch probe against `matchit` 0.8.6 said
+  `/a/{x}.jpg` registers; the 0.8.4 that `axum` 0.8.9 actually resolves says it does not. A model
+  written from the first probe would have been a claim about a router nobody in this workspace runs.
+
+So progeny inserts each template into a real `matchit::Router` at generation time and believes the
+answer, and `matchit` is on the generator's dependency list for that one reason. **216 operations
+across 10 documents** are refused outright, which is 1% of the corpus and four idioms:
+
+| document | operations | what it writes |
+| --- | --- | --- |
+| `twilio-api-v2010` | 99 | `.json` after the variable — `/Accounts/{AccountSid}/Calls/{Sid}.json` |
+| `anthropic` | 41 | a query string inside the template — `/v1/agents/{agent_id}?beta=true` |
+| `exoscale` | 33 | an action suffix — `/block-storage/{id}:attach` |
+| `mongodb-atlas` | 23 | the same — `/clusters/{clusterName}:pinFeatureCompatibilityVersion` |
+| `telnyx`, `weather-gov` | 7 each | `.json` again; and `{x},{y}` as one segment |
+| `cloudflare`, `frankfurter` | 2 each | `{scan_id}.png`; and a date range as `{start_date}..{end_date}` |
+| `jellyfin`, `miro` | 1 each | `{width}/{index}.jpg`; and a stray `?` in the template |
+
+**All 216 come back with the same `matchit` message**, "Only one parameter is allowed per path
+segment" — which is not accurate for most of them. `/screenshots/{scan_id}.png` has exactly one
+parameter in each of its segments; that message is `matchit`'s blanket answer for a parameter that
+does not *end* its segment. The diagnostic therefore **attributes** the reason to `matchit` instead
+of asserting it. A module that deliberately declines to model the rule is in no position to phrase
+the refusal better than the router did, and quoting a router's confusing message as though it were
+progeny's own reading of the document would be the worse of the two failures.
+
+The direction of the remaining risk is stated rather than hidden: a consumer on a newer `matchit`
+may find progeny was conservative, which costs a route named in a diagnostic. The other direction is
+a server that panics at startup, which is the failure the classifier exists to prevent.
+
+### What the type system of the generated crate carries
+
+- **A handler cannot answer with an undeclared status**, because the response enum has no variant
+  for one. `default` is the exception that proves it: that variant carries its own `status`, because
+  `default` means "any status this description did not otherwise claim" and only the handler knows
+  which one it is sending. Picking a number there would have been progeny deciding what an
+  operation's unlisted statuses are.
+- **A handler cannot exist for a route the router refused**, because `RegistrableRoute` has no
+  public constructor and the trait method is only emitted for an operation that has one.
+
+The first of those has an edge the corpus was asked about rather than assumed: an operation that
+declares *no* responses at all would get a response enum with no variants, which compiles and leaves
+a trait method nobody can return from. **0 of 21,764 operations declare none** — 3.0 requires
+`responses` and 3.1 only permits omitting it — so this is recorded as measured-absent rather than
+guarded against. It is also a loud failure if it ever appears: the consumer cannot write the handler,
+which is the opposite of the silent kind.
+
+### The body limit is a ceiling, and `axum`'s knob does not move it
+
+A generated server reads at most **2 MiB** of request body. That is a decision — a server must not
+become a denial-of-service target because a description said `type: string` — but the first version
+of the comment above it was wrong in a way worth recording, because it told a consumer to turn a
+knob that does nothing. `axum`'s `DefaultBodyLimit` works by inserting an extension that only
+extractors calling `with_limited_body` consult; the generated support code reads the body with
+`to_bytes` and its own constant, so the extension never comes into it. Raising `DefaultBodyLimit`
+changes nothing, and a 3 MiB upload comes back as a 400 either way.
+
+Stated rather than fixed here: making the limit a configuration knob means templating the support
+module per crate, which is stage 9's kind of work. What stage 7 owes is that the number is written
+down, and that no comment claims a way to change it that isn't one.
+
+## The example crate, and the two defects it found in its first minute
+
+Every other gate in this project checks one side of the wire: the corpus checks a document, the
+compile gate checks that emitted source is Rust, the payload gate runs serde against bodies.
+**None of them sends a request.** The example crate generates the client *and* the server of the
+committed petstore, implements the server's `Api` trait with a double that records what arrived,
+starts it on a real socket, and calls it with the generated client.
+
+It failed immediately, twice, and both were real:
+
+- **Every path parameter arrived as "not sent".** The extractor read them out of the request's
+  extensions looking for `axum`'s `Path` type; what a router stores there is its own private type,
+  so the lookup found nothing and every request was rejected for being exactly right. Reading them
+  through `RawPathParams` — the extractor `axum` provides for this — is the fix.
+- **A URL carries no types, and nothing was supplying them.** `?limit=3` is three characters; the
+  schema is the only thing that says the value is a number. Handing serde the text a parameter
+  arrived as fails for *every non-string parameter in every description*. The reading is now
+  attempted as-is and only then re-read as the scalar the text spells, which is what keeps a
+  `type: string` parameter holding `"9"` or `"007"` the string it was.
+
+Neither would have been found by reading the emitted source, and neither is visible to any gate that
+does not send a request. That is the whole argument for the example crate in two bullets.
+
+## The hand-written serde path, first shown the corpus
+
+Until stage 8 the hand-written `Deserialize`/`Serialize` renderer had met exactly **one 56-line
+fixture**. All 78 corpus documents generated with the derive, the differential harness compared the
+two strategies on that fixture, and nothing else had ever asked the hand-written path a question.
+The renderer, the eligibility function and the buffering machinery had all been written and tested;
+what had not happened is the thing this project keeps finding to be the difference — *running it
+against the corpus*.
+
+`xtask corpus --serde hand-written` and `xtask payloads --serde hand-written` exist so that both
+strategies are reachable from the gates that run 78 documents. **An escape hatch nobody runs is not
+an escape hatch**, and the same is true of the path that is supposed to become the default.
+
+### The first run failed on all eight tier documents, in four ways
+
+Every one is a warning rather than a type error, and every one would have landed in a consumer's
+build as a complaint about code they did not write. That is why the compile gate denies warnings.
+
+| what it was | where | why it only appears here |
+| --- | --- | --- |
+| `let mut count` with nothing to increment | `petstore-31`, `posthog`, `oxide` | a struct whose members are all required has no conditional arm |
+| `#[allow(deprecated)]` missing on the impls | `github-31`, `cloudflare`, `okta`, `orb`, `jellyfin` | the derive puts its own allowance on; a hand-written impl has to be given one |
+| `unused variable: buffer` | `cloudflare`, `github-31`, `okta` | a struct with no members reads nothing |
+| `let mut state` with nothing to write | the same three | and writes nothing |
+
+The deprecation row has **three distinct shapes and the corpus produced all three**: a deprecated
+*type*, which `impl Serialize for …` uses simply by naming it (`cloudflare`); a deprecated *member*,
+used by reading or writing it (`jellyfin`, `github-31`); and a member whose *type* is deprecated
+(`okta`). The allowance goes on the item, which is the same lesson stage 5 learned about the derive
+and had to learn again about a different set of items.
+
+The last two rows are one shape — **an object with no properties** — and three documents declare
+one. It is now in the differential fixture, because a shape whose whole difficulty is that it
+renders to code with nothing in it belongs in the gate that runs in seconds rather than the one that
+compiles eight documents.
+
+### The arity bug the plan predicted, present in the code
+
+[04](../plan/04-render.md) specified "explicit end-of-sequence checks after replaying buffered
+content — the fixed-arity (`[T; N]`, tuple) trailing-element bug class". It had not been
+implemented. Replaying a buffered `Content::Seq` handed serde's `SeqDeserializer` straight to the
+visitor, skipping the `end()` call that serde's own `deserialize_any` makes, so:
+
+```rust
+let content = Content::Seq(vec![U64(1), U64(2), U64(3)]);
+<(u64, u64)>::deserialize(ContentDeserializer::new(content))  // Ok((1, 2)) — the third vanished
+```
+
+**Only the buffered path can have this bug**, which is why it survived: read the array directly and
+the *format* notices the leftovers — `serde_json` answers with a trailing-characters error. Buffering
+makes progeny the format, and a visitor asked for a fixed arity stops as soon as it has that many
+and never looks again. Silently dropping input is the one failure mode this project forbids, and the
+derive rejects the same payload, so the two strategies disagreed on the wire.
+
+Found by reading the plan's specification against the code rather than by a gate, which is worth
+recording as a limitation of the gates: the differential fixture had no fixed-arity member, so
+nothing could have caught it. It now has one.
+
+## Pagination: ubiquitous, and no two documents agree
+
+Open question 1, measured across all 78 documents. **62 of them declare a cursor-ish query
+parameter on a `GET`**, so pagination is not a niche — and nothing whatever about it generalizes:
+
+| the cursor parameter is called | times |
+| --- | --- |
+| `offset` | 541 |
+| `page` | 319 |
+| `cursor` | 213 |
+| `after` | 198 |
+| `before` | 133 |
+| `from` | 98 |
+| `page_token` | 84 |
+| `page[size]` | 75 |
+| `Page` | 61 |
+| `PageToken` | 61 |
+| `page[cursor]` | 60 |
+| `start` | 39 |
+
+Four different conventions (offset, cursor, page number, opaque token), two casings, and bracketed
+forms borrowed from JSON:API. The response side is no better: `next`, `next_page`, `total_count`,
+`has_more`, `next_cursor`, `totalCount`, `hasMore`, `NextToken`, and a `Hasmore` that is somebody's
+typo. **`Link` headers are two documents** — `github-31` with 205 operations and `okta` with one —
+so RFC 5988 is not this corpus's answer whatever its reputation suggests.
+
+**So detection would be a table of vendor spellings pretending to be a rule**, which is what the
+predecessor built and what did not generalize. Pagination is *declared*, per operation, and every
+name in the declaration is checked against the document before anything renders: a cursor parameter
+the operation does not have, a member path that does not resolve, an `items` path that is not a
+list, a next cursor that is not optional — each is a refusal that names what it looked for and what
+the document had instead.
+
+Two constraints fell out of writing it, and both are refusals rather than guesses:
+
+- **The next cursor must be optional.** Its absence is the only thing that ends the stream. Stopping
+  on an empty string or an empty page are conventions the declaration did not state.
+- **The operation must have exactly one success status.** With two, the client hands back an enum,
+  and picking which variant carries a page is a decision the document did not make.
+
+The honest price: a consumer of `github-31` who wants streams writes 205 declarations. That is what
+refusing to guess costs, and it is why the plain `send` is never replaced — only joined by a
+`stream` beside it. The generated crate takes `futures-core` and `futures-util` **only when some
+operation declared pagination**, on the same rule the client and server halves already follow.
 
 ## Diagnostics the corpus produces
 
