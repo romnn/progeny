@@ -52,6 +52,14 @@ pub struct Args {
     #[arg(long)]
     generate_only: bool,
 
+    /// Measure what an earlier run rendered, rather than rendering again.
+    ///
+    /// The other half of `--generate-only`, and the reason both exist: a figure about *this* tree
+    /// has to be taken from crates rendered by *this* tree, and the machine may not be quiet for
+    /// hours. Reusing pins the subject; only the measurement waits.
+    #[arg(long, conflicts_with_all = ["generate_only", "crate_dir"])]
+    reuse: bool,
+
     /// Repetitions per variant.
     #[arg(long, default_value_t = 4)]
     reps: usize,
@@ -63,6 +71,14 @@ pub struct Args {
     /// Refuse to start a repetition while the one-minute load average is above this.
     #[arg(long, default_value_t = 1.0)]
     max_load: f64,
+
+    /// Minutes to wait for the machine to go quiet before giving up on a repetition.
+    ///
+    /// Five is right for a run somebody is watching. A take that has been left to find its own
+    /// window wants hours, and the alternative — measuring anyway — is the thing the whole harness
+    /// exists to refuse.
+    #[arg(long, default_value_t = 5)]
+    max_wait: u64,
 
     /// The checked-in baseline to compare against or to write.
     #[arg(long, value_name = "PATH")]
@@ -162,12 +178,30 @@ struct BaselineEntry {
 }
 
 /// One crate to measure, and which rendering of its document it is.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct Target {
     /// The document this was generated from, or the directory it was found in.
     subject: String,
-    variant: &'static str,
+    variant: String,
     package: String,
     directory: Utf8PathBuf,
+}
+
+/// What one run rendered, and which tree it rendered from.
+///
+/// Written beside the crates so that a measurement taken days later still says what it measured.
+/// A benchmark whose subject cannot be identified afterwards is a number, not evidence.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct Rendering {
+    /// The commit the generator was at, and whether the worktree had uncommitted changes.
+    revision: String,
+    dirty: bool,
+    targets: Vec<Target>,
+}
+
+/// Where the rendering plan lives, so `--reuse` needs no guesses about directory names.
+fn rendering_path() -> Utf8PathBuf {
+    crate::generated::scratch_root().join("bench-rendering.toml")
 }
 
 /// The serde strategy each variant renders with.
@@ -194,6 +228,11 @@ pub fn run(args: &Args) -> Result<()> {
                 println!("  {} → {}", key_of(target), target.directory);
             }
         }
+        println!();
+        println!(
+            "rendered but not measured. `--reuse` measures exactly these crates, however far the \
+             generator moves in the meantime"
+        );
         return Ok(());
     }
     println!(
@@ -203,7 +242,10 @@ pub fn run(args: &Args) -> Result<()> {
 
     let mut summaries: BTreeMap<String, Summary> = BTreeMap::new();
     for (subject, targets) in &subjects {
-        let variants: Vec<&str> = targets.iter().map(|target| target.variant).collect();
+        let variants: Vec<&str> = targets
+            .iter()
+            .map(|target| target.variant.as_str())
+            .collect();
         println!();
         println!("{subject}: {} reps × {}", args.reps, variants.join(", "));
         // Dependencies are compiled once, outside the measurement, so the first repetition
@@ -268,6 +310,9 @@ fn key_of(target: &Target) -> String {
 /// Generation happens up front rather than between repetitions: A-B-B-A ordering only means
 /// anything if both variants are sitting on disk before the first measurement starts.
 fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
+    if args.reuse {
+        return reuse(args);
+    }
     if let Some(crate_dir) = &args.crate_dir {
         let package = package_name(crate_dir)?;
         println!(
@@ -278,7 +323,7 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
             package.clone(),
             vec![Target {
                 subject: package.clone(),
-                variant: "as-is",
+                variant: "as-is".to_owned(),
                 package,
                 directory: crate_dir.clone(),
             }],
@@ -326,14 +371,102 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
             let directory = crate::generated::write(&format!("bench-{variant}-{name}"), &output)?;
             targets.push(Target {
                 subject: name.clone(),
-                variant,
+                variant: variant.to_owned(),
                 package: config.package.name.clone(),
                 directory,
             });
         }
         planned.push((name.clone(), targets));
     }
+    record(&planned)?;
     Ok(planned)
+}
+
+/// Write down what was rendered and from which tree.
+fn record(planned: &[(String, Vec<Target>)]) -> Result<()> {
+    let (revision, dirty) = revision();
+    let rendering = Rendering {
+        revision,
+        dirty,
+        targets: planned
+            .iter()
+            .flat_map(|(_, targets)| targets.iter().cloned())
+            .collect(),
+    };
+    let path = rendering_path();
+    let text = toml::to_string_pretty(&rendering).context("rendering the bench plan")?;
+    std::fs::write(&path, text).with_context(|| format!("writing {path}"))
+}
+
+/// Measure the crates an earlier run rendered, without rendering anything.
+fn reuse(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
+    let path = rendering_path();
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!("reading {path}; --reuse measures what --generate-only rendered, and nothing has")
+    })?;
+    let rendering: Rendering = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+
+    let (here, _) = revision();
+    println!(
+        "bench-compile: reusing {} crates rendered from {}{}, {} reps",
+        rendering.targets.len(),
+        rendering.revision,
+        if rendering.dirty {
+            " with uncommitted changes"
+        } else {
+            ""
+        },
+        args.reps
+    );
+    // Said rather than refused: measuring an older rendering is the *point* of `--reuse`, and the
+    // only thing that would make it a mistake is not knowing.
+    if here != rendering.revision {
+        println!(
+            "  note: the generator is at {here} now, so this measures the earlier tree and not \
+             this one"
+        );
+    }
+
+    let mut planned: Vec<(String, Vec<Target>)> = Vec::new();
+    for target in rendering.targets {
+        let manifest = target.directory.join("Cargo.toml");
+        if !manifest.exists() {
+            bail!(
+                "{} is gone, so there is nothing to reuse; re-run with --generate-only",
+                target.directory
+            );
+        }
+        if !args.specs.is_empty() && !args.specs.contains(&target.subject) {
+            continue;
+        }
+        match planned.iter_mut().find(|(name, _)| name == &target.subject) {
+            Some((_, targets)) => targets.push(target),
+            None => planned.push((target.subject.clone(), vec![target])),
+        }
+    }
+    if planned.is_empty() {
+        bail!("the recorded rendering has nothing matching the documents asked for");
+    }
+    Ok(planned)
+}
+
+/// The commit the generator is at, and whether the worktree has uncommitted changes.
+fn revision() -> (String, bool) {
+    let git = |arguments: &[&str]| -> Option<String> {
+        let output = Command::new("git")
+            .current_dir(crate::paths::workspace_root())
+            .args(arguments)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let head =
+        git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "an unknown tree".to_owned());
+    let dirty = git(&["status", "--porcelain"]).is_some_and(|status| !status.is_empty());
+    (head, dirty)
 }
 
 /// Compile the crate once without measuring, so its dependencies are built and cached.
@@ -365,7 +498,7 @@ fn order<'a>(variants: &[&'a str], rep: usize) -> Vec<&'a str> {
 }
 
 fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
-    wait_for_quiet(args.max_load)?;
+    wait_for_quiet(args.max_load, args.max_wait)?;
 
     // A cached crate measures nothing, so discard just this package's artifacts and leave its
     // dependencies compiled: what is under test is the generated code, not the ecosystem.
@@ -630,19 +763,25 @@ fn package_name(crate_dir: &Utf8PathBuf) -> Result<String> {
     Ok(manifest.package.name)
 }
 
-fn wait_for_quiet(max_load: f64) -> Result<()> {
-    const ATTEMPTS: usize = 30;
-    for attempt in 0..ATTEMPTS {
+fn wait_for_quiet(max_load: f64, max_wait: u64) -> Result<()> {
+    const INTERVAL: u64 = 10;
+    let attempts = (max_wait * 60 / INTERVAL).max(1);
+    for attempt in 0..attempts {
         let load = load_average()?;
         if load <= max_load {
             return Ok(());
         }
-        if attempt == 0 {
+        // Every attempt would be noise and only the first would be silence: a wait measured in
+        // hours should say it is still waiting, and roughly every ten minutes is enough for that.
+        if attempt == 0 || attempt % 60 == 0 {
             println!("  waiting for the machine to go quiet (load {load:.2} > {max_load:.2})");
         }
-        std::thread::sleep(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(INTERVAL));
     }
-    bail!("the machine did not go quiet; timing on a busy machine measures the machine")
+    bail!(
+        "the machine did not go quiet within {max_wait} minutes; timing on a busy machine measures \
+         the machine"
+    )
 }
 
 /// The one-minute load average.
@@ -756,6 +895,30 @@ mod tests {
             load_after,
             pressured: false,
         }
+    }
+
+    #[test]
+    fn a_rendering_survives_the_file_it_is_written_to() {
+        // `--generate-only` writes this and `--reuse` reads it, possibly days apart and across a
+        // rebuild of the tool. A shape that serializes and does not deserialize would strand the
+        // one artifact the separation exists to preserve.
+        let rendering = super::Rendering {
+            revision: "013655a".to_owned(),
+            dirty: true,
+            targets: vec![super::Target {
+                subject: "okta".to_owned(),
+                variant: super::DERIVE.to_owned(),
+                package: "corpus-okta".to_owned(),
+                directory: camino::Utf8PathBuf::from("/tmp/bench-derive-okta"),
+            }],
+        };
+        let text = toml::to_string_pretty(&rendering).unwrap();
+        let read: super::Rendering = toml::from_str(&text).unwrap();
+        assert_eq!(read.revision, "013655a");
+        assert!(read.dirty);
+        assert_eq!(read.targets.len(), 1);
+        assert_eq!(super::key_of(&read.targets[0]), "okta.derive");
+        assert_eq!(read.targets[0].directory, "/tmp/bench-derive-okta");
     }
 
     #[test]
