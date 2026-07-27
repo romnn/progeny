@@ -9,7 +9,8 @@ Reproduce with:
 task corpus:fetch
 task corpus            # round trip, references, dialect convergence, generation, snapshots
 task corpus:stats      # the model-level histograms
-task corpus:compile    # generate the quick tier and compile it
+task corpus:compile    # generate the quick tier and compile it, client included
+task payloads          # deserialize every example payload into the type generated for it
 task differential      # the two serde renderings, asserted equivalent
 task bench:compile -- --ab --reps 3 oxide jellyfin okta   # what each rendering costs to compile
 ```
@@ -17,6 +18,19 @@ task bench:compile -- --ab --reps 3 oxide jellyfin okta   # what each rendering 
 The last one needs a machine with nothing else on it; on a shared one it refuses rather than
 reporting a number about the machine. `--max-load` raises the bar it refuses at, and every figure it
 then produces carries the conditions it was taken under.
+
+**Rendering and measuring are separate commands on purpose**, because only the second one needs a
+quiet machine and only the first one is pinned to a version of the generator:
+
+```sh
+task bench:compile -- --ab --generate-only oxide jellyfin okta          # capture the subject, now
+task bench:compile -- --ab --reuse --reps 6 --max-load 3 --max-wait 600 --write-baseline
+```
+
+`--generate-only` writes the crates plus a `bench-rendering.toml` recording the commit they came
+from; `--reuse` measures exactly those, however far the generator has moved since, and says so.
+`--max-wait` is how long it will sit waiting for the machine to go quiet — five minutes is right for
+a run somebody is watching, and hours are right for a take left to find its own window.
 
 ## The front end holds every document
 
@@ -65,6 +79,14 @@ losslessly is still invisible to anything that needs to *address* it.
 3.1 half is an independent statement of what the normalization is supposed to *mean* rather than a
 recording of what it currently does. Their models are equal, member for member, with the declared
 version excluded because that is the one member they are supposed to disagree about.
+
+Since stage 5 the gate compares the **generated source** as well, which is the promise convergence
+was always making: the model is an intermediate nobody receives. It also compares what each half
+*gave up*, and that is the part with teeth — the source can match while one dialect was understood
+less well, because a degradation that types a thing as `serde_json::Value` types it that way in both
+halves once one of them decides to. The three failures are named separately: a model difference is a
+normalization defect, a source difference with the models agreeing is a defect in a later stage, and
+a one-sided `Degrade` is neither.
 
 ## Answers to the questions the front end had to settle first
 
@@ -164,14 +186,17 @@ here on rather than from stage 8.
 | | |
 | --- | --- |
 | documents generated | 78/78 |
-| lines of Rust | 979,603 (983,029 before stage 4 taught the union table what it may not do, 980,390 before the review pass after it) |
-| generated crates that compile | 78/78 |
+| lines of Rust | **4,671,513** — 979,603 of them the shared type layer and the rest the client, which stage 5 added. Before that: 983,029 at stage 3, 980,390 after stage 4's union table, 979,603 after the review pass |
+| generated crates that compile | 78/78 types; the quick tier with `--all-features`, so the client half is checked too |
 | generation is deterministic | every document generated twice per run, byte-compared |
 
 ### What the type layer had to say about the corpus
 
 31,110 findings, aggregated into **353 records** — which is the aggregation requirement earning its
 keep: unaggregated, the snapshot suite would be thirty thousand lines and nobody would read it.
+(After stage 5 the suite holds **750** records across twenty classes; the growth is operations
+arriving, and the largest single contributor was cut from 1,058 records to 16 by giving
+`colliding-operation-id` the aggregation the rule had always implied it needed.)
 
 The "before" column is stage 3, so the two together are what stage 4 did to the corpus, including
 the review pass that followed it ("the 76", below).
@@ -435,6 +460,382 @@ The spread between two runs of the *same* tree is wider than the difference betw
 and peak RSS agrees to within 0.1%. Stage 4 changed which unions are representable; it did not
 change what the result costs.
 
+## What the API model found, and what it cost
+
+Stage 5 turned the corpus into operations. Four things it settled that no earlier stage could:
+
+**`presence-collapse` split by position.** The class fired 27,044 times across 58 documents and said
+one thing about all of them. It now says which half of the API each occurrence costs, because the
+consequence differs: in a request body a caller loses the ability to *send* an explicit null — the
+difference between "clear this field" and "leave it alone", which is every PATCH endpoint; in a
+response body they lose the ability to *tell*; in a component no operation reaches, nothing on the
+wire is affected at all. `oxide`'s 171 collapses split 35 request / 115 response / 20 both / 1
+nowhere; `jellyfin`'s 906 split 231 / 231 / 403 / 41. The last bucket is the one worth noticing: a
+document can collapse hundreds of properties on types nothing sends.
+
+**A path variable inside a segment is filled, not refused.** The first implementation refused
+`/Videos/{itemId}/stream.{container}` on the grounds that escaping the literal part around a
+variable is a decision — and it is not: the literal is path text and the variable percent-encodes
+exactly as it would alone. Refusing cost `jellyfin` six working routes for no safety gained. A
+segment is a *sequence* of literal and variable pieces, and filling one is the whole-segment rule
+applied piece by piece. What is still refused is a template that cannot be filled at all: unbalanced
+braces, a variable named twice, a path that does not start with `/`, or a variable no path parameter
+declares.
+
+**A wildcard media type is never selected.** `jellyfin` declares `application/*+json` beside
+`application/json` on 75 request bodies, and the first preference table — which ranked the JSON
+family together and broke ties alphabetically — chose the wildcard. A client cannot send `*` as a
+content type. Wildcards now sort last whatever they wildcard over: they are a perfectly good thing
+for a document to *say* about a response and never a thing to send.
+
+**Being declared is not being on the wire.** The tag-affordability check asks whether a variant type
+is used anywhere the discriminator property really travels, and answered it with "does any
+API-surface root point at this key". That counted `components.responses` and `components.parameters`
+entries the document declares and no operation references — which are exactly as much on the wire as
+a `components.schemas` entry, which the same rule had always excluded. Roots now distinguish a
+*position* an operation sends or receives from a *name* the document merely declares. Anything an
+operation does reference is reached through that operation and keeps its position there, so nothing
+real is lost.
+
+## What the client half costs, counted
+
+A deterministic count rather than a timing, so it is valid on any machine — the same kind of
+evidence as "3.3× fewer function bodies", and for the same reason.
+
+| document | operations | `types.rs` | `client.rs` | ratio | lines per operation |
+|---|---:|---:|---:|---:|---:|
+| cloudflare | 3,200 | 123,931 | 588,646 | 4.7× | 184 |
+| github-31 | 1,194 | 38,533 | 229,902 | 6.0× | 193 |
+| jellyfin | 356 | 8,564 | 83,581 | 9.8× | 235 |
+| oxide | 317 | 7,207 | 51,093 | 7.1× | 161 |
+
+**The client is the larger half of a generated crate, by a factor of five to ten.** The per-operation
+figure is stable across documents of very different shapes, which says the cost is proportionate
+rather than wasteful — a builder struct, a constructor, one setter per parameter, and a `send` that
+builds a URL and dispatches on status. But it moves the compile-cost question: every figure this
+project has measured so far was about *types*, and types are now the minority of the output.
+
+Three consequences, none of them acted on yet because acting on them without a measurement is what
+this project's discipline exists to prevent:
+
+- The stage-4 A/B (**−63…−68% CPU**) is a claim about type-only crates and does not transfer. Both
+  sides of it were rendered and archived before the client existed, so it stays re-measurable.
+- The **typestate-versus-runtime builder** question ([03](../plan/03-api-model.md) #4) now has a
+  denominator: a type parameter per required field, multiplied by 3,200 operations.
+- The first thing to measure at stage 8 is no longer only derive-versus-hand-written; it is what
+  the client half costs at all.
+
+## The payload gate
+
+The first check in the project that runs serde against data rather than asking whether source
+compiles — and therefore the first that could have caught any of the five stage-4 defects.
+
+It generates a crate and then generates a test *into* that crate, one `check::<T>` call per example,
+because there is no way to deserialize into a type chosen at run time. Two rules it is built with:
+
+- **Compare against the original payload, never a second round of the type's own output.** A member
+  the type drops uniformly survives an idempotence check forever. The expectation is the payload
+  restricted to the members the *shape* declares — the type layer's claim about what it carries,
+  checked against what the emitted Rust actually carries.
+- **Carry the vendor verdict from the start.** An example that contradicts its own schema is a
+  finding about the document. The verdict is computed per example rather than read back out of the
+  `invalid-example` diagnostics, which aggregate per document and cap their related locations at
+  five — `cloudflare` writes 29, so reading it back would have been right about the first few and
+  quietly wrong about the rest.
+
+Two expectations had to be *stated* rather than discovered as failures, and both are documented
+degradations rather than defects: an optional member holding an explicit `null` comes back **absent**
+(the presence collapse), and a member the schema never named comes back absent because the generated
+type never carried it. Positions that cannot be checked at all — arbitrary JSON, a type spelled at
+the use site, a type that captures undeclared members — are counted and printed rather than skipped
+quietly, because a gate that omits silently reads as coverage it does not have.
+
+### What it found on its first run
+
+**60 payloads across three documents came back carrying members they never had**, all of one cause:
+a schema `default` was being rendered as `#[serde(default = "…")]`. serde fills the member in on the
+way *in*; the member is then written on the way *out*. So a generated client sent
+`force_refresh: false` on every request where the caller had never mentioned it — turning "the caller
+said nothing" into "the caller said `false`", silently, which is the one forbidden failure mode.
+
+OpenAPI's `default` is a statement about what the **server** assumes when a member is absent. It is
+not an instruction to the client to fill it in. The attribute is gone; the value is stated in the
+member's doc comment instead, so nothing is dropped quietly. Nothing else is lost, because every
+non-required field is an `Option` and serde reads an absent `Option` as `None` unprompted.
+
+This is the first defect in this project found by running serde against data rather than by
+compiling source, and it is exactly the shape stage 4's review predicted: it generated, it compiled,
+it round-tripped its document, it snapshotted, and it was wrong about payloads.
+
+After that fix and two corrections to the harness itself — the example check now recurses into
+declared members, and the expected value for an untagged union is the payload pruned under the
+*first branch that accepts it*, which is the rule serde uses — the tier stands at:
+
+| document | checked | vendor defects | not checkable | failing |
+|---|---:|---:|---:|---:|
+| github-31 | 409 | 23 | 101 | **3** |
+| cloudflare | 208 | 8 | 59 | 0 |
+| posthog | 14 | 0 | 2 | 0 |
+| okta | 12 | 0 | 9 | 0 |
+| petstore-31, orb, jellyfin, oxide | 0 | 0 | 0 | 0 |
+| **total** | **643** | **31** | **171** | **3** |
+
+**The three that remained were left open and the gate left red rather than tuned green.** They have
+since been read, and the section below is what they turned out to be.
+
+### The three that were left red
+
+All three are vendor defects, and all three had one cause on progeny's side: **the example check
+recursed into a struct's members but stopped at the container edge.** An array, a fixed array, a
+tuple and a map were checked for being an array or an object and nothing more — never their
+elements. Every contradiction one element deep was therefore invisible, the example was called
+sound, and the payload gate reported the vendor's defect as progeny's.
+
+| where | what the document says | what its own example writes |
+|---|---|---|
+| `PUT /user/codespaces/secrets/{secret_name}/repositories` | `selected_repository_ids` is an array of `integer` | `["1296269", "1296280"]` — the same ids as strings |
+| `POST /orgs/{org}/issue-fields` | every entry of `options` requires `name`, `color` and `priority` | three options, none carrying `priority` |
+| `GET /orgs/{org}/copilot-spaces/{space_number}/collaborators` | a collaborator is a user (`actor_type: User`, plus all of `simple-user`) or a team (`actor_type: Team`, requiring `type`) | a team collaborator with no `type` — so the team branch rejects it and `actor_type` rules out the user branch |
+
+**The recorded hypothesis was half right and worth correcting.** It said all three were untagged
+unions where the harness's branch selection was more permissive than serde's. That describes the
+third exactly; the first two never reach a union at all. The common cause was one level down from
+where it was being looked for.
+
+Two things followed from reading them:
+
+- **Every container recurses now**, and the tuple length check with it — a tuple lowers to a Rust
+  tuple whatever `items` says about the elements past the prefix, and serde reads one only at
+  exactly that length.
+- **A string enumeration now rejects a non-string.** It was returning "no mismatch", which is the
+  same leniency one type further down: the shape is only ever a string enumeration when every listed
+  value is a string (a mixed `enum` degrades to arbitrary JSON long before), so the generated type
+  reads from a string and nothing else.
+
+The gate is green at **643/643**, and the three moved into the column they belonged in:
+
+| document | checked | vendor defects | not checkable | failing |
+|---|---:|---:|---:|---:|
+| github-31 | 409 | 26 | 101 | 0 |
+| cloudflare | 208 | 8 | 59 | 0 |
+| posthog | 14 | 0 | 2 | 0 |
+| okta | 12 | 0 | 9 | 0 |
+| petstore-31, orb, jellyfin, oxide | 0 | 0 | 0 | 0 |
+| **total** | **643** | **34** | **171** | **0** |
+
+**What this buys and what it costs.** The vendor verdict is computed from progeny's own shape, so a
+stricter check tolerates more — and it can only be trusted as far as the shape is. If progeny were
+wrong about a member being required, this would file its own defect under the vendor's name. That
+is why all three were read in the document before the check was changed, rather than the check being
+loosened until the gate went green.
+
+**What it found in the rest of the corpus.** The three payloads were the reason to look, but the
+blind spot was not `github`'s. Re-running the full corpus moved **17 documents' snapshots, and every
+changed line is `invalid-example`** — 110 records added against 5 replaced, with no other class and
+no round-trip touched. All 17 are "same document, different diagnostics": the hash is unchanged, so
+this is progeny seeing more rather than a vendor republishing. Two checked by hand in the source
+document, both real:
+
+- `polygon` declares `settlement_date` as `type: string, format: date` and writes the nanosecond
+  epoch `1753851600000000000` into it, inside an array element.
+- `zoom` allows `Controller` in a five-value enum and writes `Zoom Rooms Controller`.
+
+The 110 are spread rather than concentrated: `pagerduty` 24, `zoom` 18, `superset` 16, `polygon` 11,
+then a tail of thirteen documents with six or fewer, `github` among them at 5. Note that the
+manifest's `bad_examples` lists are now understated — they gate nothing (the payload verdict is
+computed per example, not read from the manifest) and feed only the header count, but they no longer
+describe how much of the corpus contradicts itself.
+
+**One thing checked and found not to matter.** A `prefixItems` tuple records what the elements past
+the prefix may be, and lowering drops it — the generated type is a fixed Rust tuple either way. That
+would be a real narrowing if a document wrote one. Across all 78 documents `prefixItems` appears in
+exactly two: `meilisearch` writes `items: false` and `airflow` writes `minItems: maxItems: 2`. Both
+tuples are closed, so nothing is lost anywhere in the corpus.
+
+### And what the compile gate found that reading could not
+
+`jellyfin` declares a query parameter called `client`. Every generated builder has a `client` field,
+so the struct declared it twice and did not compile. The builder interface now reserves `client`,
+`body`, `new` and `send`; a parameter wanting one takes a suffix on the Rust side and keeps its wire
+name exactly. Reserved in the API model rather than in the renderer, because which names the
+interface occupies is a fact about the interface.
+
+The same run surfaced a second, quieter defect: a deprecated operation's builder is `#[deprecated]`,
+and its own `impl` block then *uses* a deprecated type — a warning in the consumer's crate, about
+code the consumer did not write. An `impl` cannot itself be deprecated, so it carries the allowance.
+
+And the gate's own report had to be fixed to find either of them: it collected the first four lines
+starting with `error` or `warning` in rustc's output order, so a crate with warnings near the top
+and errors near the bottom reported as four warnings — which reads as "compiles, with grumbling".
+Errors now come first.
+
+### That allowance was one of three sites, and the gate that would say so is off by default
+
+**`compiled: 8/8 generated crates check clean` is `cargo check`, not clippy.** `--clippy` is a
+separate flag, it is the only thing that denies warnings, and neither the tier gate nor CI passes it.
+So the gate says "clean" about crates that are emitting warnings on every build a user runs. Armed
+against one document it fails immediately:
+
+```
+$ cargo xtask corpus --only okta --compile --clippy
+  ok  okta  ...  DOES NOT COMPILE
+      error: use of deprecated enum `types::MtlsTrustCredentialsRevocation`; ...
+compiled: 0/1 generated crates check clean
+```
+
+Ten warnings, five distinct items, **two defects**:
+
+- **The builder accessor never got the allowance the builder's `impl` got.** `Client::extend_okta_support`
+  is `#[deprecated]` and returns `ExtendOktaSupport<'_>`, which is also `#[deprecated]` — and rustc
+  lints both the return type in the signature and the constructor call in the body. Being deprecated
+  does not exempt an item from the lint. Four operations, eight warnings.
+- **A field whose type is deprecated is not itself deprecated, and warns.** `okta` marks the
+  *component* `MtlsTrustCredentialsRevocation` deprecated but not the `revocation` property that
+  refers to it, which is faithful — so `pub revocation: Option<MtlsTrustCredentialsRevocation>`
+  is correct and warns anyway.
+
+The second is not `okta`'s alone. A scan of the generated crates sitting in `target/generated`
+finds a deprecated named type referenced from elsewhere in **15 of them** — `cloudflare` has 17 such
+types, `openai` 9, `anthropic` 8. That is a lower bound rather than a survey: it counts only the
+crates a previous run happened to leave on disk.
+
+Neither is a wrong-output defect — the crates compile, and the deprecations they carry are the ones
+the documents declared. They are the other thing this project says it will not ship: a generated
+crate that makes noise in a build the consumer did not write. **Both are fixed**, and the second one
+taught something worth keeping:
+
+**A field-level `#[allow]` is not enough, because the derive names the type again.** The obvious fix
+— put the allowance on the declaration that names the deprecated type — silences the field and
+leaves the `Deserialize` that `derive` expands from that same field, which reports at the same span.
+The warning count halves and the gate stays red, which is the worst of the three outcomes. The
+allowance goes on the *item*: the narrowest level that covers a derive. It hides nothing from the
+consumer, because it governs uses inside the generated item, and the consumer's own use of a
+deprecated type or field is linted at their site, not this one.
+
+### And behind those, a client that did not compile at all
+
+Arming `--clippy` on documents outside the quick tier to check the deprecation fix found something
+that was never about clippy: **`weather-gov`'s generated client did not compile**, and had not for
+the whole of stage 5.
+
+```
+error[E0277]: the trait bound `client::OfficeBriefingDownloadLatestError: DeserializeOwned` is not satisfied
+    --> src/client.rs:3816:42
+     |
+3816 |                     Error::ErrorResponse(support::decode(response).await?),
+```
+
+Two answers to one question that were allowed to disagree. `error_type` counts an operation's
+failure arms as *the non-2xx arms plus `default`*, and declares an enum when there is more than one.
+`send` decided whether to put a decoded body **into a variant** of that enum by counting the same
+arms — except it only counted `default` when `default` was not also claiming success. For every
+document in the corpus those two agree. `weather-gov` writes an operation with a `302`, a `default`,
+and no `2XX` at all: `error_type` saw two arms and declared the enum, `send` saw one and decoded the
+body straight into it — handing an enum that derives `Debug, Clone` and nothing else to serde.
+
+`default` is a failure arm whenever it exists; claiming success as well does not stop `_ =>` from
+decoding through it. The two now count identically.
+
+**What this says about the gate is worth more than the fix.** The stage-5 gate is "clients for the
+full corpus compile", and what runs is `--quick --compile`: eight documents. `weather-gov` is not
+one of them, the shape appears in **1 of 78 documents and 2 operations**, and nothing else in the
+corpus has it — verified by walking every `responses` object in the manifest, plus compiling
+`zendesk` by hand because its YAML would not parse for the walk. A one-in-seventy-eight shape is
+exactly what an eight-document tier is blind to, and it took an unrelated errand to find this one.
+
+### What `--clippy` finds once the deprecations are gone
+
+With `okta` green on deprecations, three lint classes it was hiding come into view — all
+pre-existing, none of them about deprecation:
+
+| lint | count in `okta` | what it is |
+|---|---:|---|
+| `doc_lazy_continuation` (quote) | 34 | a vendor's multi-line blockquote in a `description`, whose continuation lines carry no `>` |
+| `doc_lazy_continuation` (list) | 25 | the same, for list items |
+| `large_enum_variant` | 3 | a union whose variants differ enough in size that clippy wants a `Box` |
+
+The first two are the same defect: **vendor prose is transcribed into doc comments verbatim**, and
+markdown that was fine in a description is not always fine in rustdoc. The third is a design
+question rather than a transcription one, because boxing a variant changes the type the consumer
+gets.
+
+None is a reason to leave `--clippy` off — they are reasons it has never been on.
+
+### `--clippy` is the gate now, and what it took to get there
+
+`corpus:compile` passes `--clippy`, so CI denies warnings in generated crates. Surveying the whole
+quick tier first — rather than fixing what `okta` happened to show — turned up seven classes, and
+they split cleanly into defects and decisions.
+
+**Four were progeny's own output, and are fixed:**
+
+| what | where | fix |
+|---|---|---|
+| `tabs_in_doc_comments` | `cloudflare` 78, `github` 4 | tabs expand to spaces; rustdoc does not define their width |
+| `doc_lazy_continuation` | `posthog` 79, `orb` 62, `okta` 59, `github` 25, `cloudflare` 11 | lazy list and blockquote continuations are written out explicitly |
+| `doc_overindented_list_items` | `posthog` 8 | the same rule from the other side — a continuation belongs at its item's content column |
+| `single_char_add_str` | `cloudflare` 9 | a one-character path literal is `push`, not `push_str` |
+| `deprecated` | `cloudflare` 2 | the client names deprecated schema types too — a live operation with a deprecated `feedback` parameter put one in a field and a setter |
+
+**Vendor prose is transcribed, never rewritten.** What changed is that lazy continuations — a
+paragraph line inside a list item or blockquote that leaves out the indent or the `>` — are now
+written in the explicit form CommonMark defines them to be equal to. Nothing renders differently.
+The case that makes it concrete is `posthog`, which describes an endpoint with a parenthesis that
+wraps onto a line beginning `+ the spec it derived…`: markdown reads that as a list item and every
+line after it as a lazy continuation of one. One habit, 79 warnings.
+
+**It took three passes, and the two failures are the more useful half.** Writing the normalizer was
+the easy part; being right about markdown was not, and the gate caught both mistakes on documents no
+amount of reading would have suggested.
+
+- **A nested list is indented relative to its parent, not to column zero.** `orb` writes a sub-item
+  at column 4 under an item whose content starts at column 2. Read absolutely, four spaces is an
+  indented code block; read against its parent it is a list. The first reading flattened the
+  sub-item to column 2 and left its own continuation stranded at 6. What gave it away is that
+  `orb`'s 62 warnings **changed class** rather than disappearing — `without indentation` became
+  `overindented`, which is the signature of a normalizer moving lines to the wrong column rather
+  than one leaving them alone.
+- **A blank line ends the paragraph, not the list item.** `okta` writes an item, a blank line, a
+  second paragraph still inside the item, and then wraps that paragraph lazily back to column zero.
+  Tracking "what block is open" and "is a paragraph open" as one flag loses the item at the blank
+  line and leaves everything after it unindented. They are two pieces of state.
+
+**And a fourth defect that was not the vendor's prose at all.** progeny appends its own sentence to
+a parameter's documentation — `Sent as the \`limit\` query parameter.` — directly after the
+description, with no paragraph break. When a description *ends inside a list item*, markdown reads
+progeny's own sentence as a continuation of it. The struct documentation and a documented `default`
+already separate themselves with a blank line; the setters did not. This one is worth noting
+separately because it is the only one where the markdown progeny emitted was its own.
+
+**Three were decisions, and the rule for them was the same each time — suppress only where the fix
+would be worse than the wart, and say why on the spot:**
+
+- **`large_enum_variant`** asks for a `Box`, which is a change to the type the consumer receives.
+  Deciding it here would mean knowing the layout of every generated type, and progeny cannot: a
+  field may be `chrono::DateTime`, `time::OffsetDateTime`, `uuid::Uuid` or whichever map the
+  configuration picked, and those layouts belong to crates at versions this build never sees. The
+  threshold is clippy's own and free to move between releases. A `Box` placed on an estimate is an
+  API change made on a guess, appearing and disappearing as an unrelated knob moves.
+- **`type_complexity`** asks for an alias, and progeny would have to invent its name. Every name in
+  the output comes from the document; a named type the document never mentions is worse than a long
+  one that says exactly what the schema said.
+- **`match_overlapping_arm`** is reporting the contract. OpenAPI says an exact status claims a
+  response before a range does, so a document declaring both `400` and `4XX` produces arms that
+  overlap by construction. The lint reads the rule as a mistake.
+
+Each suppression sits on the construct it is about rather than on the crate, and is `#[allow]`
+rather than `#[expect]` for the same reason throughout: this lands in someone else's crate, compiled
+by a clippy this build never sees, and an expectation unfulfilled there is a warning of its own.
+
+### What it does not cover, said plainly
+
+The gate runs serde against **bodies**. It does not send a request. Nothing in this project yet
+checks that a generated `send()` builds the URL, query string, headers and cookies a document
+describes — the style table is unit-tested row by row in `support/style.rs`, and the wiring from a
+parameter to the right row is checked only by reading the emitted source. That gap closes at stage 7
+with the example crate, which is the first thing that will have both halves of a real request. Until
+then, a claim about a request line is a claim no gate is making.
+
 ## Diagnostics the corpus produces
 
 Every finding, per document, is recorded in `corpus/snapshots/*.jsonl`, keyed by the SHA-256 of the
@@ -446,6 +847,15 @@ republication is indistinguishable from a bug.
 Aggregation is what keeps the suite readable: a class that fires at scale — 642 tuple rewrites in one
 document, 19 name collisions in another — is one record with a count and the first five locations
 rather than 642 lines nobody reads.
+
+**Stage 5 tested that rule and had to apply it again.** Operations arrived and
+`colliding-operation-id` produced **1,058 records — 1,052 of them the same finding**: an operation
+that declares no `operationId` and is therefore named after its method and path. Six were genuine
+collisions. A per-occurrence class at that scale is the failure mode the aggregation rule exists to
+prevent, so the class now aggregates and the missing-id sentence deliberately names no identifier —
+records fold on their sentence, so the 1,052 become one per document with a count, while a real
+collision names both identifiers and stays its own record. The names are not lost; they are in the
+generated source, which is where a reader would look for them anyway.
 
 ## Drift found in the manifest
 
