@@ -1174,6 +1174,78 @@ refusing to guess costs, and it is why the plain `send` is never replaced — on
 `stream` beside it. The generated crate takes `futures-core` and `futures-util` **only when some
 operation declared pagination**, on the same rule the client and server halves already follow.
 
+## The wire probe, and the startup panic it found in its first hour
+
+The example crate's lesson — only a gate that sends a request catches request-line defects — had
+one document's worth of coverage. The probe is its generated form: from the same frozen contracts
+the renderers read, `xtask probe` synthesizes a value for every parameter, body and response of
+every servable operation, generates the recorder double and the driver tests, and runs the
+document's client against its server over a socket. Per operation it asserts that a request with
+every declared parameter set **extracts cleanly**, that every optional parameter **arrives**, and
+that the declared response **decodes back with its declared status**. Anything unprobeable is a
+named skip, counted out loud.
+
+Its first three documents were petstore (6/6, the hand-written example's subject), oxide (**308
+operations driven**, 9 named skips), and jellyfin — where it found three product defects in one
+run:
+
+- **Generated servers could panic at startup.** The registrability classifier kept one `matchit`
+  router *per method*, on the stated belief that axum does the same. It does not: `axum::Router`
+  keeps a single path tree, and method dispatch happens inside a matched node. So `jellyfin`'s
+  `GET …/Subtitles/{language}` and `POST …/Subtitles/{subtitleId}` — different methods, same
+  shape — passed the classifier and panicked the real router, the one failure the classifier
+  exists to make impossible. The corrected classifier mirrors axum exactly: one router, one
+  insertion per distinct template, methods merging on identical strings. **35 operations across 11
+  documents** turn out to collide cross-method; every one was previously a server that could not
+  boot. "Asked, not modelled" applies to the router's sharding too — the sharding was still a
+  model, and it was wrong.
+- **Arrays could not be read back from a query string.** `ids=a,b` under `style: form,
+  explode: false` is byte-identical to a scalar containing a comma, and the reader worked from the
+  style row alone — so joined arrays arrived as one string and were rejected by the typed read, and
+  a single-element exploded array was indistinguishable from a scalar. The schema's shape now rides
+  along into the reading: the schema decides *whether* it is an array, the row decides *how* one is
+  spelled. A URL carries no types; the schema supplies them — the project already knew this rule,
+  and had applied it to every location except this one.
+- **`HEAD` responses were decoded.** A `HEAD` response has no body on the wire — the transport
+  strips whatever the handler wrote — so the schema a document declares there documents the `GET`
+  twin. The client decoded it anyway and failed on every `HEAD` in `jellyfin`. Response arms of
+  `HEAD` operations now carry `()`: the statuses stay, the phantom payload goes.
+
+After the fixes: **jellyfin 362/362 driven, 0 skipped.** One real limitation surfaced and is
+recorded rather than patched: an *exploded form object* in the query writes each member as its own
+key, so the parameter's name never reaches the wire and the generated server's read-by-name cannot
+ever see it. The probe neither sets nor asserts such parameters; giving the degradation its own
+diagnostic is filed work.
+
+The rest of the tier held two more, each a one-source-of-truth failure between the halves:
+
+- **`orb`: the shape flag and the rendered type came from different layers.** `status[]` is a
+  *nullable* array, which classifies as a union rather than as `Shape::Array` — so the parameter's
+  shape said "primitive" while its rendered type was `Option<Vec<String>>`, and the server, told it
+  was reading a scalar, rejected the very requests its own client builds. The shape is now derived
+  from the type the extraction decodes into, looking through the wrappers that do not change what
+  the wire carries. Six operations, all clean after.
+- **`posthog`: the reader had never learned the writer's one spelling for a compound.** The client
+  encodes a struct-typed query element as its JSON — `properties=` carries one JSON-encoded filter
+  per occurrence — and the server's second-attempt coercion stopped at numbers and booleans, on the
+  written-down reasoning that "a string that happens to spell an object is a string". That
+  reasoning missed what the writer actually does. The coercion now inverts it exactly, one compound
+  level deep, and the safety argument is unchanged: the as-is reading runs first, so a
+  `type: string` member keeps its braces.
+- **`posthog` again: form bodies had no member shapes.** The `FormSpec` table carried only the
+  members the document's `encoding` named — one body in the whole corpus — so a form body's reader
+  fell back to guessing arrays from key repetition, and a *one-element* array member is one
+  occurrence: byte-identical to a scalar, handed to serde as its element. The table is now derived
+  from the body's own contract, one spec per declared member with its shape, exactly the way query
+  parameters get theirs; the repetition heuristic survives only for `additionalProperties` members,
+  which have no declared shape anywhere.
+
+The tally for the probe's first day, across seven documents: **4,983 operations driven** and six
+product defects found, none of which any gate that does not send a request could have seen. Five of
+the six are one lesson wearing different clothes: *the wire under-determines the value, and every
+reader needs the schema's answer threaded to it* — the same rule the example crate's coercion fix
+established at stage 7, rediscovered at five more positions.
+
 ## Diagnostics the corpus produces
 
 Every finding, per document, is recorded in `corpus/snapshots/*.jsonl`, keyed by the SHA-256 of the
