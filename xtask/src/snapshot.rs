@@ -183,7 +183,11 @@ pub fn orphans(known: &[String]) -> Vec<Utf8PathBuf> {
 fn digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    let mut out = String::from("sha256:");
+    for byte in hasher.finalize() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// The relative path a snapshot lives at, for messages.

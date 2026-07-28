@@ -13,6 +13,19 @@ use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{Contracts, TypeRef};
 use crate::shape::Format;
 
+/// The `reqwest` features a generated client forwards, and whether it turns each on by default.
+///
+/// Every name is forwarded under itself, so a consumer reads the generated manifest and gets the
+/// feature they already know from `reqwest`. `native-tls` is the one that is off: it is the
+/// alternative to `rustls`, not an addition to it.
+const REQWEST_FEATURES: [(&str, bool); 5] = [
+    ("rustls", true),
+    ("native-tls", false),
+    ("http2", true),
+    ("charset", true),
+    ("system-proxy", true),
+];
+
 pub(super) fn render(
     contracts: &Contracts,
     api: &ApiModel,
@@ -42,10 +55,16 @@ pub(super) fn render(
         // Both are on by default because progeny only emits a module when it was asked to; turning
         // one off is `default-features = false` plus the half that is wanted.
         out.push_str("[features]\n");
-        let default: Vec<&str> = [("client", client), ("server", server)]
+        let mut default: Vec<&str> = [("client", client), ("server", server)]
             .into_iter()
             .filter_map(|(name, wanted)| wanted.then_some(name))
             .collect();
+        if client {
+            let on = REQWEST_FEATURES
+                .iter()
+                .filter_map(|(name, on_by_default)| on_by_default.then_some(*name));
+            default.extend(on);
+        }
         let _ = writeln!(out, "default = [{}]", quoted(&default));
         if client {
             let mut wants = vec!["dep:reqwest"];
@@ -62,6 +81,16 @@ pub(super) fn render(
         if server {
             out.push_str("server = [\"dep:axum\", \"dep:tokio\"]\n");
         }
+        if client {
+            // `reqwest` is public here — the consumer hands `with_client` a `Client` and gets one
+            // back from `client()` — so which TLS backend, HTTP version and proxy source it is
+            // built with is their decision. Feature unification alone cannot express that: it only
+            // ever adds, so a stack named here is one a consumer can never drop. Forwarding gives
+            // the choice an off switch, and `default` keeps the crate working untouched.
+            for (name, _) in REQWEST_FEATURES {
+                let _ = writeln!(out, "{name} = [\"reqwest?/{name}\"]");
+            }
+        }
         out.push('\n');
     }
 
@@ -70,8 +99,10 @@ pub(super) fn render(
     out.push_str("serde_json = \"1\"\n");
     if client {
         out.push_str(
-            "reqwest = { version = \"0.12\", optional = true, default-features = false, \
-             features = [\"json\", \"charset\", \"http2\", \"rustls-tls\"] }\n",
+            // Only the two features the emitted calls name; the rest are the consumer's, forwarded
+            // through this crate's own features.
+            "reqwest = { version = \"0.13\", optional = true, default-features = false, \
+             features = [\"json\", \"query\"] }\n",
         );
         // Only when something declared pagination. A crate that did not ask for streams must not
         // pay to compile them, which is the same rule the two halves already follow.

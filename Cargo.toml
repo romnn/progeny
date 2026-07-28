@@ -91,9 +91,9 @@ matchit = "0.8"
 # their shipped source.
 axum = { version = "0.8", default-features = false, features = ["json"] }
 # The API surface only: `json` is the one feature the shipped client runtime's signatures need.
-# The runtime features a consumer gets (`charset`, `http2`, `rustls-tls`) change behaviour, not
+# The runtime features a consumer gets (`charset`, `http2`, `rustls`) change behaviour, not
 # types, and compiling a TLS stack to type-check a file would be minutes bought for nothing.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
@@ -105,5 +105,5 @@ toml = "1"
 ureq = "3"
 # Snapshots are keyed by the hash of the document they were taken from, which is what tells
 # "upstream republished" apart from "we regressed" for documents that are fetched, not committed.
-sha2 = "0.10"
+sha2 = "0.11.0"
 nix = { version = "0.31", features = ["resource"] }
