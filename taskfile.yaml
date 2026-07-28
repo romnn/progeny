@@ -201,7 +201,7 @@ tasks:
     desc: "check for unused cargo workspace dependencies"
     aliases: [unused-dependencies]
     cmds:
-      - cargo +nightly udeps --workspace --all-targets {{.CLI_ARGS}}
+      - cargo +nightly fc udeps --maximal-features --all-targets {{.CLI_ARGS}}
 
   typos:
     desc: "check repository for typos"
