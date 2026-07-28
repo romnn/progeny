@@ -22,6 +22,15 @@
 # Deliberately absent: `zendesk`, whose bare `=` scalar (a YAML 1.1 `!!value` tag) is
 # covered by a loader unit test rather than by paying for a large spec, and `launchdarkly`,
 # which is fetched live and can fail for reasons unrelated to progeny.
+#
+# One hole in the coverage, recorded rather than discovered later: CI compiles this tier
+# through the derive strategy with `--except cloudflare`. Through the derive, `cloudflare`
+# needs about 14.7 GiB for one rustc invocation and a hosted runner has 16 GB, of which
+# roughly 14.5 GiB is usable — and a single compilation unit cannot be split across jobs, so
+# no job count reaches it. Measured under a 14 GiB cgroup cap: the hand-written path peaks at
+# 9.10 GiB and finishes, the derive is killed at the ceiling. `cloudflare` still compiles here
+# through the default path, and still runs every cheaper gate through both strategies; what is
+# untested is the derive rendering of the largest crate in the corpus, on this runner size.
 quick = [
   "petstore-31",
   "github-31",

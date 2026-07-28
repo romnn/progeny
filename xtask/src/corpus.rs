@@ -34,6 +34,14 @@ pub struct Args {
     #[arg(long = "only", value_name = "NAME")]
     only: Vec<String>,
 
+    /// Leave these documents out of whatever was selected, by name. Repeatable.
+    ///
+    /// For a document a run cannot afford rather than one it does not want. `cloudflare` through
+    /// the derive strategy needs about 14.7 GiB for a single rustc invocation, which is more than a
+    /// hosted runner has; no job count reaches that, because one unit is already too large.
+    #[arg(long = "except", value_name = "NAME")]
+    except: Vec<String>,
+
     /// Report the model-level counts the design questions turn on.
     #[arg(long)]
     stats: bool,
@@ -182,6 +190,11 @@ pub fn run(args: &Args) -> Result<()> {
         // Never sample silently: a run that covered less has to say what it left out.
         println!("corpus: skipped {}", skipped.join(", "));
     }
+    if !args.except.is_empty() {
+        // Said again, on its own line: an exclusion is a deliberate hole in the coverage, and one
+        // name among seventy in the line above is not a hole anybody sees.
+        println!("corpus: excluded on request: {}", args.except.join(", "));
+    }
 
     if args.fetch {
         fetch_all(&selected, args.refresh)?;
@@ -288,7 +301,14 @@ fn lint_manifest(specs: &[Spec]) -> Result<()> {
 }
 
 fn select(specs: &[Spec], args: &Args) -> Result<Vec<Spec>> {
-    if !args.only.is_empty() {
+    // A misspelled exclusion excludes nothing and reports a full run, which is the one reading a
+    // coverage gate must never produce.
+    for name in &args.except {
+        if !specs.iter().any(|spec| &spec.name == name) {
+            bail!("`--except {name}` names no document in the manifest");
+        }
+    }
+    let selected = if !args.only.is_empty() {
         let mut selected = Vec::new();
         for name in &args.only {
             let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
@@ -296,9 +316,8 @@ fn select(specs: &[Spec], args: &Args) -> Result<Vec<Spec>> {
             };
             selected.push(spec.clone());
         }
-        return Ok(selected);
-    }
-    if args.quick {
+        selected
+    } else if args.quick {
         let mut selected = Vec::new();
         for name in &quick_tier()? {
             let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
@@ -306,9 +325,14 @@ fn select(specs: &[Spec], args: &Args) -> Result<Vec<Spec>> {
             };
             selected.push(spec.clone());
         }
-        return Ok(selected);
-    }
-    Ok(specs.to_vec())
+        selected
+    } else {
+        specs.to_vec()
+    };
+    Ok(selected
+        .into_iter()
+        .filter(|spec| !args.except.contains(&spec.name))
+        .collect())
 }
 
 /// Where a document lives on disk.
@@ -938,4 +962,61 @@ fn verdict(outcomes: &[(String, Outcome, Duration)]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::{Args, Spec, select};
+
+    /// `Args` is a subcommand's argument group, so parsing it needs something to hang it on.
+    #[derive(Debug, clap::Parser)]
+    struct Invocation {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    fn parse(arguments: &[&str]) -> Args {
+        Invocation::parse_from(std::iter::once("corpus").chain(arguments.iter().copied())).args
+    }
+
+    fn manifest(names: &[&str]) -> Vec<Spec> {
+        names
+            .iter()
+            .map(|name| {
+                toml::from_str(&format!("name = \"{name}\"\nlocal = true\n"))
+                    .expect("a name and a local flag are a whole spec")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_excluded_document_is_left_out_of_what_was_selected() {
+        let specs = manifest(&["petstore-31", "cloudflare", "oxide"]);
+        let selected = select(
+            &specs,
+            &parse(&[
+                "--only",
+                "petstore-31",
+                "--only",
+                "cloudflare",
+                "--except",
+                "cloudflare",
+            ]),
+        )
+        .expect("the exclusion names a document in the manifest");
+        let names: Vec<&str> = selected.iter().map(|spec| spec.name.as_str()).collect();
+        assert_eq!(names, ["petstore-31"]);
+    }
+
+    /// The failure mode this guards is not a missing document but a *reported* one: a misspelled
+    /// exclusion silently excludes nothing, and the run then claims coverage it did not have.
+    #[test]
+    fn an_exclusion_that_names_nothing_is_refused() {
+        let specs = manifest(&["petstore-31", "cloudflare"]);
+        let error = select(&specs, &parse(&["--except", "petstore-30"]))
+            .expect_err("a name no document carries cannot be excluded");
+        assert!(error.to_string().contains("petstore-30"), "{error}");
+    }
 }
