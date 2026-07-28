@@ -1301,6 +1301,49 @@ it instead of parsing an error message; and the harness gates share one document
 one refusal — the payloads gate could previously exit green having checked zero documents when
 the cache was missing.
 
+## The review's structural tail: one value rule, and a tag the types carry
+
+The two items the review filed as design tasks rather than patches, implemented after it — each
+re-measured over the corpus.
+
+**A tagged variant without its wire bytes is now unconstructible.** "`tag_value` is set exactly
+when the tagging is `Internal`" was asserted in four comments and enforced by none; a variant that
+broke it would have had serde write the *Rust* variant name onto the wire. The tagging enum and its
+`Option<String>` are gone — an internally-tagged union is its own contract kind, and every one of
+its variants carries its tag bytes as a plain `String`. Making the pairing structural surfaced a
+second hole the review had not named: the dedup fingerprint compared variants by Rust name and
+type, and a Rust name is a *normalization* of the tag value — `a-cat` and `aCat` both name an
+`ACat` — so two unions that differ only in the bytes their tags read could merge, handing one
+document position the other's wire format. The corpus answered that no document contains the
+colliding pair (78/78 snapshots byte-identical), so the fix ships as a guard with a test that was
+verified to catch the merge, not as a repair to any output.
+
+**One rule for a JSON value against a schema.** A declared `default` was checked shallowly against
+the lowered *type*, and an `example` recursively against the *shape* — two checkers that could
+disagree about the same literal, and over the corpus did, in both directions. The rule now lives
+below both layers (`shape::Fit`) and both verdicts come from it; re-running the corpus re-ruled 14
+documents, 105 recorded invalid-default occurrences becoming 67:
+
+- **50 valid defaults were being dropped.** The shallow checker's `Named` arm accepted only
+  objects and strings, so any scalar default behind a reference was refused: `cloudflare` alone
+  gets 30 back — `build_caching_enabled`'s `true` behind an `allOf` to a boolean component among
+  them — beside `logfire`'s `false` on a boolean-or-`"allow-local"` union (8) and `gladia`'s `16`
+  on a number enum that lists it (4). All now kept, and each generated field's documentation
+  gained its "the server assumes …" line back.
+- **12 genuinely impossible defaults were passing silently.** The same arm asked nothing about an
+  object's members or an enum's values: `meilisearch` defaults `mode` to `"Human"` and its own
+  enum allows `human`, `json`, `profile`; `oxide`'s allocator defaults satisfy no branch of their own
+  unions; five `cloudflare` ruleset defaults omit members their schemas require. Each is now
+  dropped with the contradiction spelled out, because serde could never have deserialized it.
+- The rest re-keyed in place: `okta`'s 18 split into three reasons with the same total, and every
+  surviving record now says *why* — "the schema says an integer, the default is a string" — in
+  the same vocabulary the example checker has always used, because it is now the same sentence
+  from the same rule.
+
+The corpus also pinned the disagreement shut end-to-end: one wrong literal written as both a
+property's `default` and the payload's `example` produces both records, same reason, each in its
+own words.
+
 ## Diagnostics the corpus produces
 
 Every finding, per document, is recorded in `corpus/snapshots/*.jsonl`, keyed by the SHA-256 of the
