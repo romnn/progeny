@@ -1,53 +1,147 @@
-["jellyfin.derive"]
-cpu_seconds = 5.369795333333333
-peak_rss_bytes = 724770133
-scope = "types-only"
+["cloudflare.derive"]
+cpu_seconds = 157.16329283333332
+peak_rss_bytes = 15779648170
+scope = "types+client+server"
 kept = 6
 discarded = 0
-load = 4.9
+load = 3.26
+cores = 48
+pressured = true
+provisional = ["memory was thin, so the peak resident set size is a floor rather than a result"]
+
+["cloudflare.hand-written"]
+cpu_seconds = 89.26109883333332
+peak_rss_bytes = 9957550080
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 4.71
+cores = 48
+
+["github-31.derive"]
+cpu_seconds = 49.225064999999994
+peak_rss_bytes = 5623382698
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 3.28
+cores = 48
+
+["github-31.hand-written"]
+cpu_seconds = 27.586913666666664
+peak_rss_bytes = 3626789546
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 2.66
+cores = 48
+
+["jellyfin.derive"]
+cpu_seconds = 11.559502
+peak_rss_bytes = 1636291242
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 4.78
 cores = 48
 
 ["jellyfin.hand-written"]
-cpu_seconds = 1.9008783333333332
-peak_rss_bytes = 385136640
-scope = "types-only"
+cpu_seconds = 7.9706641666666656
+peak_rss_bytes = 1271322624
+scope = "types+client+server"
 kept = 6
 discarded = 0
-load = 4.89
+load = 4.44
 cores = 48
 
 ["okta.derive"]
-cpu_seconds = 20.670143333333332
-peak_rss_bytes = 2265201322
-scope = "types-only"
+cpu_seconds = 30.85228166666667
+peak_rss_bytes = 3643105962
+scope = "types+client+server"
 kept = 6
 discarded = 0
-load = 4.91
+load = 4.8
 cores = 48
 
 ["okta.hand-written"]
-cpu_seconds = 6.777338166666666
-peak_rss_bytes = 1011318784
-scope = "types-only"
+cpu_seconds = 17.455174333333336
+peak_rss_bytes = 2415334741
+scope = "types+client+server"
 kept = 6
 discarded = 0
-load = 4.7
+load = 4.12
+cores = 48
+
+["orb.derive"]
+cpu_seconds = 12.317972666666668
+peak_rss_bytes = 1677740714
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 2.7
+cores = 48
+
+["orb.hand-written"]
+cpu_seconds = 5.752231833333333
+peak_rss_bytes = 984309760
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 2.88
 cores = 48
 
 ["oxide.derive"]
-cpu_seconds = 5.6305005
-peak_rss_bytes = 722629973
-scope = "types-only"
+cpu_seconds = 9.888155666666668
+peak_rss_bytes = 1350755669
+scope = "types+client+server"
 kept = 6
 discarded = 0
-load = 3.25
+load = 4.47
 cores = 48
 
 ["oxide.hand-written"]
-cpu_seconds = 1.9585543333333335
-peak_rss_bytes = 361200981
-scope = "types-only"
+cpu_seconds = 6.199346333333334
+peak_rss_bytes = 960096938
+scope = "types+client+server"
 kept = 6
 discarded = 0
-load = 3.12
+load = 4.23
+cores = 48
+
+["petstore-31.derive"]
+cpu_seconds = 0.38599216666666675
+peak_rss_bytes = 205033472
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 1.02
+cores = 48
+
+["petstore-31.hand-written"]
+cpu_seconds = 0.36920400000000003
+peak_rss_bytes = 199777621
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 1.02
+cores = 48
+
+["posthog.derive"]
+cpu_seconds = 68.66241083333334
+peak_rss_bytes = 7353278464
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 2.54
+cores = 48
+pressured = true
+provisional = ["memory was thin, so the peak resident set size is a floor rather than a result"]
+
+["posthog.hand-written"]
+cpu_seconds = 43.319136500000006
+peak_rss_bytes = 5119676416
+scope = "types+client+server"
+kept = 6
+discarded = 0
+load = 2.76
 cores = 48
