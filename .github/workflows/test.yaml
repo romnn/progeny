@@ -45,7 +45,10 @@ jobs:
   corpus:
     name: conformance corpus
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Generated crates are compiled one cargo job at a time, because the largest of them need more
+    # rustc than a hosted runner has memory for. That trades wall clock for finishing at all: the
+    # 45 minutes this used to allow were sized for a parallel build that never once survived.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4

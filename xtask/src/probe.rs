@@ -16,7 +16,6 @@
 //! "covered" when it is not.
 
 use std::fmt::Write as _;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
@@ -97,10 +96,7 @@ pub fn run(args: &Args) -> Result<()> {
             continue;
         }
 
-        let run = Command::new("cargo")
-            .current_dir(&directory)
-            .env("CARGO_TARGET_DIR", crate::generated::shared_target())
-            .env_remove("RUSTFLAGS")
+        let run = crate::generated::cargo(&directory)
             .args(["test", "--quiet", "--all-features", "--test", "probe"])
             .output()
             .context("running the probe")?;

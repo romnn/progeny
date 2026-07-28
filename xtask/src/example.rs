@@ -16,7 +16,6 @@
 //! operation carries a path parameter, a query parameter, a header, a cookie and a body at once.
 
 use std::fmt::Write as _;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
@@ -62,10 +61,7 @@ pub fn run(args: &Args) -> Result<()> {
         return Ok(());
     }
 
-    let run = Command::new("cargo")
-        .current_dir(&directory)
-        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
-        .env_remove("RUSTFLAGS")
+    let run = crate::generated::cargo(&directory)
         .args([
             "test",
             "--quiet",

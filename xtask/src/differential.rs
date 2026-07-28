@@ -11,7 +11,6 @@
 //! deterministic, so the number is valid on a loaded machine — no idle-machine discipline needed.
 
 use std::fmt::Write as _;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -63,13 +62,10 @@ pub fn run(args: &Args) -> Result<()> {
     assemble(&directory, &document, &assertions)?;
     println!("differential: assembled {directory}");
 
-    let status = Command::new("cargo")
-        .current_dir(&directory)
-        // The shared dependency cache every other gate uses: this gate once kept a private
-        // target directory and recompiled `serde` and `serde_json` from scratch on each run,
-        // invisibly, because the decision sat in a module nobody reads beside `generated`.
-        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
-        .env_remove("RUSTFLAGS")
+    // The shared dependency cache every other gate uses: this gate once kept a private target
+    // directory and recompiled `serde` and `serde_json` from scratch on each run, invisibly,
+    // because the decision sat in a module nobody reads beside `generated`.
+    let status = crate::generated::cargo(&directory)
         .args(["test", "--quiet"])
         .status()
         .with_context(|| format!("running cargo test in {directory}"))?;
@@ -241,10 +237,10 @@ fn assemble_single(directory: &Utf8Path, document: &[u8], strategy: SerdeImpl) -
 
 /// Expand a crate and count the function bodies in it.
 fn expand_and_count(directory: &Utf8Path) -> Result<usize> {
-    let output = Command::new("cargo")
-        .current_dir(directory)
+    let output = crate::generated::cargo(directory)
+        // Its own target directory: expansion is a nightly build of the same crate the gate above
+        // just checked on stable, and sharing one would have each invalidate the other's artefacts.
         .env("CARGO_TARGET_DIR", scratch().join("bodies-target"))
-        .env_remove("RUSTFLAGS")
         .args(["+nightly", "rustc", "--quiet", "--", "-Zunpretty=expanded"])
         .output()
         .with_context(|| format!("expanding {directory}"))?;

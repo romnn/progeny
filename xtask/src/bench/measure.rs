@@ -113,10 +113,7 @@ impl Summary {
 
 /// Compile the crate once without measuring, so its dependencies are built and cached.
 pub(super) fn warm_up(target: &Target) -> Result<()> {
-    let status = Command::new("cargo")
-        .current_dir(&target.directory)
-        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
-        .env_remove("RUSTFLAGS")
+    let status = crate::generated::cargo(&target.directory)
         .args(["check", "--quiet", "--lib"])
         .status()
         .with_context(|| format!("warming up {}", target.directory))?;

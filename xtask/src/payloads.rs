@@ -18,7 +18,6 @@
 //!   their own schemas. A harness with no verdict for them reports 19 failures nobody can fix.
 
 use std::fmt::Write as _;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
@@ -161,10 +160,7 @@ fn check(name: &str, spec: &crate::corpus::Spec, bytes: &[u8], args: &Args) -> R
         return Ok(outcome);
     }
 
-    let run = Command::new("cargo")
-        .current_dir(&directory)
-        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
-        .env_remove("RUSTFLAGS")
+    let run = crate::generated::cargo(&directory)
         // `--nocapture`, because the report travels on stdout and libtest swallows the stdout of a
         // test that passes — without it a document with vendor defects and no real failures would
         // report zero of both, which is the reading that looks like success.
