@@ -28,6 +28,7 @@
 
 mod classify;
 mod discriminate;
+mod fit;
 mod merge;
 mod roots;
 
@@ -39,6 +40,7 @@ use crate::diag::{Ctx, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
 
+pub(crate) use fit::Fit;
 pub(crate) use roots::{Root, RootKind};
 
 /// The set of schemas a shape is the classification of.

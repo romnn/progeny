@@ -153,6 +153,9 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
         ContractKind::Enum { variants } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
+        ContractKind::TaggedEnum { variants, .. } => {
+            variants.iter_mut().map(|variant| &mut variant.ty).collect()
+        }
         ContractKind::StringEnum { .. } => Vec::new(),
         ContractKind::Newtype { inner } => vec![inner],
         ContractKind::Tuple { items } => items.iter_mut().collect(),
@@ -167,7 +170,7 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
 /// reader of the generated source cannot see.
 fn fingerprint(contract: &Provisional) -> String {
     let mut out = String::new();
-    let _ = write!(out, "{:?}|{:?}|", contract.tagging, contract.unknown_fields);
+    let _ = write!(out, "{:?}|", contract.unknown_fields);
     match &contract.kind {
         ContractKind::Struct { fields } => {
             out.push_str("struct");
@@ -179,6 +182,20 @@ fn fingerprint(contract: &Provisional) -> String {
             out.push_str("enum");
             for variant in variants {
                 let _ = write!(out, "|{}:{:?}", variant.rust_name, variant.ty);
+            }
+        }
+        // The tag values are part of the identity on purpose: a Rust variant name is a
+        // normalization of the value (`foo-bar` and `fooBar` both name a `FooBar`), so two unions
+        // whose names and types agree can still put different bytes on the wire, and merging them
+        // would give one of them the other's tags.
+        ContractKind::TaggedEnum { tag, variants } => {
+            let _ = write!(out, "tagged({tag})");
+            for variant in variants {
+                let _ = write!(
+                    out,
+                    "|{}={}:{:?}",
+                    variant.rust_name, variant.tag_value, variant.ty
+                );
             }
         }
         ContractKind::StringEnum { variants } => {

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::dedup::references_mut;
 use super::lower::Provisional;
-use super::{ContractKind, Contracts, DeserStrategy, Tagging, TypeContract, TypeIndex, TypeRef};
+use super::{ContractKind, Contracts, DeserStrategy, TypeContract, TypeIndex, TypeRef};
 use crate::config::{Config, Derive, MapKind, SerdeImpl, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, RejectError, RejectKind};
 use crate::schema::cycles::Sccs;
@@ -81,14 +81,8 @@ pub(super) fn run(
         frozen.push(TypeContract {
             rust_name: contract.rust_name.clone(),
             docs: contract.docs.clone(),
-            deser: decide(
-                &contract.kind,
-                &contract.tagging,
-                contract.unknown_fields,
-                config,
-            ),
+            deser: decide(&contract.kind, contract.unknown_fields, config),
             kind: contract.kind.clone(),
-            tagging: contract.tagging.clone(),
             unknown_fields: contract.unknown_fields,
             derives,
             origin: contract.origin.clone(),
@@ -109,18 +103,13 @@ fn matches(contract: &Provisional, key: &str) -> bool {
 
 /// **The eligibility function.** Exhaustive, with no wildcard arm.
 ///
-/// Adding a variant to [`ContractKind`], [`Tagging`] or [`UnknownFields`] breaks this function's
-/// compilation until someone rules on it, which is the mechanism behind "a new serde option fails to
-/// compile until it has been ruled on". The rulings themselves come from measurement
-/// (`04-render.md`): a struct's derive expands to 9 function bodies and a fieldless enum's to 8 and
-/// climbing, while an untagged enum's expands to 1 — so converting a union would *cost* compile
-/// time rather than save it, and unions stay derived on purpose.
-fn decide(
-    kind: &ContractKind,
-    tagging: &Tagging,
-    unknown_fields: UnknownFields,
-    config: &Config,
-) -> DeserStrategy {
+/// Adding a variant to [`ContractKind`] or [`UnknownFields`] breaks this function's compilation
+/// until someone rules on it, which is the mechanism behind "a new serde option fails to compile
+/// until it has been ruled on". The rulings themselves come from measurement (`04-render.md`): a
+/// struct's derive expands to 9 function bodies and a fieldless enum's to 8 and climbing, while an
+/// untagged enum's expands to 1 — so converting a union would *cost* compile time rather than save
+/// it, and unions stay derived on purpose.
+fn decide(kind: &ContractKind, unknown_fields: UnknownFields, config: &Config) -> DeserStrategy {
     match config.serde_impl {
         // The escape hatch. Every corpus document is generated both ways from stage 8 on, because
         // an escape hatch nobody runs is not one — the first corpus run in the other mode failed on
@@ -128,14 +117,14 @@ fn decide(
         SerdeImpl::DeriveAlways => DeserStrategy::Derive,
         SerdeImpl::HandWrittenWhereEligible => match kind {
             ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
-            ContractKind::Struct { fields } => match (tagging, unknown_fields) {
+            ContractKind::Struct { fields } => match unknown_fields {
                 // `flatten` and the buffered implementation are not reconciled: the buffered
                 // deserializer assigns members by name, and a flattened member claims whatever is
                 // left, which is a second pass it does not have. Ruled to the derive rather than
                 // left to chance — and note that `flatten` with `Deny` cannot even be asked for,
                 // because capturing and denying are two arms of one enum.
-                (Tagging::Untagged, UnknownFields::Capture) => DeserStrategy::Derive,
-                (Tagging::Untagged, UnknownFields::Ignore | UnknownFields::Deny) => {
+                UnknownFields::Capture => DeserStrategy::Derive,
+                UnknownFields::Ignore | UnknownFields::Deny => {
                     if fields.iter().any(|field| field.flatten) {
                         DeserStrategy::Derive
                     } else {
@@ -144,21 +133,13 @@ fn decide(
                         }
                     }
                 }
-                // Tagging is a property of the union above a type, not of the struct itself, so
-                // nothing builds this today. Ruled rather than made unrepresentable because the
-                // ruling is the interesting part: the buffered deserializer assigns members by
-                // name and has no notion of one having been consumed before it started, so a
-                // struct that did carry its own tag would need the derive, not this path.
-                #[expect(
-                    clippy::match_same_arms,
-                    reason = "one arm per serde-relevant combination is the mechanism: merging \
-                              two arms that happen to rule the same way today would let the next \
-                              variant added inherit a ruling nobody made"
-                )]
-                (Tagging::Internal { .. }, _) => DeserStrategy::Derive,
             },
-            // Data-carrying enums, wrappers, tuples and aliases: all derived in v1.
+            // Data-carrying enums, wrappers, tuples and aliases: all derived in v1. A tagged
+            // union could not take the buffered path even if the measurement changed: consuming
+            // the tag means one member is gone before assignment starts, a notion the buffered
+            // deserializer does not have.
             ContractKind::Enum { .. }
+            | ContractKind::TaggedEnum { .. }
             | ContractKind::Newtype { .. }
             | ContractKind::Tuple { .. }
             | ContractKind::Alias { .. } => DeserStrategy::Derive,
@@ -287,6 +268,9 @@ fn references(kind: &ContractKind) -> Vec<&TypeRef> {
     match kind {
         ContractKind::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
         ContractKind::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
+        ContractKind::TaggedEnum { variants, .. } => {
+            variants.iter().map(|variant| &variant.ty).collect()
+        }
         ContractKind::StringEnum { .. } => Vec::new(),
         ContractKind::Newtype { inner } => vec![inner],
         ContractKind::Tuple { items } => items.iter().collect(),
@@ -395,7 +379,9 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
 /// first would be progeny inventing a fact.
 fn defaults(contract: &Provisional, supported: &[BTreeSet<Derive>], config: &Config) -> bool {
     match &contract.kind {
-        ContractKind::Enum { .. } | ContractKind::StringEnum { .. } => false,
+        ContractKind::Enum { .. }
+        | ContractKind::TaggedEnum { .. }
+        | ContractKind::StringEnum { .. } => false,
         ContractKind::Struct { fields } => fields
             .iter()
             .all(|field| carries(Derive::Default, &field.ty, supported, config)),
@@ -412,7 +398,7 @@ fn defaults(contract: &Provisional, supported: &[BTreeSet<Derive>], config: &Con
 mod tests {
     use super::decide;
     use crate::config::{Config, SerdeImpl, UnknownFields};
-    use crate::contract::{ContractKind, DeserStrategy, StringVariant, Tagging, name::RustIdent};
+    use crate::contract::{ContractKind, DeserStrategy, StringVariant, name::RustIdent};
 
     fn hand_written() -> Config {
         Config {
@@ -440,7 +426,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                decide(&kind, &Tagging::Untagged, UnknownFields::Ignore, &escape),
+                decide(&kind, UnknownFields::Ignore, &escape),
                 DeserStrategy::Derive,
                 "{kind:?} took a hand-written path under the escape hatch"
             );
@@ -457,7 +443,6 @@ mod tests {
         assert_eq!(
             decide(
                 &ContractKind::Struct { fields: Vec::new() },
-                &Tagging::Untagged,
                 UnknownFields::Ignore,
                 &Config::default()
             ),
@@ -471,12 +456,7 @@ mod tests {
     fn the_two_paths_measurement_justifies_are_the_two_that_are_taken() {
         let plain = ContractKind::Struct { fields: Vec::new() };
         assert_eq!(
-            decide(
-                &plain,
-                &Tagging::Untagged,
-                UnknownFields::Ignore,
-                &hand_written()
-            ),
+            decide(&plain, UnknownFields::Ignore, &hand_written()),
             DeserStrategy::HandWrittenBuffered {
                 deny_unknown: false
             }
@@ -488,12 +468,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            decide(
-                &strings,
-                &Tagging::Untagged,
-                UnknownFields::Ignore,
-                &hand_written()
-            ),
+            decide(&strings, UnknownFields::Ignore, &hand_written()),
             DeserStrategy::HandWrittenFieldless
         );
     }
@@ -502,29 +477,27 @@ mod tests {
     fn capturing_unknown_members_is_ruled_to_the_derive() {
         let kind = ContractKind::Struct { fields: Vec::new() };
         assert_eq!(
-            decide(
-                &kind,
-                &Tagging::Untagged,
-                UnknownFields::Capture,
-                &hand_written()
-            ),
+            decide(&kind, UnknownFields::Capture, &hand_written()),
             DeserStrategy::Derive
         );
     }
 
     #[test]
     fn a_union_stays_derived_because_converting_it_would_cost_compile_time() {
-        let kind = ContractKind::Enum {
-            variants: Vec::new(),
-        };
-        assert_eq!(
-            decide(
-                &kind,
-                &Tagging::Untagged,
-                UnknownFields::Ignore,
-                &hand_written()
-            ),
-            DeserStrategy::Derive
-        );
+        for kind in [
+            ContractKind::Enum {
+                variants: Vec::new(),
+            },
+            ContractKind::TaggedEnum {
+                tag: "kind".to_owned(),
+                variants: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                decide(&kind, UnknownFields::Ignore, &hand_written()),
+                DeserStrategy::Derive,
+                "{kind:?} took a hand-written path"
+            );
+        }
     }
 }

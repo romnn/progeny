@@ -12,8 +12,8 @@ use quote::{format_ident, quote};
 
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{
-    ContractKind, Contracts, DeserStrategy, FieldContract, RustIdent, SkipRule, Tagging,
-    TypeContract, TypeRef,
+    ContractKind, Contracts, DeserStrategy, FieldContract, RustIdent, SkipRule, TypeContract,
+    TypeRef,
 };
 use crate::shape::{Docs, Format};
 
@@ -77,6 +77,14 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                 #body
             }
         }
+        ContractKind::TaggedEnum { tag, variants } => {
+            let body = tagged_enum(tag, variants, contract, contracts, config);
+            quote! {
+                #docs
+                #derives
+                #body
+            }
+        }
         ContractKind::StringEnum { variants } => {
             let with_serde = contract.deser() == DeserStrategy::Derive;
             let arms = variants.iter().map(|variant| {
@@ -132,11 +140,8 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
     }
 }
 
-/// A data-carrying enum: how it says which variant it is, and what each variant holds.
-///
-/// The tagging attribute and the per-variant rename are two readings of one contract field, which
-/// is why they are written together: `Untagged` has no variant names on the wire to rename, and
-/// `Internal` has exactly one name per variant and no choice about using it.
+/// An untagged data-carrying enum: matched by shape, so its variant names never touch the wire and
+/// there is nothing to rename.
 fn data_enum(
     variants: &[crate::contract::VariantContract],
     contract: &TypeContract,
@@ -144,12 +149,50 @@ fn data_enum(
     config: &Config,
 ) -> TokenStream {
     let name = ident(contract.rust_name());
-    let tagging = match (contract.deser(), contract.tagging()) {
-        (DeserStrategy::Derive, Tagging::Untagged) => quote! { #[serde(untagged)] },
-        (DeserStrategy::Derive, Tagging::Internal { tag }) => quote! { #[serde(tag = #tag)] },
+    let tagging = match contract.deser() {
+        DeserStrategy::Derive => quote! { #[serde(untagged)] },
         // The hand-written path reads the same contract and consults no attributes, so leaving one
         // on would be a second source of truth — and would not resolve without the derive anyway.
-        (DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless, _) => {
+        DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless => {
+            quote! {}
+        }
+    };
+    let arms = variants.iter().map(|variant| {
+        let variant_ident = ident(&variant.rust_name);
+        let ty = type_ref(&variant.ty, contracts, config);
+        quote! { #variant_ident(#ty), }
+    });
+    let allow = deprecated_use(variants.iter().map(|variant| &variant.ty), contracts);
+    let sized = variant_sizes();
+    quote! {
+        #tagging
+        #allow
+        #sized
+        pub enum #name {
+            #(#arms)*
+        }
+    }
+}
+
+/// A tagged data-carrying enum: the tag member and each variant's exact wire name, straight off
+/// the contract.
+///
+/// The tag attribute and the per-variant rename are two readings of one contract kind, which is
+/// why they are written together: a tagged union has exactly one name per variant and no choice
+/// about using it.
+fn tagged_enum(
+    tag: &str,
+    variants: &[crate::contract::TaggedVariant],
+    contract: &TypeContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    let name = ident(contract.rust_name());
+    let tagging = match contract.deser() {
+        DeserStrategy::Derive => quote! { #[serde(tag = #tag)] },
+        // The hand-written path reads the same contract and consults no attributes, so leaving one
+        // on would be a second source of truth — and would not resolve without the derive anyway.
+        DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless => {
             quote! {}
         }
     };
@@ -157,11 +200,9 @@ fn data_enum(
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
         let ty = type_ref(&variant.ty, contracts, config);
-        let rename = variant
-            .tag_value
-            .as_deref()
-            .filter(|wire| with_serde && variant_ident != *wire)
-            .map(|wire| quote! { #[serde(rename = #wire)] });
+        let wire = &variant.tag_value;
+        let rename =
+            (with_serde && variant_ident != *wire).then(|| quote! { #[serde(rename = #wire)] });
         quote! { #rename #variant_ident(#ty), }
     });
     let allow = deprecated_use(variants.iter().map(|variant| &variant.ty), contracts);

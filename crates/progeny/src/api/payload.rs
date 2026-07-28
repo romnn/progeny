@@ -309,10 +309,10 @@ impl Collect<'_> {
                 for variant in &union.variants {
                     let accepted = match &variant.shape {
                         ShapeRef::Key(key) => self.shapes.get(key).is_some_and(|shape| {
-                            super::examples::accepts(self.resolved, self.shapes, value, shape)
+                            super::examples::accepts(self.shapes, value, shape)
                         }),
                         ShapeRef::Inline(shape) => {
-                            super::examples::accepts(self.resolved, self.shapes, value, shape)
+                            super::examples::accepts(self.shapes, value, shape)
                         }
                     };
                     if accepted {

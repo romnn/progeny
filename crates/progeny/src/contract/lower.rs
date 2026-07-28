@@ -21,14 +21,14 @@ use serde_json::Value;
 
 use super::name::{self, Namer, RustIdent};
 use super::{
-    ContractKind, FieldContract, Presence, SkipRule, StringVariant, Tagging, TypeIndex, TypeRef,
-    VariantContract,
+    ContractKind, FieldContract, Presence, SkipRule, StringVariant, TaggedVariant, TypeIndex,
+    TypeRef, VariantContract,
 };
 use crate::config::{Config, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::cycles::Sccs;
-use crate::shape::{Docs, Extra, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes};
+use crate::shape::{Docs, Extra, Fit, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes};
 
 /// One property whose directional distinction was collapsed onto the single shared type.
 ///
@@ -60,7 +60,6 @@ pub(super) struct Provisional {
     pub(super) rust_name: RustIdent,
     pub(super) docs: Docs,
     pub(super) kind: ContractKind,
-    pub(super) tagging: Tagging,
     pub(super) unknown_fields: UnknownFields,
     pub(super) origin: JsonPointer,
     /// The document gave this shape a name of its own, so it must not merge with another type that
@@ -290,7 +289,6 @@ impl Lower<'_> {
             // Replaced as soon as the children are lowered; a struct with no fields is the least
             // surprising thing to see if that ever failed to happen.
             kind: ContractKind::Struct { fields: Vec::new() },
-            tagging: Tagging::Untagged,
             unknown_fields: self
                 .config
                 .unknown_fields_for(component.as_deref(), &rendered),
@@ -372,13 +370,39 @@ impl Lower<'_> {
                         )
                     })
                     .collect::<Vec<_>>();
-                if let Some(tag) = &union.tag
-                    && let Some(slot) = self.types.get_mut(index.index())
-                {
-                    slot.tagging = Tagging::Internal { tag: tag.clone() };
-                }
-                ContractKind::Enum {
-                    variants: self.variants(variants, union.tag.is_some()),
+                match &union.tag {
+                    None => ContractKind::Enum {
+                        variants: self.variants(variants.into_iter().map(|(ty, _)| ty).collect()),
+                    },
+                    Some(tag) => {
+                        if let Some(variants) = tagged_variants(variants) {
+                            ContractKind::TaggedEnum {
+                                tag: tag.clone(),
+                                variants,
+                            }
+                        } else {
+                            // A tagged union with a variant nothing names is what
+                            // [`crate::shape::discriminate`] demotes before lowering ever runs,
+                            // so this arm is the pipeline contract breaking rather than a
+                            // document shape. The same demotion is applied here, because the
+                            // alternatives are both the forbidden failure mode: rendering the
+                            // union untagged matches whichever branch parses first, and rendering
+                            // it tagged writes a Rust variant name progeny made up onto the wire.
+                            ctx.report(Diagnostic::new(
+                                BreakageClass::DiscriminatorEdgeCase,
+                                Action::Degrade,
+                                self.types
+                                    .get(index.index())
+                                    .map_or_else(JsonPointer::root, |slot| slot.origin.clone()),
+                                "this union declares a discriminator, but nothing says what one \
+                                 of its variants' tags would read; the value is typed as \
+                                 arbitrary JSON rather than tagged with an invented name",
+                            ));
+                            ContractKind::Alias {
+                                target: TypeRef::Value,
+                            }
+                        }
+                    }
                 }
             }
             Shape::Tuple { items, .. } => ContractKind::Tuple {
@@ -517,7 +541,7 @@ impl Lower<'_> {
                     (Presence::OptionalNullable, inner, SkipRule::WhenNone)
                 }
             };
-            let default = Self::default(field.default.as_ref(), &ty, &origin, &field.wire, ctx);
+            let default = self.default(field, &origin, ctx);
             fields.push(FieldContract {
                 rust_name: unique_field(&mut used, &field.wire),
                 wire_name: field.wire.clone(),
@@ -576,54 +600,56 @@ impl Lower<'_> {
         }
     }
 
-    /// Keep a default only if it could be a value of the field's type.
+    /// Keep a default only if it could be a value of the field's own schema.
+    ///
+    /// The rule is [`crate::shape::Fit`] — the same one the example checker runs, so the two
+    /// verdicts about one JSON value cannot disagree. It is one-sided on purpose: a default is
+    /// dropped only when it certainly cannot deserialize into the generated type, because a
+    /// default that does not typecheck is worse than none, and one dropped on a guess is worse
+    /// than either.
     fn default(
-        default: Option<&Value>,
-        ty: &TypeRef,
+        &self,
+        field: &crate::shape::Field,
         origin: &JsonPointer,
-        field: &str,
         ctx: &mut Ctx,
     ) -> Option<Value> {
-        let default = default?;
-        if fits(default, ty) {
+        let default = field.default.as_ref()?;
+        // A `null` default on an optional member says the server assumes nothing when the member
+        // is absent. The generated field is an `Option` precisely because the member may be
+        // absent, so `null` deserializes into it whatever the property's own schema says.
+        if default.is_null() && !field.required {
             return Some(default.clone());
         }
+        let Some(reason) = Fit::new(self.shapes, "the default").through(default, &field.shape)
+        else {
+            return Some(default.clone());
+        };
         ctx.report(Diagnostic::new(
             BreakageClass::InvalidDefault,
             Action::Repair,
             origin
                 .child("properties")
-                .child(field.to_owned())
+                .child(field.wire.clone())
                 .child("default"),
-            "the declared default is not a value of the property's own type; dropped it, because a \
-             default that does not typecheck is worse than none",
+            format!(
+                "the declared default contradicts the property's own schema: {reason}; dropped \
+                 it, because a default that does not typecheck is worse than none"
+            ),
         ));
         None
     }
 
-    /// Give every variant a distinct name, and record the tag value where there is one.
+    /// Give every variant of an untagged union a distinct name.
     ///
-    /// A tagged union names its variants after the tag values, because that is what the document
-    /// calls them and what a reader of a payload sees; an untagged one has no such name to use and
-    /// falls back to the type each variant holds.
-    fn variants(
-        &self,
-        types: Vec<(TypeRef, Option<String>)>,
-        tagged: bool,
-    ) -> Vec<VariantContract> {
+    /// An untagged union has no wire name to use — nothing on the wire says which variant a
+    /// payload is — so the name falls back to the type each variant holds.
+    fn variants(&self, types: Vec<TypeRef>) -> Vec<VariantContract> {
         let mut used = Namer::default();
         types
             .into_iter()
-            .map(|(ty, tag)| {
-                let wanted = match &tag {
-                    Some(value) if tagged => value.clone(),
-                    _ => self.variant_name(&ty),
-                };
-                VariantContract {
-                    rust_name: used.unique(RustIdent::variant(&wanted)),
-                    ty,
-                    tag_value: tagged.then_some(tag).flatten(),
-                }
+            .map(|ty| VariantContract {
+                rust_name: used.unique(RustIdent::variant(&self.variant_name(&ty))),
+                ty,
             })
             .collect()
     }
@@ -650,6 +676,30 @@ impl Lower<'_> {
             TypeRef::Tuple(_) => "Tuple".to_owned(),
         }
     }
+}
+
+/// Pair every variant of a tagged union with the tag value that names it, or nothing if any value
+/// is missing.
+///
+/// The names are the tag values themselves, because that is what the document calls the variants
+/// and what a reader of a payload sees. The `None` is the discharge of the shape layer's
+/// proposal-phase `Option`: a value may legitimately be unknown while a tag is merely *proposed*,
+/// but [`crate::shape::discriminate`] demotes every union where one stayed unknown, so a settled
+/// tagged union always has all of them — and the caller treats `None` as that guarantee having
+/// broken.
+fn tagged_variants(types: Vec<(TypeRef, Option<String>)>) -> Option<Vec<TaggedVariant>> {
+    let mut used = Namer::default();
+    types
+        .into_iter()
+        .map(|(ty, tag)| {
+            let tag_value = tag?;
+            Some(TaggedVariant {
+                rust_name: used.unique(RustIdent::variant(&tag_value)),
+                ty,
+                tag_value,
+            })
+        })
+        .collect()
 }
 
 fn format_name(format: Format) -> &'static str {
@@ -711,34 +761,4 @@ fn string_variants(values: &[String]) -> Vec<StringVariant> {
 /// A field name that no other field of the same struct already has.
 fn unique_field(used: &mut Namer, wire: &str) -> RustIdent {
     used.unique(RustIdent::field(wire))
-}
-
-/// Whether a JSON value could be a value of this type.
-///
-/// Deliberately shallow: a named type's own fields are not checked, because a default for a whole
-/// struct is rare and the contract it would be checked against may not exist yet. The check catches
-/// what real documents get wrong — a string default on a number, `{}` on an array — and says so.
-fn fits(value: &Value, ty: &TypeRef) -> bool {
-    match ty {
-        TypeRef::Value => true,
-        TypeRef::Option(inner) => value.is_null() || fits(value, inner),
-        TypeRef::Boxed(inner) => fits(value, inner),
-        TypeRef::Unit => value.is_null(),
-        TypeRef::Bool => value.is_boolean(),
-        TypeRef::I64 | TypeRef::U64 | TypeRef::F64 => value.is_number(),
-        TypeRef::String | TypeRef::Format(_) => value.is_string(),
-        TypeRef::Vec(inner) => value
-            .as_array()
-            .is_some_and(|items| items.iter().all(|item| fits(item, inner))),
-        TypeRef::Array(inner, len) => value.as_array().is_some_and(|items| {
-            items.len() == *len as usize && items.iter().all(|item| fits(item, inner))
-        }),
-        TypeRef::Tuple(items) => value
-            .as_array()
-            .is_some_and(|values| values.len() == items.len()),
-        TypeRef::Map(inner) => value
-            .as_object()
-            .is_some_and(|members| members.values().all(|member| fits(member, inner))),
-        TypeRef::Named(_) => value.is_object() || value.is_string(),
-    }
 }

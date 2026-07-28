@@ -17,7 +17,7 @@
 
 use crate::api::{BodyContract, Location, OperationContract, StatusPattern};
 use crate::config::Config;
-use crate::contract::{ContractKind, Contracts, Tagging, TypeIndex, TypeRef};
+use crate::contract::{ContractKind, Contracts, TypeIndex, TypeRef};
 use crate::diag::{Ctx, RejectError};
 use crate::shape::Format;
 use crate::{api, contract, doc, load, normalize, render, resolve, shape};
@@ -437,11 +437,18 @@ fn synthesize_named(
                     contract.rust_name()
                 ));
             };
+            synthesize(&variant.ty, contracts, visiting)?
+        }
+        ContractKind::TaggedEnum { tag, variants } => {
+            let Some(variant) = variants.first() else {
+                return Err(format!(
+                    "`{}` is a union with no variants",
+                    contract.rust_name()
+                ));
+            };
             let mut value = synthesize(&variant.ty, contracts, visiting)?;
-            if let (Tagging::Internal { tag }, Value::Object(members), Some(name)) =
-                (contract.tagging(), &mut value, variant.tag_value.as_deref())
-            {
-                members.insert(tag.clone(), json!(name));
+            if let Value::Object(members) = &mut value {
+                members.insert(tag.clone(), json!(variant.tag_value));
             }
             value
         }

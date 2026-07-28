@@ -365,6 +365,62 @@ mod tests {
         );
     }
 
+    /// Two tagged unions that agree on everything but the bytes their tags read are two types.
+    ///
+    /// The trap is that a Rust variant name is a *normalization* of the tag value — `a-cat` and
+    /// `aCat` both name an `ACat` — so an identity built from names and types alone calls these
+    /// unions equal, merges them, and hands one document position the other's wire bytes. The tag
+    /// values are part of the dedup fingerprint precisely so this cannot happen.
+    #[test]
+    fn two_tagged_unions_that_differ_only_in_their_tag_bytes_stay_two_types() {
+        let body = |mapping: Value| {
+            json!({"post": {
+                "requestBody": {"content": {"application/json": {"schema": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/Cat"},
+                        {"$ref": "#/components/schemas/Dog"},
+                    ],
+                    "discriminator": {"propertyName": "kind", "mapping": mapping},
+                }}}},
+                "responses": {"204": {"description": "done"}},
+            }})
+        };
+        let rendered = types(
+            json!({
+                "openapi": "3.1.0",
+                "components": {"schemas": {
+                    "Cat": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+                    "Dog": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+                }},
+                "paths": {
+                    "/one": body(json!({
+                        "a-cat": "#/components/schemas/Cat",
+                        "a-dog": "#/components/schemas/Dog",
+                    })),
+                    "/two": body(json!({
+                        "aCat": "#/components/schemas/Cat",
+                        "aDog": "#/components/schemas/Dog",
+                    })),
+                },
+            }),
+            &derive_mode(),
+        );
+        assert_eq!(
+            rendered.matches(r#"#[serde(tag = "kind")]"#).count(),
+            2,
+            "the two unions merged:\n{rendered}"
+        );
+        // Each position keeps the exact bytes its own mapping declared.
+        assert!(
+            rendered.contains(r#"#[serde(rename = "a-cat")]"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"#[serde(rename = "aCat")]"#),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn a_declared_default_is_documented_rather_than_applied_on_the_way_in() {
         let rendered = types(

@@ -184,19 +184,6 @@ pub(crate) enum SkipRule {
     WhenNone,
 }
 
-/// How a union carries which variant it is.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Tagging {
-    /// Matched by shape, and the common case: the variants differ in a way a payload shows.
-    Untagged,
-    /// The payload names its own variant in a member, which the union consumes.
-    ///
-    /// Used only where matching by shape would be unsound, because consuming the tag costs each
-    /// variant type the property that carries it ([`crate::shape`]). The variants' `tag_value`s
-    /// are the names this member takes.
-    Internal { tag: String },
-}
-
 /// Which `Deserialize` implementation a type gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum DeserStrategy {
@@ -224,9 +211,26 @@ pub(crate) enum ContractKind {
     Struct {
         fields: Vec<FieldContract>,
     },
-    /// A data-carrying enum.
+    /// A data-carrying enum matched by shape, and the common case: the variants differ in a way a
+    /// payload shows, so nothing on the wire names them.
     Enum {
         variants: Vec<VariantContract>,
+    },
+    /// A data-carrying enum whose payload names its own variant in a member, which the union
+    /// consumes.
+    ///
+    /// Used only where matching by shape would be unsound, because consuming the tag costs each
+    /// variant type the property that carries it ([`crate::shape`]). A kind of its own rather than
+    /// a tagging flag beside [`ContractKind::Enum`], because the two say different things about a
+    /// variant: a tagged variant always has the exact bytes its tag member reads, and an untagged
+    /// one never does. As two kinds with two variant types, a tagged variant without a value —
+    /// which serde would fill by writing the *Rust* variant name onto the wire — cannot be
+    /// constructed at all, where it used to be a pairing four comments asserted and nothing
+    /// enforced.
+    TaggedEnum {
+        /// The member of every payload that carries its variant's name.
+        tag: String,
+        variants: Vec<TaggedVariant>,
     },
     /// An enum with no data: the fast serde path.
     StringEnum {
@@ -254,6 +258,9 @@ impl ContractKind {
         match self {
             Self::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
             Self::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
+            Self::TaggedEnum { variants, .. } => {
+                variants.iter().map(|variant| &variant.ty).collect()
+            }
             Self::StringEnum { .. } => Vec::new(),
             Self::Newtype { inner } | Self::Alias { target: inner } => vec![inner],
             Self::Tuple { items } => items.iter().collect(),
@@ -278,15 +285,22 @@ pub(crate) struct FieldContract {
     pub(crate) docs: Docs,
 }
 
+/// One variant of an untagged union: a name for the reader, a type for the payload, and nothing
+/// for the wire, because an untagged union writes no variant names there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VariantContract {
     pub(crate) rust_name: RustIdent,
     pub(crate) ty: TypeRef,
-    /// The exact bytes the tag member holds for this variant.
-    ///
-    /// Set exactly when the enclosing contract's [`Tagging`] is `Internal`; the pairing is what
-    /// lets the renderer write a `rename` without asking whether it should.
-    pub(crate) tag_value: Option<String>,
+}
+
+/// One variant of a tagged union.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaggedVariant {
+    pub(crate) rust_name: RustIdent,
+    pub(crate) ty: TypeRef,
+    /// The exact bytes the tag member holds for this variant — what lets the renderer write a
+    /// `rename` without asking whether it should.
+    pub(crate) tag_value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,7 +316,6 @@ pub(crate) struct TypeContract {
     rust_name: RustIdent,
     docs: Docs,
     kind: ContractKind,
-    tagging: Tagging,
     unknown_fields: UnknownFields,
     derives: Vec<Derive>,
     deser: DeserStrategy,
@@ -320,10 +333,6 @@ impl TypeContract {
 
     pub(crate) fn kind(&self) -> &ContractKind {
         &self.kind
-    }
-
-    pub(crate) fn tagging(&self) -> &Tagging {
-        &self.tagging
     }
 
     pub(crate) fn unknown_fields(&self) -> UnknownFields {
