@@ -1,12 +1,17 @@
 //! The two structural invariants of the generator crate, held mechanically.
 //!
 //! **Pipeline directionality.** The module graph *is* the pipeline —
-//! `load → normalize → schema/doc → shape → contract → api → render` — with dependencies pointing
-//! strictly leftward. Private fields already stop a later stage from constructing or mutating an
-//! earlier stage's values, but Rust cannot make a leftward `use` a compile error inside one crate,
-//! so this walks the crate's `use` graph instead. When workspace build parallelism ever justifies
-//! splitting the crate, these module seams are already the crate seams and the rule becomes
-//! compiler-enforced for free.
+//! `load → normalize → schema/doc → resolve → shape → contract → api → render` — with dependencies
+//! pointing strictly leftward. Private fields already stop a later stage from constructing or
+//! mutating an earlier stage's values, but Rust cannot make a leftward `use` a compile error inside
+//! one crate, so this walks the crate's `use` graph instead. When workspace build parallelism ever
+//! justifies splitting the crate, these module seams are already the crate seams and the rule
+//! becomes compiler-enforced for free.
+//!
+//! The layer table is **total**: a top-level module the table does not rank is itself a violation.
+//! An unranked module used to be silently exempt in both directions — free to import anything, and
+//! invisible as a target — which is how `resolve`, a whole pipeline stage, went unenforced from the
+//! day it was added until this check existed.
 //!
 //! **No I/O in the library.** `generate` takes bytes and returns strings. The check is here rather
 //! than in a clippy `disallowed_methods` list because clippy's configuration is per-crate and this
@@ -43,13 +48,16 @@ const LAYERS: &[(&str, u32)] = &[
     ("normalize", 20),
     ("schema", 30),
     ("doc", 40),
+    ("resolve", 45),
     ("shape", 50),
     ("contract", 60),
     ("api", 70),
     ("support", 75),
     ("render", 80),
-    // The corpus harness and the crate root consume the whole pipeline by design.
+    // The corpus harness, the breakage-class catalogue and the crate root consume the whole
+    // pipeline by design.
     ("harness", 1000),
+    ("catalogue", 1000),
 ];
 
 const ROOT_RANK: u32 = 1000;
@@ -79,9 +87,29 @@ pub fn run(args: &Args) -> Result<()> {
         let parsed = syn::parse_file(&text).with_context(|| format!("parsing {file}"))?;
         let module = module_path(&source_root, file);
         let is_binary = module.first().is_some_and(|segment| segment == "bin");
-        let layer = module.first().map_or(ROOT_RANK, |segment| {
-            ranks.get(segment.as_str()).copied().unwrap_or(ROOT_RANK)
-        });
+        // Total, on purpose: a module the table does not rank would otherwise be exempt in both
+        // directions — free to import anything, and invisible as a target — and the lint would
+        // print "0 violations" while enforcing nothing about it.
+        let layer = match module.first() {
+            None => ROOT_RANK,
+            Some(_) if is_binary => ROOT_RANK,
+            Some(segment) => {
+                if let Some(&rank) = ranks.get(segment.as_str()) {
+                    rank
+                } else {
+                    violations.push(Violation {
+                        file: file.clone(),
+                        line: 1,
+                        detail: format!(
+                            "`{}` is not in the layer table; rank every module, or the \
+                             one-direction rule is not being held for it",
+                            module.join("::"),
+                        ),
+                    });
+                    continue;
+                }
+            }
+        };
 
         let mut visitor = Walker { paths: Vec::new() };
         visitor.visit_file(&parsed);

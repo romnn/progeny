@@ -343,7 +343,9 @@ pub(crate) struct Xml {
 }
 
 /// A pointer to documentation outside the document. Appears both inside schemas and at several
-/// document levels, which is why it lives here rather than in the document model.
+/// document levels, and the *layering* is what fixes the home: `doc` sits above `schema` and may
+/// import it, never the reverse, so the one shared node has to live on the schema side however
+/// lopsided its use counts are (today four document positions to one schema position).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ExternalDocs {
     pub(crate) description: Option<String>,

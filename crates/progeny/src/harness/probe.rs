@@ -85,7 +85,21 @@ pub struct ProbeSetter {
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
     /// The response enum's name inside the generated `server` module.
+    ///
+    /// Needed whether or not the operation is driven: the double has to *implement* a skipped
+    /// operation's trait method either way, and the method's return type names this.
     pub enum_name: String,
+    /// The arm the double answers with — absent for an operation the driver never calls.
+    ///
+    /// An `Option` rather than empty-string sentinels: a consumer that read a sentinel's
+    /// `status: 0` before checking the skip would emit an assertion on a status nothing sends,
+    /// and the type now makes that read impossible.
+    pub answer: Option<ProbeAnswer>,
+}
+
+/// The synthesized reply for one driven operation.
+#[derive(Debug, Clone)]
+pub struct ProbeAnswer {
     /// The variant for the arm the double answers with.
     pub variant: String,
     /// The Rust path of the arm's payload type.
@@ -123,7 +137,7 @@ pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
 
 /// The plan for one servable operation, with the reason when it cannot be driven.
 fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -> ProbeOp {
-    let path = |ty: &TypeRef| render::types::type_path(ty, contracts, config).to_string();
+    let path = |ty: &TypeRef| test_path(&render::types::type_path(ty, contracts, config));
 
     let groups = render::server::LOCATIONS
         .iter()
@@ -148,7 +162,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         .collect();
 
     let body = operation.body.as_ref().map(|body| ProbeBody {
-        ty: render::client::body_type(body, contracts, config).to_string(),
+        ty: test_path(&render::client::body_type(body, contracts, config)),
         json: String::new(),
         required: body.required(),
     });
@@ -157,25 +171,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
     // skipped operation's trait method either way — only the driver test is dropped.
     let mut skip = None;
 
-    let mut setters = Vec::new();
-    for param in &operation.params {
-        if param.style.erased_by_explosion() {
-            continue;
-        }
-        match synthesize(&param.ty, contracts, &mut Vec::new()) {
-            Ok(value) => setters.push(ProbeSetter {
-                setter: param.rust_name.as_str().to_owned(),
-                ty: path(&param.ty),
-                json: value.to_string(),
-            }),
-            Err(reason) => {
-                skip.get_or_insert(format!(
-                    "parameter `{}` cannot be synthesized: {reason}",
-                    param.wire_name
-                ));
-            }
-        }
-    }
+    let setters = probe_setters(operation, contracts, config, &mut skip);
 
     let body = body.map(|mut planned| {
         let ty = match operation.body.as_ref() {
@@ -204,18 +200,17 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         planned
     });
 
-    let response = if let Some((variant, ty, status)) = success_arm(operation) {
+    let answer = if let Some((variant, ty, status)) = success_arm(operation) {
         match synthesize(&ty, contracts, &mut Vec::new()) {
-            Ok(value) => ProbeResponse {
-                enum_name: render::server::response_name(operation).to_string(),
+            Ok(value) => Some(ProbeAnswer {
                 variant,
                 ty: path(&ty),
                 json: value.to_string(),
                 status,
-            },
+            }),
             Err(reason) => {
                 skip.get_or_insert(format!("the response cannot be synthesized: {reason}"));
-                unprobed(operation)
+                None
             }
         }
     } else {
@@ -224,7 +219,11 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
              answers with is the handler's choice rather than the description's"
                 .to_owned(),
         );
-        unprobed(operation)
+        None
+    };
+    let response = ProbeResponse {
+        enum_name: render::server::response_name(operation).to_string(),
+        answer,
     };
 
     ProbeOp {
@@ -237,15 +236,59 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
     }
 }
 
-/// A placeholder response for an operation the driver never calls.
-fn unprobed(operation: &OperationContract) -> ProbeResponse {
-    ProbeResponse {
-        enum_name: render::server::response_name(operation).to_string(),
-        variant: String::new(),
-        ty: String::new(),
-        json: String::new(),
-        status: 0,
+/// A rendered type path, as the probe's test file spells it.
+///
+/// The renderer writes `super::types::X` because `client` and `server` are sibling modules of
+/// `types`; the test file imports `types` at its own root (`use {krate}::{client, server,
+/// types};`), so the same type is `types::X` there. Respelled here, beside the renderer that
+/// owns the original spelling — the consumer once patched it back with its own string
+/// replacement, and a changed qualification would have slipped past that silently.
+fn test_path(rendered: &proc_macro2::TokenStream) -> String {
+    rendered
+        .to_string()
+        .replace("super :: types :: ", "types::")
+        .replace(' ', "")
+}
+
+/// One synthesized setter per settable parameter, recording a skip where none can be.
+fn probe_setters(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+    skip: &mut Option<String>,
+) -> Vec<ProbeSetter> {
+    let mut setters = Vec::new();
+    for param in &operation.params {
+        if param.style.erased_by_explosion() {
+            // The wire erases the parameter's name, so the server can never see it. Optional:
+            // the client simply leaves it unset and the operation is still probeable. Required:
+            // the builder refuses to send without it and the handler rejects without it, so the
+            // operation cannot cross the wire at all — a named skip, not a red test and not a
+            // silent cap.
+            if param.required {
+                skip.get_or_insert(format!(
+                    "parameter `{}` is a required exploded `form` object, whose name the wire \
+                     erases; no request can carry it in a form the server can read",
+                    param.wire_name
+                ));
+            }
+            continue;
+        }
+        match synthesize(&param.ty, contracts, &mut Vec::new()) {
+            Ok(value) => setters.push(ProbeSetter {
+                setter: param.rust_name.as_str().to_owned(),
+                ty: test_path(&render::types::type_path(&param.ty, contracts, config)),
+                json: value.to_string(),
+            }),
+            Err(reason) => {
+                skip.get_or_insert(format!(
+                    "parameter `{}` cannot be synthesized: {reason}",
+                    param.wire_name
+                ));
+            }
+        }
     }
+    setters
 }
 
 /// The first arm the driver can wait for: an exact 2xx, or a 2XX range.
@@ -292,7 +335,7 @@ fn synthesize(
     contracts: &Contracts,
     visiting: &mut Vec<TypeIndex>,
 ) -> Result<serde_json::Value, String> {
-    use serde_json::{Map, Value, json};
+    use serde_json::{Value, json};
     Ok(match ty {
         TypeRef::Unit => Value::Null,
         TypeRef::Bool => json!(true),

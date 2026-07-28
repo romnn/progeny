@@ -149,7 +149,9 @@ fn data_enum(
         (DeserStrategy::Derive, Tagging::Internal { tag }) => quote! { #[serde(tag = #tag)] },
         // The hand-written path reads the same contract and consults no attributes, so leaving one
         // on would be a second source of truth — and would not resolve without the derive anyway.
-        (DeserStrategy::HandWrittenBuffered | DeserStrategy::HandWrittenFieldless, _) => quote! {},
+        (DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless, _) => {
+            quote! {}
+        }
     };
     let with_serde = contract.deser() == DeserStrategy::Derive;
     let arms = variants.iter().map(|variant| {
@@ -254,7 +256,9 @@ fn derives(contract: &TypeContract) -> TokenStream {
     // no serde attributes at all, so it must carry no serde derive either.
     let serde = match contract.deser() {
         DeserStrategy::Derive => quote! { , serde::Serialize, serde::Deserialize },
-        DeserStrategy::HandWrittenBuffered | DeserStrategy::HandWrittenFieldless => quote! {},
+        DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless => {
+            quote! {}
+        }
     };
     quote! { #[derive(#(#names),* #serde)] }
 }

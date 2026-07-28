@@ -657,19 +657,8 @@ impl Walk<'_> {
 
     fn path_item(&mut self, item: &PathItem, at: &JsonPointer) {
         self.parameters(item.parameters.as_deref(), at);
-        for (method, operation) in [
-            ("get", &item.get),
-            ("put", &item.put),
-            ("post", &item.post),
-            ("delete", &item.delete),
-            ("options", &item.options),
-            ("head", &item.head),
-            ("patch", &item.patch),
-            ("trace", &item.trace),
-        ] {
-            if let Some(operation) = operation {
-                self.operation(operation, &at.child(method));
-            }
+        for (method, operation) in item.operations() {
+            self.operation(operation, &at.child(method.slug()));
         }
     }
 

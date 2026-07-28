@@ -13,7 +13,6 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::config::UnknownFields;
 use crate::contract::{ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TypeContract};
 
 /// Whether any type takes a hand-written path, and therefore whether the support module is needed.
@@ -34,8 +33,8 @@ pub(super) fn render(contracts: &Contracts) -> TokenStream {
 
 fn one(contract: &TypeContract, contracts: &Contracts) -> TokenStream {
     match (contract.deser(), contract.kind()) {
-        (DeserStrategy::HandWrittenBuffered, ContractKind::Struct { fields }) => {
-            buffered(contract, fields, contracts)
+        (DeserStrategy::HandWrittenBuffered { deny_unknown }, ContractKind::Struct { fields }) => {
+            buffered(contract, fields, deny_unknown, contracts)
         }
         (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants }) => {
             fieldless(contract, variants)
@@ -68,13 +67,14 @@ fn allowance(
 fn buffered(
     contract: &TypeContract,
     fields: &[crate::contract::FieldContract],
+    deny_unknown: bool,
     contracts: &Contracts,
 ) -> TokenStream {
     let allow = allowance(contract, fields, contracts);
     let name = ident(contract.rust_name());
     // Threaded in rather than wrapped around, because `reading` emits two impls and an attribute
     // written once outside would land on only the first of them.
-    let reading = reading(contract, fields, &allow);
+    let reading = reading(contract, fields, deny_unknown, &allow);
     let writing = writing(contract, fields);
     quote! {
         #reading
@@ -96,6 +96,7 @@ fn buffered(
 fn reading(
     contract: &TypeContract,
     fields: &[crate::contract::FieldContract],
+    deny_unknown: bool,
     allow: &TokenStream,
 ) -> TokenStream {
     let name = ident(contract.rust_name());
@@ -104,10 +105,13 @@ fn reading(
         .iter()
         .map(|field| field.wire_name.as_str())
         .collect();
-    let unknown = match contract.unknown_fields() {
-        UnknownFields::Deny => quote! { Deny },
-        // `Capture` is ruled to the derive, so it cannot arrive here.
-        UnknownFields::Ignore | UnknownFields::Capture => quote! { Ignore },
+    // Resolved by the eligibility ruling and carried in the strategy, so this module has no
+    // policy to decide — and no arm in which "cannot arrive here" could quietly become a fold
+    // that discards members.
+    let unknown = if deny_unknown {
+        quote! { Deny }
+    } else {
+        quote! { Ignore }
     };
 
     let defaulted = fields

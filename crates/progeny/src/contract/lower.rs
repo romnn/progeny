@@ -30,14 +30,28 @@ use crate::resolve::ResolvedDocument;
 use crate::schema::cycles::Sccs;
 use crate::shape::{Docs, Extra, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes};
 
-/// One property whose optional-and-nullable distinction was collapsed onto a single `Option`.
+/// One property whose directional distinction was collapsed onto the single shared type.
 ///
 /// Held rather than reported because the diagnostic wants to say which half of the API it affects,
-/// and that is a question about positions — see [`crate::api::presence`].
-#[derive(Debug, Clone)]
+/// and that is a question about positions — see [`crate::api::presence`]. One record shape for
+/// every directional fact, so dedup renumbers them all through the same rewrite rather than each
+/// growing its own list to forget.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Collapse {
     pub(crate) owner: TypeIndex,
     pub(crate) at: JsonPointer,
+    pub(crate) kind: CollapseKind,
+}
+
+/// What the shared type stopped being able to say about the property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollapseKind {
+    /// Optional and nullable, folded onto one `Option`.
+    Presence,
+    /// `readOnly: true` — the document says only responses carry the member.
+    ReadOnly,
+    /// `writeOnly: true` — the document says only requests carry the member.
+    WriteOnly,
 }
 
 /// A contract before the caller's policy and the eligibility rules have been applied.
@@ -373,8 +387,21 @@ impl Lower<'_> {
                     .map(|item| self.reference(item, key, ctx))
                     .collect(),
             },
-            // A root whose shape has an anonymous form is a name for that form.
-            other => ContractKind::Alias {
+            // A root whose shape has an anonymous form is a name for that form. Spelled variant
+            // by variant rather than wildcarded: `nameable` and `inline` each hold their own
+            // copy of "which shapes have no anonymous form", and a new shape falling into a
+            // wildcard here would lower to a silent `pub type X = …` alias whether or not that
+            // was the decision — the compiler hands the new variant's author all three sites
+            // instead.
+            other @ (Shape::Null
+            | Shape::Scalar(_)
+            | Shape::Format(_)
+            | Shape::Map { .. }
+            | Shape::Array { .. }
+            | Shape::FixedArray { .. }
+            | Shape::Optional(_)
+            | Shape::Alias(_)
+            | Shape::Any) => ContractKind::Alias {
                 target: self.inline(other, key, ctx),
             },
         }
@@ -449,6 +476,25 @@ impl Lower<'_> {
         for field in &structure.fields {
             let nullable = matches!(self.shape_of(&field.shape), Some(Shape::Optional(_)));
             let inner = self.reference(&field.shape, key, ctx);
+            let position = origin.child("properties").child(field.wire.clone());
+            // An access marker names the direction the member travels; whether this type also
+            // crosses the *other* direction is the API model's knowledge, so the fact is recorded
+            // here and priced there — the same split the presence collapse below uses. Dropping
+            // the markers with no record made a `readOnly` member a silent fidelity gap.
+            if field.read_only {
+                self.collapses.push(Collapse {
+                    owner: index,
+                    at: position.clone(),
+                    kind: CollapseKind::ReadOnly,
+                });
+            }
+            if field.write_only {
+                self.collapses.push(Collapse {
+                    owner: index,
+                    at: position.clone(),
+                    kind: CollapseKind::WriteOnly,
+                });
+            }
             let (presence, ty, skip) = match (field.required, nullable) {
                 (true, false) => (Presence::Required, inner, SkipRule::Never),
                 // Already an `Option` from the shape: the key is there and may be null.
@@ -465,7 +511,8 @@ impl Lower<'_> {
                     // consequences, and nothing knows a position until the API model exists.
                     self.collapses.push(Collapse {
                         owner: index,
-                        at: origin.child("properties").child(field.wire.clone()),
+                        at: position,
+                        kind: CollapseKind::Presence,
                     });
                     (Presence::OptionalNullable, inner, SkipRule::WhenNone)
                 }

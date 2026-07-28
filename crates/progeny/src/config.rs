@@ -406,16 +406,24 @@ impl Config {
     ///
     /// The [`Address`] grammar, with the name spelling given priority when both keys are present:
     /// both are accepted because both are how a caller thinks about a type — `Pet` for a component,
-    /// and the pointer for a shape the document never named. The direct `get`s are equivalent to
-    /// parsing each key, because a component name never starts with `/` and a pointer always does.
+    /// and the pointer for a shape the document never named. [`Address::names`] is the one
+    /// matcher, for the application path here exactly as for the validation path in
+    /// `unmatched_keys`: a second implementation of the grammar once let the validator accept a
+    /// key the lookups then silently ignored, which is the defect this module exists to prevent.
+    /// The scan is over a caller-written table of at most a few dozen entries.
     fn keyed<'a, T>(
         table: &'a BTreeMap<String, T>,
         component: Option<&str>,
         address: &str,
     ) -> Option<&'a T> {
-        component
-            .and_then(|name| table.get(name))
-            .or_else(|| table.get(address))
+        let matched = |wanted: fn(Address<'_>) -> bool| {
+            table.iter().find_map(|(key, entry)| {
+                let parsed = Address::parse(key);
+                (wanted(parsed) && parsed.names(component, address)).then_some(entry)
+            })
+        };
+        matched(|parsed| matches!(parsed, Address::Name(_)))
+            .or_else(|| matched(|parsed| matches!(parsed, Address::Pointer(_))))
     }
 
     /// Every key in the type-keyed maps that names nothing in `named`, with the map it sits in.

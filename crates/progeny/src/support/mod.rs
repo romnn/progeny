@@ -9,7 +9,10 @@
 mod buffered;
 mod multipart;
 mod serve;
-mod style;
+// Crate-visible for one reason: the bridge test beside the client renderer holds this file's
+// `Style` and the API layer's to the same variant list through an exhaustive match, which a
+// private module would put out of the test's reach.
+pub(crate) mod style;
 
 // The two files that name an HTTP crate, compiled under `cfg(test)` against dev-dependencies so
 // that the property this module is arranged around — the file progeny tests is the file it ships —
@@ -179,15 +182,20 @@ fn items(text: &str) -> Vec<syn::Item> {
         .collect()
 }
 
+/// Whether an item is a `#[cfg(test)] mod`, which the shipped source drops.
+///
+/// The question is asked structurally — the `cfg` predicate is exactly the path `test` — rather
+/// than as a substring of the stringified attribute, which would also strip a shipped
+/// `#[cfg(not(test))]` or `#[cfg(feature = "latest")]` module, silently.
 fn is_test_module(item: &syn::Item) -> bool {
     let syn::Item::Mod(module) = item else {
         return false;
     };
     module.attrs.iter().any(|attribute| {
         attribute.path().is_ident("cfg")
-            && quote::ToTokens::to_token_stream(attribute)
-                .to_string()
-                .contains("test")
+            && attribute
+                .parse_args::<syn::Path>()
+                .is_ok_and(|predicate| predicate.is_ident("test"))
     })
 }
 
@@ -195,6 +203,25 @@ fn is_test_module(item: &syn::Item) -> bool {
 mod tests {
     use crate::config::BodyLimit;
     use serde::de::{Deserialize, Deserializer};
+
+    /// The one flattened file names no `super::` paths.
+    ///
+    /// `buffered.rs` is `mod buffered;` in this workspace and spliced *flat into the support
+    /// root* in a generated crate — the one file whose module depth differs between the two
+    /// forms. A `super::` path inside it would resolve to two different places, compile here,
+    /// and break every generated crate, invisibly to this workspace's build. (`style`,
+    /// `multipart`, `serve` and the wire module keep their submodule depth, so `super::` is
+    /// legitimate there.)
+    #[test]
+    fn the_flattened_buffered_source_names_no_super_paths() {
+        let items = super::items(super::BUFFERED);
+        let spelled = quote::quote! { #(#items)* }.to_string();
+        assert!(
+            !spelled.contains("super ::"),
+            "buffered.rs names `super::`, which resolves differently once the file is spliced \
+             flat into the generated support root"
+        );
+    }
 
     /// The shipped source has to parse as a file, both ways.
     ///

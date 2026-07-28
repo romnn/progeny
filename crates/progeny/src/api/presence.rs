@@ -1,9 +1,13 @@
-//! Which half of the API an optional-and-nullable collapse costs.
+//! Which half of the API a directional collapse costs.
 //!
-//! A property that may be absent *and* may be null becomes one `Option`, so "absent" and "present
-//! and null" stop being different documents ([`crate::contract::Presence`]). The type layer knows
-//! that has happened and cannot know what it costs, because the cost depends on which direction
-//! the type travels:
+//! The type layer records the facts it cannot price ([`crate::contract::Collapse`]) and this is
+//! where each is held against the directions its type actually travels. Two kinds today. An
+//! access marker (`readOnly`/`writeOnly`) names the one direction a member goes, and the single
+//! shared type serves both — which only costs something when the type crosses the direction the
+//! marker excludes, so that is the only time it is reported. And a property that may be absent
+//! *and* may be null becomes one `Option`, so "absent" and "present and null" stop being
+//! different documents ([`crate::contract::Presence`]); what that costs depends on which
+//! direction the type travels:
 //!
 //! * **In a request body** the caller loses the ability to *send* an explicit null. Where a `null`
 //!   means "clear this field" and an absent member means "leave it alone" — the shape every PATCH
@@ -19,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ApiModel, BodyContract};
-use crate::contract::{Contracts, TypeIndex, TypeRef};
+use crate::contract::{CollapseKind, Contracts, TypeIndex, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic};
 
 /// Which directions a type is reachable in.
@@ -68,17 +72,38 @@ pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
     // question unanswerable before.
     for collapse in contracts.collapses() {
         let at = reach.get(&collapse.owner).copied().unwrap_or_default();
-        ctx.report(Diagnostic::new(
-            BreakageClass::PresenceCollapse,
-            Action::Degrade,
-            collapse.at.clone(),
-            format!(
-                "the property may be absent and may be null, and the document says those are \
-                 different; both become `None`. The type is reached from {}, so {}",
-                at.describe(),
-                at.consequence()
-            ),
-        ));
+        match collapse.kind {
+            CollapseKind::Presence => ctx.report(Diagnostic::new(
+                BreakageClass::PresenceCollapse,
+                Action::Degrade,
+                collapse.at.clone(),
+                format!(
+                    "the property may be absent and may be null, and the document says those are \
+                     different; both become `None`. The type is reached from {}, so {}",
+                    at.describe(),
+                    at.consequence()
+                ),
+            )),
+            // An access marker costs nothing until the type crosses the direction it excludes;
+            // a `readOnly` member of a response-only type is exactly what the document said.
+            CollapseKind::ReadOnly if at.request => ctx.report(Diagnostic::new(
+                BreakageClass::AccessCollapse,
+                Action::Degrade,
+                collapse.at.clone(),
+                "the property is `readOnly` — the document says only responses carry it — and \
+                 its type is reached from a request body, so the one generated type carries it \
+                 on the way out too",
+            )),
+            CollapseKind::WriteOnly if at.response => ctx.report(Diagnostic::new(
+                BreakageClass::AccessCollapse,
+                Action::Degrade,
+                collapse.at.clone(),
+                "the property is `writeOnly` — the document says only requests carry it — and \
+                 its type is reached from a response body, so the one generated type carries it \
+                 on the way back too",
+            )),
+            CollapseKind::ReadOnly | CollapseKind::WriteOnly => {}
+        }
     }
 }
 
@@ -90,7 +115,11 @@ fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, 
     let mut requests = BTreeSet::new();
     let mut responses = BTreeSet::new();
     for operation in model.operations() {
-        if let Some(BodyContract::Json { ty, .. }) = &operation.body {
+        // Every typed body is a request position, whatever its wire format: a multipart or form
+        // body carries its type out with the call exactly as a JSON one does, and seeding JSON
+        // alone once reported form-reached types as "no operation's body" — a false statement
+        // about the wire.
+        if let Some(ty) = operation.body.as_ref().and_then(BodyContract::ty) {
             seed(ty, &mut requests);
         }
         // A parameter is a request position too: its type travels out with the call.
@@ -201,6 +230,100 @@ mod tests {
                 .any(|detail| detail.contains("no operation's body")),
             "{found:#?}"
         );
+    }
+
+    /// An access marker is reported exactly where it costs something.
+    ///
+    /// `readOnly` says only responses carry the member; a type that crosses a request body
+    /// carries it anyway, because there is one generated type for both directions. A `readOnly`
+    /// member of a response-only type is exactly what the document said, so it stays silent —
+    /// these markers were dropped with no record at all until this diagnostic existed.
+    #[test]
+    fn an_access_marker_reports_only_where_the_type_crosses_it() {
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "operationId": "createPet",
+                        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/PetIn"}}}},
+                        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PetOut"}}}}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                // Crosses a request body carrying a `readOnly` member: reported.
+                "PetIn": {"type": "object", "properties": {"id": {"type": "integer", "readOnly": true}, "in_only": {"type": "string"}}},
+                // A `readOnly` member that stays on the response side: silent.
+                "PetOut": {"type": "object", "properties": {"id": {"type": "integer", "readOnly": true}, "out_only": {"type": "string"}}},
+            }},
+        }));
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("`readOnly`"), "{found:#?}");
+        assert!(found[0].contains("request body"), "{found:#?}");
+    }
+
+    /// The mirror image: `writeOnly` costs something on the way back.
+    #[test]
+    fn a_write_only_member_of_a_response_is_reported() {
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "operationId": "getPet",
+                        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}}}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                "Pet": {"type": "object", "properties": {"secret": {"type": "string", "writeOnly": true}}},
+            }},
+        }));
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("`writeOnly`"), "{found:#?}");
+        assert!(found[0].contains("response body"), "{found:#?}");
+    }
+
+    /// A multipart body is a request position like a JSON one.
+    ///
+    /// Seeding reachability from JSON bodies alone reported a form-reached type as "no
+    /// operation's body" — a false statement about the wire, in a diagnostic the caller is meant
+    /// to act on. The corpus has 278 multipart bodies across 27 documents.
+    #[test]
+    fn a_multipart_body_is_a_request_position() {
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "operationId": "createPet",
+                        "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/PetForm"}}}},
+                        "responses": {"204": {"description": "done"}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                "PetForm": {"type": "object", "properties": {"nickname": {"type": ["string", "null"]}}},
+            }},
+        }));
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("a request body"), "{found:#?}");
     }
 
     #[test]

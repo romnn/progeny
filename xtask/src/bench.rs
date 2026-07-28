@@ -505,7 +505,6 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
         )]);
     }
 
-    let specs = crate::corpus::load_manifest()?;
     let wanted = if args.specs.is_empty() {
         crate::corpus::quick_tier()?
     } else {
@@ -525,14 +524,8 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
     );
 
     let mut planned = Vec::new();
-    for name in &wanted {
-        let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
-            bail!("no corpus document named `{name}`");
-        };
-        let path = crate::corpus::document_path(spec);
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading {path}; run `cargo xtask corpus --fetch`"))?;
-
+    for (spec, bytes) in &crate::corpus::selected(&wanted)? {
+        let name = &spec.name;
         let mut targets = Vec::new();
         for &variant in variants {
             let mut config = crate::corpus::config_for(spec);
@@ -541,7 +534,7 @@ fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
             } else {
                 progeny::SerdeImpl::DeriveAlways
             };
-            let output = progeny::generate(&bytes, &config)
+            let output = progeny::generate(bytes, &config)
                 .with_context(|| format!("generating {name} ({variant})"))?;
             let scope = scope_of(
                 output
@@ -1453,6 +1446,35 @@ mod tests {
                 entry.provisional,
                 shortfalls(entry.kept, entry.load, entry.pressured),
                 "{key} disagrees with its own recorded conditions"
+            );
+        }
+    }
+
+    /// The layer list is the renderer's module list, checked against a real rendering.
+    ///
+    /// `scope_of` is what guards baseline comparability — `unusable()` refuses a cross-scope
+    /// comparison by this string — so a renderer that gains a fourth surface module has to
+    /// extend `LAYERS`, or two structurally different crates stringify to the same scope and
+    /// the refusal stops refusing. The subject is the committed petstore, which renders every
+    /// surface module a default configuration can produce.
+    #[test]
+    fn the_layer_list_is_the_renderers_module_list() {
+        let path = crate::paths::corpus_root().join("specs/petstore-31.yaml");
+        let bytes = std::fs::read(&path).expect("the committed petstore is always available");
+        let output =
+            progeny::generate(&bytes, &progeny::Config::default()).expect("the petstore generates");
+        for file in output.files.keys() {
+            let Some(stem) = file
+                .strip_prefix("src")
+                .ok()
+                .and_then(camino::Utf8Path::file_stem)
+            else {
+                continue;
+            };
+            assert!(
+                stem == "lib" || stem == "support" || super::LAYERS.contains(&stem),
+                "the renderer emits `src/{stem}.rs`, which the bench layer list does not know; \
+                 two different crates could now stringify to one scope"
             );
         }
     }

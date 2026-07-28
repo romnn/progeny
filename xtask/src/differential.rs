@@ -33,9 +33,17 @@ pub struct Args {
 
 /// The function bodies every generated type carries whichever serde strategy it takes.
 ///
-/// `Clone` and `Debug` are the derives progeny always emits, one body each, so they are the same on
-/// both sides of the comparison and subtracting them is what makes the remaining number about serde.
-const BASELINE: f64 = 2.0;
+/// The always-emitted derives cost one body each, so they are the same on both sides of the
+/// comparison and subtracting them is what makes the remaining number about serde. Asked of the
+/// library rather than restated: a hand-kept `2.0` here would silently under-count the day a
+/// third always-emitted derive lands, in the ratio the hand-written path is justified by.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a derive count of two or three fits in f64 exactly"
+)]
+fn baseline() -> f64 {
+    progeny::harness::base_derive_count() as f64
+}
 
 fn fixture_root() -> Utf8PathBuf {
     paths::corpus_root().join("differential")
@@ -57,7 +65,10 @@ pub fn run(args: &Args) -> Result<()> {
 
     let status = Command::new("cargo")
         .current_dir(&directory)
-        .env("CARGO_TARGET_DIR", directory.join("target"))
+        // The shared dependency cache every other gate uses: this gate once kept a private
+        // target directory and recompiled `serde` and `serde_json` from scratch on each run,
+        // invisibly, because the decision sat in a module nobody reads beside `generated`.
+        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
         .env_remove("RUSTFLAGS")
         .args(["test", "--quiet"])
         .status()
@@ -112,6 +123,10 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> Result<(
          pub mod hand;\n",
     )?;
     std::fs::write(directory.join("tests/differential.rs"), assertions)?;
+    // The edition and dependency lines restate what `render/manifest.rs` writes for a shipped
+    // crate, and they have to keep restating it: this gate certifies "the derive and the
+    // hand-written path agree", and a crate compiled under a different edition than any shipped
+    // configuration would quietly make that claim about something nobody ships.
     std::fs::write(
         directory.join("Cargo.toml"),
         "# Assembled by `cargo xtask differential`.\n\
@@ -171,7 +186,7 @@ fn count_bodies() -> Result<()> {
         );
         let per_type =
             f64::from(u32::try_from(eleven.saturating_sub(one)).unwrap_or(u32::MAX)) / 10.0;
-        let serde_only = per_type - BASELINE;
+        let serde_only = per_type - baseline();
         let name = match strategy {
             SerdeImpl::DeriveAlways => "derive",
             SerdeImpl::HandWrittenWhereEligible => "hand-written",

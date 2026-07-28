@@ -509,22 +509,6 @@ impl<'de> Buffer<'de> {
         }
     }
 
-    /// Read a declared member, or fall back to its declared default.
-    ///
-    /// What `#[serde(default = "…")]` does, and the reason it is a separate function: a default is a
-    /// statement about the absent case, and a buffered implementation that silently answered "not
-    /// there" would disagree with the derive about it.
-    pub(crate) fn take_or<T, E>(&mut self, name: &'static str, fallback: fn() -> T) -> Result<T, E>
-    where
-        T: Deserialize<'de>,
-        E: de::Error,
-    {
-        match self.position(name) {
-            Some(content) => T::deserialize(ContentDeserializer::new(content)),
-            None => Ok(fallback()),
-        }
-    }
-
     fn position(&mut self, name: &'static str) -> Option<Content<'de>> {
         let at = self
             .members

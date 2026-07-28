@@ -135,20 +135,9 @@ impl Walk<'_> {
     }
 
     fn path_item(&mut self, item: &PathItem, route: &str) {
-        for (method, operation) in [
-            ("get", &item.get),
-            ("put", &item.put),
-            ("post", &item.post),
-            ("delete", &item.delete),
-            ("options", &item.options),
-            ("head", &item.head),
-            ("patch", &item.patch),
-            ("trace", &item.trace),
-        ] {
-            if let Some(operation) = operation {
-                let name = operation_name(operation, method, route);
-                self.operation(operation, &name);
-            }
+        for (method, operation) in item.operations() {
+            let name = operation_name(operation, method.slug(), route);
+            self.operation(operation, &name);
         }
         // Path-level parameters belong to every operation on the route, so they are named from the
         // route rather than from any one operation.

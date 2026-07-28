@@ -147,17 +147,8 @@ fn document_operation<'a>(
     };
     let item = resolved.document().paths.as_ref()?.items.get(route)?;
     let item = resolved.path_item(item)?;
-    match method.as_ref() {
-        "get" => item.get.as_ref(),
-        "put" => item.put.as_ref(),
-        "post" => item.post.as_ref(),
-        "delete" => item.delete.as_ref(),
-        "options" => item.options.as_ref(),
-        "head" => item.head.as_ref(),
-        "patch" => item.patch.as_ref(),
-        "trace" => item.trace.as_ref(),
-        _ => None,
-    }
+    item.operations()
+        .find_map(|(name, operation)| (name.slug() == method).then_some(operation))
 }
 
 struct Collect<'a> {
@@ -200,7 +191,6 @@ impl Collect<'_> {
                     vendor_defect: super::examples::contradiction(
                         self.resolved,
                         self.shapes,
-                        self.contracts,
                         id,
                         &original,
                     )
@@ -319,21 +309,11 @@ impl Collect<'_> {
                 for variant in &union.variants {
                     let accepted = match &variant.shape {
                         ShapeRef::Key(key) => self.shapes.get(key).is_some_and(|shape| {
-                            super::examples::accepts(
-                                self.resolved,
-                                self.shapes,
-                                self.contracts,
-                                value,
-                                shape,
-                            )
+                            super::examples::accepts(self.resolved, self.shapes, value, shape)
                         }),
-                        ShapeRef::Inline(shape) => super::examples::accepts(
-                            self.resolved,
-                            self.shapes,
-                            self.contracts,
-                            value,
-                            shape,
-                        ),
+                        ShapeRef::Inline(shape) => {
+                            super::examples::accepts(self.resolved, self.shapes, value, shape)
+                        }
                     };
                     if accepted {
                         return self.through(value, &variant.shape);

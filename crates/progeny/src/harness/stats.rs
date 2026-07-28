@@ -205,19 +205,7 @@ fn components_node(components: &Components, stats: &mut Stats) {
 }
 
 fn path_item(item: &PathItem, stats: &mut Stats) {
-    for operation in [
-        &item.get,
-        &item.put,
-        &item.post,
-        &item.delete,
-        &item.options,
-        &item.head,
-        &item.patch,
-        &item.trace,
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for (_, operation) in item.operations() {
         operation_node(operation, stats);
     }
 }

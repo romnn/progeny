@@ -42,11 +42,16 @@ pub(super) fn run(
         types = apply(types, &merge, lowered, collapses);
     }
     // Two types that merged reported the same collapse at the same place, and the merge is what
-    // makes that visible: one type now, so one finding.
+    // makes that visible: one type now, so one finding. The kind is part of the identity — a
+    // property can be both a presence collapse and `readOnly`, and those are two findings.
     collapses.sort_by(|left, right| {
-        (left.owner, left.at.to_string()).cmp(&(right.owner, right.at.to_string()))
+        (left.owner, left.at.to_string(), left.kind as u8).cmp(&(
+            right.owner,
+            right.at.to_string(),
+            right.kind as u8,
+        ))
     });
-    collapses.dedup_by(|left, right| left.owner == right.owner && left.at == right.at);
+    collapses.dedup_by(|left, right| left == right);
     types
 }
 

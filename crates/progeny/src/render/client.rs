@@ -126,18 +126,13 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
 }
 
 /// A `Default` impl, when the document declares a server to default to.
+///
+/// Which URLs are usable is the model's ruling ([`ApiModel::default_server_url`]); this only
+/// spells the impl.
 fn default_base_url(model: &ApiModel) -> TokenStream {
-    let Some(server) = model.servers().first() else {
+    let Some(url) = model.default_server_url() else {
         return TokenStream::new();
     };
-    let url = &server.url;
-    // Two server URLs a `Default` would be wrong about, and the constructor still takes either. A
-    // *templated* one has variables progeny does not substitute. A *relative* one — `/api/v3`, which
-    // OpenAPI allows and means "relative to wherever this description is served" — is not a URL at
-    // all once the description is a file on disk, and only the caller knows what it was relative to.
-    if url.contains('{') || !(url.starts_with("https://") || url.starts_with("http://")) {
-        return TokenStream::new();
-    }
     let docs = format!(" The first server the description declares: `{url}`.");
     quote! {
         impl ::std::default::Default for Client {
@@ -836,7 +831,10 @@ pub(super) fn form_specs(specs: &[FormSpec]) -> TokenStream {
         let name = &spec.wire_name;
         let style = style_tokens(spec.style);
         let explode = spec.explode;
-        let array = spec.array;
+        let array = spec.array.map_or_else(
+            || quote! { ::std::option::Option::None },
+            |array| quote! { ::std::option::Option::Some(#array) },
+        );
         quote! {
             support::style::FormSpec { name: #name, style: #style, explode: #explode, array: #array }
         }

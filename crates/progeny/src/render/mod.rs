@@ -34,10 +34,9 @@ pub(crate) fn run(
     api: &ApiModel,
     config: &Config,
 ) -> BTreeMap<Utf8PathBuf, String> {
+    // `emit.types = false` cannot arrive here: `generate` refuses it, because an empty rendering
+    // with a success code would be a silent no-op.
     let mut files = BTreeMap::new();
-    if !config.emit.types {
-        return files;
-    }
     let mut body = types::render(contracts, config);
     body.extend(serde_impl::render(contracts));
     let mut modules = vec![("types", body)];
@@ -86,7 +85,7 @@ pub(crate) fn run(
         Packaging::Crate => {
             files.insert(
                 Utf8PathBuf::from("Cargo.toml"),
-                manifest::render(contracts, config, http, serves, streams),
+                manifest::render(contracts, api, config, http, serves, streams),
             );
             let declarations = modules.iter().map(|(name, _)| {
                 let ident = quote::format_ident!("{name}");
@@ -151,8 +150,11 @@ mod tests {
     use crate::doc::parse as doc_parse;
     use crate::{contract, normalize, resolve, shape};
 
-    /// Generate the types module for a document.
-    fn types(document: Value, config: &Config) -> String {
+    /// Run the whole pipeline and return every rendered file.
+    fn files(
+        document: Value,
+        config: &Config,
+    ) -> std::collections::BTreeMap<camino::Utf8PathBuf, String> {
         let mut ctx = Ctx::new();
         let normalized = normalize::normalize(document, &mut ctx).unwrap();
         let parsed = doc_parse::document(normalized, &mut ctx);
@@ -160,8 +162,12 @@ mod tests {
         let shapes = shape::classify(&resolved, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, config, &mut ctx).unwrap();
         let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx).unwrap();
-        let files = super::run(&contracts, &api, config);
-        files
+        super::run(&contracts, &api, config)
+    }
+
+    /// Generate the types module for a document.
+    fn types(document: Value, config: &Config) -> String {
+        files(document, config)
             .get(camino::Utf8Path::new("src/types.rs"))
             .cloned()
             .unwrap_or_default()
@@ -169,16 +175,7 @@ mod tests {
 
     /// Generate the client module for a document.
     fn client(document: Value) -> String {
-        let config = Config::default();
-        let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
-        let parsed = doc_parse::document(normalized, &mut ctx);
-        let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
-        let files = super::run(&contracts, &api, &config);
-        let rendered = files
+        let rendered = files(document, &Config::default())
             .get(camino::Utf8Path::new("src/client.rs"))
             .cloned()
             .unwrap_or_default();
@@ -958,5 +955,291 @@ mod tests {
         let once = types(document.clone(), &Config::default());
         let twice = types(document, &Config::default());
         assert_eq!(once, twice);
+    }
+
+    /// Every `support::…` path a renderer spells resolves to an item the shipped module holds.
+    ///
+    /// The renderers write these paths as *strings into somebody else's crate*: progeny compiles
+    /// the support items, but nothing in progeny's own build calls them by the emitted spelling,
+    /// so renaming `support::style::cookie_pair` would build green here and break every
+    /// generated crate with a cookie parameter. This resolves each spelled path against the
+    /// emitted support module's actual items — the check the compiler cannot do across the
+    /// generation boundary.
+    #[test]
+    fn every_support_path_the_renderers_spell_exists() {
+        use std::collections::BTreeSet;
+
+        // One document exercising every wire feature: path styles, query styles, header and
+        // cookie parameters, all five body kinds, and a server half.
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets/{id}": {"get": {
+                    "operationId": "getPet",
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": true, "style": "matrix",
+                         "schema": {"type": "string"}},
+                        {"name": "tags", "in": "query", "style": "pipeDelimited", "explode": false,
+                         "schema": {"type": "array", "items": {"type": "string"}}},
+                        {"name": "x-trace", "in": "header", "schema": {"type": "string"}},
+                        {"name": "session", "in": "cookie", "schema": {"type": "string"}},
+                    ],
+                    "responses": {"200": {"description": "ok", "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/Pet"}}}},
+                                  "404": {"description": "gone"}},
+                }},
+                "/pets": {"post": {
+                    "operationId": "createPet",
+                    "requestBody": {"content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/Pet"}}}},
+                    "responses": {"201": {"description": "made", "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/Pet"}}}}},
+                }},
+                "/form": {"post": {
+                    "operationId": "sendForm",
+                    "requestBody": {"content": {"application/x-www-form-urlencoded": {
+                        "schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+                        "encoding": {"a": {"style": "form", "explode": false}}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/upload": {"post": {
+                    "operationId": "upload",
+                    "requestBody": {"content": {"multipart/form-data": {
+                        "schema": {"type": "object", "properties": {
+                            "file": {"type": "string", "format": "binary"},
+                            "note": {"type": "string"}}}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/note": {"post": {
+                    "operationId": "sendNote",
+                    "requestBody": {"content": {"text/plain": {"schema": {"type": "string"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/blob": {"post": {
+                    "operationId": "sendBlob",
+                    "requestBody": {"content": {"application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+            "components": {"schemas": {
+                "Pet": {"type": "object", "required": ["name"],
+                        "properties": {"name": {"type": "string"}}},
+            }},
+        });
+        let rendered = files(document, &Config::default());
+
+        // Every item the emitted support module defines, as `module::item` relative paths —
+        // plus the root-level spellings its glob re-exports (`pub use wire::*;`) create.
+        let support = syn::parse_file(&rendered[camino::Utf8Path::new("src/support.rs")])
+            .expect("the support module should parse");
+        let mut defined: BTreeSet<String> = BTreeSet::new();
+        let mut reexported: Vec<String> = Vec::new();
+        support_items(&support.items, "", &mut defined, &mut reexported);
+        for module in reexported {
+            let inner: Vec<String> = defined
+                .iter()
+                .filter_map(|path| path.strip_prefix(&format!("{module}::")))
+                .map(ToOwned::to_owned)
+                .collect();
+            defined.extend(inner);
+        }
+
+        // Every `support::…` (or `super::support::…`) path the other modules spell.
+        let mut spelled: BTreeSet<Vec<String>> = BTreeSet::new();
+        for name in ["src/client.rs", "src/server.rs", "src/types.rs"] {
+            let Some(text) = rendered.get(camino::Utf8Path::new(name)) else {
+                continue;
+            };
+            let file = syn::parse_file(text).expect("a rendered module should parse");
+            let mut visitor = SupportPaths {
+                out: BTreeSet::new(),
+            };
+            syn::visit::Visit::visit_file(&mut visitor, &file);
+            spelled.extend(visitor.out);
+        }
+        assert!(
+            spelled.len() >= 10,
+            "the fixture should exercise the wire: {spelled:?}"
+        );
+
+        // A spelled path resolves when some prefix of it names a defined item — the tail past
+        // that is an enum variant or an associated function, which belongs to the item.
+        for path in &spelled {
+            let resolves =
+                (1..=path.len()).any(|length| defined.contains(&path[..length].join("::")));
+            assert!(
+                resolves,
+                "the renderers spell `support::{}`, which the shipped module does not define",
+                path.join("::")
+            );
+        }
+    }
+
+    /// Every named item of the emitted support module, recursively, with `pub use x::*;`
+    /// re-export modules collected for the caller to flatten.
+    fn support_items(
+        items: &[syn::Item],
+        prefix: &str,
+        defined: &mut std::collections::BTreeSet<String>,
+        globs: &mut Vec<String>,
+    ) {
+        for item in items {
+            let name = match item {
+                syn::Item::Fn(it) => Some(it.sig.ident.to_string()),
+                syn::Item::Struct(it) => Some(it.ident.to_string()),
+                syn::Item::Enum(it) => Some(it.ident.to_string()),
+                syn::Item::Trait(it) => Some(it.ident.to_string()),
+                syn::Item::Type(it) => Some(it.ident.to_string()),
+                syn::Item::Const(it) => Some(it.ident.to_string()),
+                syn::Item::Mod(it) => {
+                    let module = it.ident.to_string();
+                    let inner = format!("{prefix}{module}::");
+                    if let Some((_, items)) = &it.content {
+                        support_items(items, &inner, defined, globs);
+                    }
+                    Some(module)
+                }
+                syn::Item::Use(it) => {
+                    // `pub use wire::*;` at the root: remember the module whose items become
+                    // root-level names.
+                    if prefix.is_empty()
+                        && let syn::UseTree::Path(path) = &it.tree
+                        && matches!(*path.tree, syn::UseTree::Glob(_))
+                    {
+                        globs.push(path.ident.to_string());
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                defined.insert(format!("{prefix}{name}"));
+            }
+        }
+    }
+
+    /// Collects every path rooted at `support` (or `super::support`), without the root.
+    struct SupportPaths {
+        out: std::collections::BTreeSet<Vec<String>>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for SupportPaths {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            let segments: Vec<String> = node
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            let rest = match segments.first().map(String::as_str) {
+                Some("support") => &segments[1..],
+                Some("super") if segments.get(1).map(String::as_str) == Some("support") => {
+                    &segments[2..]
+                }
+                _ => {
+                    syn::visit::visit_path(self, node);
+                    return;
+                }
+            };
+            if !rest.is_empty() {
+                self.out.insert(rest.to_vec());
+            }
+            syn::visit::visit_path(self, node);
+        }
+    }
+
+    /// The API layer's style table and the shipped one are one variant list, held by the
+    /// compiler.
+    ///
+    /// `style_tokens` spells the shipped enum's variants as *strings* into generated source, so
+    /// no compiler links the two enums there. These two matches are that link: a variant added
+    /// to either enum fails this test's build, where the drift it prevents — a style silently
+    /// encoded as `form` by the shipped table's fallback, or generated crates that name a
+    /// variant the shipped enum lacks — fails nothing in progeny's own build.
+    #[test]
+    fn the_two_style_enums_are_one_variant_list() {
+        use crate::api::Style as Declared;
+        use crate::support::style::Style as Shipped;
+        fn bridge(style: Declared) -> Shipped {
+            match style {
+                Declared::Form => Shipped::Form,
+                Declared::Simple => Shipped::Simple,
+                Declared::Label => Shipped::Label,
+                Declared::Matrix => Shipped::Matrix,
+                Declared::SpaceDelimited => Shipped::SpaceDelimited,
+                Declared::PipeDelimited => Shipped::PipeDelimited,
+                Declared::DeepObject => Shipped::DeepObject,
+            }
+        }
+        fn back(style: Shipped) -> Declared {
+            match style {
+                Shipped::Form => Declared::Form,
+                Shipped::Simple => Declared::Simple,
+                Shipped::Label => Declared::Label,
+                Shipped::Matrix => Declared::Matrix,
+                Shipped::SpaceDelimited => Declared::SpaceDelimited,
+                Shipped::PipeDelimited => Declared::PipeDelimited,
+                Shipped::DeepObject => Declared::DeepObject,
+            }
+        }
+        for style in [
+            Declared::Form,
+            Declared::Simple,
+            Declared::Label,
+            Declared::Matrix,
+            Declared::SpaceDelimited,
+            Declared::PipeDelimited,
+            Declared::DeepObject,
+        ] {
+            assert_eq!(back(bridge(style)), style);
+        }
+    }
+
+    /// The manifest declares every crate the rendered surface names, not only what the named
+    /// types use.
+    ///
+    /// A `format: uuid` that appears only as a parameter gets no named contract on purpose — a
+    /// `pub type` alias for one scalar would be noise — but the builder still spells `uuid::Uuid`.
+    /// And a binary body under `formats.bytes = "bytes"` is the only place `::bytes::Bytes` is
+    /// spelled at all. A manifest computed from the named contracts alone shipped both as crates
+    /// that do not compile.
+    #[test]
+    fn the_manifest_declares_what_the_surface_names_beyond_the_types() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets/{id}": {"get": {
+                    "operationId": "getPet",
+                    "parameters": [{"name": "id", "in": "path", "required": true,
+                        "schema": {"type": "string", "format": "uuid"}}],
+                    "responses": {"200": {"description": "ok"}},
+                }},
+                "/upload": {"post": {
+                    "operationId": "upload",
+                    "requestBody": {"content": {"application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+        });
+        let config = Config {
+            formats: crate::config::Formats {
+                uuid: crate::config::UuidCrate::Uuid,
+                bytes: crate::config::BytesRepr::Bytes,
+                ..crate::config::Formats::default()
+            },
+            ..Config::default()
+        };
+        let rendered = files(document, &config);
+        let manifest = &rendered[camino::Utf8Path::new("Cargo.toml")];
+        assert!(manifest.contains("uuid = { version = \"1\""), "{manifest}");
+        assert!(manifest.contains("dep:bytes"), "{manifest}");
+        assert!(manifest.contains("bytes = { version = \"1\""), "{manifest}");
+        // The claim about where the crate is named, pinned so the manifest rule can follow it.
+        let client = &rendered[camino::Utf8Path::new("src/client.rs")];
+        assert!(client.contains("uuid::Uuid"), "{client}");
+        assert!(client.contains("::bytes::Bytes"), "{client}");
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(!types.contains("uuid::Uuid"), "{types}");
     }
 }

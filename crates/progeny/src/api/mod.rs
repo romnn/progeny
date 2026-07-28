@@ -60,8 +60,20 @@ impl ApiModel {
         &self.operations
     }
 
-    pub(crate) fn servers(&self) -> &[ServerEntry] {
-        &self.servers
+    /// The server URL a generated `Default` can point at, when the document declares one.
+    ///
+    /// The first declared server, and only when its URL is usable exactly as written. Two shapes
+    /// are declined, and the constructor still takes either: a *templated* URL has variables
+    /// progeny does not substitute, and a *relative* one — `/api/v3`, which OpenAPI allows and
+    /// means "relative to wherever this description is served" — is not a URL at all once the
+    /// description is a file on disk, and only the caller knows what it was relative to.
+    ///
+    /// Decided here rather than in the renderer, because which URLs are usable is a fact about
+    /// the document; the renderer's job is only to spell the `impl Default` when there is one.
+    pub(crate) fn default_server_url(&self) -> Option<&str> {
+        let url = self.servers.first()?.url.as_str();
+        (!url.contains('{') && (url.starts_with("https://") || url.starts_with("http://")))
+            .then_some(url)
     }
 }
 
@@ -110,48 +122,9 @@ impl OperationContract {
     }
 }
 
-/// An HTTP method, as a closed set: a renderer cannot be handed one that is not a method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Method {
-    Get,
-    Put,
-    Post,
-    Delete,
-    Options,
-    Head,
-    Patch,
-    Trace,
-}
-
-impl Method {
-    /// The uppercase name the request line carries.
-    pub(crate) fn wire(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Put => "PUT",
-            Self::Post => "POST",
-            Self::Delete => "DELETE",
-            Self::Options => "OPTIONS",
-            Self::Head => "HEAD",
-            Self::Patch => "PATCH",
-            Self::Trace => "TRACE",
-        }
-    }
-
-    /// The lowercase name the document writes, and the one an operation is named after.
-    pub(crate) fn slug(self) -> &'static str {
-        match self {
-            Self::Get => "get",
-            Self::Put => "put",
-            Self::Post => "post",
-            Self::Delete => "delete",
-            Self::Options => "options",
-            Self::Head => "head",
-            Self::Patch => "patch",
-            Self::Trace => "trace",
-        }
-    }
-}
+// The method enum lives beside `PathItem`, whose fields it mirrors, so the document walk can
+// yield it with no fallback arm; the API model is where every consumer reads it from.
+pub(crate) use crate::doc::Method;
 
 /// One parameter, with the serialization already decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,7 +239,11 @@ pub(crate) struct FormSpec {
     /// Whether the member's schema says it is an array — the same fact a query parameter carries
     /// in its [`StyleContract`], for the same reason: a single-occurrence exploded array on the
     /// wire is byte-identical to a scalar, and only the schema can tell the reader which it was.
-    pub(crate) array: bool,
+    ///
+    /// `None` when the schema does not declare the member at all — an `encoding` row can name a
+    /// member captured only through `additionalProperties` — and the reader falls back to the
+    /// repetition heuristic rather than trusting a guess.
+    pub(crate) array: Option<bool>,
 }
 
 /// What each declared status yields.
@@ -332,7 +309,7 @@ pub(crate) fn build(
     // cannot support has to stop generation rather than produce a method that cannot work.
     pagination::attach(&mut model.operations, contracts, config)?;
     presence::report(contracts, &model, ctx);
-    examples::report(resolved, shapes, contracts, ctx);
+    examples::report(resolved, shapes, ctx);
     Ok(model)
 }
 
@@ -403,7 +380,11 @@ pub(crate) mod tests {
             json!([{"url": "https://example.invalid/v1", "description": "production"}]),
         );
         let (model, _) = model_of(document);
-        assert_eq!(model.servers().len(), 1);
-        assert_eq!(model.servers()[0].url, "https://example.invalid/v1");
+        assert_eq!(model.servers.len(), 1);
+        assert_eq!(model.servers[0].url, "https://example.invalid/v1");
+        assert_eq!(
+            model.default_server_url(),
+            Some("https://example.invalid/v1")
+        );
     }
 }

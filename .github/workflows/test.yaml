@@ -101,6 +101,11 @@ jobs:
       # panicked at startup, which no gate that does not call `router()` could have seen.
       - name: The wire differential over the small documents
         run: task probe -- petstore-31 oxide
+      # The derive escape hatch, over a socket: a serde-path defect that surfaces as a rejection
+      # rather than a payload mismatch is exactly the probe's class, and the run above only ever
+      # drives the default strategy.
+      - name: The wire differential through the escape hatch
+        run: task probe -- --serde derive petstore-31
       - name: Differential serde harness
         run: task differential
 

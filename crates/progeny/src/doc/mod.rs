@@ -148,6 +148,78 @@ pub(crate) struct PathItem {
     pub(crate) extensions: BTreeMap<String, Value>,
 }
 
+impl PathItem {
+    /// Every operation this path item declares, with the method member it was written under.
+    ///
+    /// The one walk over the method fields. Seven copies of this list used to exist across the
+    /// crate, and the failure mode of a copy missing a method is the forbidden one: the
+    /// operation's examples, payloads and statistics silently vanish from their gates. A method
+    /// added to this struct without extending this list is caught by the mirror test beside the
+    /// parser, which counts the members a maximal path item round-trips.
+    pub(crate) fn operations(&self) -> impl Iterator<Item = (Method, &Operation)> {
+        [
+            (Method::Get, &self.get),
+            (Method::Put, &self.put),
+            (Method::Post, &self.post),
+            (Method::Delete, &self.delete),
+            (Method::Options, &self.options),
+            (Method::Head, &self.head),
+            (Method::Patch, &self.patch),
+            (Method::Trace, &self.trace),
+        ]
+        .into_iter()
+        .filter_map(|(method, operation)| Some((method, operation.as_ref()?)))
+    }
+}
+
+/// An HTTP method, as a closed set: a renderer cannot be handed one that is not a method.
+///
+/// Defined beside [`PathItem`], whose fields are the eight members a document can write, so that
+/// [`PathItem::operations`] can yield it directly — a string-to-method mapping anywhere else
+/// would need a fallback arm, and every wrong answer for that arm is one of the forbidden ones:
+/// a panic, or an operation silently skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Method {
+    Get,
+    Put,
+    Post,
+    Delete,
+    Options,
+    Head,
+    Patch,
+    Trace,
+}
+
+impl Method {
+    /// The uppercase name the request line carries.
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Put => "PUT",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
+            Self::Options => "OPTIONS",
+            Self::Head => "HEAD",
+            Self::Patch => "PATCH",
+            Self::Trace => "TRACE",
+        }
+    }
+
+    /// The lowercase name the document writes, and the one an operation is named after.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Put => "put",
+            Self::Post => "post",
+            Self::Delete => "delete",
+            Self::Options => "options",
+            Self::Head => "head",
+            Self::Patch => "patch",
+            Self::Trace => "trace",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Operation {
     pub(crate) tags: Option<Vec<String>>,

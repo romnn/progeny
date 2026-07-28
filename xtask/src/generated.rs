@@ -54,6 +54,34 @@ pub fn write(name: &str, output: &Output) -> Result<Utf8PathBuf> {
     Ok(directory)
 }
 
+/// Append the wire harness's runtime to a generated crate and write its integration test.
+///
+/// A generated crate has no business declaring a runtime or a socket — those are the consumer's
+/// choices — so the gates that stand a server up (`example`, `probe`) append the same
+/// dev-dependency here. One copy on purpose: when the generated servers start needing another
+/// tokio feature, both gates move together, where a copy updated in one once meant the other
+/// failing to compile and reporting it as a *product* verdict — "the two halves disagree on the
+/// wire" — from a harness defect.
+pub fn write_wire_test(directory: &Utf8Path, file_name: &str, source: &str) -> Result<()> {
+    let manifest = directory.join("Cargo.toml");
+    let existing =
+        std::fs::read_to_string(&manifest).with_context(|| format!("reading {manifest}"))?;
+    std::fs::write(
+        &manifest,
+        format!(
+            "{existing}\n[dev-dependencies]\n\
+             tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"net\"] }}\n"
+        ),
+    )
+    .with_context(|| format!("writing {manifest}"))?;
+
+    let tests = directory.join("tests");
+    std::fs::create_dir_all(&tests).with_context(|| format!("creating {tests}"))?;
+    let file = tests.join(file_name);
+    std::fs::write(&file, source).with_context(|| format!("writing {file}"))?;
+    Ok(())
+}
+
 /// What compiling a generated crate found.
 pub struct Compiled {
     pub ok: bool,

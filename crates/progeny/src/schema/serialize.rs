@@ -377,6 +377,45 @@ mod tests {
         assert_eq!(seen.len(), store.len());
     }
 
+    /// The normalizer's three subschema lists are the model's applicators, exactly.
+    ///
+    /// `normalize` sits below the schema model and walks raw values with its own keyword lists.
+    /// A keyword the model holds that those lists miss is a position whose 3.0 rewrites silently
+    /// never run — a `nullable: true` there is parsed faithfully and never repaired, and the
+    /// generated type silently rejects `null`. The maximal fixture stores a subschema under
+    /// every applicator the model has (the two tests above hold it to that), and each stored
+    /// subschema's address begins with the keyword that holds it, so the two lists can be
+    /// compared outright.
+    #[test]
+    fn the_normalizers_subschema_lists_are_the_models_applicators() {
+        let mut store = SchemaStore::default();
+        let mut ctx = Ctx::new();
+        let root = parse::schema(
+            serde_json::from_str(EVERY_KEYWORD).unwrap(),
+            &mut store,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let mut walked = std::collections::BTreeSet::new();
+        for (id, _) in store.iter() {
+            if id == root {
+                continue;
+            }
+            if let Some(keyword) = store.address(id).tokens().first() {
+                walked.insert(keyword.as_str());
+            }
+        }
+        let listed: std::collections::BTreeSet<&str> = crate::normalize::SUBSCHEMA
+            .iter()
+            .chain(&crate::normalize::SUBSCHEMA_ARRAY)
+            .chain(&crate::normalize::SUBSCHEMA_MAP)
+            .copied()
+            .collect();
+        let walked: std::collections::BTreeSet<&str> = walked;
+        assert_eq!(walked, listed);
+    }
+
     #[test]
     fn the_written_form_of_type_is_preserved() {
         assert_eq!(

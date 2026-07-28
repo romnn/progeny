@@ -98,10 +98,14 @@ pub(crate) enum Shape {
         item: Option<ShapeRef>,
     },
     /// `prefixItems`: fixed positions, each with its own type.
+    ///
+    /// Always fixed-arity: a prefix followed by an `items` that admits values is degraded by the
+    /// classifier, because instances could then be longer than the prefix and no fixed-arity Rust
+    /// tuple accepts that. A `rest` field once carried that tail here, and nothing ever lowered
+    /// it — the arity claim lives in the classifier now, not in a field renderers must remember
+    /// to read.
     Tuple {
         items: Vec<ShapeRef>,
-        /// What the elements past the tuple may be, when the document allows any.
-        rest: Option<ShapeRef>,
     },
     /// `minItems == maxItems` over a uniform element type.
     FixedArray {
@@ -263,7 +267,16 @@ impl Shapes {
     /// [`discriminate`] can only tell whether a proposed tag is affordable once every shape is
     /// known, so the union it demotes was necessarily classified before the answer existed.
     pub(crate) fn replace(&mut self, key: &ShapeKey, shape: Shape) {
-        if let Some(slot) = self.by_key.get_mut(key) {
+        let slot = self.by_key.get_mut(key);
+        // Not a tolerable miss: `replace` is how an unsound union is demoted, and a demotion
+        // that silently missed leaves an untagged enum matching by declaration order — the
+        // WildUnion failure. Every caller today iterates `entries()`, so the key exists; this
+        // holds that reasoning against a future caller that derives the key instead.
+        debug_assert!(
+            slot.is_some(),
+            "replacing a shape that was never classified"
+        );
+        if let Some(slot) = slot {
             *slot = shape;
         }
     }
@@ -367,12 +380,9 @@ fn children(shape: &Shape, out: &mut Vec<ShapeKey>) {
                 push(value);
             }
         }
-        Shape::Tuple { items, rest } => {
+        Shape::Tuple { items } => {
             for item in items {
                 push(item);
-            }
-            if let Some(rest) = rest {
-                push(rest);
             }
         }
         Shape::FixedArray { item: inner, .. } | Shape::Alias(inner) | Shape::Optional(inner) => {
@@ -391,7 +401,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{Extra, Scalar, Shape, ShapeRef, Shapes, classify};
-    use crate::diag::{Ctx, Diagnostic};
+    use crate::diag::{BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
     use crate::{normalize, resolve};
 
@@ -1173,11 +1183,50 @@ mod tests {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Pair": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]},
         })));
-        let Shape::Tuple { items, rest } = shape_of(&shapes, "Pair") else {
+        let Shape::Tuple { items } = shape_of(&shapes, "Pair") else {
             panic!("expected a tuple");
         };
         assert_eq!(items.len(), 2);
-        assert!(rest.is_none());
+    }
+
+    /// `additionalItems: false` — normalized to `items: false` — forbids a tail, which is
+    /// exactly what a fixed-arity tuple expresses.
+    #[test]
+    fn a_tuple_whose_tail_admits_nothing_stays_a_tuple() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Pair": {"type": "array",
+                     "items": [{"type": "string"}, {"type": "integer"}],
+                     "additionalItems": false},
+        })));
+        let Shape::Tuple { items } = shape_of(&shapes, "Pair") else {
+            panic!("expected a tuple");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|found| found.class() == BreakageClass::UnsupportedConstruct),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A prefix followed by an `items` that admits values allows instances longer than the
+    /// prefix, and a generated `(A, B)` would refuse them — wrong about the wire, and until this
+    /// diagnostic existed, silently so: the tail was carried in a field nothing ever lowered.
+    #[test]
+    fn a_tuple_whose_tail_admits_values_degrades_loudly() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Row": {"type": "array",
+                    "prefixItems": [{"type": "string"}, {"type": "integer"}],
+                    "items": {"type": "number"}},
+        })));
+        assert!(matches!(shape_of(&shapes, "Row"), Shape::Any));
+        let found: Vec<_> = diagnostics
+            .iter()
+            .filter(|found| found.class() == BreakageClass::UnsupportedConstruct)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].detail().contains("prefixItems"), "{found:#?}");
     }
 
     #[test]

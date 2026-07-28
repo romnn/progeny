@@ -17,7 +17,7 @@ use crate::config::{Config, Pagination};
 use crate::contract::{ContractKind, Contracts, RustIdent, TypeRef};
 use crate::diag::{JsonPointer, RejectError, RejectKind};
 
-use super::{Location, OperationContract, StatusPattern};
+use super::{Location, OperationContract};
 
 /// One operation's validated pagination, in the terms the renderer needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,10 +183,18 @@ fn resolve(
 /// Exactly one, not the first of several. When a document declares two success statuses the client
 /// hands back an enum, and a stream would have to decide which variant carries a page — a decision
 /// the document did not make and this is in no position to invent.
+///
+/// "Success" is [`super::StatusPattern::is_success`], the same rule the client's `send()` decodes
+/// by.
+/// A second spelling of the rule here once refused a document declaring only `2XX` — an arm the
+/// client happily decodes — and that class of disagreement has produced a non-compiling client
+/// before (`weather-gov`, at stage 5).
 fn success_arm(operation: &OperationContract) -> Option<(RustIdent, TypeRef)> {
-    let mut successes = operation.responses.arms.iter().filter(
-        |arm| matches!(arm.status, StatusPattern::Exact(code) if (200..300).contains(&code)),
-    );
+    let mut successes = operation
+        .responses
+        .arms
+        .iter()
+        .filter(|arm| arm.status.is_success());
     let only = successes.next()?;
     successes
         .next()
@@ -336,12 +344,16 @@ mod tests {
     }
 
     fn build(declared: Pagination) -> Result<(), String> {
+        build_on(document(), declared)
+    }
+
+    fn build_on(document: Value, declared: Pagination) -> Result<(), String> {
         let config = Config {
             pagination: [("list_pets".to_owned(), declared)].into_iter().collect(),
             ..Config::default()
         };
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document(), &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx).unwrap();
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
@@ -362,6 +374,27 @@ mod tests {
     #[test]
     fn a_declaration_the_document_supports_is_accepted() {
         assert_eq!(build(declaring("cursor", "next", "items")), Ok(()));
+    }
+
+    /// A `2XX` arm is the success the client renders, so it is the page the stream reads.
+    ///
+    /// The success rule is `StatusPattern::is_success`, not a locally spelled `Exact(2xx)`: an
+    /// operation declaring only the range key used to be refused with "no success response" while
+    /// the generated `send()` decoded that very arm as the success type — two answers to one
+    /// question, and the stricter one was wrong.
+    #[test]
+    fn a_range_success_is_a_page_like_an_exact_one() {
+        let mut document = document();
+        let responses = &mut document["paths"]["/pets"]["get"]["responses"];
+        let arm = responses.as_object_mut().unwrap().remove("200").unwrap();
+        responses
+            .as_object_mut()
+            .unwrap()
+            .insert("2XX".to_owned(), arm);
+        assert_eq!(
+            build_on(document, declaring("cursor", "next", "items")),
+            Ok(())
+        );
     }
 
     /// Each refusal names what it looked for and what the document had instead.

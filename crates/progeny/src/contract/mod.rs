@@ -30,7 +30,15 @@ use crate::resolve::ResolvedDocument;
 pub(crate) use crate::shape::Format;
 use crate::shape::{Docs, ShapeKey, Shapes};
 
-pub(crate) use lower::Collapse;
+#[cfg_attr(
+    not(feature = "harness"),
+    allow(
+        unused_imports,
+        reason = "read by the corpus harness, which is feature-gated"
+    )
+)]
+pub(crate) use finalize::BASE as BASE_DERIVES;
+pub(crate) use lower::{Collapse, CollapseKind};
 pub(crate) use name::{Namer, RustIdent};
 
 /// Which generated type, by position in [`Contracts`].
@@ -116,6 +124,11 @@ impl TypeRef {
     }
 
     /// Rewrite every named reference through `remap`, which dedup fills in.
+    ///
+    /// Exhaustive like [`Self::reaches`] above, and for a sharper reason: a composite variant a
+    /// wildcard arm absorbed here would keep its *stale* indices after dedup renumbers — a valid,
+    /// wrong type name in the output, which is the forbidden failure mode. The compiler hands the
+    /// next variant's author this match; a `_` would hand them nothing.
     fn remap(&mut self, remap: &BTreeMap<TypeIndex, TypeIndex>) {
         match self {
             Self::Named(index) => {
@@ -133,7 +146,14 @@ impl TypeRef {
                     item.remap(remap);
                 }
             }
-            _ => {}
+            Self::Unit
+            | Self::Bool
+            | Self::I64
+            | Self::U64
+            | Self::F64
+            | Self::String
+            | Self::Format(_)
+            | Self::Value => {}
         }
     }
 }
@@ -183,7 +203,17 @@ pub(crate) enum DeserStrategy {
     /// The serde derive. The escape hatch, and the only strategy in `DeriveAlways` mode.
     Derive,
     /// Hand-written, buffering the members before assigning them: the compile-speed path.
-    HandWrittenBuffered,
+    HandWrittenBuffered {
+        /// Whether the emitted implementation refuses an undeclared member.
+        ///
+        /// Resolved here by the eligibility ruling, which sends `Capture` to the derive — so by
+        /// the time this strategy exists, capturing is impossible and the two remaining policies
+        /// are one bit. Carried in the strategy so the renderer receives the answer instead of
+        /// re-deriving it: a renderer-side `Capture → Ignore` arm once encoded "cannot arrive
+        /// here" as a silent fold, which would have discarded members without a diagnostic the
+        /// day the eligibility rule loosened.
+        deny_unknown: bool,
+    },
     /// Hand-written with no buffering, for a fieldless enum.
     HandWrittenFieldless,
 }

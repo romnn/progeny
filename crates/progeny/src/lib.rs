@@ -8,8 +8,8 @@
 //!
 //! * **Parse, don't validate.** Untrusted input becomes a typed value once, at the edge.
 //!   Downstream code cannot receive malformed data because there is no shape for it to arrive in.
-//! * **One direction.** `load → normalize → document → shape → contract → api → render`. Each
-//!   conversion is total: it produces a value plus diagnostics, or it rejects.
+//! * **One direction.** `load → normalize → document → resolve → shape → contract → api →
+//!   render`. Each conversion is total: it produces a value plus diagnostics, or it rejects.
 //! * **Silently wrong output is the only forbidden failure mode.** Generating less, with a
 //!   diagnostic, always beats generating something plausible. Every deviation from the input
 //!   document appears in [`Output::diagnostics`]; the caller decides which ones stop the build.
@@ -103,6 +103,15 @@ pub struct Output {
 /// does not implement, no operations at all. Rejection is a last resort and it is total: there is
 /// no partial rejection, so anything short of it produces output plus diagnostics.
 pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
+    // Everything else depends on the type layer, so `types = false` asks for nothing at all —
+    // and an empty `files` map with a success code is the silent no-op this crate forbids.
+    if !config.emit.types {
+        return Err(RejectError::new(
+            RejectKind::UnsatisfiableConfig,
+            "the configuration turns off `emit.types`, and the client and the server both build \
+             on the type layer, so there is nothing left to generate",
+        ));
+    }
     let mut ctx = diag::Ctx::new();
     let loaded = load::load(input, &mut ctx)?;
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
@@ -208,6 +217,39 @@ mod tests {
         let config: Config = toml::from_str("[type-derives]\nPet = [\"copy\"]\n").unwrap();
         let error = generate(PETSTORE, &config).unwrap_err();
         assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
+    }
+
+    /// One declared dialect is one record.
+    ///
+    /// The normalizer's walk and the schema parser both used to report a schema's `$schema`,
+    /// with different wording, so one member produced two `unsupported-dialect` records. The
+    /// parser is the layer that stores the member, so it is the layer that reports it.
+    #[test]
+    fn one_unknown_dialect_is_one_record() {
+        let output = generate(
+            br#"{"openapi":"3.1.0","paths":{},"components":{"schemas":{
+                "Thing": {"type": "string", "$schema": "http://json-schema.org/draft-07/schema#"}
+            }}}"#,
+            &Config::default(),
+        )
+        .unwrap();
+        let dialects: Vec<_> = output
+            .diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::UnsupportedDialect)
+            .collect();
+        assert_eq!(dialects.len(), 1, "{dialects:#?}");
+        assert_eq!(dialects[0].occurrences().get(), 1, "{dialects:#?}");
+    }
+
+    /// `emit.types = false` used to return an empty `files` map with a success code — the silent
+    /// no-op this crate exists to forbid, in its own configuration.
+    #[test]
+    fn a_configuration_that_asks_for_nothing_is_refused_rather_than_silently_granted() {
+        let config: Config = toml::from_str("[emit]\ntypes = false\n").unwrap();
+        let error = generate(PETSTORE, &config).unwrap_err();
+        assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
+        assert!(error.detail().contains("emit.types"), "{error}");
     }
 
     #[test]

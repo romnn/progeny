@@ -19,7 +19,7 @@ use crate::schema::cycles::Sccs;
 /// Two, deliberately. Each derive is function bodies the consumer compiles, and compile cost is a
 /// property of the product rather than of progeny; anything beyond `Clone` and `Debug` is something
 /// a caller can ask for by name.
-const BASE: [Derive; 2] = [Derive::Clone, Derive::Debug];
+pub(crate) const BASE: [Derive; 2] = [Derive::Clone, Derive::Debug];
 
 /// Freeze the provisional contracts.
 ///
@@ -139,7 +139,9 @@ fn decide(
                     if fields.iter().any(|field| field.flatten) {
                         DeserStrategy::Derive
                     } else {
-                        DeserStrategy::HandWrittenBuffered
+                        DeserStrategy::HandWrittenBuffered {
+                            deny_unknown: unknown_fields == UnknownFields::Deny,
+                        }
                     }
                 }
                 // Tagging is a property of the union above a type, not of the struct itself, so
@@ -459,7 +461,9 @@ mod tests {
                 UnknownFields::Ignore,
                 &Config::default()
             ),
-            DeserStrategy::HandWrittenBuffered
+            DeserStrategy::HandWrittenBuffered {
+                deny_unknown: false
+            }
         );
     }
 
@@ -473,7 +477,9 @@ mod tests {
                 UnknownFields::Ignore,
                 &hand_written()
             ),
-            DeserStrategy::HandWrittenBuffered
+            DeserStrategy::HandWrittenBuffered {
+                deny_unknown: false
+            }
         );
         let strings = ContractKind::StringEnum {
             variants: vec![StringVariant {

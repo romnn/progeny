@@ -15,7 +15,19 @@ use camino::Utf8PathBuf;
 use serde_json::Value;
 
 pub use crate::resolve::Counts as Resolution;
-pub use probe::{Probe, ProbeBody, ProbeGroup, ProbeOp, ProbeResponse, ProbeSetter, probe};
+
+/// How many derives every generated type carries whatever the configuration says.
+///
+/// The differential harness subtracts these from its per-type body counts so the remaining
+/// number is about serde; it once kept its own `2.0`, which a third always-emitted derive would
+/// have silently made a lie in the project's headline ratio.
+#[must_use]
+pub fn base_derive_count() -> usize {
+    crate::contract::BASE_DERIVES.len()
+}
+pub use probe::{
+    Probe, ProbeAnswer, ProbeBody, ProbeGroup, ProbeOp, ProbeResponse, ProbeSetter, probe,
+};
 
 use crate::diag::{Ctx, Diagnostic, JsonPointer, RejectError};
 use crate::{api, contract, doc, load, normalize, render, resolve, shape};

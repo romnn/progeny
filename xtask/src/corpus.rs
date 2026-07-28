@@ -158,7 +158,6 @@ struct Clean {
 
 pub fn run(args: &Args) -> Result<()> {
     let specs = load_manifest()?;
-    lint_manifest(&specs)?;
     let selected = select(&specs, args)?;
 
     println!(
@@ -232,7 +231,33 @@ pub fn load_manifest() -> Result<Vec<Spec>> {
     let path = paths::corpus_root().join("manifest.toml");
     let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
     let manifest: Manifest = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+    // Linted here rather than by one caller: every gate reads this manifest, and a gate trusting
+    // an unlinted one once meant a duplicated entry could hand `payloads` a different
+    // `bad_examples` list than `corpus` tested with — whichever `.find()` hit first.
+    lint_manifest(&manifest.spec)?;
     Ok(manifest.spec)
+}
+
+/// One gate's selection, resolved to documents with their bytes.
+///
+/// The refusal semantics are the corpus gate's, shared so no gate can pass green on nothing: a
+/// name the manifest does not list is an error, and a selected document whose bytes are not on
+/// disk is an error too. A missing cache is a reason to run `corpus:fetch`, never a silently
+/// smaller run — the payloads gate once printed `skipped` per missing file and exited green
+/// having checked zero documents.
+pub fn selected(names: &[String]) -> Result<Vec<(Spec, Vec<u8>)>> {
+    let specs = load_manifest()?;
+    let mut out = Vec::new();
+    for name in names {
+        let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
+            bail!("no corpus document named `{name}`");
+        };
+        let path = document_path(spec);
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("reading {path}; run `cargo xtask corpus --fetch`"))?;
+        out.push((spec.clone(), bytes));
+    }
+    Ok(out)
 }
 
 /// Check the manifest itself before trusting anything it says.
@@ -394,7 +419,11 @@ fn download(url: &str) -> Result<Vec<u8>> {
 /// is right.
 fn check_convergence() -> Result<usize> {
     let root = paths::convergence_root();
-    let mut names = BTreeSet::new();
+    // Name to extension, from the file actually found — the pair is opened with the same
+    // extension discovery matched, where a discovery that accepted any `.3.0.<ext>` and an open
+    // step that hardcoded `.yaml` once meant a committed `.3.0.json` failed the whole gate with
+    // "reading …3.0.yaml" instead of being tested.
+    let mut pairs: BTreeMap<String, String> = BTreeMap::new();
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) => bail!("{root}: {error}"),
@@ -403,24 +432,25 @@ fn check_convergence() -> Result<usize> {
         let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
             continue;
         };
-        if path.as_str().contains(".3.0.")
-            && let Some(name) = path.file_name().and_then(|file| file.split(".3.0.").next())
+        if let Some((name, extension)) = path.file_name().and_then(|file| file.split_once(".3.0."))
         {
-            names.insert(name.to_owned());
+            pairs.insert(name.to_owned(), extension.to_owned());
         }
     }
-    if names.is_empty() {
+    if pairs.is_empty() {
         bail!("{root} holds no `<name>.3.0.<ext>` document");
     }
 
     let mut failures = 0usize;
-    for name in &names {
+    for (name, extension) in &pairs {
         let (old, new) = (
-            root.join(format!("{name}.3.0.yaml")),
-            root.join(format!("{name}.3.1.yaml")),
+            root.join(format!("{name}.3.0.{extension}")),
+            root.join(format!("{name}.3.1.{extension}")),
         );
         let old_bytes = std::fs::read(&old).with_context(|| format!("reading {old}"))?;
-        let new_bytes = std::fs::read(&new).with_context(|| format!("reading {new}"))?;
+        let new_bytes = std::fs::read(&new).with_context(|| {
+            format!("reading {new}; a `.3.0.` document needs its `.3.1.` counterpart beside it")
+        })?;
         match harness::convergence(&old_bytes, &new_bytes) {
             Ok(result) if result.is_clean() => {
                 println!("  ok        {name:<24} the two dialects agree, model and source");
@@ -458,8 +488,8 @@ fn check_convergence() -> Result<usize> {
     }
     println!(
         "convergence: {}/{} dialect pairs agree",
-        names.len() - failures,
-        names.len()
+        pairs.len() - failures,
+        pairs.len()
     );
     Ok(failures)
 }
@@ -562,6 +592,14 @@ fn check(spec: &Spec, args: &Args, totals: &mut Stats, counted: &mut usize) -> R
 ///
 /// Deliberately the defaults, plus a crate name: the corpus measures what a caller gets without
 /// having to know anything, and a gate that only passes under a tuned configuration is not a gate.
+/// The library name cargo derives from a package name.
+///
+/// Cargo's own rule, spelled once: three gates re-derived it independently before, which is
+/// three chances to disagree with cargo about what `use corpus-x::…` is called.
+pub fn lib_name(package: &str) -> String {
+    package.replace('-', "_")
+}
+
 pub fn config_for(spec: &Spec) -> progeny::Config {
     progeny::Config {
         package: progeny::Package {

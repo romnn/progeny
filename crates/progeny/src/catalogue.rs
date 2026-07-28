@@ -55,6 +55,19 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::PresenceCollapse => Wiring::Fixture(document(json!({
             "Thing": {"type": "object", "properties": {"both": {"type": ["string", "null"]}}},
         }))),
+        // The marker only costs something where the type crosses the direction it excludes, so
+        // the fixture needs an operation: a `readOnly` member in a request body.
+        BreakageClass::AccessCollapse => Wiring::Fixture(document_with(
+            json!({
+                "Pet": {"type": "object", "properties": {"id": {"type": "integer", "readOnly": true}}},
+            }),
+            "paths",
+            json!({"/pets": {"post": {
+                "operationId": "createPet",
+                "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}}},
+                "responses": {"204": {"description": "done"}},
+            }}}),
+        )),
         BreakageClass::InvalidDefault => Wiring::Fixture(document(json!({
             "Thing": {"type": "object", "properties": {"count": {"type": "integer", "default": "seven"}}},
         }))),
@@ -242,7 +255,7 @@ fn dissolved() -> Vec<(&'static str, Wiring)> {
 #[test]
 fn every_breakage_class_is_pinned_by_a_fixture_or_dated() {
     let mut undated = Vec::new();
-    for class in all_classes() {
+    for class in BreakageClass::ALL {
         match wiring(class) {
             Wiring::Fixture(document) => {
                 let produced = diagnostics_of(&document);
@@ -256,13 +269,10 @@ fn every_breakage_class_is_pinned_by_a_fixture_or_dated() {
                 );
             }
             Wiring::Arrives(reason) => undated.push(format!("{class}: waiting on {reason}")),
-            Wiring::Dissolved(document) => {
-                assert!(
-                    !diagnostics_of(&document)
-                        .iter()
-                        .any(|found| found.class() == class),
-                    "`{class}` is supposed to be dissolved, and something reported it"
-                );
+            // A dissolution has no class to be: those live in `dissolved()` under a name, and
+            // `wiring` — one arm per *variant* — can never return one.
+            Wiring::Dissolved(_) => {
+                panic!("`{class}` is a variant, and a dissolution has none")
             }
         }
     }
@@ -281,40 +291,27 @@ fn the_classes_this_architecture_dissolves_stay_dissolved() {
         };
         let output = generate(&serde_json::to_vec(&document).unwrap(), &Config::default())
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        // The dissolution's whole claim: the construct generates, rather than being handled.
+        // The dissolution's whole claim, both halves. The construct generates *faithfully* —
+        // the recursive type exists and still holds its recursion — and it generates *silently*,
+        // because a dissolved class is one no machinery had to handle: any diagnostic here means
+        // something was handled after all, and the row belongs back in the catalogue.
         assert!(
             output
                 .files
                 .values()
-                .any(|text| text.contains("pub struct")),
-            "{name} produced no types at all"
+                .any(|text| text.contains("pub struct Node") && text.contains("children")),
+            "{name}: the recursive type was not generated"
+        );
+        assert!(
+            output.diagnostics.is_empty(),
+            "{name}: a dissolved construct reported {:?}",
+            output
+                .diagnostics
+                .iter()
+                .map(|found| found.class().slug())
+                .collect::<Vec<_>>()
         );
     }
-}
-
-/// Every variant of the closed enum, read out of the enum rather than listed by hand.
-///
-/// The derived `Deserialize` names all of them when it rejects one, which makes the list a
-/// property of the type instead of a second copy that can fall behind it.
-fn all_classes() -> Vec<BreakageClass> {
-    let error = serde_json::from_value::<BreakageClass>(json!("no-such-class"))
-        .expect_err("a class that does not exist should not deserialize");
-    let message = error.to_string();
-    let listed = message
-        .split_once("expected one of ")
-        .map(|(_, rest)| rest)
-        .unwrap_or_else(|| panic!("the variant list moved: {message}"));
-    let classes: Vec<BreakageClass> = listed
-        .split(", ")
-        .filter_map(|name| name.trim().split('`').nth(1))
-        .filter_map(|slug| serde_json::from_value(json!(slug)).ok())
-        .collect();
-    assert!(
-        classes.len() > 20,
-        "only found {} classes in {message}",
-        classes.len()
-    );
-    classes
 }
 
 fn diagnostics_of(document: &Value) -> Vec<Diagnostic> {

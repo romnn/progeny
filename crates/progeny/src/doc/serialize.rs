@@ -184,17 +184,8 @@ fn path_item_to_value(store: &SchemaStore, item: &PathItem) -> Value {
     let mut out = Builder::new();
     out.set("summary", item.summary.clone());
     out.set("description", item.description.clone());
-    for (method, operation) in [
-        ("get", &item.get),
-        ("put", &item.put),
-        ("post", &item.post),
-        ("delete", &item.delete),
-        ("options", &item.options),
-        ("head", &item.head),
-        ("patch", &item.patch),
-        ("trace", &item.trace),
-    ] {
-        out.set_with(method, operation.as_ref(), |operation| {
+    for (method, operation) in item.operations() {
+        out.set_with(method.slug(), Some(operation), |operation| {
             operation_to_value(store, operation)
         });
     }
@@ -494,4 +485,188 @@ fn components_to_value(store: &SchemaStore, components: &Components) -> Value {
     });
     out.extend(&components.extensions);
     out.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use crate::diag::Ctx;
+    use crate::normalize;
+
+    /// A document exercising **every member the parser models**, on every node type.
+    ///
+    /// The schema layer pins its parse↔serialize mirror with `EVERY_KEYWORD`; this is the same
+    /// pin for the document layer, which had none — a member read by `parse.rs` and forgotten by
+    /// `serialize.rs` was invisible to every gate except corpus luck, and losslessness is this
+    /// crate's central claim. When you teach the parser a member, add it here: a member missing
+    /// from this fixture is a member whose serializer no test holds.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one maximal document, spelled member by member; splitting it would only hide members"
+    )]
+    fn maximal() -> Value {
+        json!({
+            "openapi": "3.1.0",
+            "jsonSchemaDialect": "https://spec.openapis.org/oas/3.1/dialect/base",
+            "info": {
+                "title": "Everything", "summary": "All of it", "description": "Every member.",
+                "termsOfService": "https://example.invalid/terms", "version": "1.2.3",
+                "contact": {"name": "A", "url": "https://example.invalid", "email": "a@example.invalid", "x-contact": 1},
+                "license": {"name": "MIT", "identifier": "MIT", "url": "https://example.invalid/mit", "x-license": 2},
+                "x-info": 3,
+            },
+            "servers": [{
+                "url": "https://{region}.example.invalid", "description": "one",
+                "variables": {"region": {"enum": ["eu", "us"], "default": "eu", "description": "where", "x-variable": 4}},
+                "x-server": 5,
+            }],
+            "paths": {
+                "/pets/{id}": {
+                    "summary": "One route", "description": "Its story.",
+                    "get": {
+                        "tags": ["pets"], "summary": "Read", "description": "Reads.",
+                        "externalDocs": {"description": "More", "url": "https://example.invalid/docs"},
+                        "operationId": "getPet",
+                        "parameters": [
+                            {"name": "id", "in": "path", "description": "which", "required": true,
+                             "deprecated": false, "allowEmptyValue": false, "style": "simple",
+                             "explode": false, "allowReserved": false,
+                             "schema": {"type": "string"}, "example": "seven", "x-parameter": 6},
+                            {"name": "filter", "in": "query",
+                             "examples": {"one": {"summary": "an example", "description": "of it",
+                                                  "value": {"a": 1}, "externalValue": "https://example.invalid/ex",
+                                                  "x-example": 7}},
+                             "content": {"application/json": {"schema": {"type": "object"}}}},
+                        ],
+                        "requestBody": {
+                            "description": "the body", "required": true,
+                            "content": {"application/x-www-form-urlencoded": {
+                                "schema": {"type": "object"},
+                                "example": {"a": 1},
+                                "examples": {"one": {"value": {"a": 2}}},
+                                "encoding": {"a": {
+                                    "contentType": "text/plain",
+                                    "headers": {"X-Rate": {"description": "a header", "required": true,
+                                                            "deprecated": false, "allowEmptyValue": false,
+                                                            "style": "simple", "explode": false,
+                                                            "allowReserved": false,
+                                                            "schema": {"type": "integer"},
+                                                            "example": 3, "x-header": 8}},
+                                    "style": "form", "explode": true, "allowReserved": false,
+                                    "x-encoding": 9,
+                                }},
+                                "x-media": 10,
+                            }},
+                            "x-body": 11,
+                        },
+                        "responses": {
+                            "default": {"description": "fallback"},
+                            "200": {
+                                "description": "ok",
+                                "headers": {"X-Total": {"schema": {"type": "integer"}}},
+                                "content": {"application/json": {"schema": {"type": "string"}}},
+                                "links": {"next": {"operationRef": "#/paths/~1pets~1{id}/get",
+                                                    "operationId": "getPet",
+                                                    "parameters": {"id": "$response.body#/next"},
+                                                    "requestBody": "$response.body#/body",
+                                                    "description": "the next one",
+                                                    "server": {"url": "https://example.invalid"},
+                                                    "x-link": 12}},
+                                "x-response": 13,
+                            },
+                            "x-responses": 14,
+                        },
+                        "callbacks": {"onEvent": {"{$request.body#/url}": {"post": {
+                            "responses": {"200": {"description": "ok"}},
+                        }}, "x-callback": 15}},
+                        "deprecated": true,
+                        "security": [{"petstore_auth": ["read:pets"]}],
+                        "servers": [{"url": "https://op.example.invalid"}],
+                        "x-operation": 16,
+                    },
+                    "put": {"responses": {"200": {"description": "ok"}}},
+                    "post": {"responses": {"200": {"description": "ok"}}},
+                    "delete": {"responses": {"200": {"description": "ok"}}},
+                    "options": {"responses": {"200": {"description": "ok"}}},
+                    "head": {"responses": {"200": {"description": "ok"}}},
+                    "patch": {"responses": {"200": {"description": "ok"}}},
+                    "trace": {"responses": {"200": {"description": "ok"}}},
+                    "servers": [{"url": "https://item.example.invalid"}],
+                    "parameters": [{"name": "trace", "in": "header", "schema": {"type": "string"}}],
+                    "x-item": 17,
+                },
+                "x-paths": 18,
+            },
+            "webhooks": {
+                "newPet": {"$ref": "#/components/pathItems/Hook", "summary": "a hooked item",
+                            "description": "reference members survive", "x-ref": 19},
+            },
+            "components": {
+                "schemas": {"Pet": {"type": "object", "properties": {"name": {"type": "string"}}}},
+                "responses": {"Err": {"description": "an error"}},
+                "parameters": {"Page": {"name": "page", "in": "query", "schema": {"type": "integer"}}},
+                "examples": {"One": {"value": 1}},
+                "requestBodies": {"Body": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                "headers": {"Rate": {"schema": {"type": "integer"}}},
+                "securitySchemes": {"petstore_auth": {
+                    "type": "oauth2", "description": "the flows", "name": "auth", "in": "header",
+                    "scheme": "bearer", "bearerFormat": "JWT",
+                    "flows": {
+                        "implicit": {"authorizationUrl": "https://example.invalid/auth",
+                                      "tokenUrl": "https://example.invalid/token",
+                                      "refreshUrl": "https://example.invalid/refresh",
+                                      "scopes": {"read:pets": "read"}, "x-flow": 20},
+                        "password": {"tokenUrl": "https://example.invalid/token", "scopes": {}},
+                        "clientCredentials": {"tokenUrl": "https://example.invalid/token", "scopes": {}},
+                        "authorizationCode": {"authorizationUrl": "https://example.invalid/auth",
+                                               "tokenUrl": "https://example.invalid/token", "scopes": {}},
+                        "x-flows": 21,
+                    },
+                    "openIdConnectUrl": "https://example.invalid/oidc",
+                    "x-scheme": 22,
+                }},
+                "links": {"Next": {"operationId": "getPet"}},
+                "callbacks": {"Cb": {"{$url}": {"get": {"responses": {"200": {"description": "ok"}}}}}},
+                "pathItems": {"Hook": {"post": {"responses": {"200": {"description": "ok"}}}}},
+                "x-components": 23,
+            },
+            "security": [{"petstore_auth": ["write:pets", "read:pets"]}],
+            "tags": [{"name": "pets", "description": "the pets",
+                       "externalDocs": {"description": "more", "url": "https://example.invalid/tags"},
+                       "x-tag": 24}],
+            "externalDocs": {"description": "everything else", "url": "https://example.invalid/all"},
+            "x-root": 25,
+        })
+    }
+
+    /// Parse and serialize are member-by-member mirrors, and this is the test that holds them to
+    /// it. Equality with the input proves no modelled member is dropped on the way out; the
+    /// members the parser does not model round-trip through `extensions` and prove nothing here.
+    #[test]
+    fn a_maximal_document_round_trips_member_by_member() {
+        let mut ctx = Ctx::new();
+        let input = maximal();
+        let normalized = normalize::normalize(input.clone(), &mut ctx).unwrap();
+        let parsed = super::super::parse::document(normalized, &mut ctx);
+        let output = super::document(&parsed);
+        assert_eq!(output, input);
+    }
+
+    /// The normalizer's method list is the document model's, spelled as wire members.
+    ///
+    /// `normalize` sits below `doc` and walks raw values, so it cannot use
+    /// [`super::super::PathItem::operations`]; this pins the two lists to each other instead.
+    #[test]
+    fn the_normalizer_walks_every_method_the_model_holds() {
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(maximal(), &mut ctx).unwrap();
+        let parsed = super::super::parse::document(normalized, &mut ctx);
+        let paths = parsed.document.paths.as_ref().unwrap();
+        let super::super::MaybeRef::Item(item) = &paths.items["/pets/{id}"] else {
+            panic!("the fixture writes the path item inline");
+        };
+        let walked: Vec<&str> = item.operations().map(|(method, _)| method.slug()).collect();
+        assert_eq!(walked, normalize::METHODS);
+    }
 }

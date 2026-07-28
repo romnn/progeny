@@ -104,20 +104,13 @@ fn object(mut node: Members, store: &mut SchemaStore, ctx: &mut Ctx) -> SchemaOb
     schema
 }
 
-/// The dialects progeny reads as 2020-12 without comment.
-///
-/// Real documents that set `$schema` at all set it to one of these; anything else is a claim
-/// progeny cannot honour and therefore has to surface.
-const KNOWN_DIALECTS: [&str; 2] = [
-    "https://json-schema.org/draft/2020-12/schema",
-    "https://spec.openapis.org/oas/3.1/dialect/base",
-];
-
 fn core(node: &mut Members, schema: &mut SchemaObject, store: &mut SchemaStore, ctx: &mut Ctx) {
     schema.schema_dialect = node.string("$schema", ctx);
     if let Some(dialect) = &schema.schema_dialect {
-        let bare = dialect.trim_end_matches('#');
-        if !KNOWN_DIALECTS.contains(&bare) {
+        // The known list is the normalizer's, which checks the document-level
+        // `jsonSchemaDialect` with it; this is the only place a schema's own `$schema` is read,
+        // and therefore the only place it is reported.
+        if !crate::normalize::is_known_dialect(dialect) {
             let location = ctx.child("$schema");
             ctx.report(Diagnostic::new(
                 BreakageClass::UnsupportedDialect,

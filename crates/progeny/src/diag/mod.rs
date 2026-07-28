@@ -131,6 +131,10 @@ pub enum BreakageClass {
     /// A property that is both optional and nullable, collapsed onto one `Option`, so "absent"
     /// and "present and null" become the same value.
     PresenceCollapse,
+    /// A `readOnly` or `writeOnly` property in a type that crosses the direction the marker
+    /// excludes: the one generated type serves both directions, so the member travels where the
+    /// document says it does not.
+    AccessCollapse,
     /// Two shapes whose names sanitize to the same Rust identifier.
     CollidingTypeName,
     /// A derive the caller asked every type for, on a type that cannot have it.
@@ -138,6 +142,49 @@ pub enum BreakageClass {
 }
 
 impl BreakageClass {
+    /// Every variant, for the sweeps that need the closed set as data — the catalogue iterates
+    /// this to force one pinned fixture per class.
+    ///
+    /// Completeness is held by a test beside this type: the derived `Deserialize` names every
+    /// variant when it rejects an unknown one, and the test compares that list — serde's own,
+    /// which cannot fall behind the enum — against this one, so a variant added without
+    /// extending this list fails the build's tests instead of silently narrowing every sweep.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "consumed by the catalogue and the completeness test, which are test-only"
+        )
+    )]
+    pub(crate) const ALL: [Self; 26] = [
+        Self::MalformedMember,
+        Self::MissingFinalLineBreak,
+        Self::NonFiniteNumber,
+        Self::UnsupportedDialect,
+        Self::DynamicScoping,
+        Self::DanglingRef,
+        Self::UnknownSchemaType,
+        Self::MultiParentDiscriminator,
+        Self::DiscriminatorEdgeCase,
+        Self::MultiMediaType,
+        Self::WildUnion,
+        Self::CollidingOperationId,
+        Self::QuerySerializationStyle,
+        Self::InvalidExample,
+        Self::InvalidDefault,
+        Self::UnregistrableRoute,
+        Self::LegacyTupleItems,
+        Self::LegacyExclusiveBound,
+        Self::LegacyStringFormat,
+        Self::NullableUnionBranch,
+        Self::UnsupportedConstruct,
+        Self::IrreconcilableAllOf,
+        Self::PresenceCollapse,
+        Self::AccessCollapse,
+        Self::CollidingTypeName,
+        Self::UnsatisfiableDerive,
+    ];
+
     /// The stable kebab-case name used by the JSON-lines rendering and by config deny-lists.
     #[must_use]
     pub fn slug(self) -> &'static str {
@@ -165,6 +212,7 @@ impl BreakageClass {
             Self::UnsupportedConstruct => "unsupported-construct",
             Self::IrreconcilableAllOf => "irreconcilable-all-of",
             Self::PresenceCollapse => "presence-collapse",
+            Self::AccessCollapse => "access-collapse",
             Self::CollidingTypeName => "colliding-type-name",
             Self::UnsatisfiableDerive => "unsatisfiable-derive",
         }
@@ -204,6 +252,7 @@ impl BreakageClass {
             | Self::UnsupportedConstruct
             | Self::IrreconcilableAllOf
             | Self::PresenceCollapse
+            | Self::AccessCollapse
             | Self::CollidingTypeName
             | Self::CollidingOperationId
             // Moved here at stage 7, when the router turned it into a scale class. A refusal folds
@@ -581,7 +630,7 @@ pub(crate) struct Ctx {
     /// Keyed by the sentence as well as the class: two different findings of one class stay two
     /// records, which is what keeps "`description` should be a string" from being merged with
     /// "`url` should be a string" just because both are malformed members.
-    aggregated: BTreeMap<(BreakageClass, String), usize>,
+    aggregated: BTreeMap<(BreakageClass, Action, String), usize>,
 }
 
 impl Ctx {
@@ -617,7 +666,14 @@ impl Ctx {
             self.diagnostics.push(diagnostic);
             return;
         }
-        let key = (diagnostic.class, diagnostic.fold_key().to_owned());
+        // The action is part of the identity, not a rider: `Config::denied` filters on it, and
+        // two sites folding on one key while disagreeing about the action would hand the deny
+        // policy whichever action happened to be reported first.
+        let key = (
+            diagnostic.class,
+            diagnostic.action,
+            diagnostic.fold_key().to_owned(),
+        );
         if let Some(&index) = self.aggregated.get(&key)
             && let Some(existing) = self.diagnostics.get_mut(index)
         {
@@ -650,6 +706,55 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind};
+
+    /// `ALL` really is all of them, by serde's own count.
+    ///
+    /// The derived `Deserialize` names every variant when it rejects an unknown one — a list
+    /// that cannot fall behind the enum. Extracting it here, once, is what lets everything else
+    /// iterate `ALL` instead of parsing an error message at each site.
+    #[test]
+    fn the_class_list_is_complete() {
+        let error = serde_json::from_value::<BreakageClass>(serde_json::json!("no-such-class"))
+            .expect_err("a class that does not exist should not deserialize");
+        let message = error.to_string();
+        let listed = message
+            .split_once("expected one of ")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("the variant list moved: {message}"));
+        let named: std::collections::BTreeSet<&str> = listed
+            .split(", ")
+            .filter_map(|name| name.trim().split('`').nth(1))
+            .collect();
+        let all: std::collections::BTreeSet<&str> = BreakageClass::ALL
+            .iter()
+            .map(|class| class.slug())
+            .collect();
+        assert_eq!(named, all);
+        assert_eq!(BreakageClass::ALL.len(), named.len());
+    }
+
+    /// `slug()` and the derived serde names are one table, not two that happen to agree.
+    ///
+    /// The deny lists deserialize class names through serde while build output prints them
+    /// through `slug()`; a variant whose kebab-casing is not what `slug()` spelled would print a
+    /// name the configuration file then rejects as unknown.
+    #[test]
+    fn every_slug_is_the_serde_name() {
+        for class in BreakageClass::ALL {
+            let parsed: BreakageClass = serde_json::from_value(serde_json::json!(class.slug()))
+                .unwrap_or_else(|error| {
+                    panic!("`{}` is not the serde spelling: {error}", class.slug())
+                });
+            assert_eq!(parsed, class);
+        }
+        for action in [Action::Repair, Action::Degrade, Action::Warn] {
+            let parsed: Action = serde_json::from_value(serde_json::json!(action.slug()))
+                .unwrap_or_else(|error| {
+                    panic!("`{}` is not the serde spelling: {error}", action.slug())
+                });
+            assert_eq!(parsed, action);
+        }
+    }
 
     #[test]
     fn json_line_has_a_fixed_key_order_and_escapes_detail() {

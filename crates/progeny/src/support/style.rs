@@ -52,13 +52,27 @@ pub fn query_pairs(
             (Style::SpaceDelimited, false) => joined(name, items, " "),
             (Style::PipeDelimited, false) => joined(name, items, "|"),
             // `spaceDelimited` and `pipeDelimited` with `explode: true` are indistinguishable from
-            // exploded `form`, which is what the specification says they become.
-            (_, true) => items
+            // exploded `form`, which is what the specification says they become. Spelled out
+            // rather than wildcarded: a style added to the enum and not to this table would
+            // otherwise be silently encoded as `form`, which is a request line the document did
+            // not ask for.
+            (
+                Style::Simple
+                | Style::Label
+                | Style::Matrix
+                | Style::SpaceDelimited
+                | Style::PipeDelimited
+                | Style::DeepObject,
+                true,
+            ) => items
                 .iter()
                 .filter(|item| !item.is_null())
                 .map(|item| (name.to_owned(), scalar(item)))
                 .collect(),
-            (_, false) => joined(name, items, ","),
+            (
+                Style::Form | Style::Simple | Style::Label | Style::Matrix | Style::DeepObject,
+                false,
+            ) => joined(name, items, ","),
         },
         Value::Object(members) => match (style, explode) {
             // `a[x]=1`: the one style that keeps the member names addressable.
@@ -68,12 +82,28 @@ pub fn query_pairs(
                 .map(|(key, value)| (format!("{name}[{key}]"), scalar(value)))
                 .collect(),
             // Exploded form drops the parameter name entirely: each member becomes its own pair.
-            (_, true) => members
+            (
+                Style::Form
+                | Style::Simple
+                | Style::Label
+                | Style::Matrix
+                | Style::SpaceDelimited
+                | Style::PipeDelimited,
+                true,
+            ) => members
                 .iter()
                 .filter(|(_, value)| !value.is_null())
                 .map(|(key, value)| (key.clone(), scalar(value)))
                 .collect(),
-            (_, false) => {
+            (
+                Style::Form
+                | Style::Simple
+                | Style::Label
+                | Style::Matrix
+                | Style::SpaceDelimited
+                | Style::PipeDelimited,
+                false,
+            ) => {
                 let flat: Vec<String> = members
                     .iter()
                     .flat_map(|(key, value)| [key.clone(), scalar(value)])
@@ -100,7 +130,12 @@ pub struct FormSpec {
     pub style: Style,
     pub explode: bool,
     /// Whether the member's schema declares an array, which the wire alone cannot say.
-    pub array: bool,
+    ///
+    /// `None` when the document declared the row without declaring the member — an `encoding`
+    /// entry can name a member the schema only captures through `additionalProperties`, and a row
+    /// that guessed `false` there made the reader drop every occurrence after the first. `None`
+    /// hands the question to the repetition heuristic, exactly as if the row were absent.
+    pub array: Option<bool>,
 }
 
 /// An `application/x-www-form-urlencoded` body.
@@ -211,7 +246,16 @@ pub fn from_query(
             ) => split_one(first, ','),
             // Exploded: one occurrence per element, however many arrived — a one-element array
             // reaches the handler as a one-element array, not as its element.
-            (_, true) => split_values(&mine),
+            (
+                Style::Form
+                | Style::Simple
+                | Style::Label
+                | Style::Matrix
+                | Style::SpaceDelimited
+                | Style::PipeDelimited
+                | Style::DeepObject,
+                true,
+            ) => split_values(&mine),
         }
     } else {
         // A scalar is the first occurrence's text, commas and all.
@@ -289,22 +333,19 @@ pub fn query_object(query: &str, specs: &[FormSpec]) -> Value {
         }
         let spec = specs.iter().find(|spec| spec.name == name);
         let (style, explode) = spec.map_or((Style::Form, true), |spec| (spec.style, spec.explode));
-        // The spec table now carries every declared member's shape, derived from the body's own
+        // The spec table carries every declared member's shape, derived from the body's own
         // contract — the wire probe caught the cost of guessing on `posthog`, where a one-element
-        // array member is byte-identical to a scalar. The repetition heuristic survives only for
-        // members outside the table: an `additionalProperties` member has no declared shape
-        // anywhere, and repetition is the one signal the wire itself offers.
-        let array = spec.map_or_else(
-            || {
-                query
-                    .split('&')
-                    .filter_map(|pair| pair.split_once('='))
-                    .filter(|(key, _)| decode(key) == name)
-                    .count()
-                    > 1
-            },
-            |spec| spec.array,
-        );
+        // array member is byte-identical to a scalar. The repetition heuristic survives only where
+        // no schema answered: a member outside the table, or a row whose member the schema only
+        // captures — repetition is the one signal the wire itself offers there.
+        let array = spec.and_then(|spec| spec.array).unwrap_or_else(|| {
+            query
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .filter(|(key, _)| decode(key) == name)
+                .count()
+                > 1
+        });
         if let Some(value) = from_query(query, &name, style, explode, array) {
             members.insert(name, value);
         }
@@ -319,7 +360,11 @@ pub fn path_segment(value: &Value, style: Style, explode: bool) -> String {
         Style::Label => (".", if explode { "." } else { "," }, explode),
         Style::Matrix => (";", if explode { ";" } else { "," }, true),
         // `simple`, and anything else that reaches a path: bare, comma separated.
-        _ => ("", ",", explode),
+        Style::Form
+        | Style::Simple
+        | Style::SpaceDelimited
+        | Style::PipeDelimited
+        | Style::DeepObject => ("", ",", explode),
     };
     let body = match value {
         Value::Null => String::new(),
@@ -449,7 +494,7 @@ fn encode(text: &str) -> String {
 mod tests {
     use super::{
         FormSpec, Style, cookie_pair, encode, form_body, header_value, matrix_segment,
-        path_segment, query_pairs,
+        path_segment, query_object, query_pairs,
     };
     use serde_json::json;
 
@@ -664,9 +709,30 @@ mod tests {
             name: "tag",
             style: Style::SpaceDelimited,
             explode: false,
-            array: true,
+            array: Some(true),
         }];
         assert_eq!(form_body(&json!({"tag": ["a", "b"]}), &specs), "tag=a%20b");
+    }
+
+    /// A row that does not know the member's shape hands the question back to repetition.
+    ///
+    /// An `encoding` entry can name a member the schema only captures through
+    /// `additionalProperties`, so the row carries `style` and `explode` and no shape. A guessed
+    /// `array: false` here made the reader keep only the first occurrence — adding an `encoding`
+    /// entry to a document silently dropped data its absence had preserved.
+    #[test]
+    fn a_spec_without_a_shape_lets_repetition_decide() {
+        let specs = [FormSpec {
+            name: "tag",
+            style: Style::Form,
+            explode: true,
+            array: None,
+        }];
+        assert_eq!(
+            query_object("tag=a&tag=b", &specs),
+            json!({"tag": ["a", "b"]})
+        );
+        assert_eq!(query_object("tag=a", &specs), json!({"tag": "a"}));
     }
 
     /// An object member keeps its name on the wire, holding its JSON.

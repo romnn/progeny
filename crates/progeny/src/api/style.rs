@@ -118,13 +118,6 @@ impl StyleContract {
     /// Whether this parameter's name never reaches the wire: an exploded `form` object writes each
     /// member as its own query key, so a reader looking the parameter up by name finds nothing —
     /// the grouping is erased by the encoding itself, not by any defect in the reader.
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "the wire probe is the only caller so far, and it is feature-gated"
-        )
-    )]
     pub(crate) fn erased_by_explosion(self) -> bool {
         matches!(
             (self.style, self.explode, self.shape),

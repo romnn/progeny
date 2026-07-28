@@ -177,12 +177,21 @@ fn version(root: &Map<String, Value>) -> Result<Version, RejectError> {
     Ok(Version { major, minor, text })
 }
 
-const METHODS: [&str; 8] = [
+/// The path-item members that hold operations, as the wire spells them.
+///
+/// This module sits below `doc` and walks raw values, so it cannot ask the document model; the
+/// mirror test beside `doc::serialize` pins this list to `PathItem::operations` instead, because
+/// a method missing here is a method whose schemas silently skip every rewrite.
+pub(crate) const METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 
 /// Every place a subschema can appear under exactly one key.
-const SUBSCHEMA: [&str; 11] = [
+///
+/// The three lists below are the model's applicators spelled as keywords, and the test beside
+/// `schema::serialize`'s maximal fixture holds them to that — a keyword the model holds that
+/// these lists miss is a position whose rewrites silently never run.
+pub(crate) const SUBSCHEMA: [&str; 11] = [
     "additionalProperties",
     "contains",
     "contentSchema",
@@ -197,11 +206,11 @@ const SUBSCHEMA: [&str; 11] = [
 ];
 
 /// Every place an array of subschemas can appear.
-const SUBSCHEMA_ARRAY: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
+pub(crate) const SUBSCHEMA_ARRAY: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
 
 /// Every place a name-to-subschema map can appear. `definitions` is not an OpenAPI keyword, but
 /// tools that lower JSON Schema into 3.0 emit it, and descending into it costs nothing.
-const SUBSCHEMA_MAP: [&str; 5] = [
+pub(crate) const SUBSCHEMA_MAP: [&str; 5] = [
     "$defs",
     "definitions",
     "dependentSchemas",
@@ -432,14 +441,9 @@ impl Walk<'_> {
         let Value::Object(map) = value else {
             return;
         };
-        // A schema may declare its own dialect. Progeny implements one; anything else is read as
-        // that one, which is sound where the dialects agree and worth saying where they might not.
-        if let Some(Value::String(dialect)) = map.get("$schema")
-            && !is_known_dialect(dialect)
-        {
-            let location = self.at.child("$schema");
-            report_dialect(self.ctx, location, dialect);
-        }
+        // A schema may declare its own dialect (`$schema`); that member is read and reported by
+        // the schema parser, which is the layer that stores it. Reporting it here too once made
+        // one member into two records.
         if self.dialect_30 {
             // Before `nullable` runs on the branches themselves and takes the evidence away.
             self.repair_null_branches(map);
@@ -553,24 +557,12 @@ impl Walk<'_> {
     /// documented normalization, and anywhere else it is a defect that would otherwise leave the
     /// bound uninterpretable.
     fn repair_exclusive_bounds(&mut self, map: &mut Map<String, Value>) {
-        for (flag, bound) in [
-            ("exclusiveMinimum", "minimum"),
-            ("exclusiveMaximum", "maximum"),
-        ] {
-            let Some(Value::Bool(exclusive)) = map.get(flag) else {
-                continue;
-            };
-            let exclusive = *exclusive;
-            let location = self.at.child(flag);
-            map.remove(flag);
-            if exclusive && let Some(value) = map.remove(bound) {
-                map.insert(flag.to_owned(), value);
-            }
+        for (flag, bound) in exclusive_bounds(map) {
             // The detail carries no values: two occurrences of one finding have to render
             // identically or they cannot be aggregated into one record.
             self.report(
                 BreakageClass::LegacyExclusiveBound,
-                location,
+                self.at.child(flag),
                 &format!(
                     "`{flag}` is a boolean, which is the 3.0 form modifying a sibling `{bound}`; \
                      2020-12 has no boolean there, so it was rewritten as the numeric bound"
@@ -591,27 +583,14 @@ impl Walk<'_> {
     /// *which property* is a file — a fact the media-type key cannot carry. Left unread, those
     /// members become text parts, which is a request built wrong rather than a type named oddly.
     fn repair_string_format(&mut self, map: &mut Map<String, Value>) {
-        let Some(format) = map.get("format").and_then(Value::as_str) else {
+        let Some(already) = string_format(map) else {
             return;
         };
-        let (key, value) = match format {
-            "byte" => ("contentEncoding", "base64"),
-            "binary" => ("contentMediaType", "application/octet-stream"),
-            _ => return,
-        };
-        if !type_includes(map, "string") {
-            return;
-        }
-        let location = self.at.child("format");
-        map.remove("format");
-        let already = map.contains_key(key);
-        map.entry(key.to_owned())
-            .or_insert_with(|| Value::String(value.to_owned()));
         // The detail carries no values: two occurrences of one finding have to render identically
         // or they cannot be aggregated into one record.
         self.report(
             BreakageClass::LegacyStringFormat,
-            location,
+            self.at.child("format"),
             if already {
                 "`format` is the 3.0 spelling of a fact 2020-12 keeps elsewhere, and the 2020-12 \
                  member is already present; the `format` was dropped"
@@ -628,7 +607,11 @@ impl Walk<'_> {
 /// 2020-12 and OpenAPI 3.1's own base dialect, with or without the empty fragment both are written
 /// with. Everything else is read *as* 2020-12 anyway — the model holds keywords it does not
 /// interpret — so the finding is a warning about a possible disagreement rather than a refusal.
-fn is_known_dialect(declared: &str) -> bool {
+///
+/// The one list for both positions a dialect can be declared in: the document's
+/// `jsonSchemaDialect`, checked here, and a schema's own `$schema`, checked by the schema parser.
+/// Two copies of this list once drifted into two differently worded reports of one member.
+pub(crate) fn is_known_dialect(declared: &str) -> bool {
     const KNOWN: [&str; 2] = [
         "https://json-schema.org/draft/2020-12/schema",
         "https://spec.openapis.org/oas/3.1/dialect/base",
@@ -717,26 +700,31 @@ fn nullable(map: &mut Map<String, Value>) {
 
 /// 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum` modify a sibling bound; 3.1's are the
 /// bound.
-fn exclusive_bounds(map: &mut Map<String, Value>) {
+/// The one boolean-bound rewrite, returning the flags it rewrote.
+///
+/// Shared by the 3.0 path, where it is the documented normalization and silent, and by the
+/// wrong-dialect repair, whose caller reports each returned flag. One table, one transformation:
+/// these were two copies once, and a third spelling added to one of them would have left 3.0
+/// documents — the ones the rewrite exists for — silently unrepaired.
+fn exclusive_bounds(map: &mut Map<String, Value>) -> Vec<(&'static str, &'static str)> {
+    let mut rewritten = Vec::new();
     for (flag, bound) in [
         ("exclusiveMinimum", "minimum"),
         ("exclusiveMaximum", "maximum"),
     ] {
-        match map.get(flag) {
-            Some(Value::Bool(true)) => {
-                map.remove(flag);
-                if let Some(value) = map.remove(bound) {
-                    map.insert(flag.to_owned(), value);
-                }
-            }
-            // `exclusive*: false` means the sibling bound is inclusive, which is what a bare
-            // bound already means.
-            Some(Value::Bool(false)) => {
-                map.remove(flag);
-            }
-            _ => {}
+        let Some(Value::Bool(exclusive)) = map.get(flag) else {
+            continue;
+        };
+        // `exclusive*: false` means the sibling bound is inclusive, which is what a bare bound
+        // already means, so the flag is simply dropped.
+        let exclusive = *exclusive;
+        map.remove(flag);
+        if exclusive && let Some(value) = map.remove(bound) {
+            map.insert(flag.to_owned(), value);
         }
+        rewritten.push((flag, bound));
     }
+    rewritten
 }
 
 /// 3.0's schema-level `example` is 3.1's `examples`, which is an array.
@@ -752,26 +740,28 @@ fn example(map: &mut Map<String, Value>) {
 /// 3.0 says "this string is base64" and "this string is bytes" with `format`; 3.1 says the first
 /// with `contentEncoding` and the second at the media-type level, which is where 3.0 and 3.1
 /// genuinely differ about *where* the fact lives.
-fn string_format(map: &mut Map<String, Value>) {
+///
+/// The one table and the one rewrite, shared by the silent 3.0 path and the reported
+/// wrong-dialect repair; `Some(already)` says a rewrite happened and whether the 2020-12 member
+/// was already present (the `format` is then dropped rather than moved), which is exactly the
+/// split the repair's wording needs.
+fn string_format(map: &mut Map<String, Value>) -> Option<bool> {
     if !type_includes(map, "string") {
-        return;
+        return None;
     }
-    match map.get("format").and_then(Value::as_str) {
-        Some("byte") => {
-            map.remove("format");
-            map.entry("contentEncoding")
-                .or_insert_with(|| Value::String("base64".to_owned()));
-        }
-        // 3.1's replacement for `format: binary`. Not simply dropped: a
-        // multipart body marks *which property* is a file this way, and the
-        // media-type key cannot carry a per-property fact.
-        Some("binary") => {
-            map.remove("format");
-            map.entry("contentMediaType")
-                .or_insert_with(|| Value::String("application/octet-stream".to_owned()));
-        }
-        _ => {}
-    }
+    let (key, value) = match map.get("format").and_then(Value::as_str)? {
+        "byte" => ("contentEncoding", "base64"),
+        // 3.1's replacement for `format: binary`. Not simply dropped: a multipart body marks
+        // *which property* is a file this way, and the media-type key cannot carry a
+        // per-property fact.
+        "binary" => ("contentMediaType", "application/octet-stream"),
+        _ => return None,
+    };
+    map.remove("format");
+    let already = map.contains_key(key);
+    map.entry(key.to_owned())
+        .or_insert_with(|| Value::String(value.to_owned()));
+    Some(already)
 }
 
 fn type_includes(map: &Map<String, Value>, name: &str) -> bool {

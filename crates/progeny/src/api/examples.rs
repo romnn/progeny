@@ -14,7 +14,6 @@
 
 use serde_json::Value;
 
-use crate::contract::Contracts;
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{Document, MaybeRef, MediaType, Operation, PathItem};
 use crate::resolve::ResolvedDocument;
@@ -29,15 +28,10 @@ use crate::shape::{Shape, ShapeRef, Shapes, Struct, Union};
 pub(super) fn accepts(
     resolved: &ResolvedDocument,
     shapes: &Shapes,
-    contracts: &Contracts,
     value: &Value,
     shape: &Shape,
 ) -> bool {
-    let check = Check {
-        resolved,
-        shapes,
-        contracts,
-    };
+    let check = Check { resolved, shapes };
     check.mismatch(value, shape).is_none()
 }
 
@@ -50,43 +44,23 @@ pub(super) fn accepts(
 pub(super) fn contradiction(
     resolved: &ResolvedDocument,
     shapes: &Shapes,
-    contracts: &Contracts,
     id: SchemaId,
     value: &Value,
 ) -> Option<String> {
-    let check = Check {
-        resolved,
-        shapes,
-        contracts,
-    };
+    let check = Check { resolved, shapes };
     let key = crate::shape::key_of(resolved, id);
     check.mismatch(value, shapes.get(&key)?)
 }
 
 /// Check every example the API surface carries against the schema beside it.
-pub(super) fn report(
-    resolved: &ResolvedDocument,
-    shapes: &Shapes,
-    contracts: &Contracts,
-    ctx: &mut Ctx,
-) {
-    let check = Check {
-        resolved,
-        shapes,
-        contracts,
-    };
+pub(super) fn report(resolved: &ResolvedDocument, shapes: &Shapes, ctx: &mut Ctx) {
+    let check = Check { resolved, shapes };
     check.document(resolved.document(), ctx);
 }
 
 struct Check<'a> {
     resolved: &'a ResolvedDocument,
     shapes: &'a Shapes,
-    #[expect(
-        dead_code,
-        reason = "held so the check can move to the contract when the harness needs the Rust \
-                  type's opinion rather than the shape's"
-    )]
-    contracts: &'a Contracts,
 }
 
 impl Check<'_> {
@@ -107,19 +81,8 @@ impl Check<'_> {
     }
 
     fn path_item(&self, item: &PathItem, at: &JsonPointer, ctx: &mut Ctx) {
-        for (method, operation) in [
-            ("get", &item.get),
-            ("put", &item.put),
-            ("post", &item.post),
-            ("delete", &item.delete),
-            ("options", &item.options),
-            ("head", &item.head),
-            ("patch", &item.patch),
-            ("trace", &item.trace),
-        ] {
-            if let Some(operation) = operation {
-                self.operation(operation, &at.child(method), ctx);
-            }
+        for (method, operation) in item.operations() {
+            self.operation(operation, &at.child(method.slug()), ctx);
         }
     }
 

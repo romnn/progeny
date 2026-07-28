@@ -100,10 +100,7 @@ impl Build<'_> {
             }
         };
 
-        for (method, operation) in methods(item) {
-            let Some(operation) = operation else {
-                continue;
-            };
+        for (method, operation) in item.operations() {
             let at = at.child(method.slug());
             if let Some(built) = self.operation(operation, item, method, &template, route, &at, ctx)
             {
@@ -319,6 +316,29 @@ impl Build<'_> {
                     continue;
                 }
             };
+            // Defined by OpenAPI and writable by the client — and still a degradation, because
+            // the wire erases the parameter's name: an exploded `form` object's members travel
+            // as their own query keys, and no server can tell them from any other member. The
+            // handler's field is permanently absent; the parameter is kept because the calling
+            // side is whole.
+            if style.erased_by_explosion() {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::QuerySerializationStyle,
+                    Action::Degrade,
+                    at.child("parameters").child(name.clone()),
+                    if required {
+                        "the parameter is an exploded `form` object, whose members travel under \
+                         their own names with the parameter's name erased, so the generated \
+                         handler can never see it; it is required, so the handler rejects every \
+                         request and only the calling side of this operation is servable"
+                    } else {
+                        "the parameter is an exploded `form` object, whose members travel under \
+                         their own names with the parameter's name erased, so the generated \
+                         handler can never see it; it is optional, so the handler runs with the \
+                         member always absent"
+                    },
+                ));
+            }
             params.push(ParamContract {
                 rust_name: used.unique(RustIdent::field(&name)),
                 wire_name: name,
@@ -512,18 +532,24 @@ impl Build<'_> {
                     wire_name: field.wire_name.clone(),
                     style,
                     explode,
-                    array: matches!(param_shape(&field.ty, self.contracts), ParamShape::Array),
+                    array: Some(matches!(
+                        param_shape(&field.ty, self.contracts),
+                        ParamShape::Array
+                    )),
                 });
             }
         }
         // `encoding` entries that name no declared member — a captured `additionalProperties`
-        // member can still carry a row — keep the reach the encoding-only version had.
+        // member can still carry a row — keep the reach the encoding-only version had. Nothing
+        // here knows the member's shape, and the row says so rather than guessing: a guessed
+        // `false` once made the reader drop every repeated occurrence after the first, which is a
+        // regression bought by *adding* an `encoding` entry to a document.
         for (name, (style, explode)) in declared {
             specs.push(FormSpec {
                 wire_name: name,
                 style,
                 explode,
-                array: false,
+                array: None,
             });
         }
         specs
@@ -715,20 +741,6 @@ impl Build<'_> {
             .cloned()
             .unwrap_or(TypeRef::Value)
     }
-}
-
-/// The methods of one path item, in a fixed order.
-fn methods(item: &PathItem) -> [(Method, Option<&Operation>); 8] {
-    [
-        (Method::Get, item.get.as_ref()),
-        (Method::Put, item.put.as_ref()),
-        (Method::Post, item.post.as_ref()),
-        (Method::Delete, item.delete.as_ref()),
-        (Method::Options, item.options.as_ref()),
-        (Method::Head, item.head.as_ref()),
-        (Method::Patch, item.patch.as_ref()),
-        (Method::Trace, item.trace.as_ref()),
-    ]
 }
 
 /// Where a media type sits in the preference order. Lower wins.
@@ -998,6 +1010,37 @@ mod tests {
                 .iter()
                 .any(|found| found.class() == crate::BreakageClass::QuerySerializationStyle)
         );
+    }
+
+    /// An exploded `form` object is defined, writable — and erased: its members travel under
+    /// their own names, so no server can read the parameter back. The parameter stays (the
+    /// calling side is whole) and the degradation is said out loud; it used to ship silently,
+    /// with the handler's field permanently absent.
+    #[test]
+    fn an_exploded_form_object_parameter_is_kept_and_its_erasure_is_reported() {
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/videos": {
+                "get": {
+                    "operationId": "streamVideo",
+                    "parameters": [
+                        {"name": "streamOptions", "in": "query",
+                         "schema": {"type": "object", "properties": {"bitrate": {"type": "integer"}}}},
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                },
+            },
+        })));
+        // The parameter survives — only the serving side is degraded.
+        assert_eq!(model.operations().len(), 1);
+        assert_eq!(model.operations()[0].params.len(), 1);
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::QuerySerializationStyle)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("erased"), "{found:#?}");
+        assert!(found[0].contains("always absent"), "{found:#?}");
     }
 
     #[test]

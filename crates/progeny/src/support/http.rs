@@ -275,11 +275,3 @@ pub async fn decode<T: ::serde::de::DeserializeOwned>(
     let value = ::serde_json::from_slice(slice).map_err(|error| DecodeError::new(status, error))?;
     Ok(ResponseValue::new(status, headers, value))
 }
-
-/// The same, for a declared error arm.
-#[doc(hidden)]
-pub async fn decode_error<T: ::serde::de::DeserializeOwned>(
-    response: ::reqwest::Response,
-) -> Result<ResponseValue<T>, DecodeError> {
-    decode(response).await
-}

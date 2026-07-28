@@ -26,6 +26,10 @@ pub struct Args {
     /// Write the example crate and stop, without compiling or running it.
     #[arg(long)]
     generate_only: bool,
+
+    /// Which serde strategy to generate with, rather than the configuration default.
+    #[arg(long, value_name = "STRATEGY")]
+    serde: Option<crate::corpus::SerdeChoice>,
 }
 
 /// The document the example is built from: committed, tiny, and exercising all four locations.
@@ -34,42 +38,27 @@ const SUBJECT: &str = "petstore-31";
 pub fn run(args: &Args) -> Result<()> {
     crate::generated::require_cargo()?;
 
-    let specs = crate::corpus::load_manifest()?;
-    let spec = specs
-        .iter()
-        .find(|spec| spec.name == SUBJECT)
-        .with_context(|| format!("no corpus document named `{SUBJECT}`"))?;
-    let path = crate::corpus::document_path(spec);
-    let bytes = std::fs::read(&path).with_context(|| format!("reading {path}"))?;
+    let documents = crate::corpus::selected(&[SUBJECT.to_owned()])?;
+    let (spec, bytes) = documents
+        .first()
+        .context("the subject resolves to itself")?;
 
-    let config = crate::corpus::config_for(spec);
-    let output = progeny::generate(&bytes, &config).context("generating the example crate")?;
+    let mut config = crate::corpus::config_for(spec);
+    if let Some(choice) = args.serde {
+        config.serde_impl = choice.into();
+    }
+    let output = progeny::generate(bytes, &config).context("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
-    // The example needs a runtime and a socket, which a generated crate has no business declaring:
-    // it is the *consumer* who chooses those. Appended to the manifest here for the same reason the
-    // scratch crates get an empty `[workspace]` table — the harness's needs are not the product's.
-    let manifest = directory.join("Cargo.toml");
-    let existing =
-        std::fs::read_to_string(&manifest).with_context(|| format!("reading {manifest}"))?;
-    std::fs::write(
-        &manifest,
-        format!(
-            "{existing}\n[dev-dependencies]\n\
-             tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"net\"] }}\n"
-        ),
-    )
-    .with_context(|| format!("writing {manifest}"))?;
-
-    let tests = directory.join("tests");
-    std::fs::create_dir_all(&tests).with_context(|| format!("creating {tests}"))?;
-    let file = tests.join("both_halves.rs");
-    std::fs::write(&file, test_source(&config.package.name))
-        .with_context(|| format!("writing {file}"))?;
+    crate::generated::write_wire_test(
+        &directory,
+        "both_halves.rs",
+        &test_source(&config.package.name),
+    )?;
 
     println!("example: {SUBJECT}, both halves, at {directory}");
     if args.generate_only {
-        println!("  written but not run: {file}");
+        println!("  written but not run: {directory}/tests/both_halves.rs");
         return Ok(());
     }
 
@@ -109,7 +98,7 @@ pub fn run(args: &Args) -> Result<()> {
 /// mistake in them. This one says what a petstore request looks like in plain Rust, and it is wrong
 /// exactly when progeny is.
 fn test_source(krate: &str) -> String {
-    let krate = krate.replace('-', "_");
+    let krate = crate::corpus::lib_name(krate);
     let mut out = String::new();
     let _ = writeln!(
         out,

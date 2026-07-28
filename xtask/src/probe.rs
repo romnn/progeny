@@ -31,53 +31,45 @@ pub struct Args {
     /// Write the probe crates and stop, without compiling or running anything.
     #[arg(long)]
     generate_only: bool,
+
+    /// Which serde strategy to generate with, rather than the configuration default.
+    ///
+    /// A serde-path defect that shows up only over a socket — a rejection rather than a payload
+    /// mismatch — is exactly this gate's class, and until this flag the request-sending gates
+    /// only ever drove the default strategy.
+    #[arg(long, value_name = "STRATEGY")]
+    serde: Option<crate::corpus::SerdeChoice>,
 }
 
 pub fn run(args: &Args) -> Result<()> {
     crate::generated::require_cargo()?;
 
-    let manifest = crate::corpus::load_manifest()?;
-    let selected: Vec<String> = if args.specs.is_empty() {
+    let wanted: Vec<String> = if args.specs.is_empty() {
         crate::corpus::quick_tier()?
     } else {
         args.specs.clone()
     };
+    let documents = crate::corpus::selected(&wanted)?;
 
     let mut failures = 0usize;
-    for name in &selected {
-        let spec = manifest
-            .iter()
-            .find(|spec| &spec.name == name)
-            .with_context(|| format!("no corpus document named `{name}`"))?;
-        let path = crate::corpus::document_path(spec);
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {path}"))?;
-        let config = crate::corpus::config_for(spec);
+    for (spec, bytes) in &documents {
+        let name = &spec.name;
+        let mut config = crate::corpus::config_for(spec);
+        if let Some(choice) = args.serde {
+            config.serde_impl = choice.into();
+        }
 
-        let plan = progeny::harness::probe(&bytes, &config)
+        let plan = progeny::harness::probe(bytes, &config)
             .with_context(|| format!("planning the probe for {name}"))?;
         let output =
-            progeny::generate(&bytes, &config).with_context(|| format!("generating {name}"))?;
+            progeny::generate(bytes, &config).with_context(|| format!("generating {name}"))?;
         let directory = crate::generated::write(&format!("probe-{name}"), &output)?;
 
-        // The probe needs a runtime and a socket, which are the consumer's choices, not the
-        // product's — the same appendix the example crate gets.
-        let manifest_path = directory.join("Cargo.toml");
-        let existing = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("reading {manifest_path}"))?;
-        std::fs::write(
-            &manifest_path,
-            format!(
-                "{existing}\n[dev-dependencies]\n\
-                 tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"net\"] }}\n"
-            ),
-        )
-        .with_context(|| format!("writing {manifest_path}"))?;
-
-        let tests = directory.join("tests");
-        std::fs::create_dir_all(&tests).with_context(|| format!("creating {tests}"))?;
-        let file = tests.join("probe.rs");
-        std::fs::write(&file, render(&config.package.name, &plan))
-            .with_context(|| format!("writing {file}"))?;
+        crate::generated::write_wire_test(
+            &directory,
+            "probe.rs",
+            &render(&config.package.name, &plan),
+        )?;
 
         let driven = plan
             .operations
@@ -101,7 +93,7 @@ pub fn run(args: &Args) -> Result<()> {
             );
         }
         if args.generate_only {
-            println!("         written but not run: {file}");
+            println!("         written but not run: {directory}/tests/probe.rs");
             continue;
         }
 
@@ -128,7 +120,7 @@ pub fn run(args: &Args) -> Result<()> {
     println!(
         "probe: every driven operation of {} documents extracts cleanly and answers with its \
          declared status",
-        selected.len()
+        documents.len()
     );
     Ok(())
 }
@@ -136,7 +128,7 @@ pub fn run(args: &Args) -> Result<()> {
 /// The probe test file: the double implementing every servable operation, then one driver test per
 /// driven one.
 fn render(krate: &str, plan: &Probe) -> String {
-    let krate = krate.replace('-', "_");
+    let krate = crate::corpus::lib_name(krate);
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -168,8 +160,10 @@ fn render(krate: &str, plan: &Probe) -> String {
     }
     out.push_str("}\n");
     for operation in &plan.operations {
-        if operation.skip.is_none() {
-            out.push_str(&driver(operation));
+        if operation.skip.is_none()
+            && let Some(answer) = &operation.response.answer
+        {
+            out.push_str(&driver(operation, answer));
         }
     }
     out
@@ -186,13 +180,9 @@ fn handler(operation: &ProbeOp) -> String {
         // An optional body reaches the trait as an `Option`, exactly like an optional parameter
         // reaches its group struct.
         if body.required {
-            let _ = write!(arguments, ", body: {}", in_crate(&body.ty));
+            let _ = write!(arguments, ", body: {}", body.ty);
         } else {
-            let _ = write!(
-                arguments,
-                ", body: ::std::option::Option<{}>",
-                in_crate(&body.ty)
-            );
+            let _ = write!(arguments, ", body: ::std::option::Option<{}>", body.ty);
         }
     }
     let _ = write!(
@@ -205,6 +195,16 @@ fn handler(operation: &ProbeOp) -> String {
         out.push_str("    }\n");
         return out;
     }
+    // A plan with no skip carries an answer; the type makes reading a sentinel impossible, and
+    // this keeps an answerless method honest if that invariant ever moves.
+    let Some(answer) = &operation.response.answer else {
+        let _ = writeln!(
+            out,
+            "        unimplemented!(\"the plan carries no answer\")"
+        );
+        out.push_str("    }\n");
+        return out;
+    };
     for group in &operation.groups {
         for field in &group.optional_fields {
             let _ = writeln!(
@@ -226,16 +226,16 @@ fn handler(operation: &ProbeOp) -> String {
         out,
         "        server::{}::{}(value::<{}>({}))",
         operation.response.enum_name,
-        operation.response.variant,
-        in_crate(&operation.response.ty),
-        json_literal(&operation.response.json),
+        answer.variant,
+        answer.ty,
+        json_literal(&answer.json),
     );
     out.push_str("    }\n");
     out
 }
 
 /// One driver test: set every parameter, send, and expect the declared status back.
-fn driver(operation: &ProbeOp) -> String {
+fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
@@ -248,7 +248,7 @@ fn driver(operation: &ProbeOp) -> String {
             out,
             "\n        .{}(value::<{}>({}))",
             setter.setter,
-            in_crate(&setter.ty),
+            setter.ty,
             json_literal(&setter.json)
         );
     }
@@ -256,7 +256,7 @@ fn driver(operation: &ProbeOp) -> String {
         let _ = write!(
             out,
             "\n        .body(value::<{}>({}))",
-            in_crate(&body.ty),
+            body.ty,
             json_literal(&body.json)
         );
     }
@@ -265,21 +265,9 @@ fn driver(operation: &ProbeOp) -> String {
         "\n        .send()\n        .await\n        .unwrap_or_else(|error| \
          panic!(\"the server rejected what the client built: {{error:?}}\"));\n    \
          assert_eq!(response.status().as_u16(), {});\n}}\n",
-        operation.response.status
+        answer.status
     );
     out
-}
-
-/// A type path as rendered for inside the generated crate, respelled for its integration tests.
-///
-/// The renderer writes `super::types::Pet` because the client and server modules are siblings of
-/// `types`; a `tests/` file is outside the crate, where the same type is `{krate}::types::Pet` —
-/// but `use {krate}::...` imports make the bare `types::Pet` form resolve, so `super` maps to
-/// nothing at all.
-fn in_crate(rendered: &str) -> String {
-    rendered
-        .replace("super :: types :: ", "types::")
-        .replace(' ', "")
 }
 
 /// A JSON value as a Rust string literal, whatever it contains.

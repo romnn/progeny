@@ -124,7 +124,7 @@ fn core(
 
     match first {
         Some(TypeName::Object) => object(view),
-        Some(TypeName::Array) => array(view),
+        Some(TypeName::Array) => array(resolved, view, ctx, at),
         Some(TypeName::String) => string(view),
         Some(TypeName::Integer) => Shape::Scalar(Scalar::Integer {
             signed: !view.unsigned,
@@ -137,16 +137,16 @@ fn core(
         // A document that omits `type` but says what the members are means an object, and the
         // corpus is full of both spellings. Guessing from the other keywords is not a repair: it
         // is what the schema says.
-        None => untyped(view),
+        None => untyped(resolved, view, ctx, at),
     }
 }
 
-fn untyped(view: &View) -> Shape {
+fn untyped(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Shape {
     if !view.properties.is_empty() || view.additional.is_some() || view.additional_denied {
         return object(view);
     }
     if view.items.is_some() || view.prefix_items.is_some() {
-        return array(view);
+        return array(resolved, view, ctx, at);
     }
     if view.uniform_pattern.is_some() {
         return object(view);
@@ -240,15 +240,32 @@ fn object(view: &View) -> Shape {
     Shape::Struct(Struct { fields, extra })
 }
 
-fn array(view: &View) -> Shape {
+fn array(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Shape {
     let item = view.items.clone().map(ShapeRef::Key);
     if let Some(prefix) = &view.prefix_items {
         // An empty `prefixItems` constrains no position, so it is an array and not a tuple of
         // nothing — which would be the unit type and would serialize as `null`.
         if !prefix.is_empty() {
+            // 2020-12: `items` beside a prefix constrains the elements *past* it. One that admits
+            // no value — `false`, which is what draft-04's `additionalItems: false` normalizes to
+            // — is exactly a fixed tuple. One that admits values means the document allows longer
+            // instances than any fixed-arity Rust tuple accepts, and a generated type that
+            // refuses instances the document allows would be wrong about the wire; this used to
+            // be dropped with no diagnostic at all.
+            if let Some(rest) = &view.items
+                && !merge::view(resolved, rest).impossible
+            {
+                degrade(
+                    ctx,
+                    at,
+                    BreakageClass::UnsupportedConstruct,
+                    "`prefixItems` is followed by an `items` that admits values, so instances may \
+                     be longer than the prefix, which no fixed-arity tuple expresses",
+                );
+                return Shape::Any;
+            }
             return Shape::Tuple {
                 items: prefix.iter().cloned().map(ShapeRef::Key).collect(),
-                rest: item,
             };
         }
     }
