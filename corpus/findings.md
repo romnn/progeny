@@ -1246,6 +1246,61 @@ the six are one lesson wearing different clothes: *the wire under-determines the
 reader needs the schema's answer threaded to it* — the same rule the example crate's coercion fix
 established at stage 7, rediscovered at five more positions.
 
+## The architecture review, and what reading found that running had not
+
+A full review of the crate and its harness, after the probe work: verdict *sound shape* — the
+pipeline fits the domain and no structural move was recommended — and a list of defects reading
+found that no gate had, because each sat exactly where the gates do not look.
+
+- **Generated manifests missed dependencies.** The dependency walk covered named contracts only,
+  so a `format: uuid` appearing only as a parameter, or a `map` only in a response arm, rendered
+  `uuid::Uuid`/`indexmap` into a crate whose manifest never declared them — and `::bytes::Bytes`,
+  spelled by the client for a binary body under `formats.bytes = "bytes"`, had **no manifest line
+  at all**. The walk now covers the API surface, and the manifest test pins where each crate is
+  named. Found by asking what the manifest was computed *from*, which no tier document happened to
+  exercise.
+- **Three answers to "which arm is success".** Pagination open-coded `Exact(2xx)` and rejected a
+  document declaring only `2XX` — an arm the client happily decodes. The `weather-gov` defect of
+  stage 5, unfixed in two more copies; `StatusPattern::is_success` is the one rule now.
+- **`readOnly`/`writeOnly` were computed and dropped**, with no diagnostic — the forbidden
+  silence, in a crate whose charter is that every deviation is reported. They now ride the same
+  machinery as the presence collapse and report as `access-collapse`, only where the type actually
+  crosses the direction the marker excludes: 23 records across the corpus, `zendesk` alone
+  carrying 211 `readOnly` members into request bodies.
+- **A tuple's permissive tail was dropped silently.** `prefixItems` beside an `items` that admits
+  values allows instances longer than the prefix; the generated `(A, B)` refused them and nothing
+  said so. Degraded loudly now — and `items: false`, which is draft-04's `additionalItems: false`
+  normalized, is read as the fixed tuple it spells, which *removed* a misleading
+  "accepts no value" record from `meilisearch`.
+- **The presence split misattributed form-reached types.** Reachability seeded from JSON bodies
+  only, so a type reached through a multipart or form body — 278 multipart bodies across 27
+  documents — was reported as "no operation's body, nothing on the wire is affected". A false
+  statement about the wire, in the diagnostic the split exists to make true.
+- **An exploded `form` object parameter is erased by its own encoding**, and the generated
+  handler's member is permanently absent — required, and the handler rejects every request. It
+  now reports under `query-serialization-style` (9 records; `workos` writes two), and the probe
+  records a named skip instead of a red test.
+- **`emit.types = false` silently generated nothing**: an empty `files` map with a success code —
+  the silent no-op, in progeny's own configuration. Refused now.
+- **One `$schema` produced two `unsupported-dialect` records**, one from the normalizer's walk
+  and one from the schema parser, differently worded. The parser — the layer that stores the
+  member — is the one reporter, and the two hand-copied dialect lists are one.
+
+The other half of the review was drift that had not yet fired, now held mechanically: the layer
+lint's table is **total** (an unranked module is itself a violation — `resolve`, a whole pipeline
+stage, had been silently exempt in both directions since the day it was added); the eight-method
+path-item walk exists once instead of seven times, and `Method` lives beside the fields it
+mirrors so no mapping needs a fallback arm; the document parser and serializer are pinned
+member-by-member by a maximal-document mirror, the way `EVERY_KEYWORD` already pinned the schema
+layer's; the normalizer's subschema lists are compared outright against the model's applicators;
+every `support::…` path the renderers spell is resolved against the shipped module's actual
+items; the two `Style` enums are bridged by an exhaustive match instead of a string table, and
+the shipped table's wildcard arms are spelled out so a new style cannot silently encode as
+`form`; `BreakageClass::ALL` is grounded in serde's own variant list and the catalogue iterates
+it instead of parsing an error message; and the harness gates share one document-selection with
+one refusal — the payloads gate could previously exit green having checked zero documents when
+the cache was missing.
+
 ## Diagnostics the corpus produces
 
 Every finding, per document, is recorded in `corpus/snapshots/*.jsonl`, keyed by the SHA-256 of the
