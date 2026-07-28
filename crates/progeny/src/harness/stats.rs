@@ -6,15 +6,128 @@
 //! is the quieter half of the argument for building the model first — it turns the corpus into a
 //! queryable dataset.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AnyOfShapes, Stats};
+use crate::diag::{Ctx, RejectError};
 use crate::doc::{
     Callback, Components, MaybeRef, Operation, ParsedDocument, PathItem, Response, Responses,
 };
 use crate::schema::{OneOrMany, Schema, SchemaId, SchemaObject, SchemaStore, TypeName};
+use crate::{doc, load, normalize};
 
-pub(super) fn collect(parsed: &ParsedDocument) -> Stats {
+/// Counts over one parsed document, for the questions the corpus is the evidence base for.
+///
+/// Each field answers a question that decides a later design choice, and each is cheap to compute
+/// once the document is a value rather than text. Adding a count here is how a design argument
+/// stops being a matter of opinion.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Schemas in the document.
+    pub schemas: usize,
+    /// `anyOf` occurrences, and the pattern each one is.
+    pub any_of: AnyOfShapes,
+    /// `oneOf` occurrences.
+    pub one_of: usize,
+    /// `oneOf`/`anyOf` occurrences carrying a discriminator.
+    pub discriminated: usize,
+    /// Properties that are both optional and nullable, where absent and `null` are different
+    /// documents and a two-state `Option` cannot say which.
+    pub optional_and_nullable: usize,
+    /// Integer schemas carrying a bound, which is what would justify picking a width from bounds
+    /// rather than a flat `i64`/`u64`.
+    pub bounded_integers: usize,
+    /// Integer schemas in total.
+    pub integers: usize,
+    /// Operations whose request body declares more than one media type.
+    pub multi_content_operations: usize,
+    /// Responses declaring headers.
+    pub responses_with_headers: usize,
+    /// Response headers in total.
+    pub response_headers: usize,
+    /// Security scheme kinds, by their `type`.
+    pub security_scheme_kinds: BTreeMap<String, usize>,
+    /// `$ref` strings that address another file rather than this document.
+    pub external_refs: usize,
+    /// `$dynamicRef` and `$dynamicAnchor` occurrences.
+    pub dynamic_scoping: usize,
+    /// Non-root `$id` occurrences, which change the base URI a relative reference resolves
+    /// against.
+    pub nested_ids: usize,
+    /// `patternProperties` occurrences.
+    pub pattern_properties: usize,
+    /// `prefixItems` occurrences.
+    pub prefix_items: usize,
+    /// `const` occurrences.
+    pub constants: usize,
+    /// The deepest schema nesting reached.
+    pub max_schema_depth: usize,
+}
+
+/// How each `anyOf` in a document is shaped.
+///
+/// The union policy turns on this histogram: "any combination may match" has no faithful Rust
+/// type, but the overwhelming majority of real `anyOf`s are not asking for that — they are
+/// emulating a nullable type or an enumeration, and those have exact translations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnyOfShapes {
+    /// Occurrences in total.
+    pub total: usize,
+    /// `[T, {"type": "null"}]` — a nullable `T`.
+    pub nullable: usize,
+    /// Every branch is a `const` or a single-valued `enum` — an enumeration.
+    pub constants: usize,
+    /// Every branch declares a different `type` — distinguishable by shape.
+    pub disjoint_types: usize,
+    /// Everything else, which is where degradation lives.
+    pub other: usize,
+}
+
+impl Stats {
+    /// Fold another document's counts into these, so the corpus can be read as one dataset.
+    ///
+    /// Maxima are taken rather than summed; everything else adds.
+    pub fn merge(&mut self, other: &Self) {
+        self.schemas += other.schemas;
+        self.any_of.total += other.any_of.total;
+        self.any_of.nullable += other.any_of.nullable;
+        self.any_of.constants += other.any_of.constants;
+        self.any_of.disjoint_types += other.any_of.disjoint_types;
+        self.any_of.other += other.any_of.other;
+        self.one_of += other.one_of;
+        self.discriminated += other.discriminated;
+        self.optional_and_nullable += other.optional_and_nullable;
+        self.bounded_integers += other.bounded_integers;
+        self.integers += other.integers;
+        self.multi_content_operations += other.multi_content_operations;
+        self.responses_with_headers += other.responses_with_headers;
+        self.response_headers += other.response_headers;
+        for (kind, count) in &other.security_scheme_kinds {
+            *self.security_scheme_kinds.entry(kind.clone()).or_default() += count;
+        }
+        self.external_refs += other.external_refs;
+        self.dynamic_scoping += other.dynamic_scoping;
+        self.nested_ids += other.nested_ids;
+        self.pattern_properties += other.pattern_properties;
+        self.prefix_items += other.prefix_items;
+        self.constants += other.constants;
+        self.max_schema_depth = self.max_schema_depth.max(other.max_schema_depth);
+    }
+}
+
+/// Count what one document contains.
+///
+/// # Errors
+///
+/// Returns [`RejectError`] when the document is unusable.
+pub fn stats(input: &[u8]) -> Result<Stats, RejectError> {
+    let mut ctx = Ctx::new();
+    let loaded = load::load(input, &mut ctx)?;
+    let normalized = normalize::normalize(loaded.value, &mut ctx)?;
+    let parsed = doc::parse::document(normalized, &mut ctx);
+    Ok(collect(&parsed))
+}
+
+fn collect(parsed: &ParsedDocument) -> Stats {
     let mut stats = Stats {
         schemas: parsed.schemas.len(),
         ..Stats::default()
@@ -320,7 +433,16 @@ fn children(object: &SchemaObject) -> Vec<SchemaId> {
 
 #[cfg(test)]
 mod tests {
-    use crate::harness::stats;
+    use super::stats;
+
+    #[test]
+    fn the_committed_spec_can_be_counted() {
+        const PETSTORE: &[u8] = include_bytes!("../../../../corpus/specs/petstore-31.yaml");
+        let counted = stats(PETSTORE).unwrap();
+        assert!(counted.schemas > 0);
+        assert_eq!(counted.external_refs, 0);
+        assert_eq!(counted.dynamic_scoping, 0);
+    }
 
     #[test]
     fn a_nullable_any_of_is_recognized_as_nullable_emulation() {
