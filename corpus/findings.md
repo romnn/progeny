@@ -1288,6 +1288,44 @@ remaining shapes are distributed rather than concentrated in one API. Request st
 therefore retained as measured follow-up work, to be designed with the raw download handle rather
 than folded into the response correctness repair without a large-body runtime gate.
 
+## Value constraints: stated, not enforced
+
+The parser already preserved JSON Schema value constraints, but classification used to drop them
+without a diagnostic. The corpus contains **39,074 active constraint occurrences** across the 78
+documents. Counts below are parsed keyword occurrences after normalization; document incidence is
+the number of descriptions carrying at least one. `uniqueItems` counts only `true`, because
+`uniqueItems: false` imposes no constraint.
+
+| keyword | occurrences | documents |
+| --- | ---: | ---: |
+| `multipleOf` | 39 | 7 |
+| `maximum` | 5,728 | 65 |
+| `exclusiveMaximum` | 10 | 4 |
+| `minimum` | 8,209 | 70 |
+| `exclusiveMinimum` | 259 | 20 |
+| `maxLength` | 10,220 | 54 |
+| `minLength` | 5,780 | 52 |
+| `pattern` | 5,125 | 46 |
+| `maxItems` | 1,547 | 48 |
+| `minItems` | 1,257 | 50 |
+| `uniqueItems` | 664 | 18 |
+| `maxContains` | 0 | 0 |
+| `minContains` | 0 | 0 |
+| `maxProperties` | 135 | 12 |
+| `minProperties` | 101 | 12 |
+
+Equal positive `minItems`/`maxItems` bounds at or below the fixed-array limit are already carried by
+the generated `[T; N]`; **72 generated shapes** take that path. Every other active keyword enters
+the uninterpreted-constraint diagnostic, folded by its keyword set with an occurrence count and a
+bounded sample of locations. Value constraints beside `$ref` participate in the shape key so they
+cannot disappear with the transparent reference.
+
+`uniqueItems` deliberately stays a `Vec`. The 664 active declarations make the constraint real, but
+a set deserializer would silently discard duplicate wire elements and may reorder what arrived.
+Preserving every element in arrival order is the faithful data model; the diagnostic states that
+uniqueness is not enforced. Constraint-carrying newtypes remain a separate, census-first opt-in
+decision. The default is now explicit: preserve, diagnose, and do not enforce.
+
 ## The architecture review, and what reading found that running had not
 
 A full review of the crate and its harness, after the probe work: verdict *sound shape* — the

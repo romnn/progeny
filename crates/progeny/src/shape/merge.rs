@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Number, Value};
 
-use super::{Docs, ShapeKey};
+use super::{Docs, MAX_FIXED_ARRAY, ShapeKey};
 use crate::resolve::ResolvedDocument;
 use crate::schema::{Schema, SchemaId, SchemaObject, TypeName};
 
@@ -90,10 +90,21 @@ fn constrains(object: &SchemaObject) -> bool {
         || object.unevaluated_properties.is_some()
         || object.required.is_some()
         || object.dependent_required.is_some()
+        || object.multiple_of.is_some()
         || object.min_items.is_some()
         || object.max_items.is_some()
+        || object.unique_items == Some(true)
+        || object.max_contains.is_some()
+        || object.min_contains.is_some()
+        || object.max_properties.is_some()
+        || object.min_properties.is_some()
+        || object.max_length.is_some()
+        || object.min_length.is_some()
+        || object.pattern.is_some()
         || object.minimum.is_some()
+        || object.maximum.is_some()
         || object.exclusive_minimum.is_some()
+        || object.exclusive_maximum.is_some()
         // Format-ish keywords decide which type a string becomes, so they constrain.
         || object.format.is_some()
         || object.content_encoding.is_some()
@@ -214,7 +225,26 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
             view.uninterpreted.push("patternProperties");
         }
     }
+    remove_typed_array_bounds(&mut view);
     view
+}
+
+fn remove_typed_array_bounds(view: &mut View) {
+    let fixed = matches!(
+        (view.min_items, view.max_items),
+        (Some(min), Some(max)) if min == max && min > 0 && min <= MAX_FIXED_ARRAY
+    ) && view.items.is_some()
+        && view.prefix_items.as_ref().is_none_or(Vec::is_empty)
+        && view.types.as_ref().is_none_or(|types| {
+            types.contains(&TypeName::Array)
+                && types
+                    .iter()
+                    .all(|name| matches!(name, TypeName::Array | TypeName::Null))
+        });
+    if fixed {
+        view.uninterpreted
+            .retain(|keyword| !matches!(*keyword, "minItems" | "maxItems"));
+    }
 }
 
 fn fold_types(view: &mut View, object: &SchemaObject) {
@@ -416,6 +446,21 @@ fn note_uninterpreted(view: &mut View, object: &SchemaObject) {
             "unevaluatedProperties",
             object.unevaluated_properties.is_some(),
         ),
+        ("multipleOf", object.multiple_of.is_some()),
+        ("maximum", object.maximum.is_some()),
+        ("exclusiveMaximum", object.exclusive_maximum.is_some()),
+        ("minimum", object.minimum.is_some()),
+        ("exclusiveMinimum", object.exclusive_minimum.is_some()),
+        ("maxLength", object.max_length.is_some()),
+        ("minLength", object.min_length.is_some()),
+        ("pattern", object.pattern.is_some()),
+        ("maxItems", object.max_items.is_some()),
+        ("minItems", object.min_items.is_some()),
+        ("uniqueItems", object.unique_items == Some(true)),
+        ("maxContains", object.max_contains.is_some()),
+        ("minContains", object.min_contains.is_some()),
+        ("maxProperties", object.max_properties.is_some()),
+        ("minProperties", object.min_properties.is_some()),
     ] {
         if present && !view.uninterpreted.contains(&keyword) {
             view.uninterpreted.push(keyword);

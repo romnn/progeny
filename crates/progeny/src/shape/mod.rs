@@ -43,6 +43,13 @@ use crate::schema::SchemaId;
 pub(crate) use fit::Fit;
 pub(crate) use roots::{Root, RootKind};
 
+/// The largest fixed-length array progeny emits.
+///
+/// `[T; N]` is a distinct type per length, and serde's own array impls stop being free above the
+/// small sizes; past this a longer `minItems == maxItems` array is a `Vec`, which accepts a
+/// superset — the sound direction.
+const MAX_FIXED_ARRAY: u32 = 32;
+
 /// The set of schemas a shape is the classification of.
 ///
 /// Sorted and deduplicated, so that two documents writing the same `allOf` in different orders
@@ -1237,7 +1244,7 @@ mod tests {
 
     #[test_util::test]
     fn a_fixed_length_array_is_told_apart_from_a_list() {
-        let (shapes, _) = shapes_of(with_schemas(json!({
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Point": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
             "List": {"type": "array", "items": {"type": "number"}, "minItems": 1},
         })))?;
@@ -1246,6 +1253,12 @@ mod tests {
             Shape::FixedArray { len: 3, .. }
         ));
         assert!(matches!(shape_of(&shapes, "List")?, Shape::Array { .. }));
+        let reported = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.detail().contains("`minItems`"))
+            .ok_or_eyre("the list's untyped lower bound should be reported")?;
+        assert_eq!(reported.occurrences().get(), 1);
+        assert!(!reported.detail().contains("`maxItems`"), "{reported}");
     }
 
     #[test_util::test]
@@ -1265,6 +1278,83 @@ mod tests {
             .find(|d| d.class() == crate::BreakageClass::UnsupportedConstruct)
             .ok_or_eyre("test fixture should contain this value")?;
         assert!(reported.detail().contains("`not`"), "{reported}");
+    }
+
+    #[test_util::test]
+    fn every_untyped_value_constraint_is_reported() {
+        let (_, diagnostics) = shapes_of(with_schemas(json!({
+            "Multiple": {"type": "number", "multipleOf": 2},
+            "Maximum": {"type": "number", "maximum": 10},
+            "ExclusiveMaximum": {"type": "number", "exclusiveMaximum": 10},
+            "Minimum": {"type": "number", "minimum": -10},
+            "ExclusiveMinimum": {"type": "number", "exclusiveMinimum": -10},
+            "MaxLength": {"type": "string", "maxLength": 10},
+            "MinLengthA": {"type": "string", "minLength": 1},
+            "MinLengthB": {"type": "string", "minLength": 2},
+            "Pattern": {"type": "string", "pattern": "^[a-z]+$"},
+            "MaxItems": {"type": "array", "items": true, "maxItems": 10},
+            "MinItems": {"type": "array", "items": true, "minItems": 1},
+            "UniqueItems": {"type": "array", "items": true, "uniqueItems": true},
+            "MaxContains": {
+                "type": "array",
+                "contains": {"type": "string"},
+                "maxContains": 2
+            },
+            "MinContains": {
+                "type": "array",
+                "contains": {"type": "string"},
+                "minContains": 1
+            },
+            "MaxProperties": {"type": "object", "maxProperties": 2},
+            "MinProperties": {"type": "object", "minProperties": 1},
+        })))?;
+        for keyword in [
+            "multipleOf",
+            "maximum",
+            "exclusiveMaximum",
+            "minimum",
+            "exclusiveMinimum",
+            "maxLength",
+            "minLength",
+            "pattern",
+            "maxItems",
+            "minItems",
+            "uniqueItems",
+            "maxContains",
+            "minContains",
+            "maxProperties",
+            "minProperties",
+        ] {
+            let named = format!("`{keyword}`");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.detail().contains(&named)),
+                "{keyword} was silent: {diagnostics:#?}"
+            );
+        }
+        let min_length = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.detail().starts_with("`minLength` narrow"))
+            .ok_or_eyre("the repeated constraint should produce a diagnostic")?;
+        assert_eq!(min_length.occurrences().get(), 2);
+    }
+
+    #[test_util::test]
+    fn a_value_constraint_beside_a_reference_cannot_vanish() {
+        let (_, diagnostics) = shapes_of(with_schemas(json!({
+            "Base": {"type": "string"},
+            "Constrained": {
+                "$ref": "#/components/schemas/Base",
+                "pattern": "^[a-z]+$"
+            },
+        })))?;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.detail().contains("`pattern`")),
+            "{diagnostics:#?}"
+        );
     }
 
     #[test_util::test]

@@ -922,6 +922,19 @@ fn report_stats(totals: &Stats, documents: usize) {
         "  integers                    {} ({} carry a bound)",
         totals.integers, totals.bounded_integers
     );
+    println!("  active value constraints");
+    for (keyword, occurrences) in &totals.value_constraints {
+        let documents = totals
+            .value_constraint_documents
+            .get(keyword)
+            .copied()
+            .unwrap_or_default();
+        println!("    {keyword:<22} {occurrences:>7} in {documents:>2} documents");
+    }
+    println!(
+        "    carried as fixed arrays   {:>7}",
+        totals.fixed_array_constraints
+    );
     println!(
         "  multi-media-type bodies     {}",
         totals.multi_content_operations

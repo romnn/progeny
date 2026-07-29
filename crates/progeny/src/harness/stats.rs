@@ -38,6 +38,14 @@ pub struct Stats {
     pub bounded_integers: usize,
     /// Integer schemas in total.
     pub integers: usize,
+    /// Active value-constraint occurrences, keyed by their JSON Schema keyword.
+    ///
+    /// `uniqueItems: false` is not active and therefore contributes nothing.
+    pub value_constraints: BTreeMap<String, usize>,
+    /// Documents carrying each active value-constraint keyword.
+    pub value_constraint_documents: BTreeMap<String, usize>,
+    /// Fixed arrays whose equal `minItems`/`maxItems` bounds are carried by `[T; N]`.
+    pub fixed_array_constraints: usize,
     /// Operations whose request body declares more than one media type.
     pub multi_content_operations: usize,
     /// Responses declaring headers.
@@ -112,6 +120,12 @@ impl Stats {
         self.optional_and_nullable += other.optional_and_nullable;
         self.bounded_integers += other.bounded_integers;
         self.integers += other.integers;
+        merge_counts(&mut self.value_constraints, &other.value_constraints);
+        merge_counts(
+            &mut self.value_constraint_documents,
+            &other.value_constraint_documents,
+        );
+        self.fixed_array_constraints += other.fixed_array_constraints;
         self.multi_content_operations += other.multi_content_operations;
         self.responses_with_headers += other.responses_with_headers;
         self.response_headers += other.response_headers;
@@ -148,6 +162,10 @@ pub fn stats(input: &[u8]) -> Result<Stats, RejectError> {
     let mut stats = collect(&parsed);
     let resolved = resolve::resolve(parsed, &mut ctx);
     let shapes = shape::classify(&resolved, &mut ctx);
+    stats.fixed_array_constraints = shapes
+        .entries()
+        .filter(|(_, shape)| matches!(shape, shape::Shape::FixedArray { .. }))
+        .count();
     let config = crate::Config::default();
     let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
     let api = api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
@@ -200,6 +218,11 @@ fn collect(parsed: &ParsedDocument) -> Stats {
             schema_object(object, &parsed.schemas, &mut stats);
         }
     }
+    stats.value_constraint_documents = stats
+        .value_constraints
+        .keys()
+        .map(|keyword| (keyword.clone(), 1))
+        .collect();
     document(parsed, &mut stats);
     stats.max_schema_depth = max_depth(parsed);
     stats
@@ -249,7 +272,41 @@ fn schema_object(object: &SchemaObject, store: &SchemaStore, stats: &mut Stats) 
             stats.bounded_integers += 1;
         }
     }
+    count_value_constraints(object, stats);
     count_optional_nullable(object, store, stats);
+}
+
+fn count_value_constraints(object: &SchemaObject, stats: &mut Stats) {
+    for (keyword, present) in [
+        ("multipleOf", object.multiple_of.is_some()),
+        ("maximum", object.maximum.is_some()),
+        ("exclusiveMaximum", object.exclusive_maximum.is_some()),
+        ("minimum", object.minimum.is_some()),
+        ("exclusiveMinimum", object.exclusive_minimum.is_some()),
+        ("maxLength", object.max_length.is_some()),
+        ("minLength", object.min_length.is_some()),
+        ("pattern", object.pattern.is_some()),
+        ("maxItems", object.max_items.is_some()),
+        ("minItems", object.min_items.is_some()),
+        ("uniqueItems", object.unique_items == Some(true)),
+        ("maxContains", object.max_contains.is_some()),
+        ("minContains", object.min_contains.is_some()),
+        ("maxProperties", object.max_properties.is_some()),
+        ("minProperties", object.min_properties.is_some()),
+    ] {
+        if present {
+            *stats
+                .value_constraints
+                .entry(keyword.to_owned())
+                .or_default() += 1;
+        }
+    }
+}
+
+fn merge_counts(into: &mut BTreeMap<String, usize>, from: &BTreeMap<String, usize>) {
+    for (key, count) in from {
+        *into.entry(key.clone()).or_default() += count;
+    }
 }
 
 /// A property that is both absent-able and null-able: three states, and a bare `Option` has two.
@@ -566,6 +623,27 @@ mod tests {
         let counted = stats(document)?;
         assert_eq!(counted.integers, 2);
         assert_eq!(counted.bounded_integers, 1);
+    }
+
+    #[test_util::test]
+    fn active_value_constraints_are_counted_by_keyword() {
+        let document = indoc::indoc! {r#"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {
+                "A": {"type": "string", "minLength": 1},
+                "B": {"type": "string", "minLength": 2},
+                "C": {"type": "array", "uniqueItems": true},
+                "D": {"type": "array", "uniqueItems": false}
+              }}
+            }"#
+        }
+        .as_bytes();
+        let counted = stats(document)?;
+        assert_eq!(counted.value_constraints["minLength"], 2);
+        assert_eq!(counted.value_constraints["uniqueItems"], 1);
+        assert_eq!(counted.value_constraint_documents["minLength"], 1);
+        assert_eq!(counted.value_constraint_documents["uniqueItems"], 1);
     }
 
     #[test_util::test]

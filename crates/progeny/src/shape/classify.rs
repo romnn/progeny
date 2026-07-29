@@ -16,18 +16,12 @@ use serde_json::Value;
 
 use super::merge::{self, Discriminated, View};
 use super::{
-    Docs, Extra, Field, Format, Scalar, Shape, ShapeKey, ShapeRef, Struct, Union, Variant,
+    Docs, Extra, Field, Format, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey, ShapeRef, Struct, Union,
+    Variant,
 };
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::TypeName;
-
-/// The largest fixed-length array progeny emits.
-///
-/// `[T; N]` is a distinct type per length, and serde's own array impls stop being free above the
-/// small sizes; past this a longer `minItems == maxItems` array is a `Vec`, which accepts a
-/// superset — the sound direction.
-const MAX_FIXED_ARRAY: u32 = 32;
 
 /// Classify one key.
 pub(crate) fn key(resolved: &ResolvedDocument, key: &ShapeKey, ctx: &mut Ctx) -> Shape {
@@ -882,14 +876,19 @@ fn report_uninterpreted(view: &View, ctx: &mut Ctx, at: &JsonPointer) {
         .iter()
         .map(|keyword| format!("`{keyword}`"))
         .collect();
+    let verb = if keywords.len() == 1 {
+        "narrows"
+    } else {
+        "narrow"
+    };
     degrade(
         ctx,
         at,
         BreakageClass::UnsupportedConstruct,
         &format!(
-            "{} narrow which values are valid in a way no Rust type expresses; the generated type \
+            "{} {verb} which values are valid in a way no Rust type expresses; the generated type \
              accepts more than the document allows",
-            keywords.join(", ")
+            keywords.join(", "),
         ),
     );
 }
