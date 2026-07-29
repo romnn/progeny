@@ -24,8 +24,8 @@
 //! takes one repetition and judges whether it counts, [`baseline`] holds the recorded figures to
 //! the discipline, and this file drives them.
 
-mod baseline;
-mod measure;
+pub(crate) mod baseline;
+pub(crate) mod measure;
 mod plan;
 
 use std::collections::BTreeMap;

@@ -57,7 +57,7 @@ struct BaselineEntry {
 /// authoritative to everyone who finds them later.
 ///
 /// [06]: ../../../plan/06-workspace-and-validation.md
-pub(super) mod discipline {
+pub(crate) mod discipline {
     /// The one-minute load average a repetition may *start* at.
     ///
     /// CPU-seconds are not load-immune despite the unit — memory-bandwidth and cache contention
@@ -73,7 +73,7 @@ pub(super) mod discipline {
 ///
 /// Written into the entry rather than checked once and forgotten, so the file carries its own
 /// verdict: somebody who finds `baseline.toml` and never runs the harness still sees it.
-pub(super) fn shortfalls(kept: usize, load: f64, pressured: bool) -> Vec<String> {
+pub(crate) fn shortfalls(kept: usize, load: f64, pressured: bool) -> Vec<String> {
     let mut reasons = Vec::new();
     if load > discipline::MAX_LOAD {
         reasons.push(format!(

@@ -15,16 +15,16 @@ use super::plan::Target;
 
 /// What one repetition cost.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Sample {
-    pub(super) cpu_seconds: f64,
-    pub(super) peak_rss_bytes: u64,
-    pub(super) load_before: f64,
-    pub(super) load_after: f64,
+pub(crate) struct Sample {
+    pub(crate) cpu_seconds: f64,
+    pub(crate) peak_rss_bytes: u64,
+    pub(crate) load_before: f64,
+    pub(crate) load_after: f64,
     /// Wall-clock seconds the repetition ran for, which is what decides how much of the load
     /// average it is answerable for itself.
-    pub(super) wall_seconds: f64,
+    pub(crate) wall_seconds: f64,
     /// Whether free memory was thin enough that the peak is an underestimate.
-    pub(super) pressured: bool,
+    pub(crate) pressured: bool,
 }
 
 /// How much of its wall-clock time a repetition has to spend on a processor before it counts.
@@ -40,7 +40,7 @@ impl Sample {
     ///
     /// Above 1.0 whenever `rustc` threads inside its single job, which is common and fine: the
     /// number is only ever compared against a floor.
-    pub(super) fn progress(&self) -> f64 {
+    pub(crate) fn progress(&self) -> f64 {
         if self.wall_seconds <= 0.0 {
             return f64::INFINITY;
         }
@@ -66,7 +66,7 @@ impl Sample {
     /// What this deliberately does *not* catch is memory-bandwidth contention, which inflates CPU
     /// seconds and wall seconds together and so leaves the ratio alone. That is what the load
     /// ceiling is for, and why both exist.
-    pub(super) fn crowded(&self) -> bool {
+    pub(crate) fn crowded(&self) -> bool {
         self.progress() < MIN_PROGRESS
     }
 }
@@ -128,7 +128,7 @@ pub(super) fn warm_up(target: &Target) -> eyre::Result<()> {
 }
 
 /// A-B-B-A: the second half of each pair of repetitions runs the variants in reverse.
-pub(super) fn order<'a>(variants: &[&'a str], rep: usize) -> Vec<&'a str> {
+pub(crate) fn order<'a>(variants: &[&'a str], rep: usize) -> Vec<&'a str> {
     let mut ordered = variants.to_vec();
     if rep % 2 == 1 {
         ordered.reverse();
@@ -208,13 +208,13 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct MeasuredCost {
-    cpu_seconds: f64,
-    peak_rss_bytes: u64,
-    ok: bool,
+pub(crate) struct MeasuredCost {
+    pub(crate) cpu_seconds: f64,
+    pub(crate) peak_rss_bytes: u64,
+    pub(crate) ok: bool,
 }
 
-fn wait_for_quiet(max_load: f64, max_wait: u64) -> eyre::Result<()> {
+pub(crate) fn wait_for_quiet(max_load: f64, max_wait: u64) -> eyre::Result<()> {
     const INTERVAL: u64 = 10;
     let attempts = (max_wait * 60 / INTERVAL).max(1);
     for attempt in 0..attempts {
@@ -236,7 +236,7 @@ fn wait_for_quiet(max_load: f64, max_wait: u64) -> eyre::Result<()> {
 }
 
 /// The one-minute load average.
-fn load_average() -> eyre::Result<f64> {
+pub(crate) fn load_average() -> eyre::Result<f64> {
     let text = std::fs::read_to_string("/proc/loadavg")
         .wrap_err("reading /proc/loadavg; load gating needs it")?;
     let first = text
@@ -249,7 +249,7 @@ fn load_average() -> eyre::Result<f64> {
 }
 
 /// Memory the kernel believes is available, in bytes.
-pub(super) fn available_memory() -> Option<u64> {
+pub(crate) fn available_memory() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = text
         .lines()
@@ -264,7 +264,7 @@ pub(super) fn available_memory() -> Option<u64> {
 /// accumulated over the caller's whole life, so a runner that measured several repetitions itself
 /// would report the largest earlier one forever.
 #[cfg(unix)]
-pub(super) fn measure_child(command: &[String]) -> eyre::Result<()> {
+pub(crate) fn measure_child(command: &[String]) -> eyre::Result<()> {
     use nix::sys::resource::{UsageWho, getrusage};
 
     // Tolerate a `--` separator so the flag can also be driven by hand.
@@ -316,7 +316,7 @@ fn duration_of(time: nix::sys::time::TimeVal) -> f64 {
 }
 
 #[cfg(not(unix))]
-pub(super) fn measure_child(command: &[String]) -> eyre::Result<()> {
+pub(crate) fn measure_child(command: &[String]) -> eyre::Result<()> {
     let _ = command;
     bail!(
         "measuring CPU time and peak resident set size needs getrusage, which this platform does \
