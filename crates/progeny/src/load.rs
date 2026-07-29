@@ -18,6 +18,7 @@ use crate::diag::{Ctx, RejectError, RejectKind};
 ///
 /// Recorded rather than inferred from a filename because filenames lie: one corpus document
 /// is served as YAML from an extensionless URL and cached as `.json`.
+#[cfg(any(feature = "harness", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceFormat {
     Json,
@@ -28,13 +29,7 @@ pub(crate) enum SourceFormat {
 #[derive(Debug)]
 pub(crate) struct Loaded {
     pub(crate) value: Value,
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
+    #[cfg(any(feature = "harness", test))]
     pub(crate) format: SourceFormat,
 }
 
@@ -52,6 +47,7 @@ pub(crate) fn load(input: &[u8], ctx: &mut Ctx) -> Result<Loaded, RejectError> {
         Ok(value) => {
             return Ok(Loaded {
                 value,
+                #[cfg(any(feature = "harness", test))]
                 format: SourceFormat::Json,
             });
         }
@@ -70,6 +66,7 @@ pub(crate) fn load(input: &[u8], ctx: &mut Ctx) -> Result<Loaded, RejectError> {
     match yaml::load(text, ctx) {
         Ok(value) => Ok(Loaded {
             value,
+            #[cfg(any(feature = "harness", test))]
             format: SourceFormat::Yaml,
         }),
         Err(yaml_error) if yaml_error.kind() == RejectKind::Unparsable => Err(RejectError::new(
@@ -87,51 +84,60 @@ pub(crate) fn load(input: &[u8], ctx: &mut Ctx) -> Result<Loaded, RejectError> {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
     use super::{SourceFormat, load};
     use crate::diag::{Ctx, RejectKind};
 
-    fn loaded(input: &str) -> (serde_json::Value, SourceFormat) {
+    fn loaded(input: &str) -> eyre::Result<(serde_json::Value, SourceFormat)> {
         let mut ctx = Ctx::new();
-        let out = load(input.as_bytes(), &mut ctx).unwrap();
-        (out.value, out.format)
+        let out = load(input.as_bytes(), &mut ctx)?;
+        Ok((out.value, out.format))
     }
 
-    #[test]
+    #[test_util::test]
     fn json_is_recognized_as_json() {
-        let (value, format) = loaded(r#"{"openapi": "3.1.0"}"#);
+        let (value, format) = loaded(r#"{"openapi": "3.1.0"}"#)?;
         assert_eq!(format, SourceFormat::Json);
         assert_eq!(value, json!({"openapi": "3.1.0"}));
     }
 
-    #[test]
+    #[test_util::test]
     fn yaml_is_recognized_as_yaml() {
-        let (value, format) = loaded("openapi: 3.1.0\ninfo:\n  title: x\n");
+        let (value, format) = loaded(indoc::indoc! {"
+            openapi: 3.1.0
+            info:
+              title: x
+        "})?;
         assert_eq!(format, SourceFormat::Yaml);
         assert_eq!(value, json!({"openapi": "3.1.0", "info": {"title": "x"}}));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_byte_order_mark_is_not_document_content() {
-        let (value, format) = loaded("\u{feff}{\"a\": 1}");
+        let (value, format) = loaded("\u{feff}{\"a\": 1}")?;
         assert_eq!(format, SourceFormat::Json);
         assert_eq!(value, json!({"a": 1}));
     }
 
-    #[test]
+    #[test_util::test]
     fn neither_format_reports_both_errors() {
         let mut ctx = Ctx::new();
-        let error = load(b"{\"a\": [", &mut ctx).unwrap_err();
+        let error = load(b"{\"a\": [", &mut ctx)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::Unparsable);
         assert!(error.detail().contains("JSON"), "{error}");
         assert!(error.detail().contains("YAML"), "{error}");
     }
 
-    #[test]
+    #[test_util::test]
     fn invalid_utf8_is_rejected_rather_than_lossily_decoded() {
         let mut ctx = Ctx::new();
-        let error = load(&[0x6f, 0x6b, 0x3a, 0x20, 0xff], &mut ctx).unwrap_err();
+        let error = load(&[0x6f, 0x6b, 0x3a, 0x20, 0xff], &mut ctx)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::Unparsable);
     }
 }

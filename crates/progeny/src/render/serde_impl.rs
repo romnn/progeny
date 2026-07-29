@@ -24,17 +24,14 @@ pub(super) fn needed(contracts: &Contracts) -> bool {
 }
 
 pub(super) fn render(contracts: &Contracts) -> TokenStream {
-    let items = contracts
-        .types()
-        .iter()
-        .map(|contract| one(contract, contracts));
+    let items = contracts.types().iter().map(one);
     quote! { #(#items)* }
 }
 
-fn one(contract: &TypeContract, contracts: &Contracts) -> TokenStream {
+fn one(contract: &TypeContract) -> TokenStream {
     match (contract.deser(), contract.kind()) {
         (DeserStrategy::HandWrittenBuffered { deny_unknown }, ContractKind::Struct { fields }) => {
-            buffered(contract, fields, deny_unknown, contracts)
+            buffered(contract, fields, deny_unknown)
         }
         (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants }) => {
             fieldless(contract, variants)
@@ -46,40 +43,27 @@ fn one(contract: &TypeContract, contracts: &Contracts) -> TokenStream {
     }
 }
 
-/// Whether these impls touch anything deprecated, and so need the allowance on the item.
-///
-/// Three ways to touch one, and the corpus produced all three: the type itself is deprecated, so
-/// naming it in `impl Serialize for …` is a use (`cloudflare`); a *member* is deprecated, so reading
-/// or writing it is a use (`jellyfin`, `github-31`); or a member's type is (`okta`). The allowance
-/// goes on the item for the same reason it does everywhere else in this renderer — a member-level
-/// attribute does not cover the impl header that names the type.
-fn allowance(
-    contract: &TypeContract,
-    fields: &[crate::contract::FieldContract],
-    contracts: &Contracts,
-) -> TokenStream {
-    if contract.docs().deprecated || fields.iter().any(|field| field.docs.deprecated) {
-        return quote! { #[allow(deprecated)] };
+/// The non-deprecated path generated impls use for a deprecated public contract.
+fn implementation_type(contract: &TypeContract) -> TokenStream {
+    let name = ident(contract.rust_name());
+    if contract.docs().deprecated {
+        quote! { __progeny_deprecated::#name }
+    } else {
+        quote! { #name }
     }
-    super::types::deprecated_use(fields.iter().map(|field| &field.ty), contracts)
 }
 
 fn buffered(
     contract: &TypeContract,
     fields: &[crate::contract::FieldContract],
     deny_unknown: bool,
-    contracts: &Contracts,
 ) -> TokenStream {
-    let allow = allowance(contract, fields, contracts);
-    let name = ident(contract.rust_name());
-    // Threaded in rather than wrapped around, because `reading` emits two impls and an attribute
-    // written once outside would land on only the first of them.
-    let reading = reading(contract, fields, deny_unknown, &allow);
+    let name = implementation_type(contract);
+    let reading = reading(contract, fields, deny_unknown);
     let writing = writing(contract, fields);
     quote! {
         #reading
 
-        #allow
         impl serde::Serialize for #name {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
             where
@@ -97,9 +81,8 @@ fn reading(
     contract: &TypeContract,
     fields: &[crate::contract::FieldContract],
     deny_unknown: bool,
-    allow: &TokenStream,
 ) -> TokenStream {
-    let name = ident(contract.rust_name());
+    let name = implementation_type(contract);
     let literal_name = contract.rust_name().as_str();
     let wire_names: Vec<&str> = fields
         .iter()
@@ -124,7 +107,8 @@ fn reading(
     let reads = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let wire = field.wire_name.as_str();
-        quote! { #member: buffer.take(#wire)?, }
+        let deprecated = deprecated_field(field, contract.docs().deprecated);
+        quote! { #deprecated #member: buffer.take(#wire)?, }
     });
     // A struct with no members reads nothing out of the buffer, and an unused binding is a warning
     // in the consumer's build. `cloudflare`, `github-31` and `okta` all declare one — an object
@@ -136,7 +120,6 @@ fn reading(
     };
 
     quote! {
-        #allow
         impl<'de> super::support::Assemble<'de> for #name {
             const NAME: &'static str = #literal_name;
             const FIELDS: &'static [&'static str] = &[#(#wire_names),*];
@@ -150,7 +133,6 @@ fn reading(
             }
         }
 
-        #allow
         impl<'de> serde::Deserialize<'de> for #name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
@@ -184,7 +166,8 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
         .filter(|field| field.skip_serializing_if == SkipRule::WhenNone)
         .map(|field| {
             let member = ident(&field.rust_name);
-            quote! { if self.#member.is_some() { count += 1; } }
+            let deprecated = deprecated_field(field, contract.docs().deprecated);
+            quote! { #deprecated if self.#member.is_some() { count += 1; } }
         })
         .collect();
     // `mut` only when something mutates it. A struct whose members are all unconditional never
@@ -205,9 +188,13 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
     let writes = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let wire = field.wire_name.as_str();
+        let deprecated = deprecated_field(field, contract.docs().deprecated);
         match field.skip_serializing_if {
-            SkipRule::Never => quote! { state.serialize_field(#wire, &self.#member)?; },
+            SkipRule::Never => {
+                quote! { #deprecated state.serialize_field(#wire, &self.#member)?; }
+            }
             SkipRule::WhenNone => quote! {
+                #deprecated
                 if self.#member.is_some() {
                     state.serialize_field(#wire, &self.#member)?;
                 } else {
@@ -226,15 +213,25 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
     }
 }
 
-fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant]) -> TokenStream {
-    // A deprecated string enum — `okta` has one — is used by the impl header that names it. No
-    // member types to consider here: a fieldless variant carries nothing.
-    let allow = if contract.docs().deprecated {
-        quote! { #[allow(deprecated)] }
+/// An expectation on the exact statement that touches a deprecated contract member.
+fn deprecated_field(
+    field: &crate::contract::FieldContract,
+    contract_deprecated: bool,
+) -> TokenStream {
+    if contract_deprecated || field.docs.deprecated {
+        quote! {
+            #[expect(
+                deprecated,
+                reason = "the generated serializer must preserve this deprecated contract member"
+            )]
+        }
     } else {
         TokenStream::new()
-    };
-    let name = ident(contract.rust_name());
+    }
+}
+
+fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant]) -> TokenStream {
+    let name = implementation_type(contract);
     let literal_name = contract.rust_name().as_str();
     let wire_names: Vec<&str> = variants
         .iter()
@@ -244,19 +241,41 @@ fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant
     let resolve = variants.iter().map(|variant| {
         let member = ident(&variant.rust_name);
         let wire = variant.wire_name.as_str();
-        quote! { #wire => Some(Self::#member), }
+        if contract.docs().deprecated {
+            quote! {
+                #wire => {
+                    #[expect(
+                        deprecated,
+                        reason = "the generated deserializer must construct this deprecated variant"
+                    )]
+                    let resolved = Self::#member;
+                    Some(resolved)
+                }
+            }
+        } else {
+            quote! { #wire => Some(Self::#member), }
+        }
     });
     let write = variants.iter().enumerate().map(|(index, variant)| {
         let member = ident(&variant.rust_name);
         let wire = variant.wire_name.as_str();
         let index = u32::try_from(index).unwrap_or(u32::MAX);
-        quote! {
-            Self::#member => serializer.serialize_unit_variant(#literal_name, #index, #wire),
+        if contract.docs().deprecated {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated serializer must match this deprecated variant"
+                )]
+                Self::#member => serializer.serialize_unit_variant(#literal_name, #index, #wire),
+            }
+        } else {
+            quote! {
+                Self::#member => serializer.serialize_unit_variant(#literal_name, #index, #wire),
+            }
         }
     });
 
     quote! {
-        #allow
         impl<'de> serde::Deserialize<'de> for #name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
@@ -278,7 +297,6 @@ fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant
             }
         }
 
-        #allow
         impl serde::Serialize for #name {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
             where

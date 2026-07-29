@@ -234,17 +234,20 @@ pub(crate) fn external_docs_to_value(docs: &ExternalDocs) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use serde_json::{Value, json};
 
     use super::super::{SchemaStore, parse};
     use super::schema;
     use crate::diag::Ctx;
 
-    fn round_trip(value: Value) -> Value {
+    fn round_trip(value: Value) -> eyre::Result<Value> {
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
-        let id = parse::schema(value, &mut store, &mut ctx).unwrap();
-        schema(&store, id)
+        let id = parse::schema(value, &mut store, &mut ctx)
+            .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
+        Ok(schema(&store, id))
     }
 
     /// Every keyword the model claims to hold, in one schema.
@@ -252,7 +255,8 @@ mod tests {
     /// Written as text rather than through `json!` so that the number literals in it are the
     /// literals under test, and so that adding a keyword to the model without adding it here is
     /// visible as an unmentioned keyword rather than hidden in a macro.
-    const EVERY_KEYWORD: &str = r##"{
+    const EVERY_KEYWORD: &str = indoc::indoc! {r##"
+    {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "https://example.test/a",
       "$anchor": "a",
@@ -315,15 +319,16 @@ mod tests {
       "externalDocs": {"description": "docs", "url": "https://example.test", "x-e": true},
       "x-vendor": {"anything": [1, {"deep": true}]},
       "unmodelledKeyword": "kept"
-    }"##;
+    }
+    "##};
 
-    #[test]
+    #[test_util::test]
     fn every_keyword_survives_the_round_trip() {
-        let original: Value = serde_json::from_str(EVERY_KEYWORD).unwrap();
-        assert_eq!(round_trip(original.clone()), original);
+        let original: Value = serde_json::from_str(EVERY_KEYWORD)?;
+        assert_eq!(round_trip(original.clone())?, original);
     }
 
-    #[test]
+    #[test_util::test]
     fn every_keyword_the_model_holds_is_covered_by_that_fixture() {
         // A keyword read into a typed field but never written back would round-trip only by
         // accident; a keyword neither read nor written would sit in `unknown` and round-trip
@@ -331,12 +336,8 @@ mod tests {
         // typed fields.
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
-        let id = parse::schema(
-            serde_json::from_str(EVERY_KEYWORD).unwrap(),
-            &mut store,
-            &mut ctx,
-        )
-        .unwrap();
+        let id = parse::schema(serde_json::from_str(EVERY_KEYWORD)?, &mut store, &mut ctx)
+            .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
         let object = match store.get(id) {
             crate::schema::Schema::Object(object) => object,
             crate::schema::Schema::Bool(_) => panic!("expected an object schema"),
@@ -348,7 +349,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn walking_children_reaches_every_schema_in_the_store() {
         // `SchemaObject::children` is the only description of the schema graph's shape, and
         // resolution, cycle detection and classification all read the graph through it. A
@@ -356,12 +357,8 @@ mod tests {
         // symptom — so the fixture that holds every keyword is asserted to be fully reachable.
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
-        let root = parse::schema(
-            serde_json::from_str(EVERY_KEYWORD).unwrap(),
-            &mut store,
-            &mut ctx,
-        )
-        .unwrap();
+        let root = parse::schema(serde_json::from_str(EVERY_KEYWORD)?, &mut store, &mut ctx)
+            .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
 
         let mut seen = std::collections::BTreeSet::from([root]);
         let mut queue = vec![root];
@@ -386,16 +383,12 @@ mod tests {
     /// every applicator the model has (the two tests above hold it to that), and each stored
     /// subschema's address begins with the keyword that holds it, so the two lists can be
     /// compared outright.
-    #[test]
+    #[test_util::test]
     fn the_normalizers_subschema_lists_are_the_models_applicators() {
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
-        let root = parse::schema(
-            serde_json::from_str(EVERY_KEYWORD).unwrap(),
-            &mut store,
-            &mut ctx,
-        )
-        .unwrap();
+        let root = parse::schema(serde_json::from_str(EVERY_KEYWORD)?, &mut store, &mut ctx)
+            .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
 
         let mut walked = std::collections::BTreeSet::new();
         for (id, _) in store.iter() {
@@ -416,48 +409,51 @@ mod tests {
         assert_eq!(walked, listed);
     }
 
-    #[test]
+    #[test_util::test]
     fn the_written_form_of_type_is_preserved() {
         assert_eq!(
-            round_trip(json!({"type": "string"})),
+            round_trip(json!({"type": "string"}))?,
             json!({"type": "string"})
         );
         assert_eq!(
-            round_trip(json!({"type": ["string"]})),
+            round_trip(json!({"type": ["string"]}))?,
             json!({"type": ["string"]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn number_literals_are_preserved() {
         let original: Value =
-            serde_json::from_str(r#"{"maximum": 1.0, "minimum": 1, "multipleOf": 1e2}"#).unwrap();
-        let text = serde_json::to_string(&round_trip(original)).unwrap();
+            serde_json::from_str(r#"{"maximum": 1.0, "minimum": 1, "multipleOf": 1e2}"#)?;
+        let text = serde_json::to_string(&round_trip(original)?)?;
         assert_eq!(text, r#"{"maximum":1.0,"minimum":1,"multipleOf":1e+2}"#);
     }
 
-    #[test]
+    #[test_util::test]
     fn empty_collections_are_not_the_same_as_absent_ones() {
-        assert_eq!(round_trip(json!({"required": []})), json!({"required": []}));
         assert_eq!(
-            round_trip(json!({"properties": {}})),
+            round_trip(json!({"required": []}))?,
+            json!({"required": []})
+        );
+        assert_eq!(
+            round_trip(json!({"properties": {}}))?,
             json!({"properties": {}})
         );
-        assert_eq!(round_trip(json!({})), json!({}));
+        assert_eq!(round_trip(json!({}))?, json!({}));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_malformed_keyword_still_round_trips() {
         assert_eq!(
-            round_trip(json!({"required": "a", "maximum": "big"})),
+            round_trip(json!({"required": "a", "maximum": "big"}))?,
             json!({"required": "a", "maximum": "big"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_explicit_null_default_is_kept() {
         assert_eq!(
-            round_trip(json!({"default": null})),
+            round_trip(json!({"default": null}))?,
             json!({"default": null})
         );
     }

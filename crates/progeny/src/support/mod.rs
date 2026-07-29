@@ -90,7 +90,6 @@ pub(crate) fn tokens(
         let wire = items(HTTP);
         quote::quote! {
             #calling
-            #[allow(dead_code)]
             pub mod wire { #(#wire)* }
             #calling
             pub use wire::*;
@@ -101,10 +100,8 @@ pub(crate) fn tokens(
         let router = with_body_limit(items(ROUTER), body_limit);
         quote::quote! {
             #serving
-            #[allow(dead_code)]
             pub mod serve { #(#serve)* }
             #serving
-            #[allow(dead_code)]
             pub mod router { #(#router)* }
             #serving
             pub use serve::*;
@@ -116,10 +113,8 @@ pub(crate) fn tokens(
     quote::quote! {
         #buffered
 
-        #[allow(dead_code)]
         pub mod style { #(#style)* }
 
-        #[allow(dead_code)]
         pub mod multipart { #(#multipart)* }
 
         #wire
@@ -168,7 +163,7 @@ fn source(text: &str) -> proc_macro2::TokenStream {
 
 /// The same, as items alone.
 ///
-/// A file's own `#![doc]` and `#![allow]` are *inner* attributes, and inner attributes may only
+/// A file's own `#![doc]` and `#![expect]` are *inner* attributes, and inner attributes may only
 /// open a block. Two files nested into one module would put the second file's inner attributes
 /// after the first file's items, which is not Rust — and the failure is quiet, because the renderer
 /// falls back to emitting unparsed tokens rather than failing a build.
@@ -202,6 +197,7 @@ fn is_test_module(item: &syn::Item) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::config::BodyLimit;
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde::de::{Deserialize, Deserializer};
 
     /// The one flattened file names no `super::` paths.
@@ -212,14 +208,17 @@ mod tests {
     /// and break every generated crate, invisibly to this workspace's build. (`style`,
     /// `multipart`, `serve` and the wire module keep their submodule depth, so `super::` is
     /// legitimate there.)
-    #[test]
+    #[test_util::test]
     fn the_flattened_buffered_source_names_no_super_paths() {
         let items = super::items(super::BUFFERED);
         let spelled = quote::quote! { #(#items)* }.to_string();
         assert!(
             !spelled.contains("super ::"),
-            "buffered.rs names `super::`, which resolves differently once the file is spliced \
-             flat into the generated support root"
+            "{}",
+            indoc::indoc! {"
+                buffered.rs names `super::`, which resolves differently once the file is spliced \
+                flat into the generated support root"
+            }
         );
     }
 
@@ -228,18 +227,22 @@ mod tests {
     /// It is checked here because the renderer's fallback is to emit unparsed tokens rather than
     /// fail a build — the right call for a formatting failure, and the reason a *composition*
     /// failure would otherwise reach a consumer as one very long line that happens not to compile.
-    #[test]
+    #[test_util::test]
     fn the_shipped_module_parses_as_a_file() {
         for client in [false, true] {
             for server in [false, true] {
                 for gated in [false, true] {
                     let tokens = super::tokens(client, server, gated, BodyLimit::default());
-                    syn::parse2::<syn::File>(tokens.clone()).unwrap_or_else(|error| {
-                        panic!(
-                            "support(client = {client}, server = {server}, gated = {gated}) does \
-                             not parse: {error}\n{tokens}"
+                    syn::parse2::<syn::File>(tokens.clone()).map_err(|error| {
+                        eyre::eyre!(
+                            "{}",
+                            indoc::formatdoc! {"
+                                support(client = {client}, server = {server}, gated = {gated}) does \
+                                not parse: {error}
+                                {tokens}"
+                            }
                         )
-                    });
+                    })?;
                 }
             }
         }
@@ -277,7 +280,7 @@ mod tests {
     /// could raise it — which it cannot: that layer inserts an extension only extractors calling
     /// `with_limited_body` consult, and this reads the body with `to_bytes` and its own number.
     /// Saying so in a comment was not enough, so it became configuration.
-    #[test]
+    #[test_util::test]
     fn the_body_ceiling_is_the_configured_one() {
         let rendered = super::tokens(false, true, false, BodyLimit(4096)).to_string();
         assert!(
@@ -341,10 +344,10 @@ mod tests {
         serde_json::from_str(text)
     }
 
-    #[test]
+    #[test_util::test]
     fn every_member_is_read_by_its_wire_name() {
         assert_eq!(
-            parse(r#"{"required": "a", "optional": 1, "wireName": true}"#).unwrap(),
+            parse(r#"{"required": "a", "optional": 1, "wireName": true}"#)?,
             Spike {
                 required: "a".to_owned(),
                 optional: Some(1),
@@ -353,55 +356,55 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_bare_option_accepts_an_absent_member() {
         // No `default` attribute anywhere: serde routes a missing member through a deserializer
         // whose `deserialize_option` answers `visit_none`, and this mirrors that.
         assert_eq!(
-            parse(r#"{"required": "a", "wireName": false}"#)
-                .unwrap()
-                .optional,
+            parse(r#"{"required": "a", "wireName": false}"#)?.optional,
             None
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_explicit_null_and_an_absent_member_agree() {
         assert_eq!(
-            parse(r#"{"required": "a", "optional": null, "wireName": false}"#)
-                .unwrap()
-                .optional,
+            parse(r#"{"required": "a", "optional": null, "wireName": false}"#)?.optional,
             None
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_duplicate_member_is_rejected_rather_than_last_write_wins() {
         // The case a map-based buffer would lose silently, which is why the buffer is a list.
-        let error = parse(r#"{"required": "a", "required": "b", "wireName": false}"#).unwrap_err();
+        let error = parse(r#"{"required": "a", "required": "b", "wireName": false}"#)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(
             error.to_string().starts_with("duplicate field `required`"),
             "{error}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_missing_member_says_which_one() {
-        let error = parse(r#"{"wireName": false}"#).unwrap_err();
+        let error = parse(r#"{"wireName": false}"#)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(
             error.to_string().starts_with("missing field `required`"),
             "{error}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_unknown_member_is_ignored_under_that_policy() {
         assert!(
             parse(r#"{"required": "a", "wireName": false, "surprise": {"deep": [1]}}"#).is_ok()
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_unknown_member_is_refused_under_the_other_one() {
         let mut deserializer =
             serde_json::Deserializer::from_str(r#"{"required": "a", "surprise": 1}"#);
@@ -411,24 +414,27 @@ mod tests {
                 <Spike as Assemble>::FIELDS,
                 BufferVisitor::<Spike>::new(Unknown::Deny),
             )
-            .expect_err("an undeclared member should be refused");
+            .err()
+            .ok_or_eyre("an undeclared member should be refused")?;
         assert!(
             error.to_string().starts_with("unknown field `surprise`"),
             "{error}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_struct_can_be_read_from_a_sequence_the_way_the_derive_reads_one() {
         assert_eq!(
-            serde_json::from_str::<Spike>(r#"["a", 1, true]"#).unwrap(),
+            serde_json::from_str::<Spike>(r#"["a", 1, true]"#)?,
             Spike {
                 required: "a".to_owned(),
                 optional: Some(1),
                 renamed: true,
             }
         );
-        let error = serde_json::from_str::<Spike>(r#"["a"]"#).unwrap_err();
+        let error = serde_json::from_str::<Spike>(r#"["a"]"#)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(
             error
                 .to_string()
@@ -437,9 +443,11 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_member_of_the_wrong_type_reports_it_the_way_the_format_does() {
-        let error = parse(r#"{"required": 7, "wireName": false}"#).unwrap_err();
+        let error = parse(r#"{"required": 7, "wireName": false}"#)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(
             error
                 .to_string()
@@ -448,13 +456,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_buffered_value_replays_into_any_type() {
         // The machinery has to be able to hand a buffered value to an arbitrary `Deserialize`, or
         // a struct could only hold scalars.
         let content = Content::Seq(vec![Content::U64(1), Content::U64(2)]);
         let replayed: Vec<u64> =
-            Vec::deserialize(ContentDeserializer::<serde_json::Error>::new(content)).unwrap();
+            Vec::deserialize(ContentDeserializer::<serde_json::Error>::new(content))?;
         assert_eq!(replayed, [1, 2]);
 
         let content = Content::Map(vec![(
@@ -462,18 +470,17 @@ mod tests {
             Content::Seq(vec![Content::Bool(true)]),
         )]);
         let replayed: std::collections::BTreeMap<String, Vec<bool>> =
-            Deserialize::deserialize(ContentDeserializer::<serde_json::Error>::new(content))
-                .unwrap();
+            Deserialize::deserialize(ContentDeserializer::<serde_json::Error>::new(content))?;
         assert_eq!(replayed["a"], [true]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_missing_member_of_a_non_optional_type_is_an_error_and_not_a_default() {
         let outcome: Result<i64, serde_json::Error> =
             Deserialize::deserialize(Missing::new("count"));
         assert!(outcome.is_err());
         let outcome: Result<Option<i64>, serde_json::Error> =
             Deserialize::deserialize(Missing::new("count"));
-        assert_eq!(outcome.unwrap(), None);
+        assert_eq!(outcome?, None);
     }
 }

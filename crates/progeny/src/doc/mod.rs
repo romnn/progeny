@@ -15,15 +15,8 @@
 
 pub(crate) mod parse;
 // Serializing the model back to a value is what makes the round-trip property checkable, and
-// today the corpus harness is its only caller. `allow` rather than `expect` because the lint fires
-// only in the feature combinations that leave the harness out.
-#[cfg_attr(
-    not(feature = "harness"),
-    allow(
-        dead_code,
-        reason = "the round-trip check is the only caller so far, and it is feature-gated"
-    )
-)]
+// today the corpus harness is its only caller.
+#[cfg(any(feature = "harness", test))]
 pub(crate) mod serialize;
 
 use std::collections::BTreeMap;

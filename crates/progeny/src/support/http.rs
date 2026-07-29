@@ -4,8 +4,8 @@
 //! dev-dependency, so it compiles here under `cfg(test)` — same bytes tested as shipped — and again
 //! on every generated crate the corpus compile gate checks, with `--all-features`.
 //!
-//! `Display` and `std::error::Error` are written out rather than derived: a derive dependency for
-//! impls this stable would re-buy the macro-expansion cost the whole project is measuring.
+//! Error types use `thiserror` so their messages and source chains stay on the declarations they
+//! describe rather than drifting into parallel implementations.
 
 /// A successful response, with everything the caller might need about it.
 ///
@@ -70,20 +70,27 @@ impl<T> ResponseValue<T> {
 ///
 /// `E` is the operation's declared error payload, so a caller matches on a type rather than
 /// re-parsing a body the document already described.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error<E> {
     /// The request never completed: DNS, TLS, connection, timeout.
-    Request(::reqwest::Error),
+    #[error("the request failed: {0}")]
+    Request(#[from] ::reqwest::Error),
     /// A status the document declares as an error, with its payload parsed.
+    #[error("the server answered {}", .0.status())]
     Declared(ResponseValue<E>),
     /// A status the document does not declare at all, handed back raw.
     ///
     /// Undeclared rather than unexpected in the ordinary sense: a document that lists only `200`
     /// says nothing about `503`, and inventing a shape for it would be describing a payload
     /// progeny has never seen.
+    #[error(
+        "the server answered {}, which the description does not declare",
+        .0.status()
+    )]
     UnexpectedStatus(::reqwest::Response),
     /// The body arrived and did not match the contract the document stated.
-    Decode(DecodeError),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
 }
 
 impl<E> Error<E> {
@@ -98,47 +105,9 @@ impl<E> Error<E> {
     }
 }
 
-impl<E> From<::reqwest::Error> for Error<E> {
-    fn from(error: ::reqwest::Error) -> Self {
-        Self::Request(error)
-    }
-}
-
-impl<E> From<DecodeError> for Error<E> {
-    fn from(error: DecodeError) -> Self {
-        Self::Decode(error)
-    }
-}
-
-impl<E> ::std::fmt::Display for Error<E> {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match self {
-            Self::Request(error) => write!(f, "the request failed: {error}"),
-            Self::Declared(response) => {
-                write!(f, "the server answered {}", response.status())
-            }
-            Self::UnexpectedStatus(response) => write!(
-                f,
-                "the server answered {}, which the description does not declare",
-                response.status()
-            ),
-            Self::Decode(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl<E: ::std::fmt::Debug> ::std::error::Error for Error<E> {
-    fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
-        match self {
-            Self::Request(error) => Some(error),
-            Self::Decode(error) => Some(error),
-            Self::Declared(_) | Self::UnexpectedStatus(_) => None,
-        }
-    }
-}
-
 /// A body that did not match the type the description said it would be.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("the {status} response did not match the shape the description declares: {source}")]
 pub struct DecodeError {
     status: ::reqwest::StatusCode,
     source: ::serde_json::Error,
@@ -156,22 +125,6 @@ impl DecodeError {
     }
 }
 
-impl ::std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        write!(
-            f,
-            "the {} response did not match the shape the description declares: {}",
-            self.status, self.source
-        )
-    }
-}
-
-impl ::std::error::Error for DecodeError {
-    fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
 /// A required value a builder was never given.
 ///
 /// The runtime half of the builder interface: required setters are checked at `send()` rather than
@@ -179,7 +132,8 @@ impl ::std::error::Error for DecodeError {
 ///
 /// Named `Unset` rather than `Missing` because the buffering machinery already ships a `Missing`,
 /// for an absent *member of a payload* — a different thing, in the same module.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("`{operation}` needs `{what}`, which was never set")]
 pub struct Unset {
     operation: &'static str,
     what: &'static str,
@@ -192,25 +146,14 @@ impl Unset {
     }
 }
 
-impl ::std::fmt::Display for Unset {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        write!(
-            f,
-            "`{}` needs `{}`, which was never set",
-            self.operation, self.what
-        )
-    }
-}
-
-impl ::std::error::Error for Unset {}
-
 /// A form body whose value is not an object.
 ///
 /// A `multipart/form-data` or form-urlencoded body names its parts after the members of an object.
 /// A document that types such a body as an array or a scalar has described something with no member
 /// names, and there is nothing to call the parts. Reported at `send()` because that is the only
 /// place it can be: the generated type is legal Rust, and only this one call is wrong.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("`{operation}` sends a form body, which needs an object to name its parts from")]
 pub struct NotAForm {
     operation: &'static str,
 }
@@ -221,18 +164,6 @@ impl NotAForm {
         Self { operation }
     }
 }
-
-impl ::std::fmt::Display for NotAForm {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        write!(
-            f,
-            "`{}` sends a form body, which needs an object to name its parts from",
-            self.operation
-        )
-    }
-}
-
-impl ::std::error::Error for NotAForm {}
 
 /// A body as a `serde_json::Value`, so a form encoder can walk its members.
 ///

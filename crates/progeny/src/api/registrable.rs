@@ -140,17 +140,19 @@ pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::{Method, OperationContract, RegistrableRoute, classify};
     use crate::api::{ResponseContract, route};
     use crate::contract::RustIdent;
     use crate::diag::{Ctx, JsonPointer};
     use crate::shape::Docs;
 
-    fn operation(method: Method, template: &str) -> OperationContract {
-        OperationContract {
+    fn operation(method: Method, template: &str) -> eyre::Result<OperationContract> {
+        Ok(OperationContract {
             rust_name: RustIdent::method(&[template.to_owned()]),
             method,
-            path: route::parse(template).expect("the template parses"),
+            path: route::parse(template)?,
             params: Vec::new(),
             body: None,
             responses: ResponseContract {
@@ -161,7 +163,7 @@ mod tests {
             registrable: None,
             pagination: None,
             origin: JsonPointer::root().child(template),
-        }
+        })
     }
 
     /// What `classify` does with each of the answers a router can give.
@@ -171,17 +173,17 @@ mod tests {
     /// a conflicting shape loses its handler **whatever its method**, because `axum` keeps one path
     /// tree for all methods — while a second method on the *identical* template is the ordinary
     /// merged registration and keeps everything.
-    #[test]
+    #[test_util::test]
     fn a_refusal_and_a_collision_cost_the_handler_and_nothing_else() {
         let mut operations = vec![
-            operation(Method::Get, "/pets/{id}"),
-            operation(Method::Get, "/pets/{name}"),
-            operation(Method::Get, "/thumbs/{id}.png"),
+            operation(Method::Get, "/pets/{id}")?,
+            operation(Method::Get, "/pets/{name}")?,
+            operation(Method::Get, "/thumbs/{id}.png")?,
             // The shape the first classifier waved through and the real router panicked on:
             // a conflicting template on a *different* method.
-            operation(Method::Delete, "/pets/{other}"),
+            operation(Method::Delete, "/pets/{other}")?,
             // And the case that must keep working: another method on the identical template.
-            operation(Method::Delete, "/pets/{id}"),
+            operation(Method::Delete, "/pets/{id}")?,
         ];
         let mut ctx = Ctx::new();
         classify(&mut operations, &mut ctx);
@@ -230,30 +232,30 @@ mod tests {
         matchit::Router::new().insert(route, ()).is_ok()
     }
 
-    fn accepts_beside(first: &str, second: &str) -> bool {
+    fn accepts_beside(first: &str, second: &str) -> eyre::Result<bool> {
         let mut router = matchit::Router::new();
-        router.insert(first, ()).expect("the first inserts");
-        router.insert(second, ()).is_ok()
+        router.insert(first, ())?;
+        Ok(router.insert(second, ()).is_ok())
     }
 
-    #[test]
+    #[test_util::test]
     fn two_routes_of_the_same_shape_are_one_route() {
         // Two variables in the same position are the same route however they are named, which is
         // the whole of `miro`'s and `polygon`'s collisions: both vendors disambiguate a path by
         // renaming its parameter, which changes the documentation and not the URL.
-        assert!(!accepts_beside("/a/{x}", "/a/{y}"));
+        assert!(!accepts_beside("/a/{x}", "/a/{y}")?);
         assert!(!accepts_beside(
             "/v1/ema/{cryptoTicker}",
             "/v1/ema/{fxTicker}"
-        ));
-        assert!(!accepts_beside("/a/{x}/b", "/a/{y}/b"));
+        )?);
+        assert!(!accepts_beside("/a/{x}/b", "/a/{y}/b")?);
         // A literal beats a variable rather than colliding with it.
-        assert!(accepts_beside("/a/{x}", "/a/me"));
+        assert!(accepts_beside("/a/{x}", "/a/me")?);
         // And differing later in the path is enough to tell two routes apart.
-        assert!(accepts_beside("/a/{x}/b", "/a/{y}/c"));
+        assert!(accepts_beside("/a/{x}/b", "/a/{y}/c")?);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_parameter_has_to_end_its_segment_and_be_the_only_one_in_it() {
         // The rule this module exists to stop progeny from guessing at. A parameter may have
         // literal text *before* it in the segment and may not have any after it, and a segment may
@@ -284,7 +286,7 @@ mod tests {
     /// being guarded against would have passed. Counting lockfile entries delegates compatibility
     /// to cargo itself: it unifies versions within one compatible range, so a second `matchit`
     /// entry appears exactly when progeny and axum stop sharing one router.
-    #[test]
+    #[test_util::test]
     fn the_router_progeny_asks_is_the_router_axum_uses() {
         let _: axum::Router<()> = axum::Router::new();
         // `include_str!` rather than a runtime read, for two reasons: the resolved dependency

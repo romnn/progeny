@@ -23,6 +23,7 @@ pedantic = { level = "deny", priority = -1 }
 cargo-fuzz = true
 
 [dependencies]
+indoc = "2"
 libfuzzer-sys = "0.4"
 progeny = { path = "../crates/progeny", features = ["harness"] }
 # The generation target asserts that what comes out parses as Rust, which needs a parser.

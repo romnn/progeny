@@ -735,13 +735,12 @@ the documents declared. They are the other thing this project says it will not s
 crate that makes noise in a build the consumer did not write. **Both are fixed**, and the second one
 taught something worth keeping:
 
-**A field-level `#[allow]` is not enough, because the derive names the type again.** The obvious fix
-— put the allowance on the declaration that names the deprecated type — silences the field and
-leaves the `Deserialize` that `derive` expands from that same field, which reports at the same span.
-The warning count halves and the gate stays red, which is the worst of the three outcomes. The
-allowance goes on the *item*: the narrowest level that covers a derive. It hides nothing from the
-consumer, because it governs uses inside the generated item, and the consumer's own use of a
-deprecated type or field is linted at their site, not this one.
+**A field-level expectation is not enough, because the derive names the type again.** Putting
+`#[expect(deprecated)]` on the declaration that names the deprecated type silences the field but not
+the `Deserialize` code expanded from that field, which reports at the same span. The warning count
+halves and the gate stays red. Generated internals therefore name a hidden, transparent alias whose
+single deprecated reference carries the expectation. The public declaration stays deprecated, so a
+consumer's own use is still linted at their site.
 
 ### And behind those, a client that did not compile at all
 
@@ -838,25 +837,21 @@ progeny's own sentence as a continuation of it. The struct documentation and a d
 already separate themselves with a blank line; the setters did not. This one is worth noting
 separately because it is the only one where the markdown progeny emitted was its own.
 
-**Three were decisions, and the rule for them was the same each time — suppress only where the fix
-would be worse than the wart, and say why on the spot:**
+**Three were decisions, and each now has an explicit, stable rule:**
 
-- **`large_enum_variant`** asks for a `Box`, which is a change to the type the consumer receives.
-  Deciding it here would mean knowing the layout of every generated type, and progeny cannot: a
-  field may be `chrono::DateTime`, `time::OffsetDateTime`, `uuid::Uuid` or whichever map the
-  configuration picked, and those layouts belong to crates at versions this build never sees. The
-  threshold is clippy's own and free to move between releases. A `Box` placed on an estimate is an
-  API change made on a guess, appearing and disappearing as an unrelated knob moves.
+- **`large_enum_variant`** asks for a `Box`, but dependency-defined layouts make a
+  threshold-dependent choice unstable. Every non-unit payload is therefore boxed unconditionally.
+  The public shape no longer changes when a configured format or map implementation changes size.
 - **`type_complexity`** asks for an alias, and progeny would have to invent its name. Every name in
   the output comes from the document; a named type the document never mentions is worse than a long
-  one that says exactly what the schema said.
+  one that says exactly what the schema said. The renderer mirrors Clippy's scoring and emits a
+  field-level `#[expect]` only when that exact field crosses the threshold.
 - **`match_overlapping_arm`** is reporting the contract. OpenAPI says an exact status claims a
   response before a range does, so a document declaring both `400` and `4XX` produces arms that
   overlap by construction. The lint reads the rule as a mistake.
 
-Each suppression sits on the construct it is about rather than on the crate, and is `#[allow]`
-rather than `#[expect]` for the same reason throughout: this lands in someone else's crate, compiled
-by a clippy this build never sees, and an expectation unfulfilled there is a warning of its own.
+Every remaining suppression is a narrowly scoped `#[expect(..., reason = "...")]` on the construct
+that requires it. There are no crate-wide lint allowances in generated output.
 
 ### What it does not cover, said plainly
 
@@ -1092,15 +1087,15 @@ build as a complaint about code they did not write. That is why the compile gate
 | what it was | where | why it only appears here |
 | --- | --- | --- |
 | `let mut count` with nothing to increment | `petstore-31`, `posthog`, `oxide` | a struct whose members are all required has no conditional arm |
-| `#[allow(deprecated)]` missing on the impls | `github-31`, `cloudflare`, `okta`, `orb`, `jellyfin` | the derive puts its own allowance on; a hand-written impl has to be given one |
+| deprecated uses inside the impls | `github-31`, `cloudflare`, `okta`, `orb`, `jellyfin` | generated internals need non-deprecated aliases and precise member expectations |
 | `unused variable: buffer` | `cloudflare`, `github-31`, `okta` | a struct with no members reads nothing |
 | `let mut state` with nothing to write | the same three | and writes nothing |
 
 The deprecation row has **three distinct shapes and the corpus produced all three**: a deprecated
 *type*, which `impl Serialize for …` uses simply by naming it (`cloudflare`); a deprecated *member*,
 used by reading or writing it (`jellyfin`, `github-31`); and a member whose *type* is deprecated
-(`okta`). The allowance goes on the item, which is the same lesson stage 5 learned about the derive
-and had to learn again about a different set of items.
+(`okta`). Hidden aliases cover generated type paths, while statement-level expectations cover the
+exact member reads and writes.
 
 The last two rows are one shape — **an object with no properties** — and three documents declare
 one. It is now in the differential fixture, because a shape whose whole difficulty is that it

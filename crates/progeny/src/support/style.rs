@@ -8,9 +8,12 @@
 //! instead of one per (row × parameter type), and one place where each row's rule lives, so the
 //! rule cannot drift between two instantiations of it.
 
-#![allow(
-    dead_code,
-    reason = "this file is shipped into generated crates; inside progeny it exists to be compiled and tested"
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "shipped into generated crates; compiled here to keep its source checked"
+    )
 )]
 
 use std::fmt::Write as _;

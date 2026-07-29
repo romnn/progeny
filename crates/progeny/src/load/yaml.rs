@@ -637,72 +637,100 @@ fn trim_leading_zeros(digits: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::{canonical_json_number, load};
     use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, RejectKind};
 
-    fn yaml(text: &str) -> Value {
+    fn yaml(text: &str) -> eyre::Result<Value> {
         let mut ctx = Ctx::new();
-        load(text, &mut ctx).unwrap()
+        Ok(load(text, &mut ctx)?)
     }
 
-    fn yaml_with_diagnostics(text: &str) -> (Value, Vec<Diagnostic>) {
+    fn yaml_with_diagnostics(text: &str) -> eyre::Result<(Value, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
-        let value = load(text, &mut ctx).unwrap();
-        (value, ctx.into_diagnostics())
+        let value = load(text, &mut ctx)?;
+        Ok((value, ctx.into_diagnostics()))
     }
 
-    #[test]
+    #[test_util::test]
     fn integer_keys_become_their_canonical_string() {
         assert_eq!(
-            yaml("responses:\n  200:\n    description: ok\n  \"404\":\n    description: no\n"),
+            yaml(indoc::indoc! {r#"
+                responses:
+                  200:
+                    description: ok
+                  "404":
+                    description: no
+            "#})?,
             json!({"responses": {"200": {"description": "ok"}, "404": {"description": "no"}}})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn every_scalar_kind_of_key_gets_a_canonical_name() {
         // `null` and `~` are the same key, so the later one wins, exactly as two identical keys
         // would. `0200` is the integer 200, and its canonical JSON rendering has no leading zero.
         assert_eq!(
-            yaml("true: a\nnull: b\n~: c\n0200: d\n1.50: e\n"),
+            yaml(indoc::indoc! {"
+                true: a
+                null: b
+                ~: c
+                0200: d
+                1.50: e
+            "})?,
             json!({"true": "a", "null": "c", "200": "d", "1.50": "e"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn core_schema_does_not_resolve_yaml_11_booleans() {
         // `figma` requires a property named `y`; `stytch` a JWK field named `n`. A YAML 1.1
         // loader turns these into booleans and corrupts the model.
         assert_eq!(
-            yaml("required:\n  - x\n  - y\n  - n\n  - on\n  - off\n  - yes\n  - no\n"),
+            yaml(indoc::indoc! {"
+                required:
+                  - x
+                  - y
+                  - n
+                  - on
+                  - off
+                  - yes
+                  - no
+            "})?,
             json!({"required": ["x", "y", "n", "on", "off", "yes", "no"]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_bare_equals_sign_is_a_string() {
         // `zendesk` has `change: =` inside an example. YAML 1.1 resolves `=` to the `!!value`
         // tag, which loaders without a constructor for it reject outright.
-        assert_eq!(yaml("change: =\n"), json!({"change": "="}));
+        assert_eq!(yaml("change: =\n")?, json!({"change": "="}));
     }
 
-    #[test]
+    #[test_util::test]
     fn number_literals_survive_exactly() {
         // Every digit is kept: `1.0` does not collapse to `1`, `1.00` does not collapse to `1.0`,
         // and a float that only `f64` round-tripping would mangle keeps all seventeen digits. The
         // one thing that is normalized is the exponent's sign, which the value type writes
         // explicitly; it is the same number either way and it is deterministic.
-        let value = yaml("a: 1\nb: 1.0\nc: 1.00\nd: 1e3\ne: 0.30000000000000004\n");
-        let text = serde_json::to_string(&value).unwrap();
+        let value = yaml(indoc::indoc! {"
+            a: 1
+            b: 1.0
+            c: 1.00
+            d: 1e3
+            e: 0.30000000000000004
+        "})?;
+        let text = serde_json::to_string(&value)?;
         assert_eq!(
             text,
             r#"{"a":1,"b":1.0,"c":1.00,"d":1e+3,"e":0.30000000000000004}"#
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn numbers_json_cannot_spell_are_rewritten_to_the_same_value() {
         assert_eq!(canonical_json_number("+5").as_deref(), Some("5"));
         assert_eq!(canonical_json_number("-5").as_deref(), Some("-5"));
@@ -722,102 +750,139 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn scalars_that_only_look_numeric_stay_strings() {
         for text in [
             ".", "-", "12:30", "1_000", "0x", "0o8", "1e", "1.2.3", "abc",
         ] {
             assert_eq!(canonical_json_number(text), None, "{text}");
         }
-        assert_eq!(yaml("at: 12:30\n"), json!({"at": "12:30"}));
+        assert_eq!(yaml("at: 12:30\n")?, json!({"at": "12:30"}));
     }
 
-    #[test]
+    #[test_util::test]
     fn quoted_scalars_are_never_resolved() {
         assert_eq!(
-            yaml("a: \"1\"\nb: 'true'\nc: \"null\"\n"),
+            yaml(indoc::indoc! {r#"
+                a: "1"
+                b: 'true'
+                c: "null"
+            "#})?,
             json!({"a": "1", "b": "true", "c": "null"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn block_scalars_keep_their_text() {
         assert_eq!(
-            yaml("a: |\n  one\n  two\nb: >-\n  folded\n  text\n"),
-            json!({"a": "one\ntwo\n", "b": "folded text"})
+            yaml(indoc::indoc! {"
+                a: |
+                  one
+                  two
+                b: >-
+                  folded
+                  text
+            "})?,
+            json!({
+                "a": indoc::indoc! {"
+                    one
+                    two
+                "},
+                "b": "folded text",
+            })
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn aliases_are_resolved_by_copying() {
         // `workos` and `openai` both use anchors, including on collections.
-        let value = yaml(concat!(
-            "shared: &group\n",
-            "  - a\n",
-            "  - b\n",
-            "first: *group\n",
-            "second: *group\n",
-        ));
+        let value = yaml(indoc::indoc! {"
+            shared: &group
+              - a
+              - b
+            first: *group
+            second: *group
+        "})?;
         assert_eq!(
             value,
             json!({"shared": ["a", "b"], "first": ["a", "b"], "second": ["a", "b"]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_anchor_on_a_scalar_is_usable_as_a_key_and_a_value() {
         assert_eq!(
-            yaml("name: &n title\nalias: *n\n"),
+            yaml(indoc::indoc! {"
+                name: &n title
+                alias: *n
+            "})?,
             json!({"name": "title", "alias": "title"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn merge_keys_are_resolved_with_explicit_members_winning() {
-        let value = yaml(concat!(
-            "base: &base\n",
-            "  type: string\n",
-            "  description: from base\n",
-            "derived:\n",
-            "  <<: *base\n",
-            "  description: mine\n",
-        ));
+        let value = yaml(indoc::indoc! {"
+            base: &base
+              type: string
+              description: from base
+            derived:
+              <<: *base
+              description: mine
+        "})?;
         assert_eq!(
             value["derived"],
             json!({"type": "string", "description": "mine"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_sequence_of_merge_sources_prefers_the_earlier_one() {
-        let value = yaml(concat!(
-            "a: &a\n",
-            "  k: from a\n",
-            "b: &b\n",
-            "  k: from b\n",
-            "  extra: yes\n",
-            "merged:\n",
-            "  <<: [*a, *b]\n",
-        ));
+        let value = yaml(indoc::indoc! {"
+            a: &a
+              k: from a
+            b: &b
+              k: from b
+              extra: yes
+            merged:
+              <<: [*a, *b]
+        "})?;
         assert_eq!(value["merged"], json!({"k": "from a", "extra": "yes"}));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_quoted_merge_key_is_an_ordinary_member() {
-        assert_eq!(yaml("a:\n  \"<<\": x\n"), json!({"a": {"<<": "x"}}));
+        assert_eq!(
+            yaml(indoc::indoc! {r#"
+                a:
+                  "<<": x
+            "#})?,
+            json!({"a": {"<<": "x"}})
+        );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_non_scalar_key_is_rejected() {
         let mut ctx = Ctx::new();
-        let error = load("? [a, b]\n: value\n", &mut ctx).unwrap_err();
+        let error = load(
+            indoc::indoc! {"
+                ? [a, b]
+                : value
+            "},
+            &mut ctx,
+        )
+        .err()
+        .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::NonScalarKey);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_non_finite_annotation_drops_the_value() {
-        let (value, diagnostics) =
-            yaml_with_diagnostics("schema:\n  default: .inf\n  type: number\n");
+        let (value, diagnostics) = yaml_with_diagnostics(indoc::indoc! {"
+            schema:
+              default: .inf
+              type: number
+        "})?;
         assert_eq!(value, json!({"schema": {"type": "number"}}));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].class(), BreakageClass::NonFiniteNumber);
@@ -825,46 +890,67 @@ mod tests {
         assert_eq!(diagnostics[0].location().to_string(), "/schema/default");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_non_finite_constraint_degrades_the_type() {
-        let (value, diagnostics) = yaml_with_diagnostics("maximum: -.inf\nminimum: 0\n");
+        let (value, diagnostics) = yaml_with_diagnostics(indoc::indoc! {"
+            maximum: -.inf
+            minimum: 0
+        "})?;
         assert_eq!(value, json!({"minimum": 0}));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].action(), Action::Degrade);
         assert_eq!(diagnostics[0].location().to_string(), "/maximum");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_non_finite_sequence_element_is_dropped_with_its_position() {
-        let (value, diagnostics) = yaml_with_diagnostics("enum:\n  - 1\n  - .nan\n  - 3\n");
+        let (value, diagnostics) = yaml_with_diagnostics(indoc::indoc! {"
+            enum:
+              - 1
+              - .nan
+              - 3
+        "})?;
         assert_eq!(value, json!({"enum": [1, 3]}));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].location().to_string(), "/enum/1");
     }
 
-    #[test]
+    #[test_util::test]
     fn duplicate_keys_keep_the_last_value() {
-        assert_eq!(yaml("a: 1\na: 2\n"), json!({"a": 2}));
+        assert_eq!(
+            yaml(indoc::indoc! {"
+                a: 1
+                a: 2
+            "})?,
+            json!({"a": 2})
+        );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_empty_document_loads_as_null() {
-        assert_eq!(yaml(""), Value::Null);
-        assert_eq!(yaml("# just a comment\n"), Value::Null);
+        assert_eq!(yaml("")?, Value::Null);
+        assert_eq!(yaml("# just a comment\n")?, Value::Null);
     }
 
-    #[test]
+    #[test_util::test]
     fn only_the_first_document_of_a_stream_is_loaded() {
-        assert_eq!(yaml("a: 1\n---\nb: 2\n"), json!({"a": 1}));
+        assert_eq!(
+            yaml(indoc::indoc! {"
+                a: 1
+                ---
+                b: 2
+            "})?,
+            json!({"a": 1})
+        );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_dangling_alias_is_a_rejection_rather_than_a_panic() {
         let mut ctx = Ctx::new();
         assert!(load("a: *nope\n", &mut ctx).is_err());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_parser_panic_becomes_an_ordinary_rejection() {
         // An unterminated flow mapping whose first token is a tag indicator makes the underlying
         // parser give up by panicking. The invariant is that no input panics *progeny*, so the
@@ -876,22 +962,35 @@ mod tests {
         let outcome = load("{!0,5',:c..8-\n", &mut ctx);
         std::panic::set_hook(previous);
 
-        let error = outcome.unwrap_err();
+        let error = outcome
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::Unparsable);
     }
 
-    #[test]
+    #[test_util::test]
     fn flow_style_is_the_same_document_as_block_style() {
         assert_eq!(
-            yaml("{a: [1, 2], b: {c: d}}"),
-            yaml("a:\n  - 1\n  - 2\nb:\n  c: d\n")
+            yaml("{a: [1, 2], b: {c: d}}")?,
+            yaml(indoc::indoc! {"
+                a:
+                  - 1
+                  - 2
+                b:
+                  c: d
+            "})?
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn explicit_core_schema_tags_are_honoured() {
         assert_eq!(
-            yaml("a: !!str 1\nb: !!int \"2\"\nc: !!bool \"true\"\nd: !!null \"\"\n"),
+            yaml(indoc::indoc! {r#"
+                a: !!str 1
+                b: !!int "2"
+                c: !!bool "true"
+                d: !!null ""
+            "#})?,
             json!({"a": "1", "b": 2, "c": true, "d": null})
         );
     }

@@ -20,9 +20,9 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args as ClapArgs;
+use color_eyre::eyre::{self, WrapErr, bail};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -71,7 +71,7 @@ struct Violation {
     detail: String,
 }
 
-pub fn run(args: &Args) -> Result<()> {
+pub fn run(args: &Args) -> eyre::Result<()> {
     let source_root = paths::library_root().join("src");
     let files = rust_files(&source_root)?;
     if files.is_empty() {
@@ -83,8 +83,8 @@ pub fn run(args: &Args) -> Result<()> {
     let mut imports = 0usize;
 
     for file in &files {
-        let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
-        let parsed = syn::parse_file(&text).with_context(|| format!("parsing {file}"))?;
+        let text = std::fs::read_to_string(file).wrap_err_with(|| format!("reading {file}"))?;
+        let parsed = syn::parse_file(&text).wrap_err_with(|| format!("parsing {file}"))?;
         let module = module_path(&source_root, file);
         let is_binary = module.first().is_some_and(|segment| segment == "bin");
         // Total, on purpose: a module the table does not rank would otherwise be exempt in both
@@ -232,16 +232,16 @@ fn module_path(root: &Utf8Path, file: &Utf8Path) -> Vec<String> {
     segments
 }
 
-fn rust_files(root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+fn rust_files(root: &Utf8Path) -> eyre::Result<Vec<Utf8PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_owned()];
     while let Some(directory) = stack.pop() {
         let entries =
-            std::fs::read_dir(&directory).with_context(|| format!("reading {directory}"))?;
+            std::fs::read_dir(&directory).wrap_err_with(|| format!("reading {directory}"))?;
         for entry in entries {
-            let entry = entry.with_context(|| format!("reading an entry of {directory}"))?;
+            let entry = entry.wrap_err_with(|| format!("reading an entry of {directory}"))?;
             let path = Utf8PathBuf::try_from(entry.path())
-                .with_context(|| "a source path is not valid UTF-8")?;
+                .wrap_err_with(|| "a source path is not valid UTF-8")?;
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension() == Some("rs") {

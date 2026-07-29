@@ -45,7 +45,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
     let items = servable
         .iter()
         .map(|(operation, _)| operation_items(operation, contracts, config));
-    let routes = router(&servable, contracts);
+    let routes = router(&servable);
 
     quote! {
         #![doc = " The serving side."]
@@ -91,11 +91,9 @@ fn trait_method(
     let name = ident(&operation.rust_name);
     let docs = docs_of(&operation.docs);
     let response = response_name(operation);
-    let deprecated = touches_deprecated(operation, contracts);
     let arguments = argument_list(operation, contracts, config);
     quote! {
         #docs
-        #deprecated
         fn #name(
             &self,
             #(#arguments),*
@@ -140,19 +138,15 @@ pub(crate) const LOCATIONS: [(Location, &str); 4] = [
     (Location::Cookie, "Cookie"),
 ];
 
-/// Whether anything this operation names is deprecated.
-///
-/// One answer for all of an operation's items, because the allowance has to sit on the *item* and
-/// an operation owns several. The same lesson the client renderer learned: a field-level `#[allow]`
-/// silences the field and not the derive that expands at the same span, so the warning count halves
-/// and the gate stays red. Two ways to touch a deprecated thing here — a parameter or a response
-/// naming a deprecated *type*, and a parameter the document deprecated *itself*, which becomes a
-/// deprecated field the handler then reads.
-fn touches_deprecated(operation: &OperationContract, contracts: &Contracts) -> TokenStream {
+/// Whether the handler must call a deprecated operation or read a deprecated parameter.
+fn touches_deprecated(operation: &OperationContract) -> TokenStream {
     if operation.docs.deprecated || operation.params.iter().any(|param| param.docs.deprecated) {
-        return quote! { #[allow(deprecated)] };
+        quote! {
+            #[expect(deprecated, reason = "the generated operation deliberately exposes deprecated API")]
+        }
+    } else {
+        TokenStream::new()
     }
-    super::types::deprecated_use(super::client::operation_types(operation), contracts)
 }
 
 /// Everything one operation contributes outside the trait: its parameter groups and its response.
@@ -161,15 +155,14 @@ fn operation_items(
     contracts: &Contracts,
     config: &Config,
 ) -> TokenStream {
-    let allow = touches_deprecated(operation, contracts);
     let groups = LOCATIONS.map(|(location, suffix)| {
         let params: Vec<&ParamContract> = operation.params_at(location).collect();
         if params.is_empty() {
             return TokenStream::new();
         }
-        group_struct(operation, suffix, &params, contracts, config, &allow)
+        group_struct(operation, suffix, &params, contracts, config)
     });
-    let response = response_enum(operation, contracts, config, &allow);
+    let response = response_enum(operation, contracts, config);
     quote! { #(#groups)* #response }
 }
 
@@ -184,7 +177,6 @@ fn group_struct(
     params: &[&ParamContract],
     contracts: &Contracts,
     config: &Config,
-    allow: &TokenStream,
 ) -> TokenStream {
     let name = group_name(operation, suffix);
     let doc = format!(
@@ -203,17 +195,15 @@ fn group_struct(
             quote! { ::std::option::Option<#ty> }
         };
         let docs = docs_of(&param.docs);
-        quote! { #docs pub #field: #ty, }
+        let nesting = super::types::type_complexity(&ty);
+        quote! { #docs #nesting pub #field: #ty, }
     });
     // `PartialEq` is deliberately absent. A generated type carries only the derives the
     // configuration asked for, and a group struct holding one that lacks `PartialEq` cannot derive
     // it — which is a compile error in the consumer's crate about a convenience nobody requested.
-    let nesting = quote! { #[allow(clippy::type_complexity)] };
     quote! {
         #[doc = #doc]
         #[derive(Debug, Clone)]
-        #allow
-        #nesting
         pub struct #name {
             #(#fields)*
         }
@@ -229,14 +219,13 @@ fn response_enum(
     operation: &OperationContract,
     contracts: &Contracts,
     config: &Config,
-    allow: &TokenStream,
 ) -> TokenStream {
     let name = response_name(operation);
     let doc = format!(" What `{}` may answer with.", operation.rust_name);
     let arms = &operation.responses.arms;
     let variants = arms.iter().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
-        let ty = type_tokens(&arm.ty, contracts, config);
+        let ty = super::types::enum_type_path(&arm.ty, contracts, config);
         let docs = docs_of(&arm.docs);
         quote! { #docs #variant(#ty), }
     });
@@ -253,13 +242,16 @@ fn response_enum(
     // because a description with no `default` has no variant to say one with.
     let default_variant = operation.responses.default.as_ref().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
-        let ty = type_tokens(&arm.ty, contracts, config);
+        let ty = super::types::enum_type_path(&arm.ty, contracts, config);
         quote! {
             /// A status this description does not name individually.
             ///
             /// `default` claims whatever the other arms do not, so the status is the handler's to
             /// choose — there is no single number the description meant.
-            #variant { status: ::std::primitive::u16, body: #ty },
+            #variant {
+                status: ::std::primitive::u16,
+                body: #ty,
+            },
         }
     });
     let default_match = operation.responses.default.as_ref().map(|arm| {
@@ -281,15 +273,12 @@ fn response_enum(
     quote! {
         #[doc = #doc]
         #[derive(Debug, Clone)]
-        #allow
-        #[allow(clippy::large_enum_variant)]
         pub enum #name {
             #empty
             #(#variants)*
             #default_variant
         }
 
-        #allow
         impl ::axum::response::IntoResponse for #name {
             fn into_response(self) -> ::axum::response::Response {
                 match self {
@@ -317,10 +306,7 @@ fn status_code(status: StatusPattern) -> u16 {
 /// Registers exactly the routes the classifier accepted, which is why the `axum`-panics-at-startup
 /// failure mode is unreachable rather than unlikely: a route the router would refuse never became
 /// a trait method in the first place.
-fn router(
-    servable: &[(&OperationContract, &RegistrableRoute)],
-    contracts: &Contracts,
-) -> TokenStream {
+fn router(servable: &[(&OperationContract, &RegistrableRoute)]) -> TokenStream {
     // Grouped by path so that two methods on one route are one `route()` call with two handlers,
     // which is what `axum` requires — registering the same path twice panics even when the methods
     // differ.
@@ -348,9 +334,7 @@ fn router(
         }
     });
 
-    let handlers = servable
-        .iter()
-        .map(|(operation, _)| handler_fn(operation, contracts));
+    let handlers = servable.iter().map(|(operation, _)| handler_fn(operation));
 
     quote! {
         /// A router serving every operation this description declares that a router can register.
@@ -373,12 +357,12 @@ fn router(
 /// Generated as a free function per operation rather than a closure so that its extraction is
 /// readable in the emitted source, which is the thing a reader of a checked-in generated crate is
 /// actually going to look at.
-fn handler_fn(operation: &OperationContract, contracts: &Contracts) -> TokenStream {
+fn handler_fn(operation: &OperationContract) -> TokenStream {
     let name = handler_name(operation);
     let method = ident(&operation.rust_name);
     let response = response_name(operation);
     let operation_label = operation.rust_name.as_str();
-    let deprecated = touches_deprecated(operation, contracts);
+    let deprecated = touches_deprecated(operation);
 
     let mut extractions = Vec::new();
     let mut arguments = Vec::new();
@@ -399,8 +383,20 @@ fn handler_fn(operation: &OperationContract, contracts: &Contracts) -> TokenStre
             // is an array or a scalar with a comma in it.
             let array = param.style.array();
             let source = match location {
-                Location::Path => quote! { incoming.path_value(#wire) },
-                Location::Query => quote! { incoming.query_value(#wire, #style, #explode, #array) },
+                Location::Path => {
+                    quote! {
+                        ::std::result::Result::<_, ::std::convert::Infallible>::Ok(
+                            incoming.path_value(#wire)
+                        )
+                    }
+                }
+                Location::Query => {
+                    quote! {
+                        ::std::result::Result::<_, ::std::convert::Infallible>::Ok(
+                            incoming.query_value(#wire, #style, #explode, #array)
+                        )
+                    }
+                }
                 Location::Header => quote! { incoming.header_value(#wire) },
                 Location::Cookie => quote! { incoming.cookie_value(#wire) },
             };

@@ -9,7 +9,7 @@
 //! compiled once for the crate instead of once per operation — the same trade the style table makes,
 //! and the reason the server half costs a consumer roughly what the client half does.
 
-#![allow(
+#![expect(
     dead_code,
     reason = "this file is shipped into generated crates; inside progeny it exists to be compiled and tested"
 )]
@@ -21,22 +21,26 @@ use serde_json::Value;
 /// One enum for every way extraction can fail, so a server shapes its error bodies in one place.
 /// The `Api` trait's `on_rejection` is handed this and returns whatever the service's conventions
 /// call for; the default is [`RejectionResponse::of`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Rejection {
     /// A parameter the description marks required, which the request did not carry.
+    #[error("`{operation}` requires `{parameter}`, which was not sent")]
     MissingParameter {
         operation: &'static str,
         parameter: &'static str,
     },
     /// A parameter that was present and did not parse as the type the description gives it.
+    #[error("`{operation}` could not read `{parameter}`: {detail}")]
     InvalidParameter {
         operation: &'static str,
         parameter: &'static str,
         detail: String,
     },
     /// A body the description marks required, which the request did not carry.
+    #[error("`{operation}` requires a body, which was not sent")]
     MissingBody { operation: &'static str },
     /// A body that arrived and did not match the description.
+    #[error("`{operation}` could not read its body: {detail}")]
     InvalidBody {
         operation: &'static str,
         detail: String,
@@ -54,12 +58,14 @@ impl Rejection {
     // Every variant answers the same number today, which is the whole point of the doc comment
     // above: `422` is a house style and progeny does not have one. Kept as a method rather than the
     // associated function clippy suggests because it is public API in the generated crate, where
-    // `rejection.status()` is what a service overriding `on_rejection` will reach for. `allow`
-    // rather than `expect` because this file is compiled again in somebody else's crate, under a
-    // lint configuration that may never enable the lint being expected.
-    #[allow(clippy::unused_self, reason = "public API shape, uniform answer")]
+    // `rejection.status()` is what a service overriding `on_rejection` will reach for.
     pub fn status(&self) -> u16 {
-        400
+        match self {
+            Self::MissingParameter { .. }
+            | Self::InvalidParameter { .. }
+            | Self::MissingBody { .. }
+            | Self::InvalidBody { .. } => 400,
+        }
     }
 
     /// Which parameter or body was at fault, for a service assembling its own error body.
@@ -73,33 +79,6 @@ impl Rejection {
         }
     }
 }
-
-impl std::fmt::Display for Rejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingParameter {
-                operation,
-                parameter,
-            } => write!(
-                f,
-                "`{operation}` requires `{parameter}`, which was not sent"
-            ),
-            Self::InvalidParameter {
-                operation,
-                parameter,
-                detail,
-            } => write!(f, "`{operation}` could not read `{parameter}`: {detail}"),
-            Self::MissingBody { operation } => {
-                write!(f, "`{operation}` requires a body, which was not sent")
-            }
-            Self::InvalidBody { operation, detail } => {
-                write!(f, "`{operation}` could not read its body: {detail}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Rejection {}
 
 /// The default reply to a [`Rejection`].
 ///
@@ -144,8 +123,8 @@ impl RejectionResponse {
 ///
 /// # Errors
 /// When the parameter is required and absent, or present and unparsable.
-pub fn read<T: serde::de::DeserializeOwned>(
-    found: Result<Option<Value>, String>,
+pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
+    found: Result<Option<Value>, E>,
     parameter: &'static str,
     required: bool,
     operation: &'static str,
@@ -162,20 +141,25 @@ pub fn read<T: serde::de::DeserializeOwned>(
         // Asking serde for it rather than returning it directly keeps this one function usable for
         // both cases, and `T` is `Option<_>` exactly when the description said optional.
         Ok(None) => Value::Null,
-        Err(detail) => {
+        Err(source) => {
             return Err(Rejection::InvalidParameter {
                 operation,
                 parameter,
-                detail,
+                detail: source.to_string(),
             });
         }
     };
     typed(value).map_err(|source| Rejection::InvalidParameter {
         operation,
         parameter,
-        detail: source,
+        detail: source.to_string(),
     })
 }
+
+/// A value that did not match the type declared by the description.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct ServerDecodeError(#[from] serde_json::Error);
 
 /// Deserialize a value that arrived as text into whatever the description says it is.
 ///
@@ -189,11 +173,12 @@ pub fn read<T: serde::de::DeserializeOwned>(
 /// reinterpreted. Only a value serde has already refused is looked at again.
 ///
 /// # Errors
-/// When the value does not match the description under either reading; the message is serde's.
-pub fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
+/// Returns [`ServerDecodeError`] when the value does not match the description under either
+/// reading.
+pub fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ServerDecodeError> {
     let first = match serde_json::from_value(value.clone()) {
         Ok(parsed) => return Ok(parsed),
-        Err(source) => source.to_string(),
+        Err(source) => ServerDecodeError::from(source),
     };
     serde_json::from_value(retyped(value)).map_err(|_| first)
 }
@@ -232,11 +217,11 @@ fn retyped(value: Value) -> Value {
 /// The same reading for a whole body assembled from text — a form or a multipart request.
 ///
 /// # Errors
-/// When the body does not match the description under either reading.
-pub fn typed_body<T: serde::de::DeserializeOwned>(members: Value) -> Result<T, String> {
+/// Returns [`ServerDecodeError`] when the body does not match the description under either reading.
+pub fn typed_body<T: serde::de::DeserializeOwned>(members: Value) -> Result<T, ServerDecodeError> {
     let first = match serde_json::from_value(members.clone()) {
         Ok(parsed) => return Ok(parsed),
-        Err(source) => source.to_string(),
+        Err(source) => ServerDecodeError::from(source),
     };
     let Value::Object(fields) = members else {
         return Err(first);
@@ -256,14 +241,17 @@ pub fn typed_body<T: serde::de::DeserializeOwned>(members: Value) -> Result<T, S
 ///
 /// # Errors
 /// When the body is absent, or present and unreadable.
-pub fn required_body<T>(
-    found: Result<Option<T>, String>,
+pub fn required_body<T, E: std::fmt::Display>(
+    found: Result<Option<T>, E>,
     operation: &'static str,
 ) -> Result<T, Rejection> {
     match found {
         Ok(Some(body)) => Ok(body),
         Ok(None) => Err(Rejection::MissingBody { operation }),
-        Err(detail) => Err(Rejection::InvalidBody { operation, detail }),
+        Err(source) => Err(Rejection::InvalidBody {
+            operation,
+            detail: source.to_string(),
+        }),
     }
 }
 
@@ -271,19 +259,24 @@ pub fn required_body<T>(
 ///
 /// # Errors
 /// When the body is present and unreadable.
-pub fn optional_body<T>(
-    found: Result<Option<T>, String>,
+pub fn optional_body<T, E: std::fmt::Display>(
+    found: Result<Option<T>, E>,
     operation: &'static str,
 ) -> Result<Option<T>, Rejection> {
     match found {
         Ok(body) => Ok(body),
-        Err(detail) => Err(Rejection::InvalidBody { operation, detail }),
+        Err(source) => Err(Rejection::InvalidBody {
+            operation,
+            detail: source.to_string(),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
+    use std::convert::Infallible;
 
     use super::{Rejection, RejectionResponse, optional_body, read, required_body, typed};
 
@@ -294,14 +287,14 @@ mod tests {
     /// filter per occurrence and serde was handed the text where the struct belonged. The guard in
     /// the other direction matters as much: a member the description types as a *string* keeps its
     /// braces, because the as-is reading accepts it before this one runs.
-    #[test]
+    #[test_util::test]
     fn a_string_spelling_a_compound_is_reread_where_a_compound_is_expected() {
         #[derive(Debug, PartialEq, serde::Deserialize)]
         struct Filter {
             key: String,
         }
         let arrived = json!(["{\"key\":\"a\"}"]);
-        let parsed: Vec<Filter> = typed(arrived).unwrap();
+        let parsed: Vec<Filter> = typed(arrived)?;
         assert_eq!(
             parsed,
             vec![Filter {
@@ -309,17 +302,19 @@ mod tests {
             }]
         );
 
-        let stays_text: String = typed(json!("{\"key\":\"a\"}")).unwrap();
+        let stays_text: String = typed(json!("{\"key\":\"a\"}"))?;
         assert_eq!(stays_text, "{\"key\":\"a\"}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_absent_optional_parameter_is_none_and_an_absent_required_one_is_a_rejection() {
-        let absent: Result<Option<serde_json::Value>, String> = Ok(None);
-        let optional: Option<String> = read(absent.clone(), "limit", false, "listPets").unwrap();
+        let absent = Ok::<_, Infallible>(None);
+        let optional: Option<String> = read(absent.clone(), "limit", false, "listPets")?;
         assert_eq!(optional, None);
 
-        let rejected = read::<String>(absent, "limit", true, "listPets").unwrap_err();
+        let rejected = read::<String, _>(absent, "limit", true, "listPets")
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(
             rejected,
             Rejection::MissingParameter {
@@ -329,45 +324,88 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_url_carries_no_types_so_the_schema_supplies_them() {
         // The defect the example crate found on its first run: every parameter arrives as text, and
         // handing serde the text it arrived as fails for every non-string parameter in every
         // description. `?limit=3` is three characters and the schema is what says it is a number.
-        let number: i64 = read(Ok(Some(json!("3"))), "limit", true, "listPets").unwrap();
+        let number: i64 = read(
+            Ok::<_, Infallible>(Some(json!("3"))),
+            "limit",
+            true,
+            "listPets",
+        )?;
         assert_eq!(number, 3);
-        let flag: bool = read(Ok(Some(json!("true"))), "deep", true, "listPets").unwrap();
+        let flag: bool = read(
+            Ok::<_, Infallible>(Some(json!("true"))),
+            "deep",
+            true,
+            "listPets",
+        )?;
         assert!(flag);
         // An exploded array is a list of strings, and every element needs the same reading.
-        let numbers: Vec<i64> = read(Ok(Some(json!(["1", "2"]))), "ids", true, "listPets").unwrap();
+        let numbers: Vec<i64> = read(
+            Ok::<_, Infallible>(Some(json!(["1", "2"]))),
+            "ids",
+            true,
+            "listPets",
+        )?;
         assert_eq!(numbers, [1, 2]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_string_the_description_asked_for_stays_the_string_it_was() {
         // The other half, and the reason the re-reading is a *second* attempt rather than a
         // preprocessing pass: a `type: string` parameter holding `"9"` is the text `9`, and a
         // version number, an identifier or a zip code that reads as a number must survive intact.
-        let text: String = read(Ok(Some(json!("9"))), "version", true, "listPets").unwrap();
+        let text: String = read(
+            Ok::<_, Infallible>(Some(json!("9"))),
+            "version",
+            true,
+            "listPets",
+        )?;
         assert_eq!(text, "9");
-        let text: String = read(Ok(Some(json!("true"))), "mode", true, "listPets").unwrap();
+        let text: String = read(
+            Ok::<_, Infallible>(Some(json!("true"))),
+            "mode",
+            true,
+            "listPets",
+        )?;
         assert_eq!(text, "true");
-        let text: String = read(Ok(Some(json!("007"))), "code", true, "listPets").unwrap();
+        let text: String = read(
+            Ok::<_, Infallible>(Some(json!("007"))),
+            "code",
+            true,
+            "listPets",
+        )?;
         assert_eq!(text, "007");
     }
 
-    #[test]
+    #[test_util::test]
     fn text_that_spells_no_scalar_is_still_refused() {
         // Coercion is not tolerance: a parameter the description types as a number and the caller
         // sent as a word is a bad request, and it has to stay one.
-        assert!(read::<i64>(Ok(Some(json!("many"))), "limit", true, "listPets").is_err());
+        assert!(
+            read::<i64, _>(
+                Ok::<_, Infallible>(Some(json!("many"))),
+                "limit",
+                true,
+                "listPets"
+            )
+            .is_err()
+        );
         // And a string that spells an object is a string. Re-reading it would invent a shape out
         // of the parameter's contents.
-        let text: String = read(Ok(Some(json!("{\"a\":1}"))), "filter", true, "listPets").unwrap();
+        let text: String = read(
+            Ok::<_, Infallible>(Some(json!("{\"a\":1}"))),
+            "filter",
+            true,
+            "listPets",
+        )?;
         assert_eq!(text, "{\"a\":1}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_body_assembled_from_text_gets_the_same_reading() {
         // A form body and a multipart body arrive as text member by member, exactly as a query
         // string does, so they go through the same rule rather than a second copy of it.
@@ -376,7 +414,7 @@ mod tests {
             note: String,
             rating: i32,
         }
-        let parsed: Upload = super::typed_body(json!({"note": "a note", "rating": "4"})).unwrap();
+        let parsed: Upload = super::typed_body(json!({"note": "a note", "rating": "4"}))?;
         assert_eq!(
             parsed,
             Upload {
@@ -386,10 +424,12 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_parameter_that_does_not_parse_says_which_one_and_why() {
-        let found = Ok(Some(serde_json::json!("not a number")));
-        let rejected = read::<i64>(found, "limit", true, "listPets").unwrap_err();
+        let found = Ok::<_, Infallible>(Some(serde_json::json!("not a number")));
+        let rejected = read::<i64, _>(found, "limit", true, "listPets")
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         let Rejection::InvalidParameter {
             parameter, detail, ..
         } = &rejected
@@ -403,19 +443,21 @@ mod tests {
         assert!(rejected.to_string().contains("listPets"), "{rejected}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_optional_body_that_is_absent_is_not_a_rejection() {
-        let absent: Result<Option<i32>, String> = Ok(None);
-        assert_eq!(optional_body(absent.clone(), "createPet").unwrap(), None);
+        let absent: Result<Option<i32>, Infallible> = Ok(None);
+        assert_eq!(optional_body(absent, "createPet")?, None);
         assert_eq!(
-            required_body(absent, "createPet").unwrap_err(),
+            required_body(absent, "createPet")
+                .err()
+                .ok_or_eyre("the test expects this operation to fail")?,
             Rejection::MissingBody {
                 operation: "createPet"
             }
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn the_default_rejection_body_says_what_went_wrong() {
         let rejection = Rejection::MissingParameter {
             operation: "listPets",

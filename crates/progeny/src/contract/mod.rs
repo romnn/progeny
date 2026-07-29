@@ -30,13 +30,7 @@ use crate::resolve::ResolvedDocument;
 pub(crate) use crate::shape::Format;
 use crate::shape::{Docs, ShapeKey, Shapes};
 
-#[cfg_attr(
-    not(feature = "harness"),
-    allow(
-        unused_imports,
-        reason = "read by the corpus harness, which is feature-gated"
-    )
-)]
+#[cfg(feature = "harness")]
 pub(crate) use finalize::BASE as BASE_DERIVES;
 pub(crate) use lower::{Collapse, CollapseKind};
 pub(crate) use name::{Namer, RustIdent};
@@ -431,6 +425,7 @@ pub(crate) fn build(
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::{ContractKind, Contracts, TypeContract, TypeRef, build};
@@ -439,14 +434,17 @@ mod tests {
     use crate::doc::parse as doc_parse;
     use crate::{normalize, resolve, shape};
 
-    pub(super) fn contracts_of(document: Value, config: &Config) -> (Contracts, Vec<Diagnostic>) {
+    pub(super) fn contracts_of(
+        document: Value,
+        config: &Config,
+    ) -> eyre::Result<(Contracts, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = build(&resolved, &shapes, config, &mut ctx).unwrap();
-        (contracts, ctx.into_diagnostics())
+        let contracts = build(&resolved, &shapes, config, &mut ctx)?;
+        Ok((contracts, ctx.into_diagnostics()))
     }
 
     pub(super) fn with_schemas(schemas: Value) -> Value {
@@ -460,28 +458,31 @@ mod tests {
         Value::Object(root)
     }
 
-    pub(super) fn named<'a>(contracts: &'a Contracts, name: &str) -> &'a TypeContract {
-        contracts
+    pub(super) fn named<'a>(
+        contracts: &'a Contracts,
+        name: &str,
+    ) -> eyre::Result<&'a TypeContract> {
+        let found = contracts
             .types()
             .iter()
-            .find(|contract| contract.rust_name().as_str() == name)
-            .unwrap_or_else(|| {
-                let names: Vec<&str> = contracts
-                    .types()
-                    .iter()
-                    .map(|contract| contract.rust_name().as_str())
-                    .collect();
-                panic!("no type called {name}; there is {names:?}")
-            })
+            .find(|contract| contract.rust_name().as_str() == name);
+        found.ok_or_else(|| {
+            let names: Vec<&str> = contracts
+                .types()
+                .iter()
+                .map(|contract| contract.rust_name().as_str())
+                .collect();
+            eyre::eyre!("no type called {name}; there is {names:?}")
+        })
     }
 
-    pub(super) fn index_of(contracts: &Contracts, name: &str) -> super::TypeIndex {
+    pub(super) fn index_of(contracts: &Contracts, name: &str) -> eyre::Result<super::TypeIndex> {
         let position = contracts
             .types()
             .iter()
             .position(|contract| contract.rust_name().as_str() == name)
-            .unwrap();
-        super::TypeIndex(u32::try_from(position).unwrap())
+            .ok_or_else(|| eyre::eyre!("no type called {name}"))?;
+        Ok(super::TypeIndex(u32::try_from(position)?))
     }
 
     pub(super) fn type_names(contracts: &Contracts) -> Vec<&str> {
@@ -497,7 +498,7 @@ mod tests {
         json!({"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}})
     }
 
-    #[test]
+    #[test_util::test]
     fn two_inline_shapes_that_behave_alike_become_one_type() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -507,16 +508,16 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         // `Holder` plus one shared inline type, not two.
         assert_eq!(contracts.types().len(), 2);
-        let ContractKind::Struct { fields } = named(&contracts, "Holder").kind() else {
+        let ContractKind::Struct { fields } = named(&contracts, "Holder")?.kind() else {
             panic!("expected a struct");
         };
         assert_eq!(fields[0].ty, fields[1].ty);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_inline_shape_becomes_a_reference_to_the_type_the_document_named() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -524,29 +525,29 @@ mod tests {
                 "Holder": {"type": "object", "properties": {"pet": same_shape()}},
             })),
             &Config::default(),
-        );
+        )?;
         // Two types, not three: the anonymous twin became a reference.
         assert_eq!(contracts.types().len(), 2);
-        let ContractKind::Struct { fields } = named(&contracts, "Holder").kind() else {
+        let ContractKind::Struct { fields } = named(&contracts, "Holder")?.kind() else {
             panic!("expected a struct");
         };
         let TypeRef::Option(inner) = &fields[0].ty else {
             panic!("expected an option");
         };
-        assert_eq!(**inner, TypeRef::Named(index_of(&contracts, "Pet")));
+        assert_eq!(**inner, TypeRef::Named(index_of(&contracts, "Pet")?));
     }
 
-    #[test]
+    #[test_util::test]
     fn two_types_the_document_named_never_merge() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({"Cat": same_shape(), "Dog": same_shape()})),
             &Config::default(),
-        );
+        )?;
         // Names are API. `Cat` and `Dog` look the same today and may not tomorrow.
         assert_eq!(type_names(&contracts), ["Cat", "Dog"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_difference_no_reader_of_the_source_can_see_still_blocks_a_merge() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -566,11 +567,11 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         assert_eq!(contracts.types().len(), 3);
     }
 
-    #[test]
+    #[test_util::test]
     fn documentation_is_not_part_of_the_merge_key() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -583,11 +584,11 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         assert_eq!(contracts.types().len(), 2);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_name_the_caller_chose_is_a_declaration_of_identity() {
         let config = Config {
             names: [
@@ -612,12 +613,12 @@ mod tests {
                 },
             })),
             &config,
-        );
+        )?;
         // Structurally identical, and named apart on purpose.
         assert_eq!(type_names(&contracts), ["Holder", "Left", "Right"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_inline_shape_is_named_after_where_it_sits() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -633,11 +634,11 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         assert_eq!(type_names(&contracts), ["Pet", "PetCollar", "PetToysItem"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_cycle_gets_exactly_one_box() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -648,8 +649,8 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
-        let ContractKind::Struct { fields } = named(&contracts, "Node").kind() else {
+        )?;
+        let ContractKind::Struct { fields } = named(&contracts, "Node")?.kind() else {
             panic!("expected a struct");
         };
         assert!(
@@ -659,7 +660,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_cycle_through_a_list_needs_no_box() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -672,18 +673,18 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
-        let ContractKind::Struct { fields } = named(&contracts, "Node").kind() else {
+        )?;
+        let ContractKind::Struct { fields } = named(&contracts, "Node")?.kind() else {
             panic!("expected a struct");
         };
         // A `Vec` already indirects, so boxing here would be a wart with no purpose.
         assert_eq!(
             fields[0].ty,
-            TypeRef::Vec(Box::new(TypeRef::Named(index_of(&contracts, "Node"))))
+            TypeRef::Vec(Box::new(TypeRef::Named(index_of(&contracts, "Node")?)))
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_recursive_alias_becomes_a_newtype_because_rust_has_no_recursive_aliases() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -691,32 +692,32 @@ mod tests {
                 "Tree": {"type": "array", "items": {"$ref": "#/components/schemas/Tree"}},
             })),
             &Config::default(),
-        );
+        )?;
         assert!(
             matches!(
-                named(&contracts, "Tree").kind(),
+                named(&contracts, "Tree")?.kind(),
                 ContractKind::Newtype { .. }
             ),
             "{:?}",
-            named(&contracts, "Tree").kind()
+            named(&contracts, "Tree")?.kind()
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_plain_component_that_is_not_a_struct_is_a_name_for_the_shape() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({"Names": {"type": "array", "items": {"type": "string"}}})),
             &Config::default(),
-        );
+        )?;
         assert_eq!(
-            named(&contracts, "Names").kind(),
+            named(&contracts, "Names")?.kind(),
             &ContractKind::Alias {
                 target: TypeRef::Vec(Box::new(TypeRef::String))
             }
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn presence_records_all_four_cases_and_the_collapse_is_reported() {
         let (contracts, diagnostics) = contracts_of(
             with_schemas(json!({
@@ -732,8 +733,8 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
-        let ContractKind::Struct { fields } = named(&contracts, "Thing").kind() else {
+        )?;
+        let ContractKind::Struct { fields } = named(&contracts, "Thing")?.kind() else {
             panic!("expected a struct");
         };
         let presence: Vec<(&str, super::Presence, super::SkipRule)> = fields
@@ -779,7 +780,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_default_that_cannot_be_a_value_of_the_field_is_dropped() {
         let (contracts, diagnostics) = contracts_of(
             with_schemas(json!({
@@ -792,8 +793,8 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
-        let ContractKind::Struct { fields } = named(&contracts, "Thing").kind() else {
+        )?;
+        let ContractKind::Struct { fields } = named(&contracts, "Thing")?.kind() else {
             panic!("expected a struct");
         };
         assert_eq!(fields[0].wire_name, "count");
@@ -806,7 +807,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_typed_catch_all_becomes_a_flattened_member_and_captures() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
@@ -817,8 +818,8 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
-        let contract = named(&contracts, "Thing");
+        )?;
+        let contract = named(&contracts, "Thing")?;
         assert_eq!(
             contract.unknown_fields(),
             crate::config::UnknownFields::Capture
@@ -826,12 +827,14 @@ mod tests {
         let ContractKind::Struct { fields } = contract.kind() else {
             panic!("expected a struct");
         };
-        let extra = fields.last().unwrap();
+        let extra = fields
+            .last()
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(extra.flatten);
         assert_eq!(extra.ty, TypeRef::Map(Box::new(TypeRef::I64)));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_derive_the_caller_asked_for_by_name_and_cannot_have_stops_generation() {
         let config = Config {
             type_derives: [(
@@ -846,11 +849,13 @@ mod tests {
             "Thing": {"type": "object", "properties": {"ratio": {"type": "number"}}},
         }));
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let error = build(&resolved, &shapes, &config, &mut ctx).unwrap_err();
+        let error = build(&resolved, &shapes, &config, &mut ctx)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), crate::RejectKind::UnsatisfiableConfig);
         assert!(error.detail().contains("Eq"), "{error}");
     }
@@ -861,7 +866,7 @@ mod tests {
     /// not there: the caller asked for a rename and got nothing, with nothing saying so — the
     /// forbidden failure mode applied to the configuration instead of to the document. The message
     /// names the key and the map it sits in, because the caller's next step is to fix one of them.
-    #[test]
+    #[test_util::test]
     fn a_config_key_that_names_nothing_stops_generation() {
         let document = with_schemas(json!({
             "Thing": {"type": "object", "properties": {"ratio": {"type": "number"}}},
@@ -873,18 +878,20 @@ mod tests {
             ..Config::default()
         };
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let error = build(&resolved, &shapes, &config, &mut ctx).unwrap_err();
+        let error = build(&resolved, &shapes, &config, &mut ctx)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), crate::RejectKind::UnsatisfiableConfig);
         assert!(error.detail().contains("`Thingg`"), "{error}");
         assert!(error.detail().contains("names"), "{error}");
     }
 
     /// Both spellings of the one grammar reach the same type.
-    #[test]
+    #[test_util::test]
     fn a_pointer_key_and_a_name_key_reach_the_same_type() {
         let document = with_schemas(json!({
             "Thing": {"type": "object", "properties": {"name": {"type": "string"}}},
@@ -896,7 +903,7 @@ mod tests {
                     .collect(),
                 ..Config::default()
             };
-            let (contracts, _) = contracts_of(document.clone(), &config);
+            let (contracts, _) = contracts_of(document.clone(), &config)?;
             assert!(
                 contracts
                     .types()
@@ -907,7 +914,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_crate_wide_derive_a_type_cannot_have_is_skipped_and_reported() {
         let config = Config {
             derives: [crate::config::Derive::Eq].into_iter().collect(),
@@ -919,14 +926,14 @@ mod tests {
                 "Fuzzy": {"type": "object", "properties": {"ratio": {"type": "number"}}},
             })),
             &config,
-        );
+        )?;
         assert!(
-            named(&contracts, "Exact")
+            named(&contracts, "Exact")?
                 .derives()
                 .contains(&crate::config::Derive::Eq)
         );
         assert!(
-            !named(&contracts, "Fuzzy")
+            !named(&contracts, "Fuzzy")?
                 .derives()
                 .contains(&crate::config::Derive::Eq)
         );
@@ -937,7 +944,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_component_becomes_a_struct_named_after_itself() {
         let (contracts, diagnostics) = contracts_of(
             with_schemas(json!({
@@ -951,10 +958,10 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(type_names(&contracts), ["Pet"]);
-        let ContractKind::Struct { fields } = named(&contracts, "Pet").kind() else {
+        let ContractKind::Struct { fields } = named(&contracts, "Pet")?.kind() else {
             panic!("expected a struct");
         };
         assert_eq!(fields.len(), 2);

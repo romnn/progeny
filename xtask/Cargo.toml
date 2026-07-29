@@ -7,9 +7,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 camino.workspace = true
 clap.workspace = true
+color-eyre.workspace = true
+indoc.workspace = true
 proc-macro2.workspace = true
 progeny = { workspace = true, features = ["harness"] }
 serde.workspace = true
@@ -24,6 +25,9 @@ ureq.workspace = true
 # child. There is no portable equivalent, so the benchmark says so on other platforms rather
 # than reporting a number it cannot measure.
 nix.workspace = true
+
+[dev-dependencies]
+test-util.workspace = true
 
 [lints]
 workspace = true

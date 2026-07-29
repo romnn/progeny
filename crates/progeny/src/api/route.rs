@@ -66,7 +66,8 @@ pub(crate) enum Piece {
 }
 
 /// Why a template cannot be filled.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{detail}")]
 pub(crate) struct Malformed {
     pub(crate) detail: String,
 }
@@ -159,14 +160,14 @@ pub(crate) fn unbound<'a>(template: &'a PathTemplate, declared: &[String]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::{Piece, parse, unbound};
+    use color_eyre::eyre::{self, OptionExt as _};
 
-    fn shape(template: &str) -> Vec<Vec<Piece>> {
-        parse(template)
-            .unwrap()
+    fn shape(template: &str) -> eyre::Result<Vec<Vec<Piece>>> {
+        Ok(parse(template)?
             .segments()
             .iter()
             .map(|segment| segment.pieces().to_vec())
-            .collect()
+            .collect())
     }
 
     fn literal(text: &str) -> Piece {
@@ -177,26 +178,26 @@ mod tests {
         Piece::Variable(name.to_owned())
     }
 
-    #[test]
+    #[test_util::test]
     fn a_template_becomes_segments() {
         assert_eq!(
-            shape("/pets/{petId}/toys"),
+            shape("/pets/{petId}/toys")?,
             [
                 vec![literal("pets")],
                 vec![variable("petId")],
                 vec![literal("toys")],
             ]
         );
-        let template = parse("/pets/{petId}/toys").unwrap();
+        let template = parse("/pets/{petId}/toys")?;
         assert_eq!(template.variables().collect::<Vec<_>>(), ["petId"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_segment_may_mix_literal_text_and_variables() {
         // `jellyfin` writes six of these. Filling one is the same rule applied piece by piece, and
         // refusing them would delete working operations for no safety gained.
         assert_eq!(
-            shape("/Videos/{itemId}/stream.{container}"),
+            shape("/Videos/{itemId}/stream.{container}")?,
             [
                 vec![literal("Videos")],
                 vec![variable("itemId")],
@@ -204,7 +205,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            shape("/Videos/{itemId}/Trickplay/{width}/{index}.jpg"),
+            shape("/Videos/{itemId}/Trickplay/{width}/{index}.jpg")?,
             [
                 vec![literal("Videos")],
                 vec![variable("itemId")],
@@ -213,20 +214,20 @@ mod tests {
                 vec![variable("index"), literal(".jpg")],
             ]
         );
-        let template = parse("/Videos/{itemId}/stream.{container}").unwrap();
+        let template = parse("/Videos/{itemId}/stream.{container}")?;
         assert_eq!(
             template.variables().collect::<Vec<_>>(),
             ["itemId", "container"]
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn the_root_path_is_a_template_with_one_empty_segment() {
-        assert_eq!(shape("/"), [vec![literal("")]]);
-        assert_eq!(parse("/").unwrap().variables().count(), 0);
+        assert_eq!(shape("/")?, [vec![literal("")]]);
+        assert_eq!(parse("/")?.variables().count(), 0);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_template_progeny_cannot_fill_is_refused_rather_than_approximated() {
         for (template, expected) in [
             ("pets", "does not start with"),
@@ -236,14 +237,16 @@ mod tests {
             ("/pets/{{id}}", "unbalanced braces"),
             ("/pets/{id}/toys/{id}", "twice"),
         ] {
-            let error = parse(template).unwrap_err();
+            let error = parse(template)
+                .err()
+                .ok_or_eyre("the test expects this operation to fail")?;
             assert!(error.detail.contains(expected), "{template}: {error:?}");
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_variable_no_parameter_declares_is_reported_by_name() {
-        let template = parse("/pets/{petId}/toys/{toyId}").unwrap();
+        let template = parse("/pets/{petId}/toys/{toyId}")?;
         assert_eq!(unbound(&template, &["petId".to_owned()]), ["toyId"]);
         assert!(unbound(&template, &["petId".to_owned(), "toyId".to_owned()]).is_empty());
     }

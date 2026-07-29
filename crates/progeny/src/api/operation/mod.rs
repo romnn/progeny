@@ -267,11 +267,12 @@ fn docs_of(operation: &Operation) -> Docs {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
     use crate::api::tests::{model_of, with_paths};
 
-    #[test]
+    #[test_util::test]
     fn an_operation_with_no_operation_id_is_named_after_its_method_and_path() {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/pets/{petId}": {
@@ -280,7 +281,7 @@ mod tests {
                     "responses": {"200": {"description": "ok"}},
                 },
             },
-        })));
+        })))?;
         assert_eq!(model.operations()[0].rust_name.as_str(), "get_pets_pet_id");
         assert!(
             diagnostics
@@ -289,12 +290,12 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn two_operations_that_want_one_name_are_told_apart_and_reported() {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/a": {"get": {"operationId": "list-pets", "responses": {"200": {"description": "ok"}}}},
             "/b": {"get": {"operationId": "list_pets", "responses": {"200": {"description": "ok"}}}},
-        })));
+        })))?;
         let names: Vec<&str> = model
             .operations()
             .iter()
@@ -310,16 +311,16 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_path_variable_nothing_declares_takes_its_operation_with_it() {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/pets/{petId}": {"get": {"operationId": "getPet", "responses": {"200": {"description": "ok"}}}},
-        })));
+        })))?;
         assert!(model.operations().is_empty());
         let found = diagnostics
             .iter()
             .find(|found| found.class() == crate::BreakageClass::UnregistrableRoute)
-            .expect("the unfillable template should be reported");
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(found.detail().contains("petId"), "{found}");
     }
 }

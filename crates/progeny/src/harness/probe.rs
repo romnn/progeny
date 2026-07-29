@@ -34,6 +34,8 @@ pub struct Probe {
 pub struct ProbeOp {
     /// The generated client method, which is also the trait method's name.
     pub method: String,
+    /// Whether exercising the operation deliberately calls deprecated API.
+    pub deprecated: bool,
     /// The grouped parameter arguments, in trait-signature order.
     pub groups: Vec<ProbeGroup>,
     /// The body argument, when the operation takes one.
@@ -55,7 +57,16 @@ pub struct ProbeGroup {
     pub ty: String,
     /// The fields the document made optional, which the driver always sets — so the double
     /// asserts each arrived `Some`, which is what catches a parameter dropped in transit.
-    pub optional_fields: Vec<String>,
+    pub optional_fields: Vec<ProbeField>,
+}
+
+/// One optional parameter field whose presence the generated double checks.
+#[derive(Debug, Clone)]
+pub struct ProbeField {
+    /// The field's Rust name.
+    pub name: String,
+    /// Whether reading the field deliberately exercises deprecated API.
+    pub deprecated: bool,
 }
 
 /// The request body the driver sets.
@@ -75,6 +86,8 @@ pub struct ProbeBody {
 pub struct ProbeSetter {
     /// The setter's name, which is the parameter's Rust name.
     pub setter: String,
+    /// Whether calling the setter deliberately exercises deprecated API.
+    pub deprecated: bool,
     /// The Rust path of the parameter's type.
     pub ty: String,
     /// A JSON value of that type.
@@ -104,6 +117,8 @@ pub struct ProbeAnswer {
     pub variant: String,
     /// The Rust path of the arm's payload type.
     pub ty: String,
+    /// Whether the response enum indirects this non-unit payload.
+    pub boxed: bool,
     /// A JSON value of that payload.
     pub json: String,
     /// The status the client must see.
@@ -143,7 +158,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         .iter()
         .filter_map(|&(location, suffix)| {
             let mut any = false;
-            let optional_fields: Vec<String> = operation
+            let optional_fields: Vec<ProbeField> = operation
                 .params_at(location)
                 .inspect(|_| any = true)
                 .filter(|param| !param.required)
@@ -151,7 +166,10 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
                 // parameter's name from the wire — so the probe neither sets nor asserts it. Not a
                 // narrowing of the operation: everything recoverable is still exercised.
                 .filter(|param| !param.style.erased_by_explosion())
-                .map(|param| param.rust_name.as_str().to_owned())
+                .map(|param| ProbeField {
+                    name: param.rust_name.as_str().to_owned(),
+                    deprecated: param.docs.deprecated,
+                })
                 .collect();
             any.then(|| ProbeGroup {
                 arg: argument_of(location),
@@ -205,6 +223,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
             Ok(value) => Some(ProbeAnswer {
                 variant,
                 ty: path(&ty),
+                boxed: crate::render::types::enum_type_is_boxed(&ty),
                 json: value.to_string(),
                 status,
             }),
@@ -228,6 +247,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
 
     ProbeOp {
         method: operation.rust_name.as_str().to_owned(),
+        deprecated: operation.docs.deprecated,
         groups,
         body,
         setters,
@@ -274,9 +294,23 @@ fn probe_setters(
             }
             continue;
         }
-        match synthesize(&param.ty, contracts, &mut Vec::new()) {
+        // The raw text and byte fixtures are both the five bytes `probe`. A different synthesized
+        // `Content-Length` makes the HTTP server wait forever for bytes the client will never send,
+        // which the Cloudflare R2 `PUT object` operation exposed.
+        let value = if param.style.location() == Location::Header
+            && param.wire_name.eq_ignore_ascii_case("content-length")
+            && matches!(
+                operation.body,
+                Some(BodyContract::Text { .. } | BodyContract::Bytes { .. })
+            ) {
+            Ok(serde_json::json!(5))
+        } else {
+            synthesize(&param.ty, contracts, &mut Vec::new())
+        };
+        match value {
             Ok(value) => setters.push(ProbeSetter {
                 setter: param.rust_name.as_str().to_owned(),
+                deprecated: param.docs.deprecated,
                 ty: test_path(&render::types::type_path(&param.ty, contracts, config)),
                 json: value.to_string(),
             }),
@@ -334,7 +368,7 @@ fn synthesize(
     ty: &TypeRef,
     contracts: &Contracts,
     visiting: &mut Vec<TypeIndex>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, SynthesisError> {
     use serde_json::{Value, json};
     Ok(match ty {
         TypeRef::Unit => Value::Null,
@@ -371,13 +405,12 @@ fn synthesize(
         ),
         TypeRef::Named(index) => {
             let Some(contract) = contracts.get(*index) else {
-                return Err("an unresolvable type index".to_owned());
+                return Err(SynthesisError::UnresolvableType);
             };
             if visiting.contains(index) {
-                return Err(format!(
-                    "`{}` is recursive with no optional escape on this path",
-                    contract.rust_name()
-                ));
+                return Err(SynthesisError::Recursive {
+                    name: contract.rust_name().as_str().to_owned(),
+                });
             }
             // Pushed here and popped here, whatever `synthesize_named` returns — keeping the
             // cleanup in one frame is what lets that function use `?` freely.
@@ -394,7 +427,7 @@ fn synthesize_named(
     contract: &crate::contract::TypeContract,
     contracts: &Contracts,
     visiting: &mut Vec<TypeIndex>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, SynthesisError> {
     use serde_json::{Map, Value, json};
     Ok(match contract.kind() {
         ContractKind::Struct { fields } => {
@@ -424,27 +457,24 @@ fn synthesize_named(
         ContractKind::StringEnum { variants } => match variants.first() {
             Some(variant) => json!(variant.wire_name),
             None => {
-                return Err(format!(
-                    "`{}` is an enum with no variants",
-                    contract.rust_name()
-                ));
+                return Err(SynthesisError::EmptyStringEnum {
+                    name: contract.rust_name().as_str().to_owned(),
+                });
             }
         },
         ContractKind::Enum { variants } => {
             let Some(variant) = variants.first() else {
-                return Err(format!(
-                    "`{}` is a union with no variants",
-                    contract.rust_name()
-                ));
+                return Err(SynthesisError::EmptyUnion {
+                    name: contract.rust_name().as_str().to_owned(),
+                });
             };
             synthesize(&variant.ty, contracts, visiting)?
         }
         ContractKind::TaggedEnum { tag, variants } => {
             let Some(variant) = variants.first() else {
-                return Err(format!(
-                    "`{}` is a union with no variants",
-                    contract.rust_name()
-                ));
+                return Err(SynthesisError::EmptyUnion {
+                    name: contract.rust_name().as_str().to_owned(),
+                });
             };
             let mut value = synthesize(&variant.ty, contracts, visiting)?;
             if let Value::Object(members) = &mut value {
@@ -462,4 +492,16 @@ fn synthesize_named(
                 .collect::<Result<_, _>>()?,
         ),
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SynthesisError {
+    #[error("an unresolvable type index")]
+    UnresolvableType,
+    #[error("`{name}` is recursive with no optional escape on this path")]
+    Recursive { name: String },
+    #[error("`{name}` is an enum with no variants")]
+    EmptyStringEnum { name: String },
+    #[error("`{name}` is a union with no variants")]
+    EmptyUnion { name: String },
 }

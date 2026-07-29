@@ -201,10 +201,10 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
     if !patterns.is_empty() {
         // Uniform means every pattern names the same value schema; anything else has no single
         // element type and is reported rather than guessed at.
-        let first = patterns
-            .first()
-            .map(|&id| merged_key(resolved, &[id]))
-            .unwrap_or_else(|| ShapeKey::new(Vec::new()));
+        let first = patterns.first().map_or_else(
+            || ShapeKey::new(Vec::new()),
+            |&id| merged_key(resolved, &[id]),
+        );
         let uniform = patterns
             .iter()
             .all(|&id| merged_key(resolved, &[id]) == first);
@@ -378,10 +378,10 @@ fn as_count(number: &Number) -> Option<u32> {
 
 fn fold_annotations(view: &mut View, object: &SchemaObject) {
     if view.docs.title.is_none() {
-        view.docs.title = object.title.clone();
+        view.docs.title.clone_from(&object.title);
     }
     if view.docs.description.is_none() {
-        view.docs.description = object.description.clone();
+        view.docs.description.clone_from(&object.description);
     }
     view.docs.deprecated |= object.deprecated.unwrap_or(false);
     for (slot, value) in [
@@ -390,7 +390,7 @@ fn fold_annotations(view: &mut View, object: &SchemaObject) {
         (&mut view.content_media_type, &object.content_media_type),
     ] {
         if slot.is_none() {
-            *slot = value.clone();
+            slot.clone_from(value);
         }
     }
 }

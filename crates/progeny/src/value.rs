@@ -258,11 +258,13 @@ impl Members {
 }
 
 /// Builds one JSON object node back up from its typed fields plus its uninterpreted members.
+#[cfg(any(feature = "harness", test))]
 #[derive(Debug, Default)]
 pub(crate) struct Builder {
     map: Map<String, Value>,
 }
 
+#[cfg(any(feature = "harness", test))]
 impl Builder {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -334,6 +336,7 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::{Builder, Members};
@@ -346,7 +349,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn uninterpreted_members_survive() {
         let mut ctx = Ctx::new();
         let mut node = members(json!({
@@ -363,7 +366,7 @@ mod tests {
         assert!(ctx.into_diagnostics().is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_mismatched_member_is_put_back_and_diagnosed() {
         let mut ctx = Ctx::new();
         let mut node = members(json!({"title": 42}));
@@ -377,7 +380,7 @@ mod tests {
         assert!(diagnostics[0].detail().contains("a string"));
     }
 
-    #[test]
+    #[test_util::test]
     fn an_explicit_null_is_not_the_same_as_an_absent_member() {
         let ctx = Ctx::new();
         let mut node = members(json!({"default": null}));
@@ -386,7 +389,7 @@ mod tests {
         assert!(ctx.into_diagnostics().is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn an_array_with_one_bad_element_is_salvaged_whole() {
         let mut ctx = Ctx::new();
         let mut node = members(json!({"servers": [{"url": "/a"}, "nope"]}));
@@ -402,7 +405,7 @@ mod tests {
         assert_eq!(ctx.into_diagnostics().len(), 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn nested_diagnostics_carry_the_full_path() {
         let mut ctx = Ctx::new();
         let mut node = members(json!({"servers": [{"url": 7}]}));
@@ -421,19 +424,23 @@ mod tests {
         assert_eq!(diagnostics[0].location().to_string(), "/servers/0/url");
     }
 
-    #[test]
+    #[test_util::test]
     fn numbers_keep_their_literal_form() {
         let mut ctx = Ctx::new();
-        let value: Value = serde_json::from_str(r#"{"a": 1.0, "b": 1}"#).unwrap();
+        let value: Value = serde_json::from_str(r#"{"a": 1.0, "b": 1}"#)?;
         let mut node = members(value);
-        let a = node.number("a", &mut ctx).unwrap();
-        let b = node.number("b", &mut ctx).unwrap();
+        let a = node
+            .number("a", &mut ctx)
+            .ok_or_eyre("test fixture should contain this value")?;
+        let b = node
+            .number("b", &mut ctx)
+            .ok_or_eyre("test fixture should contain this value")?;
         assert_eq!(a.to_string(), "1.0");
         assert_eq!(b.to_string(), "1");
         assert_ne!(a, b);
     }
 
-    #[test]
+    #[test_util::test]
     fn builder_omits_absent_fields_and_writes_empty_ones() {
         let mut builder = Builder::new();
         builder.set("present", Some("x"));

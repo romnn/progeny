@@ -150,6 +150,8 @@ fn status_name(status: StatusPattern) -> String {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use serde_json::json;
 
     use super::parse_status;
@@ -157,7 +159,7 @@ mod tests {
     use crate::api::tests::{model_of, with_paths};
     use crate::contract::TypeRef;
 
-    #[test]
+    #[test_util::test]
     fn a_status_key_is_a_code_or_a_range_and_nothing_else() {
         assert_eq!(parse_status("200"), Some(StatusPattern::Exact(200)));
         assert_eq!(parse_status("2XX"), Some(StatusPattern::Range(2)));
@@ -168,7 +170,7 @@ mod tests {
         assert_eq!(parse_status(""), None);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_response_referencing_a_component_that_does_not_exist_degrades_its_arm_not_its_operation() {
         // `miro`, in miniature: a reference to a `components.responses` section the document never
         // declares.
@@ -182,7 +184,7 @@ mod tests {
                     },
                 },
             },
-        })));
+        })))?;
         assert_eq!(model.operations().len(), 1);
         let responses = &model.operations()[0].responses;
         assert_eq!(responses.arms.len(), 2);
@@ -195,7 +197,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn exact_arms_come_before_the_ranges_they_overlap() {
         let (model, _) = model_of(with_paths(json!({
             "/pets": {
@@ -210,7 +212,7 @@ mod tests {
                     },
                 },
             },
-        })));
+        })))?;
         let responses = &model.operations()[0].responses;
         let patterns: Vec<StatusPattern> = responses.arms.iter().map(|arm| arm.status).collect();
         assert_eq!(

@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
+use color_eyre::eyre::{self, WrapErr, bail};
 
 use super::measure::Summary;
 use super::plan::UNRECORDED;
@@ -24,8 +24,8 @@ use super::{Args, as_f64, percent};
 struct BaselineEntry {
     cpu_seconds: f64,
     peak_rss_bytes: u64,
-    /// What the measured crate held, from [`super::plan::scope_of`]. Two entries with different
-    /// scopes are not comparable, and `--check` refuses to pretend otherwise.
+    /// What the measured crate held, as classified by `scope_of`. Two entries with different scopes
+    /// are not comparable, and `--check` refuses to pretend otherwise.
     #[serde(default)]
     scope: String,
     /// Repetitions kept, and repetitions thrown away because the machine got busier during them.
@@ -102,10 +102,10 @@ pub(super) fn baseline(
     scopes: &BTreeMap<String, String>,
     summaries: &BTreeMap<String, Summary>,
     args: &Args,
-) -> Result<()> {
+) -> eyre::Result<()> {
     let entries: BTreeMap<String, BaselineEntry> = if path.exists() {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
-        toml::from_str(&text).with_context(|| format!("parsing {path}"))?
+        let text = std::fs::read_to_string(path).wrap_err_with(|| format!("reading {path}"))?;
+        toml::from_str(&text).wrap_err_with(|| format!("parsing {path}"))?
     } else {
         BTreeMap::new()
     };
@@ -122,7 +122,7 @@ fn write_entries(
     mut entries: BTreeMap<String, BaselineEntry>,
     scopes: &BTreeMap<String, String>,
     summaries: &BTreeMap<String, Summary>,
-) -> Result<()> {
+) -> eyre::Result<()> {
     let mut provisional = 0usize;
     for (key, summary) in summaries {
         let Some((cpu, rss)) = summary.mean_cpu().zip(summary.mean_rss()) else {
@@ -153,8 +153,8 @@ fn write_entries(
         );
     }
 
-    let text = toml::to_string_pretty(&entries).context("rendering the baseline")?;
-    std::fs::write(path, text).with_context(|| format!("writing {path}"))?;
+    let text = toml::to_string_pretty(&entries).wrap_err("rendering the baseline")?;
+    std::fs::write(path, text).wrap_err_with(|| format!("writing {path}"))?;
     println!("baseline written to {path}");
     if provisional > 0 {
         // Written and marked rather than refused outright: a directional row taken on a shared
@@ -177,7 +177,7 @@ fn check_entries(
     scopes: &BTreeMap<String, String>,
     summaries: &BTreeMap<String, Summary>,
     args: &Args,
-) -> Result<()> {
+) -> eyre::Result<()> {
     let mut regressions = Vec::new();
     let mut refused = Vec::new();
     for (key, summary) in summaries {
@@ -277,15 +277,17 @@ fn unusable(previous: &BaselineEntry, scope: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::{discipline, shortfalls};
 
-    #[test]
+    #[test_util::test]
     fn a_measurement_within_the_discipline_says_nothing() {
         assert!(shortfalls(discipline::MIN_KEPT, discipline::MAX_LOAD, false).is_empty());
         assert!(shortfalls(discipline::MIN_KEPT + 1, 0.30, false).is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn the_conditions_the_recorded_baseline_was_taken_under_are_refused() {
         // The six entries this fix exists for: `okta.hand-written` kept one repetition of three at
         // load 18.18, and every entry ran between 12.68 and 18.18 against a ceiling of 5.
@@ -300,7 +302,7 @@ mod tests {
         assert_eq!(shortfalls(6, 12.68, false).len(), 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn thin_memory_disqualifies_a_measurement_taken_on_a_quiet_machine() {
         // Not a load problem and not a replication problem: the kernel reclaims under pressure, so
         // the peak reads *low* and the artefact points the same way as a win.
@@ -309,7 +311,7 @@ mod tests {
         assert!(reasons[0].contains("floor"), "{reasons:?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_provisional_entry_survives_the_file_and_stays_provisional() {
         // The record has to carry its own verdict: somebody who finds `baseline.toml` and never
         // runs the harness is exactly the reader the flag exists for.
@@ -324,15 +326,15 @@ mod tests {
             pressured: false,
             provisional: shortfalls(1, 18.18, false),
         };
-        let text = toml::to_string_pretty(&entry).unwrap();
+        let text = toml::to_string_pretty(&entry)?;
         assert!(text.contains("provisional"), "{text}");
         assert!(text.contains("types-only"), "{text}");
-        let read: super::BaselineEntry = toml::from_str(&text).unwrap();
+        let read: super::BaselineEntry = toml::from_str(&text)?;
         assert_eq!(read.provisional.len(), 2);
         assert_eq!(read.scope, "types-only");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_entry_that_meets_the_discipline_carries_no_flag_at_all() {
         // `skip_serializing_if` rather than an empty list in the file: a reader scanning for the
         // word should find it only where it means something.
@@ -347,7 +349,7 @@ mod tests {
             pressured: false,
             provisional: Vec::new(),
         };
-        let text = toml::to_string_pretty(&entry).unwrap();
+        let text = toml::to_string_pretty(&entry)?;
         assert!(!text.contains("provisional"), "{text}");
         assert!(!text.contains("pressured"), "{text}");
     }
@@ -366,7 +368,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_provisional_baseline_is_not_a_comparison_basis() {
         let reason = super::unusable(
             &entry("types-only", vec!["taken at load 18.18".to_owned()]),
@@ -376,7 +378,7 @@ mod tests {
         assert!(super::unusable(&entry("types-only", Vec::new()), "types-only").is_none());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_baseline_from_a_different_scope_is_not_a_comparison_basis() {
         // The whole hazard, as an assertion: the stage-4 figure is about types-only crates, and a
         // run against a crate with a client in it answers a different question at a different
@@ -385,23 +387,23 @@ mod tests {
         assert!(reason.is_some_and(|reason| reason.contains("types-only")));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_baseline_recorded_before_scopes_existed_is_still_usable() {
         // Absent is not a claim. Refusing here would strand every entry written before the field,
         // which would make the fix cost more than the defect.
         assert!(super::unusable(&entry("", Vec::new()), "types+client").is_none());
     }
 
-    #[test]
+    #[test_util::test]
     fn the_checked_in_baseline_agrees_with_its_own_conditions() {
         // The defect this whole fix exists for was a file whose numbers and whose conditions were
         // both recorded, and which never drew the conclusion. Asserting the *consistency* rather
         // than the current verdict is what makes this survive the corrected take: entries stop
         // being provisional and the test keeps holding.
         let path = crate::paths::corpus_root().join("baseline.toml");
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = std::fs::read_to_string(&path)?;
         let entries: std::collections::BTreeMap<String, super::BaselineEntry> =
-            toml::from_str(&text).unwrap();
+            toml::from_str(&text)?;
         assert!(!entries.is_empty(), "{path} has no entries");
         for (key, entry) in &entries {
             assert!(

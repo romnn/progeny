@@ -302,6 +302,7 @@ fn reject(at: &JsonPointer, message: String) -> RejectError {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use crate::config::{Config, Pagination};
@@ -343,24 +344,23 @@ mod tests {
         })
     }
 
-    fn build(declared: Pagination) -> Result<(), String> {
+    fn build(declared: Pagination) -> eyre::Result<()> {
         build_on(document(), declared)
     }
 
-    fn build_on(document: Value, declared: Pagination) -> Result<(), String> {
+    fn build_on(document: Value, declared: Pagination) -> eyre::Result<()> {
         let config = Config {
             pagination: [("list_pets".to_owned(), declared)].into_iter().collect(),
             ..Config::default()
         };
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        super::super::build(&resolved, &shapes, &contracts, &config, &mut ctx)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
+        super::super::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        Ok(())
     }
 
     fn declaring(cursor: &str, next: &str, items: &str) -> Pagination {
@@ -371,9 +371,9 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_declaration_the_document_supports_is_accepted() {
-        assert_eq!(build(declaring("cursor", "next", "items")), Ok(()));
+        build(declaring("cursor", "next", "items"))?;
     }
 
     /// A `2XX` arm is the success the client renders, so it is the page the stream reads.
@@ -382,19 +382,20 @@ mod tests {
     /// operation declaring only the range key used to be refused with "no success response" while
     /// the generated `send()` decoded that very arm as the success type — two answers to one
     /// question, and the stricter one was wrong.
-    #[test]
+    #[test_util::test]
     fn a_range_success_is_a_page_like_an_exact_one() {
         let mut document = document();
         let responses = &mut document["paths"]["/pets"]["get"]["responses"];
-        let arm = responses.as_object_mut().unwrap().remove("200").unwrap();
+        let arm = responses
+            .as_object_mut()
+            .ok_or_eyre("test fixture should contain this value")?
+            .remove("200")
+            .ok_or_eyre("test fixture should contain this value")?;
         responses
             .as_object_mut()
-            .unwrap()
+            .ok_or_eyre("test fixture should contain this value")?
             .insert("2XX".to_owned(), arm);
-        assert_eq!(
-            build_on(document, declaring("cursor", "next", "items")),
-            Ok(())
-        );
+        build_on(document, declaring("cursor", "next", "items"))?;
     }
 
     /// Each refusal names what it looked for and what the document had instead.
@@ -403,34 +404,46 @@ mod tests {
     /// list of members, not "invalid configuration". These are the four ways a declaration can be
     /// wrong, and the corpus survey is why they are worth spelling out — 62 documents paginate and
     /// every one of them will be declared by hand.
-    #[test]
+    #[test_util::test]
     fn a_cursor_parameter_the_operation_does_not_have_is_refused_by_name() {
-        let error = build(declaring("page", "next", "items")).unwrap_err();
+        let error = build(declaring("page", "next", "items"))
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
+        let error = error.to_string();
         assert!(error.contains("`page`"), "{error}");
         assert!(error.contains("`cursor`"), "{error}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_member_that_does_not_exist_is_refused_with_the_ones_that_do() {
-        let error = build(declaring("cursor", "nextCursor", "items")).unwrap_err();
+        let error = build(declaring("cursor", "nextCursor", "items"))
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
+        let error = error.to_string();
         assert!(error.contains("nextCursor"), "{error}");
         assert!(error.contains("`items`"), "{error}");
     }
 
-    #[test]
+    #[test_util::test]
     fn items_that_are_not_a_list_are_refused() {
-        let error = build(declaring("cursor", "next", "total")).unwrap_err();
+        let error = build(declaring("cursor", "next", "total"))
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
+        let error = error.to_string();
         assert!(error.contains("rather than a list"), "{error}");
     }
 
     /// A next cursor that is always present would never end the stream.
-    #[test]
+    #[test_util::test]
     fn a_required_next_cursor_is_refused() {
-        let error = build(declaring("cursor", "items", "items")).unwrap_err();
+        let error = build(declaring("cursor", "items", "items"))
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
+        let error = error.to_string();
         assert!(error.contains("always present"), "{error}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_declaration_for_an_operation_that_does_not_exist_is_refused() {
         let config = Config {
             pagination: [(
@@ -442,13 +455,14 @@ mod tests {
             ..Config::default()
         };
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document(), &mut ctx).unwrap();
+        let normalized = normalize::normalize(document(), &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
+        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         let error = super::super::build(&resolved, &shapes, &contracts, &config, &mut ctx)
-            .expect_err("an operation that does not exist cannot be declared");
+            .err()
+            .ok_or_eyre("an operation that does not exist cannot be declared")?;
         assert!(error.to_string().contains("list_owners"), "{error}");
     }
 }

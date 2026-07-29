@@ -360,6 +360,8 @@ fn examples_of(at: &JsonPointer, media_type: &str, entry: &MediaType) -> Vec<(St
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use serde_json::{Value, json};
 
     use crate::api::tests::model_of;
@@ -369,16 +371,16 @@ mod tests {
     use crate::{contract, normalize, resolve, shape};
 
     /// Collect the payloads of a document the way the harness does.
-    fn payloads_of(document: Value) -> Vec<super::Payload> {
+    fn payloads_of(document: Value) -> eyre::Result<Vec<super::Payload>> {
         let config = Config::default();
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
-        super::collect(&resolved, &shapes, &contracts, &model).0
+        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
+        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        Ok(super::collect(&resolved, &shapes, &contracts, &model).0)
     }
 
     /// A document whose `200` response carries `schema` and `example`.
@@ -406,12 +408,12 @@ mod tests {
         Value::Object(root)
     }
 
-    #[test]
+    #[test_util::test]
     fn an_example_is_paired_with_the_type_generated_for_its_position() {
         let found = payloads_of(responding(
             json!({"type": "object", "properties": {"name": {"type": "string"}}}),
             json!({"name": "Rex"}),
-        ));
+        ))?;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].type_name, "ListPetsResponse200");
         assert_eq!(
@@ -421,26 +423,26 @@ mod tests {
         assert_eq!(found[0].expected, json!({"name": "Rex"}));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_member_the_schema_never_named_is_not_expected_back() {
         // The generated type ignores what it does not declare, so its absence afterwards is
         // correct. Expecting it back would fail every payload richer than its schema.
         let found = payloads_of(responding(
             json!({"type": "object", "properties": {"name": {"type": "string"}}}),
             json!({"name": "Rex", "undeclared": 7}),
-        ));
+        ))?;
         assert_eq!(found[0].original, json!({"name": "Rex", "undeclared": 7}));
         assert_eq!(found[0].expected, json!({"name": "Rex"}));
     }
 
-    #[test]
+    #[test_util::test]
     fn an_explicit_null_in_an_optional_member_is_expected_to_come_back_absent() {
         // The presence collapse, stated as an expectation rather than discovered as a failure: an
         // optional member is an `Option` that is skipped when it is `None`.
         let found = payloads_of(responding(
             json!({"type": "object", "properties": {"name": {"type": ["string", "null"]}}}),
             json!({"name": null}),
-        ));
+        ))?;
         assert_eq!(found[0].expected, json!({}));
 
         // A *required* nullable member is always written, `null` included.
@@ -451,11 +453,11 @@ mod tests {
                 "properties": {"name": {"type": ["string", "null"]}},
             }),
             json!({"name": null}),
-        ));
+        ))?;
         assert_eq!(found[0].expected, json!({"name": null}));
     }
 
-    #[test]
+    #[test_util::test]
     fn pruning_reaches_through_lists_and_named_references() {
         let found = payloads_of(json!({
             "openapi": "3.1.0",
@@ -470,43 +472,43 @@ mod tests {
                 "Page": {"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/Pet"}}}},
                 "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
             }},
-        }));
+        }))?;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].type_name, "Page");
         assert_eq!(found[0].expected, json!({"items": [{"name": "Rex"}]}));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_position_typed_as_arbitrary_json_contributes_nothing_to_check() {
         // `true` accepts everything, so it types as arbitrary JSON: a round trip through it is
         // `Value` in and `Value` out, which asserts nothing about the generated code.
         let document = responding(json!(true), json!({"anything": 1}));
         let config = Config::default();
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
+        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
+        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
         let (found, skipped) = super::collect(&resolved, &shapes, &contracts, &model);
         assert!(found.is_empty());
         // Counted rather than dropped: a gate that omits silently reads as coverage it lacks.
         assert_eq!(skipped, [super::Skipped::Opaque]);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_example_the_document_contradicts_carries_a_vendor_verdict() {
         let schema = json!({
             "type": "object",
             "required": ["name"],
             "properties": {"name": {"type": "string"}},
         });
-        let found = payloads_of(responding(schema.clone(), json!({"other": 1})));
+        let found = payloads_of(responding(schema.clone(), json!({"other": 1})))?;
         assert!(found[0].vendor_defect);
         // And the same schema with an example that agrees carries none, so the verdict is a
         // judgement about the example rather than a property of the position.
-        let found = payloads_of(responding(schema, json!({"name": "Rex"})));
+        let found = payloads_of(responding(schema, json!({"name": "Rex"})))?;
         assert!(!found[0].vendor_defect);
 
         // The verdict is asked per example, so it survives past the fifth: the class aggregates
@@ -515,7 +517,7 @@ mod tests {
         let (_, diagnostics) = model_of(responding(
             json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}),
             json!({"other": 1}),
-        ));
+        ))?;
         assert!(
             diagnostics
                 .iter()

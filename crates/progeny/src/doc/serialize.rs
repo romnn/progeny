@@ -489,6 +489,7 @@ fn components_to_value(store: &SchemaStore, components: &Components) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use crate::diag::Ctx;
@@ -643,11 +644,11 @@ mod tests {
     /// Parse and serialize are member-by-member mirrors, and this is the test that holds them to
     /// it. Equality with the input proves no modelled member is dropped on the way out; the
     /// members the parser does not model round-trip through `extensions` and prove nothing here.
-    #[test]
+    #[test_util::test]
     fn a_maximal_document_round_trips_member_by_member() {
         let mut ctx = Ctx::new();
         let input = maximal();
-        let normalized = normalize::normalize(input.clone(), &mut ctx).unwrap();
+        let normalized = normalize::normalize(input.clone(), &mut ctx)?;
         let parsed = super::super::parse::document(normalized, &mut ctx);
         let output = super::document(&parsed);
         assert_eq!(output, input);
@@ -657,12 +658,16 @@ mod tests {
     ///
     /// `normalize` sits below `doc` and walks raw values, so it cannot use
     /// [`super::super::PathItem::operations`]; this pins the two lists to each other instead.
-    #[test]
+    #[test_util::test]
     fn the_normalizer_walks_every_method_the_model_holds() {
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(maximal(), &mut ctx).unwrap();
+        let normalized = normalize::normalize(maximal(), &mut ctx)?;
         let parsed = super::super::parse::document(normalized, &mut ctx);
-        let paths = parsed.document.paths.as_ref().unwrap();
+        let paths = parsed
+            .document
+            .paths
+            .as_ref()
+            .ok_or_eyre("test fixture should contain this value")?;
         let super::super::MaybeRef::Item(item) = &paths.items["/pets/{id}"] else {
             panic!("the fixture writes the path item inline");
         };

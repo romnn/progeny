@@ -1,9 +1,7 @@
-# unwrap/expect/panic/indexing are denied in production code (workspace lints) because
-# the generator must never panic on any input: a panic is a rejection without a
-# diagnostic. They are the idiomatic failure mode inside tests, so scope the denies to
-# non-test code.
-allow-unwrap-in-tests = true
-allow-expect-in-tests = true
+# Panic and indexing are denied in production code because the generator must never panic on any
+# input: a panic is a rejection without a diagnostic. Tests may use assertion panics and direct
+# fixture indexing; fallible setup is propagated through `Result` rather than extracted with
+# `unwrap` or `expect`.
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 

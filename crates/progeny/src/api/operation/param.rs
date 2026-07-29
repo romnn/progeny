@@ -199,13 +199,15 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use serde_json::json;
 
     use crate::api::Location;
     use crate::api::tests::{model_of, with_paths};
     use crate::contract::TypeRef;
 
-    #[test]
+    #[test_util::test]
     fn an_optional_parameter_with_no_defined_serialization_is_dropped_and_the_operation_stays() {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/pets": {
@@ -219,7 +221,7 @@ mod tests {
                     "responses": {"200": {"description": "ok"}},
                 },
             },
-        })));
+        })))?;
         assert_eq!(model.operations().len(), 1);
         let names: Vec<&str> = model.operations()[0]
             .params
@@ -238,7 +240,7 @@ mod tests {
     /// their own names, so no server can read the parameter back. The parameter stays (the
     /// calling side is whole) and the degradation is said out loud; it used to ship silently,
     /// with the handler's field permanently absent.
-    #[test]
+    #[test_util::test]
     fn an_exploded_form_object_parameter_is_kept_and_its_erasure_is_reported() {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/videos": {
@@ -251,7 +253,7 @@ mod tests {
                     "responses": {"200": {"description": "ok"}},
                 },
             },
-        })));
+        })))?;
         // The parameter survives — only the serving side is degraded.
         assert_eq!(model.operations().len(), 1);
         assert_eq!(model.operations()[0].params.len(), 1);
@@ -265,7 +267,7 @@ mod tests {
         assert!(found[0].contains("always absent"), "{found:#?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_required_parameter_with_no_defined_serialization_takes_the_operation_with_it() {
         let (model, _) = model_of(with_paths(json!({
             "/pets": {
@@ -278,11 +280,11 @@ mod tests {
                     "responses": {"200": {"description": "ok"}},
                 },
             },
-        })));
+        })))?;
         assert!(model.operations().is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_parameter_that_wants_a_name_the_builder_uses_takes_a_suffix() {
         // `jellyfin` declares a query parameter called `client`. Every builder has a `client`
         // field, so without a rename the generated struct declares it twice and does not compile —
@@ -298,7 +300,7 @@ mod tests {
                     "responses": {"200": {"description": "ok"}},
                 },
             },
-        })));
+        })))?;
         let params = &model.operations()[0].params;
         let names: Vec<(&str, &str)> = params
             .iter()
@@ -308,7 +310,7 @@ mod tests {
         assert_eq!(names, [("body", "body2"), ("client", "client2")]);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_operation_level_parameter_overrides_the_path_level_one_it_repeats() {
         let (model, _) = model_of(with_paths(json!({
             "/pets": {
@@ -319,7 +321,7 @@ mod tests {
                     "responses": {"200": {"description": "ok"}},
                 },
             },
-        })));
+        })))?;
         let params = &model.operations()[0].params;
         assert_eq!(params.len(), 1);
         assert!(params[0].required);

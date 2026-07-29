@@ -400,6 +400,7 @@ fn children(shape: &Shape, out: &mut Vec<ShapeKey>) {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::{Extra, Scalar, Shape, ShapeRef, Shapes, classify};
@@ -408,13 +409,13 @@ mod tests {
     use crate::{normalize, resolve};
 
     /// Classify a document, keeping the diagnostics.
-    pub(super) fn shapes_of(document: Value) -> (Shapes, Vec<Diagnostic>) {
+    pub(super) fn shapes_of(document: Value) -> eyre::Result<(Shapes, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = classify(&resolved, &mut ctx);
-        (shapes, ctx.into_diagnostics())
+        Ok((shapes, ctx.into_diagnostics()))
     }
 
     /// A document whose `components.schemas` are exactly these.
@@ -430,36 +431,38 @@ mod tests {
     }
 
     /// The shape of the component named `name`.
-    pub(super) fn shape_of<'a>(shapes: &'a Shapes, name: &str) -> &'a Shape {
+    pub(super) fn shape_of<'a>(shapes: &'a Shapes, name: &str) -> eyre::Result<&'a Shape> {
         let root = shapes
             .roots()
             .iter()
             .find(|root| root.hint.iter().any(|segment| segment == name))
-            .unwrap_or_else(|| panic!("no root named {name}"));
-        shapes.get(&root.key).unwrap()
+            .ok_or_else(|| eyre::eyre!("no root named {name}"))?;
+        shapes
+            .get(&root.key)
+            .ok_or_else(|| eyre::eyre!("no shape for root named {name}"))
     }
 
-    #[test]
+    #[test_util::test]
     fn a_reference_is_transparent_so_both_positions_share_one_type() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
             "Alias": {"$ref": "#/components/schemas/Pet"},
-        })));
+        })))?;
         let pet = shapes
             .roots()
             .iter()
             .find(|root| root.hint == ["Pet"])
-            .unwrap();
+            .ok_or_eyre("test fixture should contain this value")?;
         let alias = shapes
             .roots()
             .iter()
             .find(|root| root.hint == ["Alias"])
-            .unwrap();
+            .ok_or_eyre("test fixture should contain this value")?;
         // Not two structurally equal types that dedup has to notice afterwards: one key.
         assert_eq!(pet.key, alias.key);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_reference_with_a_description_beside_it_is_still_a_reference() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
@@ -469,13 +472,13 @@ mod tests {
                     "pet": {"$ref": "#/components/schemas/Pet", "description": "the pet"},
                 },
             },
-        })));
+        })))?;
         let pet = shapes
             .roots()
             .iter()
             .find(|root| root.hint == ["Pet"])
-            .unwrap();
-        let Shape::Struct(holder) = shape_of(&shapes, "Holder") else {
+            .ok_or_eyre("test fixture should contain this value")?;
+        let Shape::Struct(holder) = shape_of(&shapes, "Holder")? else {
             panic!("expected a struct");
         };
         assert_eq!(holder.fields[0].shape, ShapeRef::Key(pet.key.clone()));
@@ -486,15 +489,15 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_recursive_schema_is_classified_once_and_terminates() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Node": {
                 "type": "object",
                 "properties": {"children": {"type": "array", "items": {"$ref": "#/components/schemas/Node"}}},
             },
-        })));
-        let Shape::Struct(node) = shape_of(&shapes, "Node") else {
+        })))?;
+        let Shape::Struct(node) = shape_of(&shapes, "Node")? else {
             panic!("expected a struct");
         };
         let ShapeRef::Key(children) = &node.fields[0].shape else {
@@ -504,36 +507,37 @@ mod tests {
             panic!("expected an array");
         };
         // The element's key is the struct's own: the cycle is two entries in a map, not a loop.
-        assert_eq!(item, &ShapeRef::Key(shape_key_of(&shapes, "Node")));
+        assert_eq!(item, &ShapeRef::Key(shape_key_of(&shapes, "Node")?));
     }
 
-    fn shape_key_of(shapes: &Shapes, name: &str) -> super::ShapeKey {
-        shapes
+    fn shape_key_of(shapes: &Shapes, name: &str) -> eyre::Result<super::ShapeKey> {
+        let root = shapes
             .roots()
             .iter()
             .find(|root| root.hint.iter().any(|segment| segment == name))
-            .unwrap()
+            .ok_or_else(|| eyre::eyre!("no root named {name}"))?
             .key
-            .clone()
+            .clone();
+        Ok(root)
     }
 
-    #[test]
+    #[test_util::test]
     fn an_open_object_with_no_properties_is_a_map() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Bag": {"type": "object"},
             "Typed": {"type": "object", "additionalProperties": {"type": "integer"}},
-        })));
+        })))?;
         assert!(matches!(
-            shape_of(&shapes, "Bag"),
+            shape_of(&shapes, "Bag")?,
             Shape::Map { value: None }
         ));
         assert!(matches!(
-            shape_of(&shapes, "Typed"),
+            shape_of(&shapes, "Typed")?,
             Shape::Map { value: Some(_) }
         ));
     }
 
-    #[test]
+    #[test_util::test]
     fn additional_properties_false_is_recorded_rather_than_ignored() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Closed": {
@@ -541,14 +545,14 @@ mod tests {
                 "properties": {"a": {"type": "string"}},
                 "additionalProperties": false,
             },
-        })));
-        let Shape::Struct(closed) = shape_of(&shapes, "Closed") else {
+        })))?;
+        let Shape::Struct(closed) = shape_of(&shapes, "Closed")? else {
             panic!("expected a struct");
         };
         assert_eq!(closed.extra, Extra::Denied);
     }
 
-    #[test]
+    #[test_util::test]
     fn all_of_unions_the_properties_and_the_required_names() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Base": {
@@ -562,9 +566,9 @@ mod tests {
                     {"type": "object", "required": ["extra"], "properties": {"extra": {"type": "integer"}}},
                 ],
             },
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Struct(child) = shape_of(&shapes, "Child") else {
+        let Shape::Struct(child) = shape_of(&shapes, "Child")? else {
             panic!("expected a struct");
         };
         let names: Vec<&str> = child
@@ -576,7 +580,7 @@ mod tests {
         assert!(child.fields.iter().all(|field| field.required));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_property_two_branches_disagree_about_is_merged_one_level_down() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Merged": {
@@ -585,9 +589,9 @@ mod tests {
                     {"properties": {"a": {"type": "object", "properties": {"y": {"type": "string"}}}}},
                 ],
             },
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Struct(merged) = shape_of(&shapes, "Merged") else {
+        let Shape::Struct(merged) = shape_of(&shapes, "Merged")? else {
             panic!("expected a struct");
         };
         let ShapeRef::Key(key) = &merged.fields[0].shape else {
@@ -605,26 +609,26 @@ mod tests {
         assert_eq!(names, ["x", "y"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_integer_that_must_also_be_a_number_is_an_integer() {
         // `integer` is a subset of `number`, which the type names hide. `github` writes exactly this
         // and it is not a contradiction.
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Id": {"allOf": [{"type": "number"}, {"type": "integer"}]},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
-            shape_of(&shapes, "Id"),
+            shape_of(&shapes, "Id")?,
             &Shape::Scalar(Scalar::Integer { signed: true })
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_all_of_that_cannot_hold_degrades_and_names_the_conflict() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Impossible": {"allOf": [{"type": "string"}, {"type": "integer"}]},
-        })));
-        assert_eq!(shape_of(&shapes, "Impossible"), &Shape::Any);
+        })))?;
+        assert_eq!(shape_of(&shapes, "Impossible")?, &Shape::Any);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
             diagnostics[0].class(),
@@ -633,49 +637,49 @@ mod tests {
         assert!(diagnostics[0].detail().contains("no value satisfies both"));
     }
 
-    #[test]
+    #[test_util::test]
     fn the_nullable_emulation_pattern_is_an_option_and_not_a_union() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
             "MaybePet": {"anyOf": [{"$ref": "#/components/schemas/Pet"}, {"type": "null"}]},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "MaybePet") else {
+        let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "MaybePet")? else {
             panic!("expected an optional");
         };
         // 83% of every `anyOf` in the corpus is this, and it has an exact translation.
         assert!(matches!(**inner, Shape::Alias(ShapeRef::Key(_))));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_union_of_constants_is_a_fieldless_enum() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Colour": {"anyOf": [{"const": "red"}, {"const": "green"}]},
             "Direction": {"enum": ["up", "down"]},
-        })));
+        })))?;
         assert_eq!(
-            shape_of(&shapes, "Colour"),
+            shape_of(&shapes, "Colour")?,
             &Shape::StringEnum(vec!["red".to_owned(), "green".to_owned()])
         );
         assert_eq!(
-            shape_of(&shapes, "Direction"),
+            shape_of(&shapes, "Direction")?,
             &Shape::StringEnum(vec!["up".to_owned(), "down".to_owned()])
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_nullable_enum_is_an_optional_fieldless_enum() {
         // How 3.0's `nullable: true` beside an `enum` arrives after normalization.
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Colour": {"type": ["string", "null"], "enum": ["red", null]},
-        })));
-        let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Colour") else {
+        })))?;
+        let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Colour")? else {
             panic!("expected an optional");
         };
         assert_eq!(**inner, Shape::StringEnum(vec!["red".to_owned()]));
     }
 
-    #[test]
+    #[test_util::test]
     fn an_undiscriminated_one_of_is_matched_structurally() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Cat": {"type": "object", "required": ["meow"], "properties": {"meow": {"type": "string"}}},
@@ -684,15 +688,15 @@ mod tests {
                 {"$ref": "#/components/schemas/Cat"},
                 {"$ref": "#/components/schemas/Dog"},
             ]},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(animal) = shape_of(&shapes, "Animal") else {
+        let Shape::Union(animal) = shape_of(&shapes, "Animal")? else {
             panic!("expected a union");
         };
         assert_eq!(animal.variants.len(), 2);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_discriminated_union_whose_variants_look_alike_consumes_its_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
@@ -704,9 +708,9 @@ mod tests {
                 ],
                 "discriminator": {"propertyName": "kind"},
             },
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(either) = shape_of(&shapes, "Either") else {
+        let Shape::Union(either) = shape_of(&shapes, "Either")? else {
             panic!("expected a union");
         };
         // Matching these structurally would pick whichever deserialized first, so the tag is what
@@ -720,14 +724,14 @@ mod tests {
         assert_eq!(tags, [Some("A"), Some("B")]);
         // And the property the tag rides in comes off the variants, because serde consumes it
         // before the variant ever sees the payload.
-        let Shape::Struct(a) = shape_of(&shapes, "A") else {
+        let Shape::Struct(a) = shape_of(&shapes, "A")? else {
             panic!("expected a struct");
         };
         let names: Vec<&str> = a.fields.iter().map(|field| field.wire.as_str()).collect();
         assert_eq!(names, ["shared"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_constant_tag_beats_the_discriminator_because_it_costs_the_variants_nothing() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Cat": {
@@ -747,22 +751,22 @@ mod tests {
                 ],
                 "discriminator": {"propertyName": "kind"},
             },
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(animal) = shape_of(&shapes, "Animal") else {
+        let Shape::Union(animal) = shape_of(&shapes, "Animal")? else {
             panic!("expected a union");
         };
         // The constants already tell a payload apart, so nothing is tagged and nothing is taken
         // away: `Cat` keeps `kind`, and is still usable outside the union.
         assert_eq!(animal.tag, None);
-        let Shape::Struct(cat) = shape_of(&shapes, "Cat") else {
+        let Shape::Struct(cat) = shape_of(&shapes, "Cat")? else {
             panic!("expected a struct");
         };
         let names: Vec<&str> = cat.fields.iter().map(|field| field.wire.as_str()).collect();
         assert_eq!(names, ["kind", "shared"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_variant_used_outside_its_union_keeps_its_tag_property_and_the_union_degrades() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
@@ -776,23 +780,23 @@ mod tests {
             },
             // The use that makes stripping a loss: here `kind` really is on the wire.
             "Holder": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
-        })));
-        assert_eq!(shape_of(&shapes, "Either"), &Shape::Any);
-        let Shape::Struct(a) = shape_of(&shapes, "A") else {
+        })))?;
+        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
+        let Shape::Struct(a) = shape_of(&shapes, "A")? else {
             panic!("expected a struct");
         };
         assert_eq!(a.fields.len(), 2);
         let reported = diagnostics
             .iter()
             .find(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase)
-            .expect("the refusal should be reported");
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(
             reported.detail().contains("outside this union"),
             "{reported}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_union_nothing_tells_apart_is_not_matched_against_whichever_branch_parses_first() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": {"type": "object", "properties": {"shared": {"type": "string"}}},
@@ -803,16 +807,16 @@ mod tests {
                 {"$ref": "#/components/schemas/A"},
                 {"$ref": "#/components/schemas/B"},
             ]},
-        })));
-        assert_eq!(shape_of(&shapes, "Either"), &Shape::Any);
+        })))?;
+        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
         let reported = diagnostics
             .iter()
             .find(|d| d.class() == crate::BreakageClass::WildUnion)
-            .expect("the wild union should be reported");
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(reported.detail().contains("no discriminator"), "{reported}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_branch_that_accepts_a_later_ones_payloads_is_not_told_apart_by_it() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Base": {"type": "object", "properties": {"name": {"type": "string"}}},
@@ -828,8 +832,8 @@ mod tests {
                 {"$ref": "#/components/schemas/Base"},
                 {"$ref": "#/components/schemas/Extended"},
             ]},
-        })));
-        assert_eq!(shape_of(&shapes, "Envelope"), &Shape::Any);
+        })))?;
+        assert_eq!(shape_of(&shapes, "Envelope")?, &Shape::Any);
         assert!(
             diagnostics
                 .iter()
@@ -838,7 +842,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn the_same_two_branches_in_the_other_order_need_no_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Base": {"type": "object", "properties": {"name": {"type": "string"}}},
@@ -851,21 +855,21 @@ mod tests {
                 {"$ref": "#/components/schemas/Extended"},
                 {"$ref": "#/components/schemas/Base"},
             ]},
-        })));
+        })))?;
         // The pair is the same and the reading is sound: an `Extended` payload matches `Extended`,
         // and a `Base` payload has no `id` for `Extended` to find, so it falls through. Paired with
         // `a_branch_that_accepts_a_later_ones_payloads_is_not_told_apart_by_it`, this is why the
         // question has to be asked in declaration order — one pair of branches, two orders, and
         // only one of them sound, so a symmetric test cannot be right about both.
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(envelope) = shape_of(&shapes, "Envelope") else {
+        let Shape::Union(envelope) = shape_of(&shapes, "Envelope")? else {
             panic!("expected a union");
         };
         assert_eq!(envelope.tag, None);
         assert_eq!(envelope.variants.len(), 2);
     }
 
-    #[test]
+    #[test_util::test]
     fn one_property_holding_two_kinds_tells_the_branches_apart() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             // `workos` returns exactly this from one status. The branches share every property
@@ -885,16 +889,16 @@ mod tests {
                     },
                 },
             ]},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(error) = shape_of(&shapes, "Error") else {
+        let Shape::Union(error) = shape_of(&shapes, "Error")? else {
             panic!("expected a union");
         };
         assert_eq!(error.tag, None);
         assert_eq!(error.variants.len(), 2);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_closed_branch_is_told_apart_by_what_a_later_one_requires() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Base": {
@@ -911,17 +915,17 @@ mod tests {
                 {"$ref": "#/components/schemas/Base"},
                 {"$ref": "#/components/schemas/Extended"},
             ]},
-        })));
+        })))?;
         // Closing `Base` is what makes the first order sound too: it is the one shape that turns a
         // payload down for carrying something extra, and every `Extended` payload carries `id`.
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(envelope) = shape_of(&shapes, "Envelope") else {
+        let Shape::Union(envelope) = shape_of(&shapes, "Envelope")? else {
             panic!("expected a union");
         };
         assert_eq!(envelope.tag, None);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_branch_that_becomes_arbitrary_json_tells_nothing_apart() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             // A bare enumeration of objects narrows nothing progeny can type, so the branch is
@@ -936,8 +940,8 @@ mod tests {
                 {"$ref": "#/components/schemas/Loose"},
                 {"$ref": "#/components/schemas/Payload"},
             ]},
-        })));
-        assert_eq!(shape_of(&shapes, "Either"), &Shape::Any);
+        })))?;
+        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
         assert!(
             diagnostics
                 .iter()
@@ -946,38 +950,38 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_bare_numeric_enum_is_a_number_rather_than_arbitrary_json() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Code": {"enum": [1, 2, 3]},
             "Ratio": {"enum": [0.5, 1.5]},
             "Flag": {"enum": [true, false]},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         // `type` is not the only way a document names a kind, and reading these as arbitrary JSON
         // lost the type *and* gave a union branch that swallows its siblings.
         assert_eq!(
-            shape_of(&shapes, "Code"),
+            shape_of(&shapes, "Code")?,
             &Shape::Scalar(Scalar::Integer { signed: true })
         );
-        assert_eq!(shape_of(&shapes, "Ratio"), &Shape::Scalar(Scalar::Number));
-        assert_eq!(shape_of(&shapes, "Flag"), &Shape::Scalar(Scalar::Bool));
+        assert_eq!(shape_of(&shapes, "Ratio")?, &Shape::Scalar(Scalar::Number));
+        assert_eq!(shape_of(&shapes, "Flag")?, &Shape::Scalar(Scalar::Bool));
     }
 
-    #[test]
+    #[test_util::test]
     fn an_enum_that_repeats_a_value_gives_one_variant_per_distinct_value() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             // Not adjacent, which is the whole reason `Vec::dedup` missed it: two variants renamed
             // to `"a"` gave serde a second one it can never produce or report.
             "Repeats": {"type": "string", "enum": ["a", "b", "a"]},
-        })));
+        })))?;
         assert_eq!(
-            shape_of(&shapes, "Repeats"),
+            shape_of(&shapes, "Repeats")?,
             &Shape::StringEnum(vec!["a".to_owned(), "b".to_owned()])
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn branches_of_different_kinds_still_need_no_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Either": {"anyOf": [
@@ -985,9 +989,9 @@ mod tests {
                 {"type": "integer"},
                 {"type": "array", "items": {"type": "string"}},
             ]},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(either) = shape_of(&shapes, "Either") else {
+        let Shape::Union(either) = shape_of(&shapes, "Either")? else {
             panic!("expected a union");
         };
         // 754 of the corpus's `anyOf`s are this. Nothing is lost by matching them structurally,
@@ -996,7 +1000,7 @@ mod tests {
         assert_eq!(either.tag, None);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_unmapped_variant_is_refused_rather_than_named_after_its_rust_type() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Holder": {
@@ -1011,8 +1015,8 @@ mod tests {
                     },
                 },
             },
-        })));
-        let Shape::Struct(holder) = shape_of(&shapes, "Holder") else {
+        })))?;
+        let Shape::Struct(holder) = shape_of(&shapes, "Holder")? else {
             panic!("expected a struct");
         };
         let ShapeRef::Key(either) = &holder.fields[0].shape else {
@@ -1029,7 +1033,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_variant_that_is_itself_a_response_body_keeps_its_tag() {
         let document = json!({
             "openapi": "3.1.0",
@@ -1063,30 +1067,30 @@ mod tests {
                 },
             }},
         });
-        let (shapes, diagnostics) = shapes_of(document);
+        let (shapes, diagnostics) = shapes_of(document)?;
         // The refusal the union table always specified, from the half of the safety condition that
         // has no edge to be found by: an API-surface position points at no shape, so a walk over
         // shapes alone never sees that `FromFile` is a `200` body. Stripping `kind` there loses it
         // on the wire.
-        let Shape::Struct(from_file) = shape_of(&shapes, "FromFile") else {
+        let Shape::Struct(from_file) = shape_of(&shapes, "FromFile")? else {
             panic!("expected a struct");
         };
         assert!(
             from_file.fields.iter().any(|field| field.wire == "kind"),
             "the response body kept `kind`: {from_file:?}"
         );
-        assert_eq!(shape_of(&shapes, "Source"), &Shape::Any);
+        assert_eq!(shape_of(&shapes, "Source")?, &Shape::Any);
         let reported = diagnostics
             .iter()
             .find(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase)
-            .expect("the refusal should be reported");
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(
             reported.detail().contains("outside this union"),
             "{reported}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_variant_only_a_declared_component_points_at_is_not_on_the_wire() {
         // The same document, with the `200` moved into a `components.responses` entry that no
         // operation references. Being *declared* is not being on the wire — the same reason a
@@ -1134,16 +1138,16 @@ mod tests {
                 },
             },
         });
-        let (shapes, _) = shapes_of(document);
-        let Shape::Union(union) = shape_of(&shapes, "Source") else {
+        let (shapes, _) = shapes_of(document)?;
+        let Shape::Union(union) = shape_of(&shapes, "Source")? else {
             panic!(
                 "the union should have kept its type: {:?}",
-                shape_of(&shapes, "Source")
+                shape_of(&shapes, "Source")?
             );
         };
         assert_eq!(union.tag.as_deref(), Some("kind"));
         // And the variant gave the property up, because nothing else carries it.
-        let Shape::Struct(from_file) = shape_of(&shapes, "FromFile") else {
+        let Shape::Struct(from_file) = shape_of(&shapes, "FromFile")? else {
             panic!("expected a struct");
         };
         assert!(
@@ -1152,7 +1156,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_explicit_mapping_names_the_variants_the_document_chose() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
@@ -1168,8 +1172,8 @@ mod tests {
                     "mapping": {"first": "#/components/schemas/A", "second": "B"},
                 },
             },
-        })));
-        let Shape::Union(either) = shape_of(&shapes, "Either") else {
+        })))?;
+        let Shape::Union(either) = shape_of(&shapes, "Either")? else {
             panic!("expected a union");
         };
         let tags: Vec<Option<&str>> = either
@@ -1180,12 +1184,12 @@ mod tests {
         assert_eq!(tags, [Some("first"), Some("second")]);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_draft_04_tuple_is_a_tuple_once_normalization_has_run() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Pair": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]},
-        })));
-        let Shape::Tuple { items } = shape_of(&shapes, "Pair") else {
+        })))?;
+        let Shape::Tuple { items } = shape_of(&shapes, "Pair")? else {
             panic!("expected a tuple");
         };
         assert_eq!(items.len(), 2);
@@ -1193,14 +1197,14 @@ mod tests {
 
     /// `additionalItems: false` — normalized to `items: false` — forbids a tail, which is
     /// exactly what a fixed-arity tuple expresses.
-    #[test]
+    #[test_util::test]
     fn a_tuple_whose_tail_admits_nothing_stays_a_tuple() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Pair": {"type": "array",
                      "items": [{"type": "string"}, {"type": "integer"}],
                      "additionalItems": false},
-        })));
-        let Shape::Tuple { items } = shape_of(&shapes, "Pair") else {
+        })))?;
+        let Shape::Tuple { items } = shape_of(&shapes, "Pair")? else {
             panic!("expected a tuple");
         };
         assert_eq!(items.len(), 2);
@@ -1215,14 +1219,14 @@ mod tests {
     /// A prefix followed by an `items` that admits values allows instances longer than the
     /// prefix, and a generated `(A, B)` would refuse them — wrong about the wire, and until this
     /// diagnostic existed, silently so: the tail was carried in a field nothing ever lowered.
-    #[test]
+    #[test_util::test]
     fn a_tuple_whose_tail_admits_values_degrades_loudly() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Row": {"type": "array",
                     "prefixItems": [{"type": "string"}, {"type": "integer"}],
                     "items": {"type": "number"}},
-        })));
-        assert!(matches!(shape_of(&shapes, "Row"), Shape::Any));
+        })))?;
+        assert!(matches!(shape_of(&shapes, "Row")?, Shape::Any));
         let found: Vec<_> = diagnostics
             .iter()
             .filter(|found| found.class() == BreakageClass::UnsupportedConstruct)
@@ -1231,20 +1235,20 @@ mod tests {
         assert!(found[0].detail().contains("prefixItems"), "{found:#?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_fixed_length_array_is_told_apart_from_a_list() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Point": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
             "List": {"type": "array", "items": {"type": "number"}, "minItems": 1},
-        })));
+        })))?;
         assert!(matches!(
-            shape_of(&shapes, "Point"),
+            shape_of(&shapes, "Point")?,
             Shape::FixedArray { len: 3, .. }
         ));
-        assert!(matches!(shape_of(&shapes, "List"), Shape::Array { .. }));
+        assert!(matches!(shape_of(&shapes, "List")?, Shape::Array { .. }));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_validating_keyword_does_not_narrow_the_type_but_is_reported() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Odd": {
@@ -1252,47 +1256,47 @@ mod tests {
                 "properties": {"a": {"type": "string"}},
                 "not": {"required": ["b"]},
             },
-        })));
+        })))?;
         // The struct survives: `not` narrows validity, and dropping the type would lose more than
         // ignoring the keyword does.
-        assert!(matches!(shape_of(&shapes, "Odd"), Shape::Struct(_)));
+        assert!(matches!(shape_of(&shapes, "Odd")?, Shape::Struct(_)));
         let reported = diagnostics
             .iter()
             .find(|d| d.class() == crate::BreakageClass::UnsupportedConstruct)
-            .expect("the keyword should be reported");
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(reported.detail().contains("`not`"), "{reported}");
     }
 
-    #[test]
+    #[test_util::test]
     fn the_swagger_era_file_type_is_repaired_into_a_binary_string() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Upload": {"type": "file"},
-        })));
+        })))?;
         assert_eq!(
-            shape_of(&shapes, "Upload"),
+            shape_of(&shapes, "Upload")?,
             &Shape::Format(super::Format::Binary)
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].action(), crate::Action::Repair);
     }
 
-    #[test]
+    #[test_util::test]
     fn integers_take_their_sign_from_bounds_and_never_their_width() {
         let (shapes, _) = shapes_of(with_schemas(json!({
             "Count": {"type": "integer", "minimum": 0, "maximum": 100},
             "Offset": {"type": "integer", "minimum": -5},
             "Plain": {"type": "integer"},
-        })));
+        })))?;
         assert_eq!(
-            shape_of(&shapes, "Count"),
+            shape_of(&shapes, "Count")?,
             &Shape::Scalar(Scalar::Integer { signed: false })
         );
         assert_eq!(
-            shape_of(&shapes, "Offset"),
+            shape_of(&shapes, "Offset")?,
             &Shape::Scalar(Scalar::Integer { signed: true })
         );
         assert_eq!(
-            shape_of(&shapes, "Plain"),
+            shape_of(&shapes, "Plain")?,
             &Shape::Scalar(Scalar::Integer { signed: true })
         );
     }

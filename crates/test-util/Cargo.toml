@@ -1,0 +1,17 @@
+[package]
+name = "test-util"
+description = "Shared test harness attributes for the progeny workspace"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote.workspace = true
+syn.workspace = true
+
+[lints]
+workspace = true

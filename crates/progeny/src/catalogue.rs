@@ -13,9 +13,9 @@
 
 #![cfg(test)]
 
-use serde_json::{Value, json};
-
 use crate::{BreakageClass, Config, Diagnostic, generate};
+use color_eyre::eyre;
+use serde_json::{Value, json};
 
 /// What proves a catalogue row does what it says.
 enum Wiring {
@@ -252,13 +252,13 @@ fn dissolved() -> Vec<(&'static str, Wiring)> {
     )]
 }
 
-#[test]
+#[test_util::test]
 fn every_breakage_class_is_pinned_by_a_fixture_or_dated() {
     let mut undated = Vec::new();
     for class in BreakageClass::ALL {
         match wiring(class) {
             Wiring::Fixture(document) => {
-                let produced = diagnostics_of(&document);
+                let produced = diagnostics_of(&document)?;
                 assert!(
                     produced.iter().any(|found| found.class() == class),
                     "the fixture for `{class}` produced {:?} instead",
@@ -272,7 +272,7 @@ fn every_breakage_class_is_pinned_by_a_fixture_or_dated() {
             // A dissolution has no class to be: those live in `dissolved()` under a name, and
             // `wiring` — one arm per *variant* — can never return one.
             Wiring::Dissolved(_) => {
-                panic!("`{class}` is a variant, and a dissolution has none")
+                eyre::bail!("`{class}` is a variant, and a dissolution has none")
             }
         }
     }
@@ -283,14 +283,14 @@ fn every_breakage_class_is_pinned_by_a_fixture_or_dated() {
     }
 }
 
-#[test]
+#[test_util::test]
 fn the_classes_this_architecture_dissolves_stay_dissolved() {
     for (name, wiring) in dissolved() {
         let Wiring::Dissolved(document) = wiring else {
-            panic!("{name} should be recorded as dissolved");
+            eyre::bail!("{name} should be recorded as dissolved");
         };
-        let output = generate(&serde_json::to_vec(&document).unwrap(), &Config::default())
-            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let output = generate(&serde_json::to_vec(&document)?, &Config::default())
+            .map_err(|error| eyre::eyre!("{name}: {error}"))?;
         // The dissolution's whole claim, both halves. The construct generates *faithfully* —
         // the recursive type exists and still holds its recursion — and it generates *silently*,
         // because a dissolved class is one no machinery had to handle: any diagnostic here means
@@ -314,18 +314,15 @@ fn the_classes_this_architecture_dissolves_stay_dissolved() {
     }
 }
 
-fn diagnostics_of(document: &Value) -> Vec<Diagnostic> {
-    let bytes = serde_json::to_vec(document).expect("a fixture should serialize");
+fn diagnostics_of(document: &Value) -> eyre::Result<Vec<Diagnostic>> {
+    let bytes = serde_json::to_vec(document)?;
     // Every optional derive requested crate-wide, so the one class that is about the caller's
     // configuration rather than the document has something to be unsatisfiable about.
     let config = Config {
         derives: [crate::Derive::Eq].into_iter().collect(),
         ..Config::default()
     };
-    match generate(&bytes, &config) {
-        Ok(output) => output.diagnostics,
-        Err(error) => panic!("a fixture should generate: {error}"),
-    }
+    Ok(generate(&bytes, &config)?.diagnostics)
 }
 
 fn document(schemas: Value) -> Value {

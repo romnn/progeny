@@ -199,12 +199,14 @@ fn diff_files(
 
 #[cfg(test)]
 mod tests {
-    #[test]
+    use color_eyre::eyre;
+
+    #[test_util::test]
     fn the_two_dialects_converge_on_one_model() {
         // The committed pair, so the check runs offline in `task test` as well as in the corpus.
         const OLD: &[u8] = include_bytes!("../../../../corpus/convergence/dialects.3.0.yaml");
         const NEW: &[u8] = include_bytes!("../../../../corpus/convergence/dialects.3.1.yaml");
-        let result = super::convergence(OLD, NEW).unwrap();
+        let result = super::convergence(OLD, NEW)?;
         // Three assertions rather than one `is_clean`, because they fail for three different
         // reasons: a model difference is a normalization defect, a source difference with the
         // models agreeing is a defect in a stage after it, and an asymmetric loss means one dialect
@@ -215,13 +217,13 @@ mod tests {
         assert!(result.is_clean());
         // Two empty renderings compare equal, so the source half of this gate would pass whether or
         // not it worked. What makes it a check is that there was something to compare.
-        let rendered = super::generated(NEW).unwrap().files;
+        let rendered = super::generated(NEW)?.files;
         let types = &rendered[camino::Utf8Path::new("src/types.rs")];
         assert!(types.contains("pub struct"), "{types}");
         assert!(types.contains("pub enum"), "{types}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_source_difference_is_reported_by_file_and_line() {
         let file = |name: &str, text: &str| {
             let mut map = std::collections::BTreeMap::new();
@@ -233,9 +235,20 @@ mod tests {
         super::diff_files(
             &file(
                 "src/types.rs",
-                "pub struct Pet {\n    pub name: String,\n}\n",
+                indoc::indoc! {"
+                    pub struct Pet {
+                        pub name: String,
+                    }
+                "},
             ),
-            &file("src/types.rs", "pub struct Pet {\n    pub name: i64,\n}\n"),
+            &file(
+                "src/types.rs",
+                indoc::indoc! {"
+                    pub struct Pet {
+                        pub name: i64,
+                    }
+                "},
+            ),
             &mut found,
         );
         assert_eq!(found.len(), 1);
@@ -253,7 +266,13 @@ mod tests {
         // Equal as far as the shorter one goes, and still not the same crate.
         let mut found = Vec::new();
         super::diff_files(
-            &file("src/a.rs", "a\nb\n"),
+            &file(
+                "src/a.rs",
+                indoc::indoc! {"
+                    a
+                    b
+                "},
+            ),
             &file("src/a.rs", "a\n"),
             &mut found,
         );
@@ -261,7 +280,7 @@ mod tests {
         assert!(found[0].detail.contains("2 lines"), "{found:#?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_loss_only_one_dialect_suffered_is_reported_and_a_shared_one_is_not() {
         use crate::{Action, BreakageClass, Diagnostic, JsonPointer};
 

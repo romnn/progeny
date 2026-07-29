@@ -134,12 +134,13 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
 #[cfg(test)]
 mod tests {
     use super::{Config, RejectKind, generate};
+    use color_eyre::eyre::{self, OptionExt as _};
 
     const PETSTORE: &[u8] = include_bytes!("../../../corpus/specs/petstore-31.yaml");
 
-    #[test]
+    #[test_util::test]
     fn a_document_that_needs_no_repair_produces_no_diagnostics() {
-        let output = generate(PETSTORE, &Config::default()).unwrap();
+        let output = generate(PETSTORE, &Config::default())?;
         assert!(
             output.diagnostics.is_empty(),
             "{:?}",
@@ -151,9 +152,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn the_shared_type_layer_and_the_client_are_generated() {
-        let output = generate(PETSTORE, &Config::default()).unwrap();
+        let output = generate(PETSTORE, &Config::default())?;
         let names: Vec<&str> = output.files.keys().map(|path| path.as_str()).collect();
         assert_eq!(
             names,
@@ -180,18 +181,17 @@ mod tests {
         for (path, text) in &output.files {
             if path.extension() == Some("rs") {
                 syn::parse_file(text)
-                    .unwrap_or_else(|error| panic!("{path} does not parse: {error}"));
+                    .map_err(|error| eyre::eyre!("{path} does not parse: {error}"))?;
             }
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_description_with_no_operations_generates_no_client() {
         let types_only = generate(
             br#"{"openapi":"3.1.0","paths":{},"components":{"schemas":{"Pet":{"type":"object"}}}}"#,
             &Config::default(),
-        )
-        .unwrap();
+        )?;
         assert!(
             !types_only
                 .files
@@ -206,16 +206,21 @@ mod tests {
             br#"{"openapi":"3.1.0","paths":{"/pets/{id}":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
             &Config::default(),
         )
-        .unwrap();
+        ?;
         let names: Vec<&str> = output.files.keys().map(|path| path.as_str()).collect();
         assert_eq!(names, ["Cargo.toml", "src/lib.rs", "src/types.rs"]);
         assert!(!output.files[camino::Utf8Path::new("Cargo.toml")].contains("reqwest"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_rejected_configuration_stops_generation_rather_than_producing_half_of_it() {
-        let config: Config = toml::from_str("[type-derives]\nPet = [\"copy\"]\n").unwrap();
-        let error = generate(PETSTORE, &config).unwrap_err();
+        let config: Config = toml::from_str(indoc::indoc! {r#"
+            [type-derives]
+            Pet = ["copy"]
+        "#})?;
+        let error = generate(PETSTORE, &config)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
     }
 
@@ -224,15 +229,18 @@ mod tests {
     /// The normalizer's walk and the schema parser both used to report a schema's `$schema`,
     /// with different wording, so one member produced two `unsupported-dialect` records. The
     /// parser is the layer that stores the member, so it is the layer that reports it.
-    #[test]
+    #[test_util::test]
     fn one_unknown_dialect_is_one_record() {
         let output = generate(
-            br#"{"openapi":"3.1.0","paths":{},"components":{"schemas":{
-                "Thing": {"type": "string", "$schema": "http://json-schema.org/draft-07/schema#"}
-            }}}"#,
+            indoc::indoc! {r#"
+                {"openapi":"3.1.0","paths":{},"components":{"schemas":{
+                    "Thing": {"type": "string", "$schema": "http://json-schema.org/draft-07/schema#"}
+                }}}"#
+            }
+            .as_bytes(),
             &Config::default(),
         )
-        .unwrap();
+        ?;
         let dialects: Vec<_> = output
             .diagnostics
             .iter()
@@ -244,15 +252,20 @@ mod tests {
 
     /// `emit.types = false` used to return an empty `files` map with a success code — the silent
     /// no-op this crate exists to forbid, in its own configuration.
-    #[test]
+    #[test_util::test]
     fn a_configuration_that_asks_for_nothing_is_refused_rather_than_silently_granted() {
-        let config: Config = toml::from_str("[emit]\ntypes = false\n").unwrap();
-        let error = generate(PETSTORE, &config).unwrap_err();
+        let config: Config = toml::from_str(indoc::indoc! {"
+            [emit]
+            types = false
+        "})?;
+        let error = generate(PETSTORE, &config)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
         assert!(error.detail().contains("emit.types"), "{error}");
     }
 
-    #[test]
+    #[test_util::test]
     fn unusable_documents_are_rejected_rather_than_half_generated() {
         for (input, kind) in [
             (&b"not a document at all: ["[..], RejectKind::Unparsable),
@@ -264,7 +277,9 @@ mod tests {
             ),
             (&b"{\"openapi\": \"3.1.0\"}"[..], RejectKind::NoOperations),
         ] {
-            let error = generate(input, &Config::default()).unwrap_err();
+            let error = generate(input, &Config::default())
+                .err()
+                .ok_or_eyre("the test expects this operation to fail")?;
             assert_eq!(error.kind(), kind, "{}", String::from_utf8_lossy(input));
         }
     }

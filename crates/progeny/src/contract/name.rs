@@ -88,7 +88,7 @@ fn guard(converted: &str, fallback: &str, case: Case) -> String {
         Case::Snake => filtered.to_snake_case(),
     };
     if cleaned.is_empty() {
-        cleaned = fallback.to_owned();
+        fallback.clone_into(&mut cleaned);
     }
     if cleaned.starts_with(|character: char| character.is_ascii_digit()) {
         cleaned.insert(0, '_');

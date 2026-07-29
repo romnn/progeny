@@ -335,6 +335,7 @@ pub(super) fn is_json(media_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
     use super::preference;
@@ -342,7 +343,7 @@ mod tests {
     use crate::api::tests::{model_of, with_paths};
     use crate::contract::TypeRef;
 
-    #[test]
+    #[test_util::test]
     fn the_json_family_is_preferred_over_everything_else() {
         assert!(preference("application/json") < preference("text/plain"));
         assert!(preference("application/vnd.api+json") < preference("multipart/form-data"));
@@ -357,7 +358,7 @@ mod tests {
         assert!(preference("audio/mpeg") < preference("audio/*"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_json_body_is_typed_and_a_binary_one_is_bytes() {
         let (model, _) = model_of(with_paths(json!({
             "/upload": {
@@ -377,12 +378,12 @@ mod tests {
                     "responses": {"201": {"description": "made"}},
                 },
             },
-        })));
+        })))?;
         let upload = model
             .operations()
             .iter()
             .find(|operation| operation.rust_name.as_str() == "upload")
-            .unwrap();
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(matches!(
             upload.body,
             Some(BodyContract::Bytes { required: true, .. })
@@ -391,7 +392,7 @@ mod tests {
             .operations()
             .iter()
             .find(|operation| operation.rust_name.as_str() == "create_pet")
-            .unwrap();
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(matches!(
             create.body,
             Some(BodyContract::Json {

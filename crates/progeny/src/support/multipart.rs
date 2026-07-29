@@ -8,9 +8,12 @@
 //! non-generic body instead of one per operation is compile time a consumer does not pay, and one
 //! place where the format's rules live is one place they can be wrong.
 
-#![allow(
-    dead_code,
-    reason = "this file is shipped into generated crates; inside progeny it exists to be compiled and tested"
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "shipped into generated crates; compiled here to keep its source checked"
+    )
 )]
 
 use std::fmt::Write as _;
@@ -110,8 +113,8 @@ pub fn boundary_of(content_type: &str) -> Option<String> {
 /// hand serde a string where it wants an object.
 ///
 /// # Errors
-/// When the body is not well-formed multipart for the boundary given.
-pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, String> {
+/// Returns [`ParseError`] when the body is not well-formed multipart for the boundary given.
+pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, ParseError> {
     let delimiter = format!("--{boundary}");
     let mut members = serde_json::Map::new();
     for section in split_on(body, delimiter.as_bytes()).skip(1) {
@@ -120,7 +123,7 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, S
             break;
         }
         let Some(headers_end) = find(section, b"\r\n\r\n") else {
-            return Err("a multipart section has no header block".to_owned());
+            return Err(ParseError::MissingHeaderBlock);
         };
         let headers = String::from_utf8_lossy(section.get(..headers_end).unwrap_or_default());
         let content = section
@@ -129,7 +132,7 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, S
             .strip_suffix(b"\r\n")
             .unwrap_or_default();
         let Some(name) = disposition_name(&headers) else {
-            return Err("a multipart section declares no name".to_owned());
+            return Err(ParseError::MissingName);
         };
         let kind = specs
             .iter()
@@ -141,7 +144,7 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, S
             .is_some_and(|spec| spec.repeated);
         let text = String::from_utf8_lossy(content).into_owned();
         let value = match kind {
-            PartKind::Json => serde_json::from_str(&text).map_err(|source| source.to_string())?,
+            PartKind::Json => serde_json::from_str(&text).map_err(ParseError::InvalidJson)?,
             PartKind::Text | PartKind::File => Value::String(text),
         };
         match members.get_mut(&name) {
@@ -158,6 +161,20 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, S
         }
     }
     Ok(Value::Object(members))
+}
+
+/// Why a multipart request could not be decoded.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    /// A part did not separate its headers from its body.
+    #[error("a multipart section has no header block")]
+    MissingHeaderBlock,
+    /// A part did not declare the member name it belongs to.
+    #[error("a multipart section declares no name")]
+    MissingName,
+    /// A part declared as JSON did not contain JSON.
+    #[error("a multipart JSON part is invalid")]
+    InvalidJson(#[source] serde_json::Error),
 }
 
 /// The `name` of a section, from its `Content-Disposition`.
@@ -324,10 +341,11 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn write(boundary: &str, parts: &[(String, Part)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (name, part) in parts {
-        let mut headers = format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"",
+        let mut headers = crlf(&indoc::formatdoc! {r#"
+            --{boundary}
+            Content-Disposition: form-data; name="{}""#,
             quoted(name)
-        );
+        });
         if let Some(filename) = &part.filename {
             let _ = write!(headers, "; filename=\"{}\"", quoted(filename));
         }
@@ -342,6 +360,10 @@ fn write(boundary: &str, parts: &[(String, Part)]) -> Vec<u8> {
     }
     out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     out
+}
+
+fn crlf(text: &str) -> String {
+    text.replace('\n', "\r\n")
 }
 
 /// A name as it may appear inside a quoted header parameter.
@@ -371,29 +393,43 @@ fn header_safe(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
-    use super::{PartKind, PartSpec, body};
+    use super::{PartKind, PartSpec, body, crlf};
 
-    fn rendered(value: &serde_json::Value, specs: &[PartSpec]) -> String {
-        let (_, bytes) = body(value, specs).expect("an object body");
-        String::from_utf8(bytes).expect("utf-8 in these fixtures")
+    fn rendered(value: &serde_json::Value, specs: &[PartSpec]) -> eyre::Result<String> {
+        let (_, bytes) =
+            body(value, specs).ok_or_eyre("test fixture should produce a multipart body")?;
+        Ok(String::from_utf8(bytes)?)
     }
 
-    #[test]
+    fn framed(text: &str) -> String {
+        const LINE_BREAK: &str = "\r\n";
+        format!("{LINE_BREAK}{LINE_BREAK}{text}{LINE_BREAK}")
+    }
+
+    fn on_new_line(text: &str) -> String {
+        const LINE_BREAK: &str = "\r\n";
+        format!("{LINE_BREAK}{text}")
+    }
+
+    #[test_util::test]
     fn a_scalar_member_is_a_named_field() {
-        let out = rendered(&json!({"name": "widget"}), &[]);
+        let out = rendered(&json!({"name": "widget"}), &[])?;
         assert_eq!(
             out,
-            "--progeny-boundary\r\n\
-             Content-Disposition: form-data; name=\"name\"\r\n\
-             \r\n\
-             widget\r\n\
-             --progeny-boundary--\r\n"
+            crlf(indoc::indoc! {r#"
+                --progeny-boundary
+                Content-Disposition: form-data; name="name"
+
+                widget
+                --progeny-boundary--
+            "#})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_binary_member_carries_a_filename_and_a_content_type() {
         let specs = [PartSpec {
             name: "file",
@@ -401,16 +437,16 @@ mod tests {
             repeated: false,
             content_type: None,
         }];
-        let out = rendered(&json!({"file": "raw bytes"}), &specs);
+        let out = rendered(&json!({"file": "raw bytes"}), &specs)?;
         assert!(out.contains("name=\"file\"; filename=\"file\""), "{out}");
         assert!(
             out.contains("Content-Type: application/octet-stream"),
             "{out}"
         );
-        assert!(out.contains("\r\n\r\nraw bytes\r\n"), "{out}");
+        assert!(out.contains(&framed("raw bytes")), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_declared_content_type_wins_over_the_default() {
         let specs = [PartSpec {
             name: "metadata",
@@ -418,21 +454,21 @@ mod tests {
             repeated: false,
             content_type: Some("application/json"),
         }];
-        let out = rendered(&json!({"metadata": {"a": 1}}), &specs);
+        let out = rendered(&json!({"metadata": {"a": 1}}), &specs)?;
         assert!(out.contains("Content-Type: application/json"), "{out}");
-        assert!(out.contains("\r\n\r\n{\"a\":1}\r\n"), "{out}");
+        assert!(out.contains(&framed(r#"{"a":1}"#)), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_structured_member_nobody_described_is_json() {
         // The inference, and the reason it is not `Text`: `[1,2]` has no faithful text form, and
         // `to_string` on the `Value` would produce the JSON anyway without saying so in a header.
-        let out = rendered(&json!({"tags": ["a", "b"]}), &[]);
+        let out = rendered(&json!({"tags": ["a", "b"]}), &[])?;
         assert!(out.contains("Content-Type: application/json"), "{out}");
-        assert!(out.contains("\r\n\r\n[\"a\",\"b\"]\r\n"), "{out}");
+        assert!(out.contains(&framed(r#"["a","b"]"#)), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_array_of_files_is_one_part_each() {
         // `anthropic` writes exactly this: `files` as an array of `format: binary` strings.
         let specs = [PartSpec {
@@ -441,13 +477,13 @@ mod tests {
             repeated: true,
             content_type: None,
         }];
-        let out = rendered(&json!({"files": ["first", "second"]}), &specs);
+        let out = rendered(&json!({"files": ["first", "second"]}), &specs)?;
         assert_eq!(out.matches("name=\"files\"; filename=\"file\"").count(), 2);
-        assert!(out.contains("\r\n\r\nfirst\r\n"), "{out}");
-        assert!(out.contains("\r\n\r\nsecond\r\n"), "{out}");
+        assert!(out.contains(&framed("first")), "{out}");
+        assert!(out.contains(&framed("second")), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_array_of_scalars_is_one_part_each() {
         let out = rendered(
             &json!({"tag": ["a", "b"]}),
@@ -457,53 +493,66 @@ mod tests {
                 repeated: true,
                 content_type: None,
             }],
-        );
+        )?;
         assert_eq!(out.matches("name=\"tag\"").count(), 2);
         assert!(!out.contains("Content-Type"), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_absent_member_is_not_a_part() {
         // What `skip_serializing_if` leaves out must not come back as an empty field: a server
         // cannot tell `name=""` from "the caller did not set it".
-        let out = rendered(&json!({"name": null, "kept": "yes"}), &[]);
+        let out = rendered(&json!({"name": null, "kept": "yes"}), &[])?;
         assert!(!out.contains("name=\"name\""), "{out}");
         assert!(out.contains("name=\"kept\""), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn the_boundary_never_appears_in_the_content() {
         // The whole reason the boundary is scanned rather than drawn: a body that happens to
         // contain it is a body the server reads as several parts, silently.
-        let out = rendered(&json!({"note": "contains progeny-boundary here"}), &[]);
+        let out = rendered(&json!({"note": "contains progeny-boundary here"}), &[])?;
         assert!(out.starts_with("--progeny-boundary-1\r\n"), "{out}");
         assert!(out.ends_with("--progeny-boundary-1--\r\n"), "{out}");
         // The content is still written exactly as it was given.
         assert!(out.contains("contains progeny-boundary here"), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn the_scan_keeps_going_until_it_is_clear() {
         let value = json!({"note": "progeny-boundary progeny-boundary-1 progeny-boundary-2"});
-        let (content_type, _) = body(&value, &[]).expect("an object body");
+        let (content_type, _) =
+            body(&value, &[]).ok_or_eyre("test fixture should contain this value")?;
         assert!(
             content_type.ends_with("boundary=progeny-boundary-3"),
             "{content_type}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_name_cannot_inject_a_header() {
-        let out = rendered(&json!({"a\"\r\nContent-Type: text/evil": "x"}), &[]);
+        let malicious = crlf(indoc::indoc! {r#"
+            a"
+            Content-Type: text/evil"#});
+        let value = serde_json::Value::Object(
+            [(malicious, serde_json::Value::String("x".to_owned()))]
+                .into_iter()
+                .collect(),
+        );
+        let out = rendered(&value, &[])?;
         assert!(
             out.contains("name=\"a\\\"Content-Type: text/evil\""),
             "{out}"
         );
         // One header line per part, and the injected one is not a line of its own.
-        assert_eq!(out.matches("\r\nContent-Type:").count(), 0, "{out}");
+        assert_eq!(
+            out.matches(&on_new_line("Content-Type:")).count(),
+            0,
+            "{out}"
+        );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_array_nobody_declared_repeated_is_one_json_part() {
         // A member typed as arbitrary JSON — a degradation, or an `additionalProperties` member —
         // holds an array at run time without anything having declared it repeated. Splitting it
@@ -516,12 +565,12 @@ mod tests {
                 repeated: false,
                 content_type: None,
             }],
-        );
+        )?;
         assert_eq!(out.matches("name=\"payload\"").count(), 1, "{out}");
-        assert!(out.contains("\r\n\r\n[1,2]\r\n"), "{out}");
+        assert!(out.contains(&framed("[1,2]")), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_repeated_member_that_is_not_an_array_is_still_one_part() {
         // `Option<Vec<T>>` unwraps to a repeated spec, and a caller who set a single value has a
         // value that is not an array. One part is the only reading that does not drop it.
@@ -533,12 +582,12 @@ mod tests {
                 repeated: true,
                 content_type: None,
             }],
-        );
+        )?;
         assert_eq!(out.matches("name=\"tag\"").count(), 1, "{out}");
-        assert!(out.contains("\r\n\r\nsolo\r\n"), "{out}");
+        assert!(out.contains(&framed("solo")), "{out}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_body_survives_being_written_and_read_back() {
         // The assertion that makes the writer and the reader one rule rather than two. Everything
         // comes back as text except a part that was written as JSON, because a multipart body has
@@ -565,20 +614,24 @@ mod tests {
         ];
         let original =
             json!({"file": "raw", "meta": {"a": 1}, "name": "widget", "tags": ["x", "y"]});
-        let (content_type, bytes) = super::body(&original, &specs).expect("an object body");
-        let boundary = super::boundary_of(&content_type).expect("a declared boundary");
-        assert_eq!(super::parse(&bytes, &boundary, &specs).unwrap(), original);
+        let (content_type, bytes) =
+            super::body(&original, &specs).ok_or_eyre("test fixture should contain this value")?;
+        let boundary = super::boundary_of(&content_type)
+            .ok_or_eyre("test fixture should contain this value")?;
+        assert_eq!(super::parse(&bytes, &boundary, &specs)?, original);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_name_that_had_to_be_escaped_comes_back_as_it_was() {
         let original = json!({"a\"b": "value"});
-        let (content_type, bytes) = super::body(&original, &[]).expect("an object body");
-        let boundary = super::boundary_of(&content_type).expect("a declared boundary");
-        assert_eq!(super::parse(&bytes, &boundary, &[]).unwrap(), original);
+        let (content_type, bytes) =
+            super::body(&original, &[]).ok_or_eyre("test fixture should contain this value")?;
+        let boundary = super::boundary_of(&content_type)
+            .ok_or_eyre("test fixture should contain this value")?;
+        assert_eq!(super::parse(&bytes, &boundary, &[])?, original);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_repeated_name_the_table_never_declared_is_still_a_list() {
         // What arrived is what arrived. Dropping the first would lose a part the client sent, and
         // no table entry is going to appear at run time to say it was repeated.
@@ -588,16 +641,17 @@ mod tests {
             repeated: true,
             content_type: None,
         }];
-        let (content_type, bytes) =
-            super::body(&json!({"tag": ["x", "y"]}), &specs).expect("an object body");
-        let boundary = super::boundary_of(&content_type).expect("a declared boundary");
+        let (content_type, bytes) = super::body(&json!({"tag": ["x", "y"]}), &specs)
+            .ok_or_eyre("test fixture should contain this value")?;
+        let boundary = super::boundary_of(&content_type)
+            .ok_or_eyre("test fixture should contain this value")?;
         assert_eq!(
-            super::parse(&bytes, &boundary, &[]).unwrap(),
+            super::parse(&bytes, &boundary, &[])?,
             json!({"tag": ["x", "y"]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_boundary_is_read_out_of_the_header_however_it_was_written() {
         assert_eq!(
             super::boundary_of("multipart/form-data; boundary=abc"),
@@ -610,7 +664,7 @@ mod tests {
         assert_eq!(super::boundary_of("application/json"), None);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_body_that_is_not_an_object_has_no_parts() {
         assert!(body(&json!([1, 2]), &[]).is_none());
         assert!(body(&json!("text"), &[]).is_none());

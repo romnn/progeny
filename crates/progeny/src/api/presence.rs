@@ -176,6 +176,8 @@ fn close(contracts: &Contracts, start: BTreeSet<TypeIndex>) -> BTreeSet<TypeInde
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use serde_json::json;
 
     use crate::api::tests::model_of;
@@ -202,9 +204,9 @@ mod tests {
         })
     }
 
-    #[test]
+    #[test_util::test]
     fn a_collapse_says_which_half_of_the_api_it_costs() {
-        let (_, diagnostics) = model_of(split_document());
+        let (_, diagnostics) = model_of(split_document())?;
         let found: Vec<&str> = diagnostics
             .iter()
             .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)
@@ -238,7 +240,7 @@ mod tests {
     /// carries it anyway, because there is one generated type for both directions. A `readOnly`
     /// member of a response-only type is exactly what the document said, so it stays silent —
     /// these markers were dropped with no record at all until this diagnostic existed.
-    #[test]
+    #[test_util::test]
     fn an_access_marker_reports_only_where_the_type_crosses_it() {
         let (_, diagnostics) = model_of(json!({
             "openapi": "3.1.0",
@@ -257,7 +259,7 @@ mod tests {
                 // A `readOnly` member that stays on the response side: silent.
                 "PetOut": {"type": "object", "properties": {"id": {"type": "integer", "readOnly": true}, "out_only": {"type": "string"}}},
             }},
-        }));
+        }))?;
         let found: Vec<&str> = diagnostics
             .iter()
             .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
@@ -269,7 +271,7 @@ mod tests {
     }
 
     /// The mirror image: `writeOnly` costs something on the way back.
-    #[test]
+    #[test_util::test]
     fn a_write_only_member_of_a_response_is_reported() {
         let (_, diagnostics) = model_of(json!({
             "openapi": "3.1.0",
@@ -284,7 +286,7 @@ mod tests {
             "components": {"schemas": {
                 "Pet": {"type": "object", "properties": {"secret": {"type": "string", "writeOnly": true}}},
             }},
-        }));
+        }))?;
         let found: Vec<&str> = diagnostics
             .iter()
             .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
@@ -300,7 +302,7 @@ mod tests {
     /// Seeding reachability from JSON bodies alone reported a form-reached type as "no
     /// operation's body" — a false statement about the wire, in a diagnostic the caller is meant
     /// to act on. The corpus has 278 multipart bodies across 27 documents.
-    #[test]
+    #[test_util::test]
     fn a_multipart_body_is_a_request_position() {
         let (_, diagnostics) = model_of(json!({
             "openapi": "3.1.0",
@@ -316,7 +318,7 @@ mod tests {
             "components": {"schemas": {
                 "PetForm": {"type": "object", "properties": {"nickname": {"type": ["string", "null"]}}},
             }},
-        }));
+        }))?;
         let found: Vec<&str> = diagnostics
             .iter()
             .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)
@@ -326,7 +328,7 @@ mod tests {
         assert!(found[0].contains("a request body"), "{found:#?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_type_reached_from_both_directions_pays_both() {
         let (_, diagnostics) = model_of(json!({
             "openapi": "3.1.0",
@@ -342,7 +344,7 @@ mod tests {
             "components": {"schemas": {
                 "Pet": {"type": "object", "properties": {"owner": {"type": ["string", "null"]}}},
             }},
-        }));
+        }))?;
         let found: Vec<&str> = diagnostics
             .iter()
             .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)
@@ -355,7 +357,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_collapse_deep_inside_a_body_is_still_attributed_to_the_position() {
         let (_, diagnostics) = model_of(json!({
             "openapi": "3.1.0",
@@ -371,7 +373,7 @@ mod tests {
                 "Page": {"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/Pet"}}}},
                 "Pet": {"type": "object", "properties": {"owner": {"type": ["string", "null"]}}},
             }},
-        }));
+        }))?;
         let found: Vec<&str> = diagnostics
             .iter()
             .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)

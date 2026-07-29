@@ -19,7 +19,7 @@
 //! * **Replaying a buffered member reports the same error the format would have.** The error type is
 //!   the format's own, so `invalid type` and `unknown variant` read the way they always do.
 
-#![allow(
+#![expect(
     dead_code,
     reason = "this file is shipped into generated crates; inside progeny it exists to be compiled and tested"
 )]

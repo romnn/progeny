@@ -30,9 +30,9 @@ mod plan;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use camino::Utf8PathBuf;
 use clap::Args as ClapArgs;
+use color_eyre::eyre;
 
 use measure::Summary;
 use plan::{Target, key_of};
@@ -120,7 +120,7 @@ pub struct Args {
 const DERIVE: &str = "derive";
 const HAND_WRITTEN: &str = "hand-written";
 
-pub fn run(args: &Args) -> Result<()> {
+pub fn run(args: &Args) -> eyre::Result<()> {
     if !args.measure.is_empty() {
         return measure::measure_child(&args.measure);
     }

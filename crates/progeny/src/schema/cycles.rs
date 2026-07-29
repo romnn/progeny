@@ -250,9 +250,11 @@ impl Tarjan {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::Sccs;
 
-    #[test]
+    #[test_util::test]
     fn a_graph_with_no_edges_has_no_cycles() {
         let sccs = Sccs::of(3, &[]);
         assert!(!sccs.recursive(0));
@@ -260,7 +262,7 @@ mod tests {
         assert_eq!(sccs.largest_group(), 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_node_pointing_at_itself_is_recursive() {
         let sccs = Sccs::of(2, &[(0, 0)]);
         assert!(sccs.recursive(0));
@@ -270,7 +272,7 @@ mod tests {
         assert_eq!(sccs.recursive_groups(), 0);
     }
 
-    #[test]
+    #[test_util::test]
     fn mutual_references_land_in_one_component() {
         let sccs = Sccs::of(4, &[(0, 1), (1, 0), (1, 2), (2, 3)]);
         assert!(sccs.recursive(0));
@@ -282,7 +284,7 @@ mod tests {
         assert_eq!(sccs.largest_group(), 2);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_long_cycle_is_one_component() {
         let edges: Vec<(u32, u32)> = (0..1000).map(|node| (node, (node + 1) % 1000)).collect();
         let sccs = Sccs::of(1000, &edges);
@@ -291,25 +293,25 @@ mod tests {
         assert!(sccs.together(0, 999));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_deep_chain_does_not_overflow_the_stack() {
         // The whole reason this is iterative. A recursive Tarjan dies somewhere around here.
         const NODES: usize = 400_000;
-        let last = u32::try_from(NODES).unwrap() - 1;
+        let last = u32::try_from(NODES)? - 1;
         let edges: Vec<(u32, u32)> = (0..last).map(|node| (node, node + 1)).collect();
         let sccs = Sccs::of(NODES, &edges);
         assert_eq!(sccs.recursive_groups(), 0);
         assert!(!sccs.recursive(0));
     }
 
-    #[test]
+    #[test_util::test]
     fn edges_leaving_the_graph_are_ignored() {
         let sccs = Sccs::of(2, &[(0, 7), (9, 0), (0, 1)]);
         assert!(!sccs.recursive(0));
         assert!(!sccs.together(0, 1));
     }
 
-    #[test]
+    #[test_util::test]
     fn two_separate_cycles_stay_separate() {
         let sccs = Sccs::of(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]);
         assert_eq!(sccs.recursive_groups(), 2);

@@ -131,19 +131,21 @@ pub(super) fn diff(expected: &Value, actual: &Value, at: &JsonPointer, out: &mut
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::round_trip;
 
     const PETSTORE: &[u8] = include_bytes!("../../../../corpus/specs/petstore-31.yaml");
 
-    #[test]
+    #[test_util::test]
     fn the_committed_spec_round_trips_exactly() {
-        let result = round_trip(PETSTORE).unwrap();
+        let result = round_trip(PETSTORE)?;
         assert!(result.is_clean(), "{:#?}", result.differences);
         assert!(result.yaml);
         assert!(result.schema_count > 0);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_dropped_member_is_reported_with_its_location() {
         let mut differences = Vec::new();
         super::diff(
@@ -156,7 +158,7 @@ mod tests {
         assert_eq!(differences[0].location, "/a/b");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_invented_member_is_reported_too() {
         let mut differences = Vec::new();
         super::diff(

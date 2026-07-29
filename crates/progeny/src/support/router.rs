@@ -9,6 +9,32 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+/// Why a generated server could not decode an incoming request.
+#[derive(Debug, thiserror::Error)]
+pub enum RequestError {
+    /// A header that must be text contained bytes outside UTF-8.
+    #[error("a request header is not valid text")]
+    Header(#[from] ::axum::http::header::ToStrError),
+    /// Reading the request body from the connection failed.
+    #[error("reading the request body failed")]
+    Body(#[from] ::axum::Error),
+    /// A JSON request body did not contain the declared type.
+    #[error("the request body is not valid JSON")]
+    Json(#[from] ::serde_json::Error),
+    /// A multipart request did not declare its boundary.
+    #[error("the request declares no multipart boundary")]
+    MissingMultipartBoundary,
+    /// A multipart request was malformed.
+    #[error(transparent)]
+    Multipart(#[from] super::multipart::ParseError),
+    /// Text assembled from request fields did not match the declared type.
+    #[error(transparent)]
+    Decode(#[from] super::serve::ServerDecodeError),
+    /// A text request body contained bytes outside UTF-8.
+    #[error("the request body is not valid UTF-8")]
+    Text(#[from] ::std::string::FromUtf8Error),
+}
+
 /// A request taken apart once, so each parameter is a lookup rather than another parse.
 ///
 /// Built before any extraction runs. The alternative — one `FromRequestParts` per parameter — parses
@@ -48,69 +74,43 @@ pub async fn receive(request: ::axum::extract::Request) -> Incoming {
 
 impl Incoming {
     /// A path parameter, which the router captured or did not.
-    ///
-    /// # Errors
-    /// Never; the signature matches the other three so one `read` serves all four locations.
-    // `allow` rather than `expect`: this file is compiled again in consumer crates, under a clippy
-    // that never runs the pedantic group, and an unfulfilled expectation there is its own warning.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "uniform signature with the header and cookie accessors, which do fail"
-    )]
-    pub fn path_value(&self, name: &str) -> Result<Option<Value>, String> {
-        Ok(self
-            .path
+    pub fn path_value(&self, name: &str) -> Option<Value> {
+        self.path
             .get(name)
-            .map(|found| Value::String(found.clone())))
+            .map(|found| Value::String(found.clone()))
     }
 
     /// A query parameter, read by the row the description gave it.
-    ///
-    /// # Errors
-    /// Never; an unreadable value is absent, and whether that costs anything is the caller's rule.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "uniform signature with the header and cookie accessors, which do fail"
-    )]
     pub fn query_value(
         &self,
         name: &str,
         style: super::style::Style,
         explode: bool,
         array: bool,
-    ) -> Result<Option<Value>, String> {
-        Ok(super::style::from_query(
-            &self.query,
-            name,
-            style,
-            explode,
-            array,
-        ))
+    ) -> Option<Value> {
+        super::style::from_query(&self.query, name, style, explode, array)
     }
 
     /// A header, as the text it carries.
     ///
     /// # Errors
-    /// When the header is present and is not valid UTF-8, which is a request nothing can read.
-    pub fn header_value(&self, name: &str) -> Result<Option<Value>, String> {
+    /// Returns [`RequestError::Header`] when the header is present and is not valid UTF-8.
+    pub fn header_value(&self, name: &str) -> Result<Option<Value>, RequestError> {
         let Some(found) = self.headers.get(name) else {
             return Ok(None);
         };
-        found
-            .to_str()
-            .map(|text| Some(Value::String(text.to_owned())))
-            .map_err(|source| source.to_string())
+        Ok(Some(Value::String(found.to_str()?.to_owned())))
     }
 
     /// One cookie out of the `Cookie` header, which carries all of them at once.
     ///
     /// # Errors
-    /// When the header is present and is not valid UTF-8.
-    pub fn cookie_value(&self, name: &str) -> Result<Option<Value>, String> {
+    /// Returns [`RequestError::Header`] when the header is present and is not valid UTF-8.
+    pub fn cookie_value(&self, name: &str) -> Result<Option<Value>, RequestError> {
         let Some(header) = self.headers.get(::axum::http::header::COOKIE) else {
             return Ok(None);
         };
-        let header = header.to_str().map_err(|source| source.to_string())?;
+        let header = header.to_str()?;
         Ok(header.split(';').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
             (key.trim() == name).then(|| Value::String(value.trim().to_owned()))
@@ -120,11 +120,9 @@ impl Incoming {
     /// The whole body, or nothing when the request carried none.
     ///
     /// # Errors
-    /// When the body could not be read off the connection.
-    pub async fn bytes(self) -> Result<Option<Vec<u8>>, String> {
-        let collected = ::axum::body::to_bytes(self.body, BODY_LIMIT)
-            .await
-            .map_err(|source| source.to_string())?;
+    /// Returns [`RequestError::Body`] when the body could not be read off the connection.
+    pub async fn bytes(self) -> Result<Option<Vec<u8>>, RequestError> {
+        let collected = ::axum::body::to_bytes(self.body, BODY_LIMIT).await?;
         // An empty body and an absent body are the same thing over HTTP, and "absent" is the
         // reading that lets an optional body be optional.
         Ok((!collected.is_empty()).then(|| collected.to_vec()))
@@ -149,13 +147,11 @@ const BODY_LIMIT: usize = 2 * 1024 * 1024;
 /// When the body cannot be read, or does not match the description.
 pub async fn json_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
-) -> Result<Option<T>, String> {
+) -> Result<Option<T>, RequestError> {
     let Some(bytes) = incoming.bytes().await? else {
         return Ok(None);
     };
-    ::serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|source| source.to_string())
+    Ok(Some(::serde_json::from_slice(&bytes)?))
 }
 
 /// A form-urlencoded body, read through the same style rows the query string uses.
@@ -165,13 +161,15 @@ pub async fn json_body<T: ::serde::de::DeserializeOwned>(
 pub async fn form_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::style::FormSpec],
-) -> Result<Option<T>, String> {
+) -> Result<Option<T>, RequestError> {
     let Some(bytes) = incoming.bytes().await? else {
         return Ok(None);
     };
     let text = ::std::string::String::from_utf8_lossy(&bytes);
     // Through the same reading a query parameter gets: a form body carries no types either.
-    super::serve::typed_body(super::style::query_object(&text, specs)).map(Some)
+    Ok(Some(super::serve::typed_body(super::style::query_object(
+        &text, specs,
+    ))?))
 }
 
 /// A `multipart/form-data` body, read back into the type its parts came from.
@@ -181,38 +179,37 @@ pub async fn form_body<T: ::serde::de::DeserializeOwned>(
 pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::multipart::PartSpec],
-) -> Result<Option<T>, String> {
-    let boundary = incoming
+) -> Result<Option<T>, RequestError> {
+    let content_type = incoming
         .headers
         .get(::axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(super::multipart::boundary_of)
-        .ok_or_else(|| "the request declares no multipart boundary".to_owned())?;
+        .ok_or(RequestError::MissingMultipartBoundary)?
+        .to_str()?;
+    let boundary = super::multipart::boundary_of(content_type)
+        .ok_or(RequestError::MissingMultipartBoundary)?;
     let Some(bytes) = incoming.bytes().await? else {
         return Ok(None);
     };
     let value = super::multipart::parse(&bytes, &boundary, specs)?;
-    super::serve::typed_body(value).map(Some)
+    Ok(Some(super::serve::typed_body(value)?))
 }
 
 /// A text body.
 ///
 /// # Errors
 /// When the body cannot be read, or is not valid UTF-8.
-pub async fn text_body(incoming: Incoming) -> Result<Option<String>, String> {
+pub async fn text_body(incoming: Incoming) -> Result<Option<String>, RequestError> {
     let Some(bytes) = incoming.bytes().await? else {
         return Ok(None);
     };
-    ::std::string::String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|source| source.to_string())
+    Ok(Some(::std::string::String::from_utf8(bytes)?))
 }
 
 /// A body the description said nothing about the shape of.
 ///
 /// # Errors
 /// When the body cannot be read off the connection.
-pub async fn byte_body(incoming: Incoming) -> Result<Option<Vec<u8>>, String> {
+pub async fn byte_body(incoming: Incoming) -> Result<Option<Vec<u8>>, RequestError> {
     incoming.bytes().await
 }
 

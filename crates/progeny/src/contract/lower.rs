@@ -494,8 +494,7 @@ impl Lower<'_> {
         let origin = self
             .types
             .get(index.index())
-            .map(|contract| contract.origin.clone())
-            .unwrap_or_else(JsonPointer::root);
+            .map_or_else(JsonPointer::root, |contract| contract.origin.clone());
 
         for field in &structure.fields {
             let nullable = matches!(self.shape_of(&field.shape), Some(Shape::Optional(_)));

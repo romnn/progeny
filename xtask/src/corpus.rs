@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args as ClapArgs;
+use color_eyre::eyre::{self, WrapErr, bail};
 use progeny::harness::{self, Stats};
 use serde::Deserialize;
 
@@ -164,7 +164,7 @@ struct Clean {
     compiled: Option<generated::Compiled>,
 }
 
-pub fn run(args: &Args) -> Result<()> {
+pub fn run(args: &Args) -> eyre::Result<()> {
     let specs = load_manifest()?;
     let selected = select(&specs, args)?;
 
@@ -240,10 +240,10 @@ pub fn run(args: &Args) -> Result<()> {
     verdict(&outcomes)
 }
 
-pub fn load_manifest() -> Result<Vec<Spec>> {
+pub fn load_manifest() -> eyre::Result<Vec<Spec>> {
     let path = paths::corpus_root().join("manifest.toml");
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
-    let manifest: Manifest = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+    let text = std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {path}"))?;
+    let manifest: Manifest = toml::from_str(&text).wrap_err_with(|| format!("parsing {path}"))?;
     // Linted here rather than by one caller: every gate reads this manifest, and a gate trusting
     // an unlinted one once meant a duplicated entry could hand `payloads` a different
     // `bad_examples` list than `corpus` tested with — whichever `.find()` hit first.
@@ -258,7 +258,7 @@ pub fn load_manifest() -> Result<Vec<Spec>> {
 /// disk is an error too. A missing cache is a reason to run `corpus:fetch`, never a silently
 /// smaller run — the payloads gate once printed `skipped` per missing file and exited green
 /// having checked zero documents.
-pub fn selected(names: &[String]) -> Result<Vec<(Spec, Vec<u8>)>> {
+pub fn selected(names: &[String]) -> eyre::Result<Vec<(Spec, Vec<u8>)>> {
     let specs = load_manifest()?;
     let mut out = Vec::new();
     for name in names {
@@ -267,7 +267,7 @@ pub fn selected(names: &[String]) -> Result<Vec<(Spec, Vec<u8>)>> {
         };
         let path = document_path(spec);
         let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading {path}; run `cargo xtask corpus --fetch`"))?;
+            .wrap_err_with(|| format!("reading {path}; run `cargo xtask corpus --fetch`"))?;
         out.push((spec.clone(), bytes));
     }
     Ok(out)
@@ -278,7 +278,7 @@ pub fn selected(names: &[String]) -> Result<Vec<(Spec, Vec<u8>)>> {
 /// The two fields that carry hard-won knowledge — which documents ship examples that contradict
 /// their own schemas, and what each document stresses — are only useful if they stay accurate, and
 /// a duplicated or misplaced entry is the kind of rot nobody notices by reading.
-fn lint_manifest(specs: &[Spec]) -> Result<()> {
+fn lint_manifest(specs: &[Spec]) -> eyre::Result<()> {
     let mut seen = BTreeSet::new();
     for spec in specs {
         if !seen.insert(spec.name.as_str()) {
@@ -300,7 +300,7 @@ fn lint_manifest(specs: &[Spec]) -> Result<()> {
     Ok(())
 }
 
-fn select(specs: &[Spec], args: &Args) -> Result<Vec<Spec>> {
+fn select(specs: &[Spec], args: &Args) -> eyre::Result<Vec<Spec>> {
     // A misspelled exclusion excludes nothing and reports a full run, which is the one reading a
     // coverage gate must never produce.
     for name in &args.except {
@@ -360,7 +360,7 @@ pub fn document_path(spec: &Spec) -> Utf8PathBuf {
     paths::cache_root().join(file)
 }
 
-fn fetch_all(specs: &[Spec], refresh: bool) -> Result<()> {
+fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
     let mut fetched = 0usize;
     let mut failed = Vec::new();
     for spec in specs {
@@ -380,9 +380,9 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> Result<()> {
             Ok(body) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {parent}"))?;
+                        .wrap_err_with(|| format!("creating {parent}"))?;
                 }
-                std::fs::write(&path, &body).with_context(|| format!("writing {path}"))?;
+                std::fs::write(&path, &body).wrap_err_with(|| format!("writing {path}"))?;
                 println!("{} bytes", body.len());
                 fetched += 1;
             }
@@ -402,7 +402,7 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> Result<()> {
     Ok(())
 }
 
-fn download(url: &str) -> Result<Vec<u8>> {
+fn download(url: &str) -> eyre::Result<Vec<u8>> {
     // api.weather.gov and several other public endpoints reject requests without a User-Agent.
     // Be honest about what we are.
     let agent = concat!(
@@ -416,7 +416,7 @@ fn download(url: &str) -> Result<Vec<u8>> {
         .timeout_global(Some(Duration::from_mins(3)))
         .build()
         .call()
-        .with_context(|| format!("GET {url}"))?;
+        .wrap_err_with(|| format!("GET {url}"))?;
 
     // Published descriptions get large: one is roughly 5 MB and several are bigger.
     let body = response
@@ -424,7 +424,7 @@ fn download(url: &str) -> Result<Vec<u8>> {
         .with_config()
         .limit(256 * 1024 * 1024)
         .read_to_vec()
-        .with_context(|| format!("reading the response body from {url}"))?;
+        .wrap_err_with(|| format!("reading the response body from {url}"))?;
 
     let head = body.get(..body.len().min(64)).unwrap_or_default();
     let head = String::from_utf8_lossy(head);
@@ -441,7 +441,7 @@ fn download(url: &str) -> Result<Vec<u8>> {
 /// committed and tiny, so this runs offline and on every invocation: the round trip proves the
 /// model holds what a document said, and only this proves that what the *normalizer* said it said
 /// is right.
-fn check_convergence() -> Result<usize> {
+fn check_convergence() -> eyre::Result<usize> {
     let root = paths::convergence_root();
     // Name to extension, from the file actually found — the pair is opened with the same
     // extension discovery matched, where a discovery that accepted any `.3.0.<ext>` and an open
@@ -471,8 +471,8 @@ fn check_convergence() -> Result<usize> {
             root.join(format!("{name}.3.0.{extension}")),
             root.join(format!("{name}.3.1.{extension}")),
         );
-        let old_bytes = std::fs::read(&old).with_context(|| format!("reading {old}"))?;
-        let new_bytes = std::fs::read(&new).with_context(|| {
+        let old_bytes = std::fs::read(&old).wrap_err_with(|| format!("reading {old}"))?;
+        let new_bytes = std::fs::read(&new).wrap_err_with(|| {
             format!("reading {new}; a `.3.0.` document needs its `.3.1.` counterpart beside it")
         })?;
         match harness::convergence(&old_bytes, &new_bytes) {
@@ -518,7 +518,12 @@ fn check_convergence() -> Result<usize> {
     Ok(failures)
 }
 
-fn check(spec: &Spec, args: &Args, totals: &mut Stats, counted: &mut usize) -> Result<Outcome> {
+fn check(
+    spec: &Spec,
+    args: &Args,
+    totals: &mut Stats,
+    counted: &mut usize,
+) -> eyre::Result<Outcome> {
     let path = document_path(spec);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -639,10 +644,10 @@ pub fn config_for(spec: &Spec) -> progeny::Config {
 /// The expensive per-document assertions — compiling a generated crate, measuring what it costs —
 /// run over this list rather than over all 78, and the caller says so out loud rather than
 /// sampling silently.
-pub fn quick_tier() -> Result<Vec<String>> {
+pub fn quick_tier() -> eyre::Result<Vec<String>> {
     let path = paths::corpus_root().join("tier.toml");
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
-    let tier: Tier = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+    let text = std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {path}"))?;
+    let tier: Tier = toml::from_str(&text).wrap_err_with(|| format!("parsing {path}"))?;
     Ok(tier.quick)
 }
 
@@ -921,13 +926,13 @@ fn report_stats(totals: &Stats, documents: usize) {
     println!("  security schemes            {}", kinds.join(", "));
 }
 
-fn write_timings(path: &Utf8Path, outcomes: &[(String, Outcome, Duration)]) -> Result<()> {
+fn write_timings(path: &Utf8Path, outcomes: &[(String, Outcome, Duration)]) -> eyre::Result<()> {
     let timings: BTreeMap<&str, u128> = outcomes
         .iter()
         .map(|(name, _, elapsed)| (name.as_str(), elapsed.as_millis()))
         .collect();
-    let json = serde_json::to_string_pretty(&timings).context("rendering the timings")?;
-    std::fs::write(path, json + "\n").with_context(|| format!("writing {path}"))?;
+    let json = serde_json::to_string_pretty(&timings).wrap_err("rendering the timings")?;
+    std::fs::write(path, json + "\n").wrap_err_with(|| format!("writing {path}"))?;
     println!("timings written to {path}");
     Ok(())
 }
@@ -937,7 +942,7 @@ fn write_timings(path: &Utf8Path, outcomes: &[(String, Outcome, Duration)]) -> R
 /// A document that could not be read is infrastructure rather than a finding — one corpus member
 /// has no cached copy at all and is fetched live from a vendor endpoint. More than one missing
 /// means the cache is not populated, and a run over nothing must not read as a pass.
-fn verdict(outcomes: &[(String, Outcome, Duration)]) -> Result<()> {
+fn verdict(outcomes: &[(String, Outcome, Duration)]) -> eyre::Result<()> {
     let broken = outcomes
         .iter()
         .filter(|(_, outcome, _)| {
@@ -967,6 +972,7 @@ fn verdict(outcomes: &[(String, Outcome, Duration)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
+    use color_eyre::eyre::{self, OptionExt as _};
 
     use super::{Args, Spec, select};
 
@@ -981,19 +987,22 @@ mod tests {
         Invocation::parse_from(std::iter::once("corpus").chain(arguments.iter().copied())).args
     }
 
-    fn manifest(names: &[&str]) -> Vec<Spec> {
+    fn manifest(names: &[&str]) -> eyre::Result<Vec<Spec>> {
         names
             .iter()
             .map(|name| {
-                toml::from_str(&format!("name = \"{name}\"\nlocal = true\n"))
-                    .expect("a name and a local flag are a whole spec")
+                toml::from_str(&indoc::formatdoc! {r#"
+                    name = "{name}"
+                    local = true
+                "#})
+                .map_err(Into::into)
             })
             .collect()
     }
 
-    #[test]
+    #[test_util::test]
     fn an_excluded_document_is_left_out_of_what_was_selected() {
-        let specs = manifest(&["petstore-31", "cloudflare", "oxide"]);
+        let specs = manifest(&["petstore-31", "cloudflare", "oxide"])?;
         let selected = select(
             &specs,
             &parse(&[
@@ -1004,19 +1013,19 @@ mod tests {
                 "--except",
                 "cloudflare",
             ]),
-        )
-        .expect("the exclusion names a document in the manifest");
+        )?;
         let names: Vec<&str> = selected.iter().map(|spec| spec.name.as_str()).collect();
         assert_eq!(names, ["petstore-31"]);
     }
 
     /// The failure mode this guards is not a missing document but a *reported* one: a misspelled
     /// exclusion silently excludes nothing, and the run then claims coverage it did not have.
-    #[test]
+    #[test_util::test]
     fn an_exclusion_that_names_nothing_is_refused() {
-        let specs = manifest(&["petstore-31", "cloudflare"]);
+        let specs = manifest(&["petstore-31", "cloudflare"])?;
         let error = select(&specs, &parse(&["--except", "petstore-30"]))
-            .expect_err("a name no document carries cannot be excluded");
+            .err()
+            .ok_or_eyre("a name no document carries cannot be excluded")?;
         assert!(error.to_string().contains("petstore-30"), "{error}");
     }
 }

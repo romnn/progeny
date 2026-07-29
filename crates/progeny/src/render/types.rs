@@ -19,11 +19,45 @@ use crate::shape::{Docs, Format};
 
 /// Render every type in the contract set.
 pub(super) fn render(contracts: &Contracts, config: &Config) -> TokenStream {
+    let deprecated = deprecated_aliases(contracts);
     let items = contracts
         .types()
         .iter()
         .map(|contract| one(contract, contracts, config));
-    quote! { #(#items)* }
+    quote! { #deprecated #(#items)* }
+}
+
+/// Non-deprecated paths the generated implementation uses to name deprecated public contracts.
+///
+/// The public declaration keeps its `#[deprecated]` marker, so callers still get the intended
+/// warning. Generated derives and support code use these transparent aliases instead: procedural
+/// macro expansions cannot inherit a field's `#[expect]`, so aliases are the only way to keep those
+/// internal uses clean without a broad `#[allow(deprecated)]`.
+fn deprecated_aliases(contracts: &Contracts) -> TokenStream {
+    let aliases: Vec<TokenStream> = contracts
+        .types()
+        .iter()
+        .filter(|contract| contract.docs().deprecated)
+        .map(|contract| {
+            let name = ident(contract.rust_name());
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "generated internals need a non-deprecated path to this public contract"
+                )]
+                pub(crate) type #name = super::#name;
+            }
+        })
+        .collect();
+    if aliases.is_empty() {
+        return TokenStream::new();
+    }
+    quote! {
+        #[doc(hidden)]
+        pub(crate) mod __progeny_deprecated {
+            #(#aliases)*
+        }
+    }
 }
 
 fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> TokenStream {
@@ -51,19 +85,10 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
             let members = fields
                 .iter()
                 .map(|field| member(field, contract, contracts, config));
-            let allow = deprecated_use(fields.iter().map(|field| &field.ty), contracts);
-            // A field's type is as nested as the schema that produced it — `cloudflare` writes an
-            // `Option<Vec<BTreeMap<String, …>>>` — and `clippy::type_complexity` asks for it to be
-            // factored into an alias. progeny would have to *invent that alias's name*, and every
-            // name in the output comes from the document. A named type the document never mentions
-            // is a worse outcome than a long one that says exactly what the schema said.
-            let nesting = quote! { #[allow(clippy::type_complexity)] };
             quote! {
                 #docs
                 #derives
                 #deny
-                #allow
-                #nesting
                 pub struct #name {
                     #(#members)*
                 }
@@ -107,11 +132,9 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
         }
         ContractKind::Newtype { inner } => {
             let ty = type_ref(inner, contracts, config);
-            let allow = deprecated_use([inner], contracts);
             quote! {
                 #docs
                 #derives
-                #allow
                 pub struct #name(pub #ty);
             }
         }
@@ -120,20 +143,16 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                 let ty = type_ref(item, contracts, config);
                 quote! { pub #ty, }
             });
-            let allow = deprecated_use(items.iter(), contracts);
             quote! {
                 #docs
                 #derives
-                #allow
                 pub struct #name(#(#members)*);
             }
         }
         ContractKind::Alias { target } => {
             let ty = type_ref(target, contracts, config);
-            let allow = deprecated_use([target], contracts);
             quote! {
                 #docs
-                #allow
                 pub type #name = #ty;
             }
         }
@@ -159,15 +178,11 @@ fn data_enum(
     };
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = type_ref(&variant.ty, contracts, config);
+        let ty = enum_type_ref(&variant.ty, contracts, config);
         quote! { #variant_ident(#ty), }
     });
-    let allow = deprecated_use(variants.iter().map(|variant| &variant.ty), contracts);
-    let sized = variant_sizes();
     quote! {
         #tagging
-        #allow
-        #sized
         pub enum #name {
             #(#arms)*
         }
@@ -199,41 +214,67 @@ fn tagged_enum(
     let with_serde = contract.deser() == DeserStrategy::Derive;
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = type_ref(&variant.ty, contracts, config);
+        let ty = enum_type_ref(&variant.ty, contracts, config);
         let wire = &variant.tag_value;
         let rename =
             (with_serde && variant_ident != *wire).then(|| quote! { #[serde(rename = #wire)] });
         quote! { #rename #variant_ident(#ty), }
     });
-    let allow = deprecated_use(variants.iter().map(|variant| &variant.ty), contracts);
-    let sized = variant_sizes();
     quote! {
         #tagging
-        #allow
-        #sized
         pub enum #name {
             #(#arms)*
         }
     }
 }
 
-/// The one lint on generated types that suppression is the right answer to.
+/// An expectation for a field whose type exceeds Clippy's default complexity threshold.
 ///
-/// `clippy::large_enum_variant` fires when an enum's variants differ enough in size, and the fix it
-/// asks for is a `Box` — a change to the type the consumer receives. Deciding that here would mean
-/// knowing the layout of every generated type, and **progeny cannot**: a field's type may be
-/// `chrono::DateTime`, `time::OffsetDateTime`, `uuid::Uuid`, or whichever map the configuration
-/// picked, and those layouts belong to crates at versions this build never sees. The threshold is
-/// clippy's own, configurable and free to move between releases. A `Box` placed on an estimate is a
-/// worse outcome than the wart: it is an API change made on a guess, and it would appear and
-/// disappear as an unrelated configuration knob moved.
-///
-/// So the size question stays the consumer's, who can measure it, and the warning stops being
-/// noise in a build about code nobody wrote. On the enum rather than the crate, so it says which
-/// construct it is about, and `#[allow]` rather than `#[expect]` because most enums never trip it —
-/// an expectation would be unfulfilled on nearly all of them.
-pub(super) fn variant_sizes() -> TokenStream {
-    quote! { #[allow(clippy::large_enum_variant)] }
+/// Kept on the field rather than its struct so an unrelated field cannot satisfy it. The score
+/// mirrors Clippy's type visitor: paths, slices, tuples, and arrays cost ten times their nesting
+/// depth; references and pointers cost one. Generated types do not contain bare function or trait
+/// object types, but those cases are included so this stays correct if the renderer grows them.
+pub(super) fn type_complexity(ty: &TokenStream) -> TokenStream {
+    use syn::visit::Visit as _;
+
+    let Ok(ty) = syn::parse2::<syn::Type>(ty.clone()) else {
+        return TokenStream::new();
+    };
+    let mut visitor = TypeComplexity { score: 0, nest: 1 };
+    visitor.visit_type(&ty);
+    if visitor.score <= 250 {
+        return TokenStream::new();
+    }
+    quote! {
+        #[expect(
+            clippy::type_complexity,
+            reason = "the public field type mirrors the schema and must remain explicit"
+        )]
+    }
+}
+
+struct TypeComplexity {
+    score: u64,
+    nest: u64,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for TypeComplexity {
+    fn visit_type(&mut self, ty: &'ast syn::Type) {
+        let (score, nesting) = match ty {
+            syn::Type::Ptr(_) | syn::Type::Reference(_) => (1, 0),
+            syn::Type::Path(_)
+            | syn::Type::Slice(_)
+            | syn::Type::Tuple(_)
+            | syn::Type::Array(_) => (10 * self.nest, 1),
+            syn::Type::BareFn(_) => (50 * self.nest, 1),
+            syn::Type::TraitObject(_) => (20 * self.nest, 0),
+            _ => (0, 0),
+        };
+        self.score += score;
+        self.nest += nesting;
+        syn::visit::visit_type(self, ty);
+        self.nest -= nesting;
+    }
 }
 
 fn member(
@@ -244,11 +285,12 @@ fn member(
 ) -> TokenStream {
     let name = ident(&field.rust_name);
     let ty = type_ref(&field.ty, contracts, config);
+    let nesting = type_complexity(&ty);
     let docs = with_default(docs(&field.docs), field);
     if contract.deser() != DeserStrategy::Derive {
         // No serde attributes at all: the hand-written implementation reads the same contract and
         // does not consult attributes, so leaving them on would be a second source of truth.
-        return quote! { #docs pub #name: #ty, };
+        return quote! { #docs #nesting pub #name: #ty, };
     }
 
     let mut attributes = Vec::new();
@@ -262,7 +304,7 @@ fn member(
         attributes.push(quote! { skip_serializing_if = "Option::is_none" });
     }
     let serde = (!attributes.is_empty()).then(|| quote! { #[serde(#(#attributes),*)] });
-    quote! { #docs #serde pub #name: #ty, }
+    quote! { #docs #serde #nesting pub #name: #ty, }
 }
 
 /// A field's declared default, said in its documentation rather than applied on deserialize.
@@ -309,39 +351,6 @@ pub(super) fn type_ref(ty: &TypeRef, contracts: &Contracts, config: &Config) -> 
     reference(ty, contracts, config, false)
 }
 
-/// The allowance an item needs when any type it names is deprecated.
-///
-/// A document may deprecate a schema without deprecating the properties that refer to it — `okta`
-/// deprecates the `MtlsTrustCredentialsRevocation` component and not the `revocation` property that
-/// holds one — and both renderings are then faithful. rustc lints the *use* regardless, so the
-/// generated crate warns on every build about code its consumer did not write. Being deprecated
-/// itself exempts nothing: a `#[deprecated]` item is still linted for the deprecated types it names.
-///
-/// **On the item, not on the field.** A field-level `#[allow]` silences the field's own declaration
-/// and not the `Deserialize` the derive expands from it, which names the same type at the same span
-/// — so the warning survives at half its old count, which is the worst of both. The item level is
-/// the narrowest one that covers a derive, and it hides nothing from the consumer: it governs uses
-/// *inside* this item, while their own use of a deprecated field or type is linted at their site.
-pub(super) fn deprecated_use<'a>(
-    types: impl IntoIterator<Item = &'a TypeRef>,
-    contracts: &Contracts,
-) -> TokenStream {
-    let mut named = Vec::new();
-    for ty in types {
-        ty.named(&mut named);
-    }
-    let touches_deprecated = named
-        .iter()
-        .any(|index| contracts.get(*index).is_some_and(|it| it.docs().deprecated));
-    // `allow` rather than `expect`: this lands in someone else's crate, compiled by a rustc this
-    // build never sees, and an expectation that turns out unfulfilled there is a warning of its own.
-    if touches_deprecated {
-        quote! { #[allow(deprecated)] }
-    } else {
-        TokenStream::new()
-    }
-}
-
 /// The same type, named from outside the `types` module.
 ///
 /// A named type renders as a bare identifier inside `types.rs` and must not anywhere else: the
@@ -352,13 +361,49 @@ pub(crate) fn type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) ->
     reference(ty, contracts, config, true)
 }
 
+/// An enum payload named from outside the `types` module.
+///
+/// Every non-unit payload is indirected uniformly, rather than according to dependency-defined
+/// layouts. That bounds every generated enum without making its API change when a format or map
+/// implementation changes size.
+pub(crate) fn enum_type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
+    enum_reference(ty, contracts, config, true)
+}
+
+/// Whether an enum payload receives the stable non-unit indirection.
+pub(crate) fn enum_type_is_boxed(ty: &TypeRef) -> bool {
+    !matches!(ty, TypeRef::Unit)
+}
+
+fn enum_type_ref(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
+    enum_reference(ty, contracts, config, false)
+}
+
+fn enum_reference(
+    ty: &TypeRef,
+    contracts: &Contracts,
+    config: &Config,
+    qualified: bool,
+) -> TokenStream {
+    let rendered = reference(ty, contracts, config, qualified);
+    if enum_type_is_boxed(ty) {
+        quote! { Box<#rendered> }
+    } else {
+        rendered
+    }
+}
+
 fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, qualified: bool) -> TokenStream {
     let type_ref = |inner: &TypeRef| reference(inner, contracts, config, qualified);
     match ty {
         TypeRef::Named(index) => {
             if let Some(contract) = contracts.get(*index) {
                 let name = ident(contract.rust_name());
-                if qualified {
+                if contract.docs().deprecated && qualified {
+                    quote! { super::types::__progeny_deprecated::#name }
+                } else if contract.docs().deprecated {
+                    quote! { __progeny_deprecated::#name }
+                } else if qualified {
                     quote! { super::types::#name }
                 } else {
                     quote! { #name }
@@ -652,12 +697,18 @@ mod doc_tests {
     fn a_lazy_list_continuation_is_written_out() {
         // `posthog`: a parenthesis wraps onto a line starting `+ `, which markdown reads as a list
         // item — and every line after it as a lazy continuation of one.
-        let found = normalized(
-            "ask the janitor to seal it (the janitor returns the sha\n+ the spec it derived), then stamp the\nrow. No rollback.",
-        );
+        let found = normalized(indoc::indoc! {"
+            ask the janitor to seal it (the janitor returns the sha
+            + the spec it derived), then stamp the
+            row. No rollback."
+        });
         assert_eq!(
             found,
-            "ask the janitor to seal it (the janitor returns the sha\n+ the spec it derived), then stamp the\n  row. No rollback."
+            indoc::indoc! {"
+                ask the janitor to seal it (the janitor returns the sha
+                + the spec it derived), then stamp the
+                  row. No rollback."
+            }
         );
     }
 
@@ -665,23 +716,32 @@ mod doc_tests {
     fn an_overindented_list_continuation_is_pulled_back_to_its_content() {
         // The same rule from the other side: the continuation belongs at the item's content
         // column, whether the vendor wrote too little indentation or too much.
-        let found = normalized(
-            "* If part index is included: the file matching the index (as ordered\n    by key) is downloaded.",
-        );
+        let found = normalized(indoc::indoc! {"
+            * If part index is included: the file matching the index (as ordered
+                by key) is downloaded."
+        });
         assert_eq!(
             found,
-            "* If part index is included: the file matching the index (as ordered\n  by key) is downloaded."
+            indoc::indoc! {"
+                * If part index is included: the file matching the index (as ordered
+                  by key) is downloaded."
+            }
         );
     }
 
     #[test]
     fn a_lazy_quote_continuation_gets_its_marker() {
         // `okta` writes deprecation notices as blockquotes whose second line drops the `>`.
-        let found =
-            normalized("> **Note:** This property isn't supported.\nSee the deprecation notice.");
+        let found = normalized(indoc::indoc! {"
+            > **Note:** This property isn't supported.
+            See the deprecation notice."
+        });
         assert_eq!(
             found,
-            "> **Note:** This property isn't supported.\n> See the deprecation notice."
+            indoc::indoc! {"
+                > **Note:** This property isn't supported.
+                > See the deprecation notice."
+            }
         );
     }
 
@@ -689,18 +749,42 @@ mod doc_tests {
     fn a_blank_line_ends_the_block_rather_than_capturing_what_follows() {
         // Lazy continuation is a within-paragraph rule. Indenting past a blank line would move a
         // new paragraph *into* the list, which changes what the document says.
-        let found = normalized("* an item\n\nA new paragraph.");
-        assert_eq!(found, "* an item\n\nA new paragraph.");
+        let found = normalized(indoc::indoc! {"
+            * an item
+
+            A new paragraph."
+        });
+        assert_eq!(
+            found,
+            indoc::indoc! {"
+                * an item
+
+                A new paragraph."
+            }
+        );
     }
 
     #[test]
     fn fenced_code_is_left_exactly_as_written() {
         // Inside a fence, indentation is content.
-        let found =
-            normalized("* an item\n```\nnot   a continuation\n    indented on purpose\n```\ntail");
+        let found = normalized(indoc::indoc! {"
+            * an item
+            ```
+            not   a continuation
+                indented on purpose
+            ```
+            tail"
+        });
         assert_eq!(
             found,
-            "* an item\n```\nnot   a continuation\n    indented on purpose\n```\ntail"
+            indoc::indoc! {"
+                * an item
+                ```
+                not   a continuation
+                    indented on purpose
+                ```
+                tail"
+            }
         );
     }
 
@@ -710,18 +794,53 @@ mod doc_tests {
         // Expanded before anything measures a column, so a tab-indented line is four columns in
         // relative to its neighbours — and four columns in from a neighbour at zero, not from
         // nothing, which is why this needs a second line to be a test of indentation at all.
-        assert_eq!(normalized("prose\n\n\tindented"), "prose\n\n    indented");
+        assert_eq!(
+            normalized(indoc::indoc! {"
+                prose
+
+                \tindented"
+            }),
+            indoc::indoc! {"
+                prose
+
+                    indented"
+            }
+        );
     }
 
     #[test]
     fn what_only_looks_like_a_list_is_left_alone() {
         // Emphasis, a horizontal rule and a sentence that opens with a number all start with a
         // list marker's first character and none of them is a list.
-        assert_eq!(normalized("*emphasis*\ncontinues"), "*emphasis*\ncontinues");
-        assert_eq!(normalized("---\ncontinues"), "---\ncontinues");
         assert_eq!(
-            normalized("2024 was the year\nit changed"),
-            "2024 was the year\nit changed"
+            normalized(indoc::indoc! {"
+                *emphasis*
+                continues"
+            }),
+            indoc::indoc! {"
+                *emphasis*
+                continues"
+            }
+        );
+        assert_eq!(
+            normalized(indoc::indoc! {"
+                ---
+                continues"
+            }),
+            indoc::indoc! {"
+                ---
+                continues"
+            }
+        );
+        assert_eq!(
+            normalized(indoc::indoc! {"
+                2024 was the year
+                it changed"
+            }),
+            indoc::indoc! {"
+                2024 was the year
+                it changed"
+            }
         );
     }
 
@@ -731,10 +850,18 @@ mod doc_tests {
         // Without the blank line it is a continuation of the item's paragraph, because an indented
         // code block cannot interrupt one — see `paragraph_doc_tests`, and `langsmith`, where
         // rustdoc says so out loud.
-        let found = normalized("* an item\n\n      code, four past the content column");
+        let found = normalized(indoc::indoc! {"
+            * an item
+
+                  code, four past the content column"
+        });
         assert_eq!(
             found,
-            "* an item\n\n      code, four past the content column"
+            indoc::indoc! {"
+                * an item
+
+                      code, four past the content column"
+            }
         );
     }
 }
@@ -748,22 +875,39 @@ mod nested_doc_tests {
         // `orb` writes a sub-item at column 4 under an item whose content starts at column 2.
         // Read absolutely that is an indented code block; read against its parent it is a list.
         // The first reading flattens the sub-item and strands its own continuation above it.
-        let found = wrap(
-            "- outer item wrapping\n  its continuation:\n    - inner item wrapping\n      its continuation.",
-        )
+        let found = wrap(indoc::indoc! {"
+            - outer item wrapping
+              its continuation:
+                - inner item wrapping
+                  its continuation."
+        })
         .join("\n");
         assert_eq!(
             found,
-            "- outer item wrapping\n  its continuation:\n    - inner item wrapping\n      its continuation."
+            indoc::indoc! {"
+                - outer item wrapping
+                  its continuation:
+                    - inner item wrapping
+                      its continuation."
+            }
         );
     }
 
     #[test]
     fn a_lazy_line_under_a_sub_item_lines_up_with_the_sub_item() {
-        let found = wrap("- outer\n    - inner item wrapping\nits lazy continuation.").join("\n");
+        let found = wrap(indoc::indoc! {"
+            - outer
+                - inner item wrapping
+            its lazy continuation."
+        })
+        .join("\n");
         assert_eq!(
             found,
-            "- outer\n    - inner item wrapping\n      its lazy continuation."
+            indoc::indoc! {"
+                - outer
+                    - inner item wrapping
+                      its lazy continuation."
+            }
         );
     }
 }
@@ -777,13 +921,18 @@ mod unindent_doc_tests {
         // `sentry` writes descriptions indented twelve columns from end to end. Measured against
         // column zero every line is an indented code block; rustdoc removes the shared indentation
         // first and sees list items with a lazy continuation, and rustdoc is the one that warns.
-        let found = wrap(
-            "            - `comparisonDelta`: the comparison delta, in minutes.\n            For example, 3600 compares against data one hour ago.",
-        )
-        .join("\n");
+        let input = indoc::formatdoc! {"
+            {indent}- `comparisonDelta`: the comparison delta, in minutes.
+            {indent}For example, 3600 compares against data one hour ago.",
+            indent = "            "
+        };
+        let found = wrap(&input).join("\n");
         assert_eq!(
             found,
-            "- `comparisonDelta`: the comparison delta, in minutes.\n  For example, 3600 compares against data one hour ago."
+            indoc::indoc! {"
+                - `comparisonDelta`: the comparison delta, in minutes.
+                  For example, 3600 compares against data one hour ago."
+            }
         );
     }
 
@@ -791,11 +940,28 @@ mod unindent_doc_tests {
     fn removing_the_shared_indent_keeps_every_relative_indent() {
         // Only what *every* line shares comes off, so a nested item stays nested and a genuine
         // code block stays a code block.
-        let found =
-            wrap("  Prose.\n\n  - an item\n\n      code under it\n\n  Back to prose.").join("\n");
+        let input = indoc::formatdoc! {"
+            {indent}Prose.
+
+            {indent}- an item
+
+            {indent}    code under it
+
+            {indent}Back to prose.",
+            indent = "  "
+        };
+        let found = wrap(&input).join("\n");
         assert_eq!(
             found,
-            "Prose.\n\n- an item\n\n    code under it\n\nBack to prose."
+            indoc::indoc! {"
+                Prose.
+
+                - an item
+
+                    code under it
+
+                Back to prose."
+            }
         );
     }
 
@@ -803,8 +969,21 @@ mod unindent_doc_tests {
     fn a_blank_line_shorter_than_the_shared_indent_survives() {
         // A truly empty line has no indentation to contribute and must not be counted, or the
         // shared indent is always zero and nothing is ever unindented.
-        let found = wrap("    first\n\n    second").join("\n");
-        assert_eq!(found, "first\n\nsecond");
+        let input = indoc::formatdoc! {"
+            {indent}first
+
+            {indent}second",
+            indent = "    "
+        };
+        let found = wrap(&input).join("\n");
+        assert_eq!(
+            found,
+            indoc::indoc! {"
+                first
+
+                second"
+            }
+        );
     }
 }
 
@@ -817,14 +996,25 @@ mod paragraph_doc_tests {
         // `okta` writes a list item, a blank line, a second paragraph still inside the item, and
         // then wraps that paragraph lazily back to column zero. Treating the blank line as closing
         // the *item* rather than the paragraph loses the indent for everything after it.
-        let found = wrap(
-            "  * An optional filter. This is a rule.\n    See the guide.\n\n    Additionally, you can specify a key\nyou must supply when calling.\nEach call.",
-        )
+        let found = wrap(indoc::indoc! {"
+              * An optional filter. This is a rule.
+                See the guide.
+
+                Additionally, you can specify a key
+            you must supply when calling.
+            Each call."
+        })
         .join("\n");
-        assert_eq!(
-            found,
-            "  * An optional filter. This is a rule.\n    See the guide.\n\n    Additionally, you can specify a key\n    you must supply when calling.\n    Each call."
-        );
+        let expected = indoc::formatdoc! {"
+            {indent}* An optional filter. This is a rule.
+            {indent}  See the guide.
+
+            {indent}  Additionally, you can specify a key
+            {indent}  you must supply when calling.
+            {indent}  Each call.",
+            indent = "  "
+        };
+        assert_eq!(found, expected);
     }
 
     #[test]
@@ -833,31 +1023,60 @@ mod paragraph_doc_tests {
         // whose content starts at two. Read as a code block it is passed through and rustdoc then
         // reads it as a list item at the wrong column; `CommonMark` says an indented code block
         // cannot interrupt a paragraph, so it is a continuation and belongs at the item's content.
-        let found = wrap(
-            "- examples: shared examples across all sessions\n            with flat array of runs",
-        )
+        let found = wrap(indoc::indoc! {"
+            - examples: shared examples across all sessions
+                        with flat array of runs"
+        })
         .join("\n");
         assert_eq!(
             found,
-            "- examples: shared examples across all sessions\n  with flat array of runs"
+            indoc::indoc! {"
+                - examples: shared examples across all sessions
+                  with flat array of runs"
+            }
         );
     }
 
     #[test]
     fn a_code_block_after_a_blank_line_is_still_a_code_block() {
         // The other side of the same rule, so the fix cannot quietly reflow real code.
-        let found = wrap("Some prose.\n\n    fn main() {}\n    // still code").join("\n");
-        assert_eq!(found, "Some prose.\n\n    fn main() {}\n    // still code");
+        let found = wrap(indoc::indoc! {"
+            Some prose.
+
+                fn main() {}
+                // still code"
+        })
+        .join("\n");
+        assert_eq!(
+            found,
+            indoc::indoc! {"
+                Some prose.
+
+                    fn main() {}
+                    // still code"
+            }
+        );
     }
 
     #[test]
     fn a_paragraph_that_leaves_the_item_closes_it() {
         // The other half of the same rule: after the blank line, a line at column zero is a new
         // paragraph outside the list, and indenting it into the item would change what it says.
-        let found = wrap("  * an item\n\nBack to the body text.\nStill the body text.").join("\n");
+        let found = wrap(indoc::indoc! {"
+              * an item
+
+            Back to the body text.
+            Still the body text."
+        })
+        .join("\n");
         assert_eq!(
             found,
-            "  * an item\n\nBack to the body text.\nStill the body text."
+            indoc::indoc! {"
+                  * an item
+
+                Back to the body text.
+                Still the body text."
+            }
         );
     }
 }

@@ -433,29 +433,34 @@ fn children(object: &SchemaObject) -> Vec<SchemaId> {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::stats;
 
-    #[test]
+    #[test_util::test]
     fn the_committed_spec_can_be_counted() {
         const PETSTORE: &[u8] = include_bytes!("../../../../corpus/specs/petstore-31.yaml");
-        let counted = stats(PETSTORE).unwrap();
+        let counted = stats(PETSTORE)?;
         assert!(counted.schemas > 0);
         assert_eq!(counted.external_refs, 0);
         assert_eq!(counted.dynamic_scoping, 0);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_nullable_any_of_is_recognized_as_nullable_emulation() {
-        let document = br#"{
-          "openapi": "3.1.0", "paths": {},
-          "components": {"schemas": {
-            "S": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "T": {"anyOf": [{"const": "a"}, {"const": "b"}]},
-            "U": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
-            "V": {"anyOf": [{"minLength": 1}, {"maxLength": 2}]}
-          }}
-        }"#;
-        let counted = stats(document).unwrap();
+        let document = indoc::indoc! {r#"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {
+                "S": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "T": {"anyOf": [{"const": "a"}, {"const": "b"}]},
+                "U": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                "V": {"anyOf": [{"minLength": 1}, {"maxLength": 2}]}
+              }}
+            }"#
+        }
+        .as_bytes();
+        let counted = stats(document)?;
         assert_eq!(counted.any_of.total, 4);
         assert_eq!(counted.any_of.nullable, 1);
         assert_eq!(counted.any_of.constants, 1);
@@ -463,58 +468,70 @@ mod tests {
         assert_eq!(counted.any_of.other, 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_optional_nullable_property_is_counted() {
-        let document = br#"{
-          "openapi": "3.1.0", "paths": {},
-          "components": {"schemas": {"S": {
-            "type": "object",
-            "required": ["a"],
-            "properties": {
-              "a": {"type": ["string", "null"]},
-              "b": {"type": ["string", "null"]},
-              "c": {"type": "string"}
-            }
-          }}}
-        }"#;
-        assert_eq!(stats(document).unwrap().optional_and_nullable, 1);
+        let document = indoc::indoc! {r#"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {"S": {
+                "type": "object",
+                "required": ["a"],
+                "properties": {
+                  "a": {"type": ["string", "null"]},
+                  "b": {"type": ["string", "null"]},
+                  "c": {"type": "string"}
+                }
+              }}}
+            }"#
+        }
+        .as_bytes();
+        assert_eq!(stats(document)?.optional_and_nullable, 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn bounded_integers_are_told_apart_from_bare_ones() {
-        let document = br#"{
-          "openapi": "3.1.0", "paths": {},
-          "components": {"schemas": {
-            "A": {"type": "integer", "minimum": 0, "maximum": 100},
-            "B": {"type": "integer"}
-          }}
-        }"#;
-        let counted = stats(document).unwrap();
+        let document = indoc::indoc! {r#"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {
+                "A": {"type": "integer", "minimum": 0, "maximum": 100},
+                "B": {"type": "integer"}
+              }}
+            }"#
+        }
+        .as_bytes();
+        let counted = stats(document)?;
         assert_eq!(counted.integers, 2);
         assert_eq!(counted.bounded_integers, 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_recursive_schema_has_a_finite_depth() {
-        let document = br##"{
-          "openapi": "3.1.0", "paths": {},
-          "components": {"schemas": {"Node": {
-            "type": "object",
-            "properties": {"child": {"$ref": "#/components/schemas/Node"}}
-          }}}
-        }"##;
-        assert!(stats(document).unwrap().max_schema_depth >= 2);
+        let document = indoc::indoc! {r##"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {"Node": {
+                "type": "object",
+                "properties": {"child": {"$ref": "#/components/schemas/Node"}}
+              }}}
+            }"##
+        }
+        .as_bytes();
+        assert!(stats(document)?.max_schema_depth >= 2);
     }
 
-    #[test]
+    #[test_util::test]
     fn external_references_are_visible() {
-        let document = br##"{
-          "openapi": "3.1.0", "paths": {},
-          "components": {"schemas": {
-            "A": {"$ref": "other.json#/components/schemas/B"},
-            "B": {"$ref": "#/components/schemas/A"}
-          }}
-        }"##;
-        assert_eq!(stats(document).unwrap().external_refs, 1);
+        let document = indoc::indoc! {r##"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {
+                "A": {"$ref": "other.json#/components/schemas/B"},
+                "B": {"$ref": "#/components/schemas/A"}
+              }}
+            }"##
+        }
+        .as_bytes();
+        assert_eq!(stats(document)?.external_refs, 1);
     }
 }

@@ -143,6 +143,7 @@ fn source(tokens: &TokenStream) -> String {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use crate::config::{Config, Packaging, SerdeImpl};
@@ -154,35 +155,35 @@ mod tests {
     fn files(
         document: Value,
         config: &Config,
-    ) -> std::collections::BTreeMap<camino::Utf8PathBuf, String> {
+    ) -> eyre::Result<std::collections::BTreeMap<camino::Utf8PathBuf, String>> {
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, config, &mut ctx).unwrap();
-        let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx).unwrap();
-        super::run(&contracts, &api, config)
+        let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
+        let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
+        Ok(super::run(&contracts, &api, config))
     }
 
     /// Generate the types module for a document.
-    fn types(document: Value, config: &Config) -> String {
-        files(document, config)
+    fn types(document: Value, config: &Config) -> eyre::Result<String> {
+        Ok(files(document, config)?
             .get(camino::Utf8Path::new("src/types.rs"))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Generate the client module for a document.
-    fn client(document: Value) -> String {
-        let rendered = files(document, &Config::default())
+    fn client(document: Value) -> eyre::Result<String> {
+        let rendered = files(document, &Config::default())?
             .get(camino::Utf8Path::new("src/client.rs"))
             .cloned()
             .unwrap_or_default();
         // The renderer falls back to unformatted tokens when a stream does not parse, which is the
         // right call for a build and the wrong one for a test that then greps the text.
-        syn::parse_file(&rendered).expect("the client module should parse");
-        rendered
+        syn::parse_file(&rendered)?;
+        Ok(rendered)
     }
 
     /// The escape hatch, named rather than defaulted to.
@@ -209,7 +210,7 @@ mod tests {
         Value::Object(root)
     }
 
-    #[test]
+    #[test_util::test]
     fn a_struct_renders_with_its_wire_names_and_its_docs() {
         let rendered = types(
             with_schemas(json!({
@@ -225,7 +226,7 @@ mod tests {
                 },
             })),
             &derive_mode(),
-        );
+        )?;
         assert!(rendered.contains("pub struct Pet {"), "{rendered}");
         assert!(rendered.contains("/// One pet."), "{rendered}");
         assert!(rendered.contains("/// What it answers to."), "{rendered}");
@@ -259,7 +260,7 @@ mod tests {
     ///
     /// The wire name has to survive the move: it stops being an attribute and becomes a string in
     /// the generated impl, and this checks it is still there rather than merely gone from the type.
-    #[test]
+    #[test_util::test]
     fn a_hand_written_type_carries_no_serde_attributes_and_keeps_its_wire_name() {
         let document = with_schemas(json!({
             "Pet": {
@@ -271,15 +272,23 @@ mod tests {
                 },
             },
         }));
-        let rendered = types(document, &Config::default());
+        let rendered = types(document, &Config::default())?;
         assert!(rendered.contains("pub struct Pet {"), "{rendered}");
         assert!(
             !rendered.contains("#[serde("),
-            "a hand-written type kept a serde attribute:\n{rendered}"
+            "{}",
+            indoc::formatdoc! {"
+                a hand-written type kept a serde attribute:
+                {rendered}"
+            }
         );
         assert!(
             !rendered.contains("derive(serde::Deserialize"),
-            "a hand-written type kept the derive:\n{rendered}"
+            "{}",
+            indoc::formatdoc! {"
+                a hand-written type kept the derive:
+                {rendered}"
+            }
         );
         // The wire names moved into the impl rather than being lost with the attributes.
         assert!(rendered.contains(r#""petName""#), "{rendered}");
@@ -287,7 +296,7 @@ mod tests {
         assert!(rendered.contains("pub type_: Option<String>"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn the_rendered_source_parses_as_rust() {
         // Formatting is what proves the stream is syntactically valid: `prettyplease` only runs on
         // a `syn::File`, and the fallback would leave the tokens on one line.
@@ -296,19 +305,19 @@ mod tests {
                 "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
             })),
             &Config::default(),
-        );
-        syn::parse_file(&rendered).unwrap();
+        )?;
+        syn::parse_file(&rendered)?;
         assert!(rendered.lines().count() > 3, "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_fieldless_enum_keeps_the_bytes_it_had() {
         let rendered = types(
             with_schemas(json!({
                 "State": {"type": "string", "enum": ["in-progress", "done", "2fa"]},
             })),
             &derive_mode(),
-        );
+        )?;
         assert!(rendered.contains("pub enum State"), "{rendered}");
         assert!(
             rendered.contains(r#"#[serde(rename = "in-progress")]"#),
@@ -318,20 +327,20 @@ mod tests {
         assert!(rendered.contains("_2fa,"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_union_renders_untagged() {
         let rendered = types(
             with_schemas(json!({
                 "Either": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
             })),
             &Config::default(),
-        );
+        )?;
         assert!(rendered.contains("#[serde(untagged)]"), "{rendered}");
-        assert!(rendered.contains("Text(String)"), "{rendered}");
-        assert!(rendered.contains("Integer(i64)"), "{rendered}");
+        assert!(rendered.contains("Text(Box<String>)"), "{rendered}");
+        assert!(rendered.contains("Integer(Box<i64>)"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_union_that_shape_cannot_decide_renders_its_tag() {
         let rendered = types(
             with_schemas(json!({
@@ -346,7 +355,7 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         assert!(rendered.contains(r#"#[serde(tag = "kind")]"#), "{rendered}");
         assert!(rendered.contains("pub enum Animal"), "{rendered}");
         // The mapped name where the document gave one, the component name where it did not.
@@ -354,8 +363,8 @@ mod tests {
             rendered.contains(r#"#[serde(rename = "a cat")]"#),
             "{rendered}"
         );
-        assert!(rendered.contains("ACat(Cat)"), "{rendered}");
-        assert!(rendered.contains("Dog(Dog)"), "{rendered}");
+        assert!(rendered.contains("ACat(Box<Cat>)"), "{rendered}");
+        assert!(rendered.contains("Dog(Box<Dog>)"), "{rendered}");
         // And the property serde consumes is gone from the variants, because a variant that still
         // declared it would be handed a payload the tag had already been taken out of.
         assert!(!rendered.contains("pub kind:"), "{rendered}");
@@ -371,7 +380,7 @@ mod tests {
     /// `aCat` both name an `ACat` — so an identity built from names and types alone calls these
     /// unions equal, merges them, and hands one document position the other's wire bytes. The tag
     /// values are part of the dedup fingerprint precisely so this cannot happen.
-    #[test]
+    #[test_util::test]
     fn two_tagged_unions_that_differ_only_in_their_tag_bytes_stay_two_types() {
         let body = |mapping: Value| {
             json!({"post": {
@@ -404,11 +413,15 @@ mod tests {
                 },
             }),
             &derive_mode(),
-        );
+        )?;
         assert_eq!(
             rendered.matches(r#"#[serde(tag = "kind")]"#).count(),
             2,
-            "the two unions merged:\n{rendered}"
+            "{}",
+            indoc::formatdoc! {"
+                the two unions merged:
+                {rendered}"
+            }
         );
         // Each position keeps the exact bytes its own mapping declared.
         assert!(
@@ -421,7 +434,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_declared_default_is_documented_rather_than_applied_on_the_way_in() {
         let rendered = types(
             with_schemas(json!({
@@ -434,7 +447,7 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         // `#[serde(default = "…")]` would fill the member in on the way *in*, and it would then be
         // written on the way *out* — turning "the caller said nothing" into "the caller said 20" on
         // every request. The payload gate caught exactly that over the corpus.
@@ -453,7 +466,7 @@ mod tests {
         assert!(rendered.contains("pub limit: Option<i64>"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn the_hand_written_strategy_leaves_no_serde_attributes_behind() {
         // Attributes are helper attributes of the serde derive macros: with no derive on the item
         // they do not even resolve, so leaving one behind would not compile.
@@ -466,7 +479,7 @@ mod tests {
                 "Pet": {"type": "object", "properties": {"petName": {"type": "string"}}},
             })),
             &config,
-        );
+        )?;
         assert!(!rendered.contains("#[serde("), "{rendered}");
         assert!(!rendered.contains("#[derive(serde::"), "{rendered}");
         assert!(
@@ -488,23 +501,23 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn crate_mode_and_module_mode_render_the_same_types() {
         let document = with_schemas(json!({
             "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
         }));
-        let as_crate = types(document.clone(), &Config::default());
+        let as_crate = types(document.clone(), &Config::default())?;
         let module = Config {
             packaging: Packaging::Module,
             ..Config::default()
         };
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &module, &mut ctx).unwrap();
-        let api = crate::api::build(&resolved, &shapes, &contracts, &module, &mut ctx).unwrap();
+        let contracts = contract::build(&resolved, &shapes, &module, &mut ctx)?;
+        let api = crate::api::build(&resolved, &shapes, &contracts, &module, &mut ctx)?;
         let files = super::run(&contracts, &api, &module);
         assert_eq!(files.len(), 1);
         let nested = files
@@ -517,7 +530,7 @@ mod tests {
         assert!(as_crate.contains("pub struct Pet"), "{as_crate}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_path_parameter_is_filled_in_and_refused_when_it_was_never_set() {
         let rendered = client(json!({
             "openapi": "3.1.0",
@@ -526,7 +539,7 @@ mod tests {
                 "parameters": [{"name": "petId", "in": "path", "required": true, "schema": {"type": "string"}}],
                 "responses": {"200": {"description": "ok"}},
             }}},
-        }));
+        }))?;
         assert!(rendered.contains("pub fn show_pet_by_id"), "{rendered}");
         assert!(
             rendered.contains("pub struct ShowPetById<'a>"),
@@ -544,7 +557,7 @@ mod tests {
         assert!(rendered.contains("support::Unset::new"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_named_type_is_qualified_wherever_it_is_not_the_types_module() {
         // A schema called `Error`: unqualified, this renders `Error<Error>` whose two `Error`s are
         // different types — the support module's and this one — and it compiles.
@@ -561,7 +574,7 @@ mod tests {
                 "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
                 "Error": {"type": "object", "properties": {"message": {"type": "string"}}},
             }},
-        }));
+        }))?;
         assert!(
             rendered.contains("ResponseValue<super::types::Pet>"),
             "{rendered}"
@@ -572,7 +585,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn several_declared_failures_become_an_enum_and_one_does_not() {
         let two = client(json!({
             "openapi": "3.1.0",
@@ -584,10 +597,10 @@ mod tests {
                     "429": {"description": "slow down", "content": {"application/json": {"schema": {"type": "string"}}}},
                 },
             }}},
-        }));
+        }))?;
         assert!(two.contains("pub enum ListPetsError"), "{two}");
         assert!(two.contains("NotFound(())"), "{two}");
-        assert!(two.contains("TooManyRequests(String)"), "{two}");
+        assert!(two.contains("TooManyRequests(Box<String>)"), "{two}");
 
         // One failure needs no enum: its payload type is the error type.
         let one = client(json!({
@@ -599,13 +612,51 @@ mod tests {
                     "404": {"description": "gone", "content": {"application/json": {"schema": {"type": "string"}}}},
                 },
             }}},
-        }));
+        }))?;
         assert!(!one.contains("pub enum ListPetsError"), "{one}");
         assert!(one.contains("Error<String>"), "{one}");
     }
 
+    #[test_util::test]
+    fn a_range_lower_bound_expects_only_the_overlap_clippy_reports() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok"},
+                    "400": {"description": "specific client error"},
+                    "4XX": {"description": "other client error"},
+                },
+            }}},
+        }))?;
+        assert!(
+            rendered.contains("clippy::match_overlapping_arm")
+                && rendered.contains(
+                    r#"reason = "OpenAPI gives an exact status precedence over its declared status range""#
+                ),
+            "{rendered}"
+        );
+
+        let interior = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {
+                    "200": {"description": "ok"},
+                    "404": {"description": "specific client error"},
+                    "4XX": {"description": "other client error"},
+                },
+            }}},
+        }))?;
+        assert!(
+            !interior.contains("clippy::match_overlapping_arm"),
+            "{interior}"
+        );
+    }
+
     /// One operation with one request body of the given media type and schema.
-    fn body_client(media_type: &str, entry: &Value) -> String {
+    fn body_client(media_type: &str, entry: &Value) -> eyre::Result<String> {
         client(json!({
             "openapi": "3.1.0",
             "paths": {"/upload": {"post": {
@@ -616,12 +667,12 @@ mod tests {
         }))
     }
 
-    #[test]
+    #[test_util::test]
     fn a_form_body_is_encoded_by_the_style_table_rather_than_as_json() {
         let rendered = body_client(
             "application/x-www-form-urlencoded",
             &json!({"schema": {"type": "object", "properties": {"grant_type": {"type": "string"}}}}),
-        );
+        )?;
         assert!(
             rendered.contains("application/x-www-form-urlencoded"),
             "{rendered}"
@@ -635,7 +686,7 @@ mod tests {
         assert!(!rendered.contains("request.json(body)"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_form_bodys_encoding_reaches_the_generated_table() {
         let rendered = body_client(
             "application/x-www-form-urlencoded",
@@ -643,7 +694,7 @@ mod tests {
                 "schema": {"type": "object", "properties": {"tag": {"type": "array", "items": {"type": "string"}}}},
                 "encoding": {"tag": {"style": "spaceDelimited", "explode": false}},
             }),
-        );
+        )?;
         assert!(
             rendered.contains("support::style::FormSpec"),
             "the encoding declaration did not reach the emitted table: {rendered}"
@@ -655,7 +706,7 @@ mod tests {
         assert!(rendered.contains("explode: false"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_multipart_bodys_parts_come_from_the_contract() {
         let rendered = body_client(
             "multipart/form-data",
@@ -664,7 +715,7 @@ mod tests {
                 "name": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
             }}}),
-        );
+        )?;
         assert!(rendered.contains("support::multipart::body("), "{rendered}");
         // One row per member, each classified from the type the member was actually given.
         assert!(
@@ -687,7 +738,7 @@ mod tests {
         assert!(rendered.contains("let (content_type, bytes)"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_multipart_encoding_names_a_parts_content_type() {
         let rendered = body_client(
             "multipart/form-data",
@@ -695,14 +746,14 @@ mod tests {
                 "schema": {"type": "object", "properties": {"metadata": {"type": "object"}}},
                 "encoding": {"metadata": {"contentType": "application/json"}},
             }),
-        );
+        )?;
         assert!(
             rendered.contains("content_type: ::std::option::Option::Some(\"application/json\")"),
             "{rendered}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_content_type_listing_several_alternatives_is_not_an_instruction() {
         // `cloudflare` writes ten comma-separated types on one part. That is the set a server
         // accepts, not a decision about what to send, and sending the whole string as one header
@@ -713,7 +764,7 @@ mod tests {
                 "schema": {"type": "object", "properties": {"module": {"type": "string", "format": "binary"}}},
                 "encoding": {"module": {"contentType": "text/javascript, application/wasm, text/plain"}},
             }),
-        );
+        )?;
         assert!(!rendered.contains("application/wasm"), "{rendered}");
         assert!(
             rendered.contains("content_type: ::std::option::Option::None"),
@@ -721,33 +772,33 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_text_body_is_a_string_and_a_binary_one_is_bytes() {
-        let text = body_client("text/plain", &json!({"schema": {"type": "string"}}));
+        let text = body_client("text/plain", &json!({"schema": {"type": "string"}}))?;
         assert!(text.contains("::std::string::String"), "{text}");
         assert!(text.contains("\"text/plain\""), "{text}");
 
         let binary = body_client(
             "application/octet-stream",
             &json!({"schema": {"type": "string", "format": "binary"}}),
-        );
+        )?;
         assert!(binary.contains("::std::vec::Vec<u8>"), "{binary}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_body_that_declares_only_a_wildcard_sends_something_a_server_can_read() {
         // `preference` sorts a wildcard last, which decides nothing when it is the only entry.
         // `Content-Type: */*` is not a content type, and 9 corpus bodies declare exactly that.
         let binary = body_client(
             "image/*",
             &json!({"schema": {"type": "string", "format": "binary"}}),
-        );
+        )?;
         assert!(!binary.contains("\"image/*\""), "{binary}");
         assert!(binary.contains("application/octet-stream"), "{binary}");
         assert!(binary.contains("::std::vec::Vec<u8>"), "{binary}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_wildcard_over_a_real_schema_keeps_the_type_the_document_gave() {
         // `telnyx` writes `*/*` over a `$ref` to an object. A wildcard permits every content type,
         // so choosing bytes there would throw away a type the document supplied for no reason —
@@ -755,12 +806,12 @@ mod tests {
         let rendered = body_client(
             "*/*",
             &json!({"schema": {"type": "object", "properties": {"start": {"type": "string"}}}}),
-        );
+        )?;
         assert!(rendered.contains("request.json(body)"), "{rendered}");
         assert!(!rendered.contains("Vec<u8>"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_default_that_claims_success_is_still_a_failure_variant() {
         // `weather-gov` writes a `302` and a `default` and no `2XX`, so the `default` is both the
         // success arm and the catch-all failure. Two answers about that used to disagree: the error
@@ -776,7 +827,7 @@ mod tests {
                     "default": {"description": "problem", "content": {"application/json": {"schema": {"type": "string"}}}},
                 },
             }}},
-        }));
+        }))?;
         assert!(rendered.contains("pub enum GetBriefingError"), "{rendered}");
         // Every failure path puts the body in a variant rather than handing the enum to serde.
         assert!(
@@ -786,7 +837,7 @@ mod tests {
         assert!(rendered.contains("GetBriefingError::Default"), "{rendered}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_deprecated_operation_does_not_warn_in_the_consumers_crate() {
         let rendered = client(json!({
             "openapi": "3.1.0",
@@ -795,21 +846,24 @@ mod tests {
                 "deprecated": true,
                 "responses": {"200": {"description": "ok"}},
             }}},
-        }));
+        }))?;
         assert!(rendered.contains("#[deprecated]"), "{rendered}");
         // The builder is deprecated, so its own `impl` block uses a deprecated type — a warning
         // about code the consumer did not write. An `impl` cannot be deprecated, so it says the
         // only thing that distinguishes "this is the deprecated thing" from "this uses one".
         assert!(
-            rendered.contains("#[allow(deprecated)]\nimpl<'a> GetArtists<'a>"),
+            rendered
+                .contains("reason = \"the generated builder deliberately exposes deprecated API\""),
             "{rendered}"
         );
 
         // The accessor is the same problem one level up: it is `#[deprecated]` itself, and it both
         // returns the deprecated builder and constructs one. Carrying the attribute exempts it from
-        // nothing — rustc lints the signature and the body — so it needs the allowance too.
+        // nothing — rustc lints the signature and the body — so it needs the expectation too.
         assert!(
-            rendered.contains("#[allow(deprecated)]\n    #[must_use]\n    pub fn get_artists"),
+            rendered.contains(
+                "reason = \"the generated accessor deliberately returns a deprecated operation\""
+            ),
             "{rendered}"
         );
 
@@ -817,11 +871,11 @@ mod tests {
         let plain = client(json!({
             "openapi": "3.1.0",
             "paths": {"/artists": {"get": {"operationId": "getArtists", "responses": {"200": {"description": "ok"}}}}},
-        }));
+        }))?;
         assert!(!plain.contains("deprecated"), "{plain}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_type_that_names_a_deprecated_type_does_not_warn_in_the_consumers_crate() {
         // `okta` deprecates the `MtlsTrustCredentialsRevocation` component and not the `revocation`
         // property that holds one. Both renderings are faithful — and rustc lints the use anyway,
@@ -835,14 +889,25 @@ mod tests {
                 },
             })),
             &Config::default(),
+        )?;
+        // The public type stays deprecated, while generated code names a transparent hidden alias.
+        // A field-level expectation cannot reach the `Deserialize` derive expansion at the same
+        // span, and an item-wide expectation would be too broad.
+        assert!(
+            rendered.contains(
+                "reason = \"generated internals need a non-deprecated path to this public contract\""
+            ),
+            "{rendered}"
         );
-        // On the item, not the field: a field-level allowance does not reach the `Deserialize` the
-        // derive expands from it, which names the same type at the same span.
-        let declaration = rendered
-            .split_once("pub struct Holder")
-            .map(|(before, _)| before)
-            .expect("the holder should be rendered");
-        assert!(declaration.contains("#[allow(deprecated)]"), "{rendered}");
+        assert!(
+            rendered.contains("pub(crate) mod __progeny_deprecated"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("pub(crate) type Retired"), "{rendered}");
+        assert!(
+            rendered.contains("pub revocation: Option<__progeny_deprecated::Retired>"),
+            "{rendered}"
+        );
 
         // A holder of something the document did not deprecate carries nothing.
         let plain = types(
@@ -854,11 +919,11 @@ mod tests {
                 },
             })),
             &Config::default(),
-        );
+        )?;
         assert!(!plain.contains("allow(deprecated)"), "{plain}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_operation_whose_only_response_is_default_still_has_a_success_path() {
         // `default` means "anything not otherwise claimed". With no `2XX` beside it, a `200` is
         // exactly that — so treating the arm as a failure would report every successful call as
@@ -872,7 +937,7 @@ mod tests {
                     "content": {"application/json": {"schema": {"type": "string"}}},
                 }},
             }}},
-        }));
+        }))?;
         assert!(
             rendered.contains("ResponseValue<String>, Error<String>"),
             "{rendered}"
@@ -892,7 +957,7 @@ mod tests {
                     "default": {"description": "anything else", "content": {"application/json": {"schema": {"type": "string"}}}},
                 },
             }}},
-        }));
+        }))?;
         assert!(
             !with_success.contains("200..=299 => ::std::result::Result::Ok"),
             "{with_success}"
@@ -903,21 +968,21 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn only_a_server_url_a_client_could_actually_use_becomes_a_default() {
-        let with_server = |servers: Value| {
+        let with_server = |servers: Value| -> eyre::Result<String> {
             let mut document = json!({
                 "openapi": "3.1.0",
                 "paths": {"/pets": {"get": {"operationId": "listPets", "responses": {"200": {"description": "ok"}}}}},
             });
             document
                 .as_object_mut()
-                .unwrap()
+                .ok_or_eyre("test fixture should be an object")?
                 .insert("servers".to_owned(), servers);
             client(document)
         };
 
-        let absolute = with_server(json!([{"url": "https://example.invalid/v1"}]));
+        let absolute = with_server(json!([{"url": "https://example.invalid/v1"}]))?;
         assert!(
             absolute.contains("impl ::std::default::Default"),
             "{absolute}"
@@ -934,7 +999,7 @@ mod tests {
             json!([{"url": "/api/v3"}]),
             json!([{"url": "https://{region}.example.invalid"}]),
         ] {
-            let rendered = with_server(servers);
+            let rendered = with_server(servers)?;
             assert!(
                 !rendered.contains("impl ::std::default::Default"),
                 "{rendered}"
@@ -942,7 +1007,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn an_undeclared_status_is_handed_back_raw_rather_than_given_a_shape() {
         let rendered = client(json!({
             "openapi": "3.1.0",
@@ -950,7 +1015,7 @@ mod tests {
                 "operationId": "listPets",
                 "responses": {"200": {"description": "ok"}},
             }}},
-        }));
+        }))?;
         assert!(
             rendered.contains("Error::UnexpectedStatus(response)"),
             "{rendered}"
@@ -966,14 +1031,14 @@ mod tests {
                     "default": {"description": "anything else"},
                 },
             }}},
-        }));
+        }))?;
         assert!(
             !with_default.contains("Error::UnexpectedStatus(response)"),
             "{with_default}"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_query_parameter_carries_the_style_the_document_asked_for() {
         let rendered = client(json!({
             "openapi": "3.1.0",
@@ -986,7 +1051,7 @@ mod tests {
                 ],
                 "responses": {"200": {"description": "ok"}},
             }}},
-        }));
+        }))?;
         assert!(
             rendered.contains("support::style::Style::PipeDelimited"),
             "{rendered}"
@@ -1002,14 +1067,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn generation_is_deterministic() {
         let document = with_schemas(json!({
             "A": {"type": "object", "properties": {"b": {"$ref": "#/components/schemas/B"}}},
             "B": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
         }));
-        let once = types(document.clone(), &Config::default());
-        let twice = types(document, &Config::default());
+        let once = types(document.clone(), &Config::default())?;
+        let twice = types(document, &Config::default())?;
         assert_eq!(once, twice);
     }
 
@@ -1021,7 +1086,7 @@ mod tests {
     /// generated crate with a cookie parameter. This resolves each spelled path against the
     /// emitted support module's actual items — the check the compiler cannot do across the
     /// generation boundary.
-    #[test]
+    #[test_util::test]
     fn every_support_path_the_renderers_spell_exists() {
         use std::collections::BTreeSet;
 
@@ -1083,12 +1148,11 @@ mod tests {
                         "properties": {"name": {"type": "string"}}},
             }},
         });
-        let rendered = files(document, &Config::default());
+        let rendered = files(document, &Config::default())?;
 
         // Every item the emitted support module defines, as `module::item` relative paths —
         // plus the root-level spellings its glob re-exports (`pub use wire::*;`) create.
-        let support = syn::parse_file(&rendered[camino::Utf8Path::new("src/support.rs")])
-            .expect("the support module should parse");
+        let support = syn::parse_file(&rendered[camino::Utf8Path::new("src/support.rs")])?;
         let mut defined: BTreeSet<String> = BTreeSet::new();
         let mut reexported: Vec<String> = Vec::new();
         support_items(&support.items, "", &mut defined, &mut reexported);
@@ -1107,7 +1171,7 @@ mod tests {
             let Some(text) = rendered.get(camino::Utf8Path::new(name)) else {
                 continue;
             };
-            let file = syn::parse_file(text).expect("a rendered module should parse");
+            let file = syn::parse_file(text)?;
             let mut visitor = SupportPaths {
                 out: BTreeSet::new(),
             };
@@ -1212,7 +1276,7 @@ mod tests {
     /// to either enum fails this test's build, where the drift it prevents — a style silently
     /// encoded as `form` by the shipped table's fallback, or generated crates that name a
     /// variant the shipped enum lacks — fails nothing in progeny's own build.
-    #[test]
+    #[test_util::test]
     fn the_two_style_enums_are_one_variant_list() {
         use crate::api::Style as Declared;
         use crate::support::style::Style as Shipped;
@@ -1259,7 +1323,7 @@ mod tests {
     /// And a binary body under `formats.bytes = "bytes"` is the only place `::bytes::Bytes` is
     /// spelled at all. A manifest computed from the named contracts alone shipped both as crates
     /// that do not compile.
-    #[test]
+    #[test_util::test]
     fn the_manifest_declares_what_the_surface_names_beyond_the_types() {
         let document = json!({
             "openapi": "3.1.0",
@@ -1286,7 +1350,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let rendered = files(document, &config);
+        let rendered = files(document, &config)?;
         let manifest = &rendered[camino::Utf8Path::new("Cargo.toml")];
         assert!(manifest.contains("uuid = { version = \"1\""), "{manifest}");
         assert!(manifest.contains("dep:bytes"), "{manifest}");

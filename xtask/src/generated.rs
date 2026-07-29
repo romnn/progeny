@@ -11,8 +11,8 @@
 
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use color_eyre::eyre::{self, WrapErr, bail};
 use progeny::Output;
 
 /// Where generated crates are written for compiling.
@@ -54,56 +54,85 @@ pub fn cargo(directory: &Utf8Path) -> Command {
 }
 
 /// Write a generated crate into the scratch area and return its directory.
-pub fn write(name: &str, output: &Output) -> Result<Utf8PathBuf> {
+pub fn write(name: &str, output: &Output) -> eyre::Result<Utf8PathBuf> {
     let directory = scratch_root().join(name);
     // A stale file from a previous run with different contents would compile as part of this one.
     if directory.exists() {
-        std::fs::remove_dir_all(&directory).with_context(|| format!("clearing {directory}"))?;
+        std::fs::remove_dir_all(&directory).wrap_err_with(|| format!("clearing {directory}"))?;
     }
     for (path, contents) in &output.files {
         let full = directory.join(path);
         if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("creating {parent}"))?;
+            std::fs::create_dir_all(parent).wrap_err_with(|| format!("creating {parent}"))?;
         }
         let contents = if path == Utf8Path::new("Cargo.toml") {
             // The scratch crate sits inside this repository's directory tree, so cargo would try to
             // read it as a workspace member. An empty `[workspace]` table detaches it. Appended
             // here rather than emitted by the renderer: a real generated crate has no business
             // carrying a marker that only this harness needs.
-            format!("{contents}\n[workspace]\n")
+            indoc::formatdoc! {"
+                {contents}
+                [workspace]
+            "}
         } else {
             contents.clone()
         };
-        std::fs::write(&full, contents).with_context(|| format!("writing {full}"))?;
+        std::fs::write(&full, contents).wrap_err_with(|| format!("writing {full}"))?;
     }
     Ok(directory)
 }
 
-/// Append the wire harness's runtime to a generated crate and write its integration test.
+/// Append the wire harness's test dependencies and write its integration test.
 ///
 /// A generated crate has no business declaring a runtime or a socket — those are the consumer's
-/// choices — so the gates that stand a server up (`example`, `probe`) append the same
-/// dev-dependency here. One copy on purpose: when the generated servers start needing another
-/// tokio feature, both gates move together, where a copy updated in one once meant the other
-/// failing to compile and reporting it as a *product* verdict — "the two halves disagree on the
-/// wire" — from a harness defect.
-pub fn write_wire_test(directory: &Utf8Path, file_name: &str, source: &str) -> Result<()> {
+/// choices — so the gates that stand a server up (`example`, `probe`) append their shared harness
+/// and runtime here. One copy on purpose: when the generated servers start needing another Tokio
+/// feature, both gates move together, where a copy updated in one once meant the other failing to
+/// compile and reporting it as a *product* verdict — "the two halves disagree on the wire" — from
+/// a harness defect.
+pub fn write_wire_test(directory: &Utf8Path, file_name: &str, source: &str) -> eyre::Result<()> {
     let manifest = directory.join("Cargo.toml");
     let existing =
-        std::fs::read_to_string(&manifest).with_context(|| format!("reading {manifest}"))?;
+        std::fs::read_to_string(&manifest).wrap_err_with(|| format!("reading {manifest}"))?;
     std::fs::write(
         &manifest,
-        format!(
-            "{existing}\n[dev-dependencies]\n\
-             tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"net\"] }}\n"
-        ),
+        indoc::formatdoc! {r#"
+            {existing}
+            [dev-dependencies]
+            color-eyre = "0.6"
+            test-util = {{ path = "../../../crates/test-util" }}
+            tokio = {{ version = "1", features = ["rt-multi-thread", "macros", "net"] }}
+        "#},
     )
-    .with_context(|| format!("writing {manifest}"))?;
+    .wrap_err_with(|| format!("writing {manifest}"))?;
 
     let tests = directory.join("tests");
-    std::fs::create_dir_all(&tests).with_context(|| format!("creating {tests}"))?;
+    std::fs::create_dir_all(&tests).wrap_err_with(|| format!("creating {tests}"))?;
     let file = tests.join(file_name);
-    std::fs::write(&file, source).with_context(|| format!("writing {file}"))?;
+    std::fs::write(&file, source).wrap_err_with(|| format!("writing {file}"))?;
+    Ok(())
+}
+
+/// Append the shared synchronous test harness and write an integration test.
+pub fn write_test(directory: &Utf8Path, file_name: &str, source: &str) -> eyre::Result<()> {
+    let manifest = directory.join("Cargo.toml");
+    let existing =
+        std::fs::read_to_string(&manifest).wrap_err_with(|| format!("reading {manifest}"))?;
+    std::fs::write(
+        &manifest,
+        indoc::formatdoc! {r#"
+            {existing}
+            [dev-dependencies]
+            color-eyre = "0.6"
+            test-util = {{ path = "../../../crates/test-util" }}
+        "#},
+    )
+    .wrap_err_with(|| format!("writing {manifest}"))?;
+
+    let tests = directory.join("tests");
+    std::fs::create_dir_all(&tests).wrap_err_with(|| format!("creating {tests}"))?;
+    let file = tests.join(file_name);
+    std::fs::write(&file, source).wrap_err_with(|| format!("writing {file}"))?;
     Ok(())
 }
 
@@ -115,7 +144,7 @@ pub struct Compiled {
 }
 
 /// `cargo check` a generated crate.
-pub fn check(directory: &Utf8Path, clippy: bool) -> Result<Compiled> {
+pub fn check(directory: &Utf8Path, clippy: bool) -> eyre::Result<Compiled> {
     let mut command = cargo(directory);
     command
         .arg(if clippy { "clippy" } else { "check" })
@@ -131,7 +160,7 @@ pub fn check(directory: &Utf8Path, clippy: bool) -> Result<Compiled> {
     }
     let output = command
         .output()
-        .with_context(|| format!("running cargo in {directory}"))?;
+        .wrap_err_with(|| format!("running cargo in {directory}"))?;
     if output.status.success() {
         return Ok(Compiled {
             ok: true,
@@ -164,7 +193,7 @@ pub fn check(directory: &Utf8Path, clippy: bool) -> Result<Compiled> {
 }
 
 /// Check that the tooling a compile gate needs is there before promising to run one.
-pub fn require_cargo() -> Result<()> {
+pub fn require_cargo() -> eyre::Result<()> {
     let found = Command::new("cargo")
         .arg("--version")
         .output()

@@ -556,7 +556,8 @@ impl RejectKind {
 }
 
 /// The error returned when a document is unusable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}: {}{}", .kind.slug(), .detail, RejectLocation(.location.as_ref()))]
 pub struct RejectError {
     kind: RejectKind,
     detail: String,
@@ -600,10 +601,11 @@ impl RejectError {
     }
 }
 
-impl fmt::Display for RejectError {
+struct RejectLocation<'a>(Option<&'a JsonPointer>);
+
+impl fmt::Display for RejectLocation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.kind.slug(), self.detail)?;
-        if let Some(location) = &self.location
+        if let Some(location) = self.0
             && !location.is_root()
         {
             write!(f, " (at {location})")?;
@@ -611,8 +613,6 @@ impl fmt::Display for RejectError {
         Ok(())
     }
 }
-
-impl std::error::Error for RejectError {}
 
 /// The diagnostic sink threaded through the front end, together with the document location
 /// currently being read.
@@ -706,21 +706,23 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind};
+    use color_eyre::eyre::{self, OptionExt as _, WrapErr as _};
 
     /// `ALL` really is all of them, by serde's own count.
     ///
     /// The derived `Deserialize` names every variant when it rejects an unknown one — a list
     /// that cannot fall behind the enum. Extracting it here, once, is what lets everything else
     /// iterate `ALL` instead of parsing an error message at each site.
-    #[test]
+    #[test_util::test]
     fn the_class_list_is_complete() {
         let error = serde_json::from_value::<BreakageClass>(serde_json::json!("no-such-class"))
-            .expect_err("a class that does not exist should not deserialize");
+            .err()
+            .ok_or_eyre("a class that does not exist should not deserialize")?;
         let message = error.to_string();
         let listed = message
             .split_once("expected one of ")
             .map(|(_, rest)| rest)
-            .unwrap_or_else(|| panic!("the variant list moved: {message}"));
+            .ok_or_else(|| eyre::eyre!("the variant list moved: {message}"))?;
         let named: std::collections::BTreeSet<&str> = listed
             .split(", ")
             .filter_map(|name| name.trim().split('`').nth(1))
@@ -738,31 +740,29 @@ mod tests {
     /// The deny lists deserialize class names through serde while build output prints them
     /// through `slug()`; a variant whose kebab-casing is not what `slug()` spelled would print a
     /// name the configuration file then rejects as unknown.
-    #[test]
+    #[test_util::test]
     fn every_slug_is_the_serde_name() {
         for class in BreakageClass::ALL {
             let parsed: BreakageClass = serde_json::from_value(serde_json::json!(class.slug()))
-                .unwrap_or_else(|error| {
-                    panic!("`{}` is not the serde spelling: {error}", class.slug())
-                });
+                .wrap_err_with(|| format!("`{}` is not the serde spelling", class.slug()))?;
             assert_eq!(parsed, class);
         }
         for action in [Action::Repair, Action::Degrade, Action::Warn] {
             let parsed: Action = serde_json::from_value(serde_json::json!(action.slug()))
-                .unwrap_or_else(|error| {
-                    panic!("`{}` is not the serde spelling: {error}", action.slug())
-                });
+                .wrap_err_with(|| format!("`{}` is not the serde spelling", action.slug()))?;
             assert_eq!(parsed, action);
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn json_line_has_a_fixed_key_order_and_escapes_detail() {
         let diagnostic = Diagnostic::new(
             BreakageClass::MalformedMember,
             Action::Degrade,
             JsonPointer::root().child("info").child("title"),
-            "found \"x\"\nkept it",
+            indoc::indoc! {r#"
+                found "x"
+                kept it"#},
         );
         assert_eq!(
             diagnostic.to_json_line(),
@@ -770,7 +770,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_related_pointer_is_listed_once_and_never_repeats_the_location() {
         let at = |token: &str| JsonPointer::root().child("components").child(token);
         let diagnostic = Diagnostic::new(
@@ -787,7 +787,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn json_line_omits_related_when_empty_and_emits_it_when_present() {
         let base = Diagnostic::new(
             BreakageClass::CollidingOperationId,
@@ -807,7 +807,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn human_rendering_names_the_document_root() {
         let diagnostic = Diagnostic::new(
             BreakageClass::UnsupportedDialect,
@@ -821,7 +821,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn control_characters_are_escaped_as_json_requires() {
         let diagnostic = Diagnostic::new(
             BreakageClass::MalformedMember,
@@ -831,12 +831,12 @@ mod tests {
         );
         let line = diagnostic.to_json_line();
         // The rendering has to survive a JSON parser, or the snapshots are not JSON lines.
-        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&line)?;
         assert_eq!(parsed["detail"], serde_json::json!("bell\u{7}"));
         assert!(line.contains("\\u0007"), "{line}");
     }
 
-    #[test]
+    #[test_util::test]
     fn scoped_reads_restore_the_previous_location() {
         let mut ctx = Ctx::new();
         ctx.scoped("components", |ctx| {
@@ -858,7 +858,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_class_that_fires_at_scale_becomes_one_record_with_a_count() {
         let mut ctx = Ctx::new();
         assert_eq!(
@@ -888,7 +888,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn two_findings_of_one_aggregated_class_stay_two_records() {
         let mut ctx = Ctx::new();
         ctx.malformed("description", "a string");
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(diagnostics[1].occurrences().get(), 1);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_class_a_reader_must_act_on_keeps_every_occurrence() {
         let mut ctx = Ctx::new();
         assert_eq!(
@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(ctx.into_diagnostics().len(), 3);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_habit_folds_and_a_finding_that_names_something_does_not() {
         // `unregistrable-route` carries both shapes. A refusal names the router's reason and so
         // folds — `anthropic` writes one habit into 19 templates. A collision names what it
@@ -952,7 +952,7 @@ mod tests {
     /// re-keyed the aggregation and re-recorded thirteen snapshots — correct both times, but only
     /// because the change happened at every site at once. A site that folds on a stable key keeps
     /// its identity through a rewording; the first phrasing reported is the one the record keeps.
-    #[test]
+    #[test_util::test]
     fn an_explicit_fold_key_outlives_the_wording() {
         let mut ctx = Ctx::new();
         for (index, wording) in ["refused (reason A)", "refused, worded differently"]
@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(found[0].detail(), "refused (reason A)");
     }
 
-    #[test]
+    #[test_util::test]
     fn rejection_renders_its_location_when_it_has_one() {
         let error = RejectError::new(RejectKind::NonScalarKey, "a mapping key is a sequence")
             .at(JsonPointer::root().child("paths"));

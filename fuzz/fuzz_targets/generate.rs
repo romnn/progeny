@@ -26,10 +26,16 @@ fuzz_target!(|data: &[u8]| {
         }
         assert!(
             syn::parse_file(contents).is_ok(),
-            "{path} is not valid Rust:\n{contents}"
+            "{}",
+            indoc::formatdoc! {"
+                {path} is not valid Rust:
+                {contents}"
+            }
         );
     }
-    let again = progeny::generate(data, &config).expect("the same input was accepted once already");
+    let Ok(again) = progeny::generate(data, &config) else {
+        panic!("the same input was accepted once already");
+    };
     assert_eq!(
         output.files, again.files,
         "generating twice produced different source"

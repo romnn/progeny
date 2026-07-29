@@ -8,7 +8,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use color_eyre::eyre::{self, ContextCompat, WrapErr, bail};
 
 use super::Args;
 use super::plan::Target;
@@ -112,11 +112,11 @@ impl Summary {
 }
 
 /// Compile the crate once without measuring, so its dependencies are built and cached.
-pub(super) fn warm_up(target: &Target) -> Result<()> {
+pub(super) fn warm_up(target: &Target) -> eyre::Result<()> {
     let status = crate::generated::cargo(&target.directory)
         .args(["check", "--quiet", "--lib"])
         .status()
-        .with_context(|| format!("warming up {}", target.directory))?;
+        .wrap_err_with(|| format!("warming up {}", target.directory))?;
     if !status.success() {
         bail!(
             "`cargo check` failed for {} ({}); there is nothing to measure",
@@ -136,7 +136,7 @@ pub(super) fn order<'a>(variants: &[&'a str], rep: usize) -> Vec<&'a str> {
     ordered
 }
 
-pub(super) fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
+pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample> {
     wait_for_quiet(args.max_load, args.max_wait)?;
 
     // A cached crate measures nothing, so discard just this package's artifacts and leave its
@@ -146,7 +146,7 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
         .args(["clean", "--quiet", "-p", &target.package, "--manifest-path"])
         .arg(target.directory.join("Cargo.toml"))
         .status()
-        .context("running cargo clean")?;
+        .wrap_err("running cargo clean")?;
     if !cleaned.success() {
         bail!("cargo clean failed for {}", target.package);
     }
@@ -155,7 +155,7 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
     let load_before = load_average()?;
     let started = std::time::Instant::now();
 
-    let runner = std::env::current_exe().context("locating this executable")?;
+    let runner = std::env::current_exe().wrap_err("locating this executable")?;
     // `--measure` takes the rest of the line, so the command follows it directly; a `--`
     // separator would be swallowed as its first value.
     let output = Command::new(runner)
@@ -172,7 +172,7 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
         .arg("--manifest-path")
         .arg(target.directory.join("Cargo.toml"))
         .output()
-        .context("running the measuring process")?;
+        .wrap_err("running the measuring process")?;
     if !output.status.success() {
         bail!(
             "the measuring process failed: {}",
@@ -182,7 +182,7 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> Result<Sample> {
 
     let reported = String::from_utf8_lossy(&output.stdout);
     let reported: MeasuredCost = serde_json::from_str(reported.trim())
-        .with_context(|| format!("reading the measurement: {reported}"))?;
+        .wrap_err_with(|| format!("reading the measurement: {reported}"))?;
     if !reported.ok {
         bail!(
             "`cargo check` failed for {}; there is nothing to measure",
@@ -214,7 +214,7 @@ struct MeasuredCost {
     ok: bool,
 }
 
-fn wait_for_quiet(max_load: f64, max_wait: u64) -> Result<()> {
+fn wait_for_quiet(max_load: f64, max_wait: u64) -> eyre::Result<()> {
     const INTERVAL: u64 = 10;
     let attempts = (max_wait * 60 / INTERVAL).max(1);
     for attempt in 0..attempts {
@@ -236,16 +236,16 @@ fn wait_for_quiet(max_load: f64, max_wait: u64) -> Result<()> {
 }
 
 /// The one-minute load average.
-fn load_average() -> Result<f64> {
+fn load_average() -> eyre::Result<f64> {
     let text = std::fs::read_to_string("/proc/loadavg")
-        .context("reading /proc/loadavg; load gating needs it")?;
+        .wrap_err("reading /proc/loadavg; load gating needs it")?;
     let first = text
         .split_whitespace()
         .next()
-        .context("/proc/loadavg was empty")?;
+        .wrap_err("/proc/loadavg was empty")?;
     first
         .parse()
-        .with_context(|| format!("reading a load average from {first:?}"))
+        .wrap_err_with(|| format!("reading a load average from {first:?}"))
 }
 
 /// Memory the kernel believes is available, in bytes.
@@ -264,7 +264,7 @@ pub(super) fn available_memory() -> Option<u64> {
 /// accumulated over the caller's whole life, so a runner that measured several repetitions itself
 /// would report the largest earlier one forever.
 #[cfg(unix)]
-pub(super) fn measure_child(command: &[String]) -> Result<()> {
+pub(super) fn measure_child(command: &[String]) -> eyre::Result<()> {
     use nix::sys::resource::{UsageWho, getrusage};
 
     // Tolerate a `--` separator so the flag can also be driven by hand.
@@ -274,14 +274,14 @@ pub(super) fn measure_child(command: &[String]) -> Result<()> {
     };
     let (program, arguments) = command
         .split_first()
-        .context("--measure needs a command to run")?;
+        .wrap_err("--measure needs a command to run")?;
 
     let status = Command::new(program)
         .args(arguments)
         .status()
-        .with_context(|| format!("running {program}"))?;
+        .wrap_err_with(|| format!("running {program}"))?;
 
-    let usage = getrusage(UsageWho::RUSAGE_CHILDREN).context("getrusage(RUSAGE_CHILDREN)")?;
+    let usage = getrusage(UsageWho::RUSAGE_CHILDREN).wrap_err("getrusage(RUSAGE_CHILDREN)")?;
     let user = duration_of(usage.user_time());
     let system = duration_of(usage.system_time());
     // `ru_maxrss` is in kibibytes on Linux and in bytes on macOS.
@@ -299,7 +299,7 @@ pub(super) fn measure_child(command: &[String]) -> Result<()> {
     };
     println!(
         "{}",
-        serde_json::to_string(&measured).context("rendering the measurement")?
+        serde_json::to_string(&measured).wrap_err("rendering the measurement")?
     );
     Ok(())
 }
@@ -316,7 +316,7 @@ fn duration_of(time: nix::sys::time::TimeVal) -> f64 {
 }
 
 #[cfg(not(unix))]
-pub(super) fn measure_child(command: &[String]) -> Result<()> {
+pub(super) fn measure_child(command: &[String]) -> eyre::Result<()> {
     let _ = command;
     bail!(
         "measuring CPU time and peak resident set size needs getrusage, which this platform does \

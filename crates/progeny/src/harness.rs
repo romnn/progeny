@@ -6,10 +6,10 @@
 //! here is a question about a document, never a way to reach into the model: exposing the model
 //! itself would recreate the general-purpose-library surface progeny exists not to have.
 //!
-//! One module per question the corpus asks: [`trip`] whether the model holds the document,
-//! [`convergence`] whether the two dialects generate the same crate, [`payload`] what the
-//! examples oblige the generated types to do, [`probe`] what a live round trip through a
-//! generated client and server must answer, and [`stats`] what the corpus contains.
+//! One result per question the corpus asks: [`RoundTrip`] whether the model holds the document,
+//! [`Convergence`] whether the two dialects generate the same crate, [`Payloads`] what the examples
+//! oblige the generated types to do, [`Probe`] what a live round trip through a generated client
+//! and server must answer, and [`Stats`] what the corpus contains.
 
 mod convergence;
 mod payload;
@@ -24,7 +24,8 @@ pub use crate::resolve::Counts as Resolution;
 pub use convergence::{Convergence, convergence};
 pub use payload::{Payload, Payloads, payloads};
 pub use probe::{
-    Probe, ProbeAnswer, ProbeBody, ProbeGroup, ProbeOp, ProbeResponse, ProbeSetter, probe,
+    Probe, ProbeAnswer, ProbeBody, ProbeField, ProbeGroup, ProbeOp, ProbeResponse, ProbeSetter,
+    probe,
 };
 pub use stats::{AnyOfShapes, Stats, stats};
 pub use trip::{RoundTrip, round_trip};
@@ -104,11 +105,13 @@ pub fn front_end(input: &[u8]) -> Result<Vec<Diagnostic>, RejectError> {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     const PETSTORE: &[u8] = include_bytes!("../../../corpus/specs/petstore-31.yaml");
 
-    #[test]
+    #[test_util::test]
     fn every_reference_is_accounted_for() {
-        let counts = super::resolution(PETSTORE).unwrap();
+        let counts = super::resolution(PETSTORE)?;
         assert_eq!(
             counts.references,
             counts.resolved + counts.repaired + counts.dangling + counts.external

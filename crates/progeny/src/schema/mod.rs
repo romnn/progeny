@@ -15,13 +15,7 @@ pub(crate) mod cycles;
 pub(crate) mod parse;
 // Reached only through the document serializer, which is itself only called by the round-trip
 // check. See the note there.
-#[cfg_attr(
-    not(feature = "harness"),
-    allow(
-        dead_code,
-        reason = "the round-trip check is the only caller so far, and it is feature-gated"
-    )
-)]
+#[cfg(any(feature = "harness", test))]
 pub(crate) mod serialize;
 
 use std::collections::BTreeMap;
@@ -124,13 +118,6 @@ pub(crate) enum OneOrMany<T> {
 }
 
 impl<T> OneOrMany<T> {
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
         match self {
             Self::One(value) => std::slice::from_ref(value).iter(),

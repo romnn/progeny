@@ -12,9 +12,9 @@
 
 use std::fmt::Write as _;
 
-use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args as ClapArgs;
+use color_eyre::eyre::{self, ContextCompat, WrapErr, bail};
 use progeny::{Config, Package, Packaging, SerdeImpl};
 
 use crate::paths;
@@ -52,11 +52,11 @@ fn scratch() -> Utf8PathBuf {
     paths::workspace_root().join("target/differential")
 }
 
-pub fn run(args: &Args) -> Result<()> {
+pub fn run(args: &Args) -> eyre::Result<()> {
     let document = std::fs::read(fixture_root().join("spike.yaml"))
-        .with_context(|| format!("reading {}/spike.yaml", fixture_root()))?;
+        .wrap_err_with(|| format!("reading {}/spike.yaml", fixture_root()))?;
     let assertions = std::fs::read_to_string(fixture_root().join("assertions.rs"))
-        .with_context(|| format!("reading {}/assertions.rs", fixture_root()))?;
+        .wrap_err_with(|| format!("reading {}/assertions.rs", fixture_root()))?;
 
     let directory = scratch();
     assemble(&directory, &document, &assertions)?;
@@ -68,7 +68,7 @@ pub fn run(args: &Args) -> Result<()> {
     let status = crate::generated::cargo(&directory)
         .args(["test", "--quiet"])
         .status()
-        .with_context(|| format!("running cargo test in {directory}"))?;
+        .wrap_err_with(|| format!("running cargo test in {directory}"))?;
     if !status.success() {
         bail!("the two renderings disagree; see the failures above");
     }
@@ -86,7 +86,7 @@ pub fn run(args: &Args) -> Result<()> {
 }
 
 /// Write the test crate: both renderings of one document, plus the assertions.
-fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> Result<()> {
+fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> eyre::Result<()> {
     if directory.exists() {
         // Only the sources; keeping `target` is what makes a second run quick.
         for stale in ["src", "tests", "Cargo.toml"] {
@@ -99,9 +99,9 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> Result<(
         }
     }
     std::fs::create_dir_all(directory.join("src"))
-        .with_context(|| format!("creating {directory}/src"))?;
+        .wrap_err_with(|| format!("creating {directory}/src"))?;
     std::fs::create_dir_all(directory.join("tests"))
-        .with_context(|| format!("creating {directory}/tests"))?;
+        .wrap_err_with(|| format!("creating {directory}/tests"))?;
 
     for (module, strategy) in [
         ("derived", SerdeImpl::DeriveAlways),
@@ -109,14 +109,16 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> Result<(
     ] {
         let rendered = render(document, strategy)?;
         std::fs::write(directory.join(format!("src/{module}.rs")), rendered)
-            .with_context(|| format!("writing {directory}/src/{module}.rs"))?;
+            .wrap_err_with(|| format!("writing {directory}/src/{module}.rs"))?;
     }
 
     std::fs::write(
         directory.join("src/lib.rs"),
-        "//! Both renderings of one document, for the differential harness.\n\
-         pub mod derived;\n\
-         pub mod hand;\n",
+        indoc::indoc! {"
+            //! Both renderings of one document, for the differential harness.
+            pub mod derived;
+            pub mod hand;
+        "},
     )?;
     std::fs::write(directory.join("tests/differential.rs"), assertions)?;
     // The edition and dependency lines restate what `render/manifest.rs` writes for a shipped
@@ -125,22 +127,30 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> Result<(
     // configuration would quietly make that claim about something nobody ships.
     std::fs::write(
         directory.join("Cargo.toml"),
-        "# Assembled by `cargo xtask differential`.\n\
-         [package]\n\
-         name = \"differential\"\n\
-         version = \"0.0.0\"\n\
-         edition = \"2021\"\n\
-         publish = false\n\n\
-         [dependencies]\n\
-         serde = { version = \"1\", features = [\"derive\"] }\n\
-         serde_json = \"1\"\n\n\
-         [workspace]\n",
+        indoc::indoc! {r#"
+            # Assembled by `cargo xtask differential`.
+            [package]
+            name = "differential"
+            version = "0.0.0"
+            edition = "2021"
+            publish = false
+
+            [dependencies]
+            serde = { version = "1", features = ["derive"] }
+            serde_json = "1"
+
+            [dev-dependencies]
+            color-eyre = "0.6"
+            test-util = { path = "../../crates/test-util" }
+
+            [workspace]
+        "#},
     )?;
     Ok(())
 }
 
 /// Generate one document in module mode, which is the packaging that fits into another crate.
-fn render(document: &[u8], strategy: SerdeImpl) -> Result<String> {
+fn render(document: &[u8], strategy: SerdeImpl) -> eyre::Result<String> {
     let config = Config {
         serde_impl: strategy,
         packaging: Packaging::Module,
@@ -157,16 +167,16 @@ fn render(document: &[u8], strategy: SerdeImpl) -> Result<String> {
         },
         ..Config::default()
     };
-    let output = progeny::generate(document, &config).context("generating the spike")?;
+    let output = progeny::generate(document, &config).wrap_err("generating the spike")?;
     output
         .files
         .get(Utf8Path::new("progeny.rs"))
         .cloned()
-        .context("module-mode generation produced no module")
+        .wrap_err("module-mode generation produced no module")
 }
 
 /// Difference the expanded output of a crate with 1 and with 11 copies of one shape.
-fn count_bodies() -> Result<()> {
+fn count_bodies() -> eyre::Result<()> {
     let mut counts = Vec::new();
     for strategy in [SerdeImpl::DeriveAlways, SerdeImpl::HandWrittenWhereEligible] {
         let mut measured = Vec::new();
@@ -210,44 +220,78 @@ fn count_bodies() -> Result<()> {
 /// Named components, so deduplication leaves them alone: names are API, and two components that
 /// look alike stay two types.
 fn synthesize(copies: usize) -> String {
-    let mut out = String::from(
-        "openapi: 3.1.0\ninfo:\n  title: Bodies\n  version: \"1.0\"\npaths: {}\ncomponents:\n  schemas:\n",
-    );
+    let mut out = String::from(indoc::indoc! {r#"
+        openapi: 3.1.0
+        info:
+          title: Bodies
+          version: "1.0"
+        paths: {}
+        components:
+          schemas:
+    "#});
     for index in 0..copies {
         let _ = write!(
             out,
-            "    Spike{index}:\n      type: object\n      required: [required]\n      properties:\n        required:\n          type: string\n        optional:\n          type: integer\n        wireName:\n          type: boolean\n"
+            "{}",
+            indoc::formatdoc! {"
+                {indent}Spike{index}:
+                {indent}  type: object
+                {indent}  required: [required]
+                {indent}  properties:
+                {indent}    required:
+                {indent}      type: string
+                {indent}    optional:
+                {indent}      type: integer
+                {indent}    wireName:
+                {indent}      type: boolean
+                ",
+                indent = "    "
+            }
         );
     }
     out
 }
 
-fn assemble_single(directory: &Utf8Path, document: &[u8], strategy: SerdeImpl) -> Result<()> {
+fn assemble_single(directory: &Utf8Path, document: &[u8], strategy: SerdeImpl) -> eyre::Result<()> {
     std::fs::create_dir_all(directory.join("src"))
-        .with_context(|| format!("creating {directory}/src"))?;
+        .wrap_err_with(|| format!("creating {directory}/src"))?;
     std::fs::write(directory.join("src/lib.rs"), render(document, strategy)?)?;
     std::fs::write(
         directory.join("Cargo.toml"),
-        "[package]\nname = \"bodies\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
-         [dependencies]\nserde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\n\n\
-         [workspace]\n",
+        indoc::indoc! {r#"
+            [package]
+            name = "bodies"
+            version = "0.0.0"
+            edition = "2021"
+            publish = false
+
+            [dependencies]
+            serde = { version = "1", features = ["derive"] }
+            serde_json = "1"
+
+            [workspace]
+        "#},
     )?;
     Ok(())
 }
 
 /// Expand a crate and count the function bodies in it.
-fn expand_and_count(directory: &Utf8Path) -> Result<usize> {
+fn expand_and_count(directory: &Utf8Path) -> eyre::Result<usize> {
     let output = crate::generated::cargo(directory)
         // Its own target directory: expansion is a nightly build of the same crate the gate above
         // just checked on stable, and sharing one would have each invalidate the other's artefacts.
         .env("CARGO_TARGET_DIR", scratch().join("bodies-target"))
         .args(["+nightly", "rustc", "--quiet", "--", "-Zunpretty=expanded"])
         .output()
-        .with_context(|| format!("expanding {directory}"))?;
+        .wrap_err_with(|| format!("expanding {directory}"))?;
     if !output.status.success() {
         bail!(
-            "expanding {directory} failed; nightly is needed for `-Zunpretty=expanded`:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            "{}",
+            indoc::formatdoc! {"
+                expanding {directory} failed; nightly is needed for `-Zunpretty=expanded`:
+                {}",
+                String::from_utf8_lossy(&output.stderr)
+            }
         );
     }
     let expanded = String::from_utf8_lossy(&output.stdout);

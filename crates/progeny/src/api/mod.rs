@@ -20,14 +20,8 @@ mod examples;
 mod operation;
 mod pagination;
 // The payload gate is the only caller, and it is feature-gated. The module stays compiled in every
-// combination so its own tests keep running; only the re-export follows the feature.
-#[cfg_attr(
-    not(feature = "harness"),
-    allow(
-        dead_code,
-        reason = "the payload gate is the only caller so far, and it is feature-gated"
-    )
-)]
+// test build so its own tests keep running.
+#[cfg(any(feature = "harness", test))]
 mod payload;
 mod presence;
 mod registrable;
@@ -330,6 +324,7 @@ fn servers(resolved: &ResolvedDocument) -> Vec<ServerEntry> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::{ApiModel, build};
@@ -339,16 +334,16 @@ pub(crate) mod tests {
     use crate::{contract, normalize, resolve, shape};
 
     /// Build the API model for a document, keeping what was said about it.
-    pub(crate) fn model_of(document: Value) -> (ApiModel, Vec<Diagnostic>) {
+    pub(crate) fn model_of(document: Value) -> eyre::Result<(ApiModel, Vec<Diagnostic>)> {
         let config = Config::default();
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx).unwrap();
-        let model = build(&resolved, &shapes, &contracts, &config, &mut ctx).unwrap();
-        (model, ctx.into_diagnostics())
+        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
+        let model = build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        Ok((model, ctx.into_diagnostics()))
     }
 
     /// A document with the given paths object.
@@ -359,27 +354,30 @@ pub(crate) mod tests {
         Value::Object(root)
     }
 
-    #[test]
+    #[test_util::test]
     fn an_operation_is_named_after_its_operation_id() {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/pets": {"get": {"operationId": "listPets", "responses": {"200": {"description": "ok"}}}},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(model.operations().len(), 1);
         assert_eq!(model.operations()[0].rust_name.as_str(), "list_pets");
         assert_eq!(model.operations()[0].method, super::Method::Get);
     }
 
-    #[test]
+    #[test_util::test]
     fn servers_are_carried_for_the_client_to_default_to() {
         let mut document = with_paths(json!({
             "/pets": {"get": {"operationId": "listPets", "responses": {"200": {"description": "ok"}}}},
         }));
-        document.as_object_mut().unwrap().insert(
-            "servers".to_owned(),
-            json!([{"url": "https://example.invalid/v1", "description": "production"}]),
-        );
-        let (model, _) = model_of(document);
+        document
+            .as_object_mut()
+            .ok_or_eyre("test fixture should contain this value")?
+            .insert(
+                "servers".to_owned(),
+                json!([{"url": "https://example.invalid/v1", "description": "production"}]),
+            );
+        let (model, _) = model_of(document)?;
         assert_eq!(model.servers.len(), 1);
         assert_eq!(model.servers[0].url, "https://example.invalid/v1");
         assert_eq!(

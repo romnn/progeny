@@ -15,8 +15,8 @@ mod payloads;
 mod probe;
 mod snapshot;
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
+use color_eyre::eyre;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -49,7 +49,8 @@ enum Command {
     Probe(probe::Args),
 }
 
-fn main() -> Result<()> {
+fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
     match cli.command {
         Command::Corpus(args) => corpus::run(&args),

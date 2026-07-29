@@ -18,13 +18,16 @@ use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{Document, MaybeRef, MediaType, Operation, PathItem};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Fit, Shape, Shapes};
+#[cfg(any(feature = "harness", test))]
+use crate::shape::Shape;
+use crate::shape::{Fit, Shapes};
 
 /// Whether a value is one this shape describes.
 ///
 /// The payload gate's question when it has to say which branch of a union a payload is: serde tries
 /// them in declaration order and takes the first that deserializes, so the harness asks the same
 /// question in the same order.
+#[cfg(any(feature = "harness", test))]
 pub(super) fn accepts(shapes: &Shapes, value: &Value, shape: &Shape) -> bool {
     fit(shapes).mismatch(value, shape).is_none()
 }
@@ -40,6 +43,7 @@ fn fit(shapes: &Shapes) -> Fit<'_> {
 /// rather than per document: the class aggregates and caps its related locations at five, so a
 /// verdict read back out of the diagnostics would be right about the first few examples of a
 /// document and silently wrong about the rest — `cloudflare` writes 29.
+#[cfg(any(feature = "harness", test))]
 pub(super) fn contradiction(
     resolved: &ResolvedDocument,
     shapes: &Shapes,
@@ -148,6 +152,7 @@ impl Check<'_> {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
     use crate::api::tests::{model_of, with_paths};
@@ -176,38 +181,41 @@ mod tests {
         with_paths(serde_json::Value::Object(paths))
     }
 
-    fn complaint(schema: serde_json::Value, example: serde_json::Value) -> Option<String> {
-        let (_, diagnostics) = model_of(response_with(schema, example));
-        diagnostics
+    fn complaint(
+        schema: serde_json::Value,
+        example: serde_json::Value,
+    ) -> eyre::Result<Option<String>> {
+        let (_, diagnostics) = model_of(response_with(schema, example))?;
+        Ok(diagnostics
             .iter()
             .find(|found| found.class() == crate::BreakageClass::InvalidExample)
-            .map(|found| found.detail().to_owned())
+            .map(|found| found.detail().to_owned()))
     }
 
-    #[test]
+    #[test_util::test]
     fn an_example_of_the_wrong_type_is_reported() {
-        let found = complaint(json!({"type": "string"}), json!(7)).expect("should be reported");
+        let found = complaint(json!({"type": "string"}), json!(7))?
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(found.contains("says a string"), "{found}");
         assert!(found.contains("is a number"), "{found}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_example_missing_a_required_property_is_reported() {
         let found = complaint(
             json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}),
             json!({"other": "thing"}),
-        )
-        .expect("should be reported");
+        )?.ok_or_eyre("test fixture should contain this value")?;
         assert!(found.contains("leaves out `name`"), "{found}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_example_outside_an_enum_is_reported() {
         let found = complaint(
             json!({"type": "string", "enum": ["red", "green"]}),
             json!("blue"),
-        )
-        .expect("should be reported");
+        )?
+        .ok_or_eyre("test fixture should contain this value")?;
         assert!(found.contains("`blue`"), "{found}");
 
         // And an example that is not a string at all. The enum reads from a string and nothing
@@ -215,13 +223,13 @@ mod tests {
         let found = complaint(
             json!({"type": "string", "enum": ["red", "green"]}),
             json!(7),
-        )
-        .expect("should be reported");
+        )?
+        .ok_or_eyre("test fixture should contain this value")?;
         assert!(found.contains("says a string"), "{found}");
         assert!(found.contains("is a number"), "{found}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_contradiction_inside_a_member_is_still_a_contradiction() {
         // `cloudflare` writes `false` where its own schema says a string, one level down. A check
         // that only reads the top level calls the example sound, and the payload gate then reports
@@ -232,8 +240,7 @@ mod tests {
                 "properties": {"inner": {"type": "object", "properties": {"name": {"type": "string"}}}},
             }),
             json!({"inner": {"name": false}}),
-        )
-        .expect("should be reported");
+        )?.ok_or_eyre("test fixture should contain this value")?;
         assert!(found.contains("at `inner`"), "{found}");
         assert!(found.contains("at `name`"), "{found}");
         assert!(found.contains("says a string"), "{found}");
@@ -245,21 +252,22 @@ mod tests {
     /// stopped at the container: the payload gate reported the vendor's defect as progeny's.
     mod inside_a_container {
         use super::{complaint, json};
+        use color_eyre::eyre::{self, OptionExt as _};
 
-        #[test]
+        #[test_util::test]
         fn an_element_of_the_wrong_type_is_reported() {
             // `/user/codespaces/secrets/{secret_name}/repositories`: the schema says integers and
             // the example writes the same numbers as strings.
             let found = complaint(
                 json!({"type": "array", "items": {"type": "integer"}}),
                 json!(["1296269", "1296280"]),
-            )
-            .expect("should be reported");
+            )?
+            .ok_or_eyre("test fixture should contain this value")?;
             assert!(found.contains("at `0`"), "{found}");
             assert!(found.contains("says an integer"), "{found}");
         }
 
-        #[test]
+        #[test_util::test]
         fn an_element_missing_a_required_member_is_reported() {
             // `/orgs/{org}/issue-fields`: the option schema requires `priority` and none of the
             // three options the example lists carries it.
@@ -273,13 +281,13 @@ mod tests {
                     },
                 }),
                 json!([{"name": "High"}]),
-            )
-            .expect("should be reported");
+            )?
+            .ok_or_eyre("test fixture should contain this value")?;
             assert!(found.contains("at `0`"), "{found}");
             assert!(found.contains("leaves out `priority`"), "{found}");
         }
 
-        #[test]
+        #[test_util::test]
         fn an_element_no_branch_of_a_union_accepts_is_reported() {
             // `/orgs/{org}/copilot-spaces/{space_number}/collaborators`: the team collaborator in
             // the example omits `type`, which the team branch requires, and its `actor_type` rules
@@ -307,32 +315,32 @@ mod tests {
                     ]},
                 }),
                 json!([{"actor_type": "Team", "name": "Developers"}]),
-            )
-            .expect("should be reported");
+            )?
+            .ok_or_eyre("test fixture should contain this value")?;
             assert!(found.contains("at `0`"), "{found}");
             assert!(found.contains("no branch"), "{found}");
         }
 
-        #[test]
+        #[test_util::test]
         fn a_map_value_that_contradicts_the_schema_is_reported() {
             let found = complaint(
                 json!({"type": "object", "additionalProperties": {"type": "string"}}),
                 json!({"one": 1}),
-            )
-            .expect("should be reported");
+            )?
+            .ok_or_eyre("test fixture should contain this value")?;
             assert!(found.contains("at `one`"), "{found}");
             assert!(found.contains("says a string"), "{found}");
         }
 
-        #[test]
+        #[test_util::test]
         fn a_tuple_the_example_gives_the_wrong_length_is_reported() {
             // A tuple lowers to a Rust tuple, which serde reads only at exactly its length — so
             // this fails to deserialize whether or not the document allows the third element.
             let found = complaint(
                 json!({"type": "array", "prefixItems": [{"type": "string"}, {"type": "integer"}]}),
                 json!(["a", 1, true]),
-            )
-            .expect("should be reported");
+            )?
+            .ok_or_eyre("test fixture should contain this value")?;
             assert!(found.contains("says 2 elements"), "{found}");
         }
     }
@@ -344,7 +352,7 @@ mod tests {
     /// while the recursive shape checker called the example wrong, so a reader was told about
     /// half the defect. Both verdicts now come from [`crate::shape::Fit`], so both records
     /// appear — same reason, each in its own vocabulary.
-    #[test]
+    #[test_util::test]
     fn a_wrong_literal_used_as_default_and_example_gets_both_verdicts() {
         let (_, diagnostics) = model_of(response_with(
             json!({
@@ -359,37 +367,37 @@ mod tests {
                 },
             }),
             json!({"config": {"name": false}}),
-        ));
-        let detail_of = |class: crate::BreakageClass| {
+        ))?;
+        let detail_of = |class: crate::BreakageClass| -> eyre::Result<String> {
             diagnostics
                 .iter()
                 .find(|found| found.class() == class)
                 .map(|found| found.detail().to_owned())
-                .unwrap_or_else(|| panic!("no `{class}` record"))
+                .ok_or_else(|| eyre::eyre!("no `{class}` record"))
         };
-        let example = detail_of(crate::BreakageClass::InvalidExample);
+        let example = detail_of(crate::BreakageClass::InvalidExample)?;
         assert!(example.contains("at `name`"), "{example}");
         assert!(example.contains("the example is a boolean"), "{example}");
-        let default = detail_of(crate::BreakageClass::InvalidDefault);
+        let default = detail_of(crate::BreakageClass::InvalidDefault)?;
         assert!(default.contains("at `name`"), "{default}");
         assert!(default.contains("the default is a boolean"), "{default}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_example_that_agrees_with_its_schema_says_nothing() {
-        assert_eq!(complaint(json!({"type": "string"}), json!("hello")), None);
+        assert_eq!(complaint(json!({"type": "string"}), json!("hello"))?, None);
         assert_eq!(
             complaint(
                 json!({"type": "object", "properties": {"name": {"type": "string"}}}),
                 json!({"name": "Rex", "extra": 1}),
-            ),
+            )?,
             None
         );
         // An integer written as a whole float is JSON having one number type, not a contradiction.
-        assert_eq!(complaint(json!({"type": "integer"}), json!(1.0)), None);
+        assert_eq!(complaint(json!({"type": "integer"}), json!(1.0))?, None);
         // A nullable schema and a null example.
         assert_eq!(
-            complaint(json!({"type": ["string", "null"]}), json!(null)),
+            complaint(json!({"type": ["string", "null"]}), json!(null))?,
             None
         );
         // Elements that agree, and a list the document left untyped — which constrains nothing, so
@@ -398,29 +406,29 @@ mod tests {
             complaint(
                 json!({"type": "array", "items": {"type": "integer"}}),
                 json!([1, 2]),
-            ),
+            )?,
             None
         );
         assert_eq!(
-            complaint(json!({"type": "array"}), json!([1, "two", null])),
+            complaint(json!({"type": "array"}), json!([1, "two", null]))?,
             None
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_union_is_only_wrong_when_no_branch_accepts_the_example() {
         assert_eq!(
             complaint(
                 json!({"oneOf": [{"type": "string"}, {"type": "integer"}]}),
                 json!(7),
-            ),
+            )?,
             None
         );
         let found = complaint(
             json!({"oneOf": [{"type": "string"}, {"type": "integer"}]}),
             json!(true),
-        )
-        .expect("should be reported");
+        )?
+        .ok_or_eyre("test fixture should contain this value")?;
         assert!(found.contains("no branch"), "{found}");
     }
 }

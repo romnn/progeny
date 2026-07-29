@@ -30,24 +30,12 @@ use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectErr
 #[derive(Debug)]
 pub(crate) struct Normalized {
     value: Value,
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
+    #[cfg(any(feature = "harness", test))]
     version: Version,
 }
 
 impl Normalized {
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
+    #[cfg(feature = "harness")]
     pub(crate) fn value(&self) -> &Value {
         &self.value
     }
@@ -56,13 +44,7 @@ impl Normalized {
         self.value
     }
 
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read by the corpus harness, which is feature-gated"
-        )
-    )]
+    #[cfg(any(feature = "harness", test))]
     pub(crate) fn version(&self) -> &Version {
         &self.version
     }
@@ -135,6 +117,7 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
 
     Ok(Normalized {
         value: Value::Object(root),
+        #[cfg(any(feature = "harness", test))]
         version,
     })
 }
@@ -778,14 +761,15 @@ fn is_extension(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::normalize;
     use crate::diag::{Action, BreakageClass, Ctx, RejectKind};
 
-    fn normalized(value: Value) -> Value {
+    fn normalized(value: Value) -> eyre::Result<Value> {
         let mut ctx = Ctx::new();
-        normalize(value, &mut ctx).unwrap().into_value()
+        Ok(normalize(value, &mut ctx)?.into_value())
     }
 
     /// A 3.0 document with one schema at `components.schemas.S`.
@@ -798,118 +782,116 @@ mod tests {
         json!({"openapi": "3.1.0", "paths": {}, "components": {"schemas": {"S": schema}}})
     }
 
-    fn normalized_schema(schema: &Value) -> Value {
-        normalized(with_schema(schema))["components"]["schemas"]["S"].clone()
+    fn normalized_schema(schema: &Value) -> eyre::Result<Value> {
+        Ok(normalized(with_schema(schema))?["components"]["schemas"]["S"].clone())
     }
 
     /// Normalize a 3.1 document with one schema, keeping the diagnostics.
-    fn normalized_schema_31(schema: &Value) -> (Value, Vec<crate::Diagnostic>) {
+    fn normalized_schema_31(schema: &Value) -> eyre::Result<(Value, Vec<crate::Diagnostic>)> {
         let mut ctx = Ctx::new();
-        let out = normalize(with_schema_31(schema), &mut ctx)
-            .unwrap()
-            .into_value();
-        (
+        let out = normalize(with_schema_31(schema), &mut ctx)?.into_value();
+        Ok((
             out["components"]["schemas"]["S"].clone(),
             ctx.into_diagnostics(),
-        )
+        ))
     }
 
-    #[test]
+    #[test_util::test]
     fn a_31_document_is_left_alone() {
         let original = json!({
             "openapi": "3.1.0",
             "paths": {},
             "components": {"schemas": {"S": {"type": ["string", "null"], "example": 1}}},
         });
-        assert_eq!(normalized(original.clone()), original);
+        assert_eq!(normalized(original.clone())?, original);
     }
 
-    #[test]
+    #[test_util::test]
     fn nullable_becomes_a_null_type_in_array_form() {
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "nullable": true})),
+            normalized_schema(&json!({"type": "string", "nullable": true}))?,
             json!({"type": ["string", "null"]})
         );
         assert_eq!(
-            normalized_schema(&json!({"type": ["string"], "nullable": true})),
+            normalized_schema(&json!({"type": ["string"], "nullable": true}))?,
             json!({"type": ["string", "null"]})
         );
         assert_eq!(
-            normalized_schema(&json!({"type": ["string", "null"], "nullable": true})),
+            normalized_schema(&json!({"type": ["string", "null"], "nullable": true}))?,
             json!({"type": ["string", "null"]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn nullable_also_widens_an_enum() {
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "enum": ["a", "b"], "nullable": true})),
+            normalized_schema(&json!({"type": "string", "enum": ["a", "b"], "nullable": true}))?,
             json!({"type": ["string", "null"], "enum": ["a", "b", null]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn nullable_without_a_type_narrows_nothing() {
         assert_eq!(
-            normalized_schema(&json!({"nullable": true, "description": "d"})),
+            normalized_schema(&json!({"nullable": true, "description": "d"}))?,
             json!({"description": "d"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn nullable_false_is_the_31_default() {
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "nullable": false})),
+            normalized_schema(&json!({"type": "string", "nullable": false}))?,
             json!({"type": "string"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_non_boolean_nullable_is_left_for_the_parser_to_diagnose() {
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "nullable": "yes"})),
+            normalized_schema(&json!({"type": "string", "nullable": "yes"}))?,
             json!({"type": "string", "nullable": "yes"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn boolean_exclusive_bounds_become_numeric_ones() {
         assert_eq!(
-            normalized_schema(&json!({"minimum": 0, "exclusiveMinimum": true})),
+            normalized_schema(&json!({"minimum": 0, "exclusiveMinimum": true}))?,
             json!({"exclusiveMinimum": 0})
         );
         assert_eq!(
-            normalized_schema(&json!({"maximum": 10, "exclusiveMaximum": false})),
+            normalized_schema(&json!({"maximum": 10, "exclusiveMaximum": false}))?,
             json!({"maximum": 10})
         );
         // A flag with nothing to modify is just noise.
         assert_eq!(
-            normalized_schema(&json!({"exclusiveMinimum": true})),
+            normalized_schema(&json!({"exclusiveMinimum": true}))?,
             json!({})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn schema_level_example_becomes_examples() {
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "example": "a"})),
+            normalized_schema(&json!({"type": "string", "example": "a"}))?,
             json!({"type": "string", "examples": ["a"]})
         );
         // An already-3.1 `examples` wins; the stray `example` is left for the parser to keep.
         assert_eq!(
-            normalized_schema(&json!({"examples": ["a"], "example": "b"})),
+            normalized_schema(&json!({"examples": ["a"], "example": "b"}))?,
             json!({"examples": ["a"], "example": "b"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn string_formats_move_to_where_31_says_them() {
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "format": "byte"})),
+            normalized_schema(&json!({"type": "string", "format": "byte"}))?,
             json!({"type": "string", "contentEncoding": "base64"})
         );
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "format": "binary"})),
+            normalized_schema(&json!({"type": "string", "format": "binary"}))?,
             json!({"type": "string", "contentMediaType": "application/octet-stream"})
         );
         // An explicit `contentMediaType` wins; normalization never overwrites
@@ -917,21 +899,21 @@ mod tests {
         assert_eq!(
             normalized_schema(
                 &json!({"type": "string", "format": "binary", "contentMediaType": "image/png"})
-            ),
+            )?,
             json!({"type": "string", "contentMediaType": "image/png"})
         );
         // `format: binary` on something that is not a string is not the 3.0 idiom.
         assert_eq!(
-            normalized_schema(&json!({"type": "object", "format": "binary"})),
+            normalized_schema(&json!({"type": "object", "format": "binary"}))?,
             json!({"type": "object", "format": "binary"})
         );
         assert_eq!(
-            normalized_schema(&json!({"type": "string", "format": "date-time"})),
+            normalized_schema(&json!({"type": "string", "format": "date-time"}))?,
             json!({"type": "string", "format": "date-time"})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn rewrites_reach_every_subschema_position() {
         let rewritten = normalized_schema(&json!({
             "allOf": [{"type": "string", "nullable": true}],
@@ -939,7 +921,7 @@ mod tests {
             "items": {"type": "boolean", "nullable": true},
             "additionalProperties": {"type": "number", "nullable": true},
             "$defs": {"D": {"type": "string", "nullable": true}},
-        }));
+        }))?;
         assert_eq!(rewritten["allOf"][0]["type"], json!(["string", "null"]));
         assert_eq!(
             rewritten["properties"]["a"]["type"],
@@ -953,7 +935,7 @@ mod tests {
         assert_eq!(rewritten["$defs"]["D"]["type"], json!(["string", "null"]));
     }
 
-    #[test]
+    #[test_util::test]
     fn rewrites_reach_schemas_under_paths_and_responses() {
         let document = json!({
             "openapi": "3.0.0",
@@ -973,7 +955,7 @@ mod tests {
                 },
             },
         });
-        let out = normalized(document);
+        let out = normalized(document)?;
         let path = &out["paths"]["/pets"];
         assert_eq!(
             path["parameters"][0]["schema"]["type"],
@@ -995,7 +977,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn decoys_outside_schema_positions_are_untouched() {
         // Every one of these is an ordinary word inside a payload, not a keyword. A rewrite
         // that pattern-matched on member names would corrupt all of them.
@@ -1036,15 +1018,15 @@ mod tests {
                 },
             },
         });
-        assert_eq!(normalized(document.clone()), document);
+        assert_eq!(normalized(document.clone())?, document);
     }
 
-    #[test]
+    #[test_util::test]
     fn the_draft_04_tuple_form_becomes_prefix_items_whatever_the_version_says() {
         let (rewritten, diagnostics) = normalized_schema_31(&json!({
             "type": "array",
             "items": [{"type": "string"}, {"type": "integer"}],
-        }));
+        }))?;
         assert_eq!(
             rewritten,
             json!({"type": "array", "prefixItems": [{"type": "string"}, {"type": "integer"}]})
@@ -1059,32 +1041,32 @@ mod tests {
 
         // A 3.0 document writes the same defect, and gets the same repair.
         assert_eq!(
-            normalized_schema(&json!({"items": [{"type": "string"}]})),
+            normalized_schema(&json!({"items": [{"type": "string"}]}))?,
             json!({"prefixItems": [{"type": "string"}]})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn additional_items_becomes_the_constraint_on_the_rest() {
         let (rewritten, _) = normalized_schema_31(&json!({
             "items": [{"type": "string"}],
             "additionalItems": false,
-        }));
+        }))?;
         assert_eq!(
             rewritten,
             json!({"prefixItems": [{"type": "string"}], "items": false})
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_document_writing_both_tuple_spellings_is_left_for_the_parser() {
         let both = json!({"items": [{"type": "string"}], "prefixItems": [{"type": "integer"}]});
-        let (rewritten, diagnostics) = normalized_schema_31(&both);
+        let (rewritten, diagnostics) = normalized_schema_31(&both)?;
         assert_eq!(rewritten, both);
         assert!(diagnostics.is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn the_tuple_repair_reaches_nested_positions_and_aggregates() {
         let (rewritten, diagnostics) = normalized_schema_31(&json!({
             "type": "object",
@@ -1092,7 +1074,7 @@ mod tests {
                 "a": {"items": [{"type": "string"}]},
                 "b": {"items": [{"type": "integer"}]},
             },
-        }));
+        }))?;
         assert!(rewritten["properties"]["a"]["prefixItems"].is_array());
         assert!(rewritten["properties"]["b"]["prefixItems"].is_array());
         // One record for the document, not one per site: this class fires 651 times in `webflow`.
@@ -1108,13 +1090,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_boolean_bound_flag_outside_30_is_repaired_and_reported() {
         let (rewritten, diagnostics) = normalized_schema_31(&json!({
             "type": "integer",
             "minimum": 0,
             "exclusiveMinimum": true,
-        }));
+        }))?;
         assert_eq!(rewritten, json!({"type": "integer", "exclusiveMinimum": 0}));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].class(), BreakageClass::LegacyExclusiveBound);
@@ -1126,12 +1108,11 @@ mod tests {
         normalize(
             with_schema(&json!({"minimum": 0, "exclusiveMinimum": true})),
             &mut ctx,
-        )
-        .unwrap();
+        )?;
         assert!(ctx.into_diagnostics().is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_31_document_with_nothing_to_repair_is_untouched() {
         // The walk now visits 3.1 documents too, so the decoys have to hold there as well.
         let document = json!({
@@ -1166,50 +1147,50 @@ mod tests {
             },
         });
         let mut ctx = Ctx::new();
-        let out = normalize(document.clone(), &mut ctx).unwrap().into_value();
+        let out = normalize(document.clone(), &mut ctx)?.into_value();
         assert_eq!(out, document);
         assert!(ctx.into_diagnostics().is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_property_named_like_a_keyword_is_still_a_schema() {
         let rewritten = normalized_schema(&json!({
             "type": "object",
             "properties": {"nullable": {"type": "string", "nullable": true}},
-        }));
+        }))?;
         assert_eq!(
             rewritten["properties"]["nullable"]["type"],
             json!(["string", "null"])
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_yaml_number_version_is_a_version() {
-        let value: Value = serde_json::from_str(r#"{"openapi": 3.0, "paths": {}}"#).unwrap();
+        let value: Value = serde_json::from_str(r#"{"openapi": 3.0, "paths": {}}"#)?;
         let mut ctx = Ctx::new();
-        let out = normalize(value, &mut ctx).unwrap();
+        let out = normalize(value, &mut ctx)?;
         assert_eq!(out.version().major, 3);
         assert_eq!(out.version().minor, 0);
         assert_eq!(out.version().text, "3.0");
     }
 
-    #[test]
+    #[test_util::test]
     fn the_declared_version_string_is_not_rewritten() {
-        let out = normalized(json!({"openapi": "3.0.2", "paths": {}}));
+        let out = normalized(json!({"openapi": "3.0.2", "paths": {}}))?;
         assert_eq!(out["openapi"], json!("3.0.2"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_future_minor_version_is_read_as_31_with_a_warning() {
         let mut ctx = Ctx::new();
-        normalize(json!({"openapi": "3.2.0", "paths": {}}), &mut ctx).unwrap();
+        normalize(json!({"openapi": "3.2.0", "paths": {}}), &mut ctx)?;
         let diagnostics = ctx.into_diagnostics();
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].class(), BreakageClass::UnsupportedDialect);
         assert_eq!(diagnostics[0].action(), Action::Warn);
     }
 
-    #[test]
+    #[test_util::test]
     fn documents_that_cannot_be_used_are_rejected() {
         let mut ctx = Ctx::new();
         for (value, kind) in [
@@ -1230,20 +1211,23 @@ mod tests {
             (json!({"openapi": "3.1.0"}), RejectKind::NoOperations),
         ] {
             assert_eq!(
-                normalize(value.clone(), &mut ctx).unwrap_err().kind(),
+                normalize(value.clone(), &mut ctx)
+                    .err()
+                    .ok_or_eyre("the test expects this operation to fail")?
+                    .kind(),
                 kind,
                 "{value}"
             );
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn webhooks_alone_describe_operations() {
         let mut ctx = Ctx::new();
         assert!(normalize(json!({"openapi": "3.1.0", "webhooks": {}}), &mut ctx).is_ok());
     }
 
-    #[test]
+    #[test_util::test]
     fn normalization_is_idempotent() {
         let once = normalized(with_schema(&json!({
             "type": "string",
@@ -1252,9 +1236,9 @@ mod tests {
             "example": "a",
             "minimum": 1,
             "exclusiveMinimum": true,
-        })));
+        })))?;
         let mut ctx = Ctx::new();
-        let twice = normalize(once.clone(), &mut ctx).unwrap().into_value();
+        let twice = normalize(once.clone(), &mut ctx)?.into_value();
         assert_eq!(once, twice);
     }
 }

@@ -480,12 +480,13 @@ impl Config {
 mod tests {
     use super::Config;
     use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer};
+    use color_eyre::eyre::{self, OptionExt as _};
 
     fn diagnostic(class: BreakageClass, action: Action) -> Diagnostic {
         Diagnostic::new(class, action, JsonPointer::root(), "detail")
     }
 
-    #[test]
+    #[test_util::test]
     fn the_default_configuration_denies_nothing() {
         let config = Config::default();
         let diagnostics = [
@@ -495,16 +496,13 @@ mod tests {
         assert_eq!(config.denied(&diagnostics).count(), 0);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_policy_is_read_from_the_names_diagnostics_render_with() {
-        let config: Config = toml::from_str(
-            r#"
+        let config: Config = toml::from_str(indoc::indoc! {r#"
             [deny]
             actions = ["degrade"]
             classes = ["dangling-ref"]
-            "#,
-        )
-        .unwrap();
+        "#})?;
         let diagnostics = [
             diagnostic(BreakageClass::WildUnion, Action::Degrade),
             diagnostic(BreakageClass::DanglingRef, Action::Repair),
@@ -516,15 +514,27 @@ mod tests {
         assert_eq!(denied[1].class(), BreakageClass::DanglingRef);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_unsupported_knob_is_a_config_error_not_a_silent_no_op() {
-        let error = toml::from_str::<Config>("attribute = \"#[serde(skip)]\"").unwrap_err();
+        let error = toml::from_str::<Config>("attribute = \"#[serde(skip)]\"")
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
-    #[test]
+    #[test_util::test]
     fn an_unknown_diagnostic_name_is_a_config_error() {
-        assert!(toml::from_str::<Config>("[deny]\nactions = [\"reject\"]").is_err());
-        assert!(toml::from_str::<Config>("[deny]\nclasses = [\"whatever\"]").is_err());
+        assert!(
+            toml::from_str::<Config>(indoc::indoc! {r#"
+                [deny]
+                actions = ["reject"]"#})
+            .is_err()
+        );
+        assert!(
+            toml::from_str::<Config>(indoc::indoc! {r#"
+                [deny]
+                classes = ["whatever"]"#})
+            .is_err()
+        );
     }
 }

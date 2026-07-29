@@ -131,7 +131,8 @@ impl StyleContract {
 }
 
 /// Why a parameter has no defined serialization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{detail}")]
 pub(crate) struct Undefined {
     pub(crate) detail: String,
 }
@@ -300,6 +301,7 @@ fn name(style: Style) -> &'static str {
 mod tests {
     use super::{Location, ParamShape, Style, classify};
     use crate::doc::Parameter;
+    use color_eyre::eyre::{self, OptionExt as _};
 
     fn parameter(location: &str, style: Option<&str>, explode: Option<bool>) -> Parameter {
         Parameter {
@@ -311,27 +313,28 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_location_supplies_the_style_the_document_left_out() {
-        let query = classify(&parameter("query", None, None), ParamShape::Primitive).unwrap();
+        let query = classify(&parameter("query", None, None), ParamShape::Primitive)?;
         assert_eq!(query.style(), Style::Form);
         // `form` is the one style that explodes unless told otherwise.
         assert!(query.explode());
 
-        let path = classify(&parameter("path", None, None), ParamShape::Primitive).unwrap();
+        let path = classify(&parameter("path", None, None), ParamShape::Primitive)?;
         assert_eq!(path.style(), Style::Simple);
         assert!(!path.explode());
         assert_eq!(path.location(), Location::Path);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_combination_the_specification_leaves_undefined_is_refused_rather_than_guessed() {
         // deepObject over an array: the one combination the specification names and declines.
         let error = classify(
             &parameter("query", Some("deepObject"), None),
             ParamShape::Array,
         )
-        .unwrap_err();
+        .err()
+        .ok_or_eyre("the test expects this operation to fail")?;
         assert!(error.detail.contains("deepObject"), "{error:?}");
 
         // spaceDelimited over an object: there is no rule for joining members with a space.
@@ -353,23 +356,27 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_parameter_with_no_name_has_nothing_to_be_called_on_the_wire() {
         let mut nameless = parameter("query", None, None);
         nameless.name = None;
-        let error = classify(&nameless, ParamShape::Primitive).unwrap_err();
+        let error = classify(&nameless, ParamShape::Primitive)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(error.detail.contains("no `name`"), "{error:?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_location_openapi_does_not_define_is_refused_by_name() {
         // Swagger 2.0's `in: body`, which real 3.x documents still carry.
-        let error = classify(&parameter("body", None, None), ParamShape::Object).unwrap_err();
+        let error = classify(&parameter("body", None, None), ParamShape::Object)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
         assert!(error.detail.contains("in: body"), "{error:?}");
         assert!(error.detail.contains("four locations"), "{error:?}");
     }
 
-    #[test]
+    #[test_util::test]
     fn every_location_defines_at_least_its_own_default_style() {
         for location in ["path", "query", "header", "cookie"] {
             assert!(

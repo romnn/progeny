@@ -48,7 +48,10 @@ pub(super) fn render(
     let _ = writeln!(out, "name = {:?}", config.package.name);
     let _ = writeln!(out, "version = {:?}", config.package.version);
     out.push_str("edition = \"2021\"\n");
-    out.push_str("publish = false\n\n");
+    out.push_str(indoc::indoc! {"
+        publish = false
+
+    "});
 
     if client || server {
         // Each half is a feature so that a consumer of one does not compile the other's HTTP stack.
@@ -97,6 +100,10 @@ pub(super) fn render(
     out.push_str("[dependencies]\n");
     out.push_str("serde = { version = \"1\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
+    if client || server {
+        out.push_str("indoc = \"2\"\n");
+        out.push_str("thiserror = \"2\"\n");
+    }
     if client {
         out.push_str(
             // Only the two features the emitted calls name; the rest are the consumer's, forwarded

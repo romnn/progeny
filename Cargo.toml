@@ -49,7 +49,7 @@ todo = "deny"
 indexing_slicing = "deny"
 missing_errors_doc = "warn"
 await_holding_lock = "deny"
-# Every `#[allow(...)]` must carry a `reason = "..."` justifying the escape hatch.
+# Every `#[expect(...)]` must carry a `reason = "..."` justifying the escape hatch.
 allow_attributes_without_reason = "deny"
 
 # Allowed
@@ -95,9 +95,12 @@ axum = { version = "0.8", default-features = false, features = ["json"] }
 # types, and compiling a TLS stack to type-check a file would be minutes bought for nothing.
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 
-anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+color-eyre = "0.6"
+indoc = "2"
 syn = { version = "2", features = ["full", "visit"] }
+test-util = { path = "crates/test-util" }
+thiserror = "2"
 # `span-locations` is what turns a parsed span into a line number, which is what makes a
 # layering violation clickable rather than a name to go hunting for.
 proc-macro2 = { version = "1", features = ["span-locations"] }

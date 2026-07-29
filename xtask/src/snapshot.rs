@@ -13,8 +13,8 @@
 
 use std::fmt::Write as _;
 
-use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
+use color_eyre::eyre::{self, WrapErr};
 use sha2::{Digest, Sha256};
 
 use crate::paths;
@@ -147,12 +147,12 @@ pub fn read(name: &str) -> Option<Snapshot> {
     Snapshot::parse(&text)
 }
 
-pub fn write(name: &str, snapshot: &Snapshot) -> Result<()> {
+pub fn write(name: &str, snapshot: &Snapshot) -> eyre::Result<()> {
     let path = path_for(name);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent}"))?;
+        std::fs::create_dir_all(parent).wrap_err_with(|| format!("creating {parent}"))?;
     }
-    std::fs::write(&path, snapshot.render()).with_context(|| format!("writing {path}"))
+    std::fs::write(&path, snapshot.render()).wrap_err_with(|| format!("writing {path}"))
 }
 
 /// Snapshot files with no document behind them any more.
@@ -200,6 +200,8 @@ pub fn display(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::{Snapshot, Verdict};
 
     fn snapshot(document: &[u8], lines: &[&str]) -> Snapshot {
@@ -207,7 +209,7 @@ mod tests {
         Snapshot::take(document, &owned)
     }
 
-    #[test]
+    #[test_util::test]
     fn the_same_document_saying_the_same_thing_matches() {
         let taken = snapshot(b"doc", &["b", "a"]);
         assert_eq!(taken.compare(Some(&taken)), Verdict::Match);
@@ -215,7 +217,7 @@ mod tests {
         assert_eq!(taken.lines, ["a", "b"]);
     }
 
-    #[test]
+    #[test_util::test]
     fn the_same_document_saying_something_new_is_a_regression() {
         let recorded = snapshot(b"doc", &["a"]);
         let taken = snapshot(b"doc", &["a", "b"]);
@@ -230,7 +232,7 @@ mod tests {
         assert!(verdict.is_failure());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_different_document_is_a_republication_rather_than_a_break() {
         let recorded = snapshot(b"old", &["a"]);
         let taken = snapshot(b"new", &["a", "b"]);
@@ -246,25 +248,25 @@ mod tests {
         assert!(!verdict.is_failure());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_missing_snapshot_fails_rather_than_passing_quietly() {
         let taken = snapshot(b"doc", &[]);
         assert_eq!(taken.compare(None), Verdict::Missing);
         assert!(taken.compare(None).is_failure());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_snapshot_round_trips_through_its_file_form() {
         let taken = snapshot(b"doc", &[r#"{"class":"wild-union"}"#]);
         let text = taken.render();
         assert_eq!(Snapshot::parse(&text), Some(taken));
         // Every line is JSON, header included.
         for line in text.lines() {
-            serde_json::from_str::<serde_json::Value>(line).unwrap();
+            serde_json::from_str::<serde_json::Value>(line)?;
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn the_hash_is_of_the_document_not_of_the_diagnostics() {
         assert_eq!(
             snapshot(b"doc", &["a"]).document,

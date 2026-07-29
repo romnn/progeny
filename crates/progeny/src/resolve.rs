@@ -42,13 +42,7 @@ pub(crate) struct ResolvedDocument {
     /// Each document-level reference string, mapped to the component name it ends up naming after
     /// any chain of references is followed.
     component_targets: BTreeMap<String, String>,
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "read through `counts`, whose only caller is the feature-gated harness"
-        )
-    )]
+    #[cfg(any(feature = "harness", test))]
     counts: Counts,
 }
 
@@ -101,13 +95,7 @@ impl ResolvedDocument {
         self.targets.get(&id).copied()
     }
 
-    #[cfg_attr(
-        not(feature = "harness"),
-        allow(
-            dead_code,
-            reason = "the corpus reports these, and the corpus harness is feature-gated"
-        )
-    )]
+    #[cfg(any(feature = "harness", test))]
     pub(crate) fn counts(&self) -> Counts {
         self.counts
     }
@@ -239,10 +227,13 @@ pub(crate) fn resolve(parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument
     counts.recursive_groups = cycles.recursive_groups();
     counts.largest_recursive_group = cycles.largest_group();
 
+    #[cfg(not(any(feature = "harness", test)))]
+    let _ = counts;
     ResolvedDocument {
         parsed,
         targets,
         component_targets,
+        #[cfg(any(feature = "harness", test))]
         counts,
     }
 }
@@ -790,6 +781,7 @@ fn component_name(written: &str, section: Section) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
     use super::{ResolvedDocument, resolve};
@@ -798,12 +790,12 @@ mod tests {
     use crate::normalize;
     use crate::schema::Schema;
 
-    fn resolve_document(document: Value) -> (ResolvedDocument, Vec<Diagnostic>) {
+    fn resolve_document(document: Value) -> eyre::Result<(ResolvedDocument, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
-        let normalized = normalize::normalize(document, &mut ctx).unwrap();
+        let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve(parsed, &mut ctx);
-        (resolved, ctx.into_diagnostics())
+        Ok((resolved, ctx.into_diagnostics()))
     }
 
     /// A document whose `components.schemas` are exactly these.
@@ -818,7 +810,7 @@ mod tests {
         Value::Object(root)
     }
 
-    fn schema_named<'a>(resolved: &'a ResolvedDocument, name: &str) -> &'a Schema {
+    fn schema_named<'a>(resolved: &'a ResolvedDocument, name: &str) -> eyre::Result<&'a Schema> {
         let id = resolved
             .document()
             .components
@@ -826,11 +818,11 @@ mod tests {
             .and_then(|components| components.schemas.as_ref())
             .and_then(|schemas| schemas.get(name))
             .copied()
-            .unwrap();
-        resolved.schema(id)
+            .ok_or_eyre("test fixture should contain the named schema")?;
+        Ok(resolved.schema(id))
     }
 
-    fn id_of(resolved: &ResolvedDocument, name: &str) -> crate::schema::SchemaId {
+    fn id_of(resolved: &ResolvedDocument, name: &str) -> eyre::Result<crate::schema::SchemaId> {
         resolved
             .document()
             .components
@@ -838,76 +830,83 @@ mod tests {
             .and_then(|components| components.schemas.as_ref())
             .and_then(|schemas| schemas.get(name))
             .copied()
-            .unwrap()
+            .ok_or_eyre("test fixture should contain the named schema")
     }
 
-    #[test]
+    #[test_util::test]
     fn a_pointer_into_this_document_resolves() {
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "Pet": {"type": "object", "properties": {"friend": {"$ref": "#/components/schemas/Pet"}}},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let counts = resolved.counts();
         assert_eq!(counts.references, 1);
         assert_eq!(counts.resolved, 1);
         assert_eq!(counts.dangling, 0);
 
-        let pet = id_of(&resolved, "Pet");
-        let friend = match schema_named(&resolved, "Pet") {
-            Schema::Object(object) => object.properties.as_ref().unwrap()["friend"],
+        let pet = id_of(&resolved, "Pet")?;
+        let friend = match schema_named(&resolved, "Pet")? {
+            Schema::Object(object) => object
+                .properties
+                .as_ref()
+                .ok_or_eyre("test fixture should contain this value")?["friend"],
             Schema::Bool(_) => panic!("expected an object schema"),
         };
         assert_eq!(resolved.follow(friend), Some(pet));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_cycle_through_a_reference_is_counted() {
         let (resolved, _) = resolve_document(with_schemas(json!({
             "A": {"properties": {"b": {"$ref": "#/components/schemas/B"}}},
             "B": {"properties": {"a": {"$ref": "#/components/schemas/A"}}},
             "C": {"type": "string"},
-        })));
+        })))?;
         assert_eq!(resolved.counts().recursive_groups, 1);
         assert_eq!(resolved.counts().largest_recursive_group, 4);
     }
 
-    #[test]
+    #[test_util::test]
     fn a_chain_of_references_resolves_link_by_link() {
         let (resolved, _) = resolve_document(with_schemas(json!({
             "A": {"$ref": "#/components/schemas/B"},
             "B": {"$ref": "#/components/schemas/C"},
             "C": {"type": "string"},
-        })));
-        let b = resolved.follow(id_of(&resolved, "A")).unwrap();
-        assert_eq!(b, id_of(&resolved, "B"));
-        assert_eq!(resolved.follow(b), Some(id_of(&resolved, "C")));
+        })))?;
+        let b = resolved
+            .follow(id_of(&resolved, "A")?)
+            .ok_or_eyre("test fixture should contain this value")?;
+        assert_eq!(b, id_of(&resolved, "B")?);
+        assert_eq!(resolved.follow(b), Some(id_of(&resolved, "C")?));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_pointer_into_a_subschema_resolves() {
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "Pet": {"properties": {"tag": {"type": "string"}}},
             "Tag": {"$ref": "#/components/schemas/Pet/properties/tag"},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let target = resolved.follow(id_of(&resolved, "Tag")).unwrap();
+        let target = resolved
+            .follow(id_of(&resolved, "Tag")?)
+            .ok_or_eyre("test fixture should contain this value")?;
         assert!(matches!(
             resolved.schema(target),
             Schema::Object(object) if object.types.is_some()
         ));
     }
 
-    #[test]
+    #[test_util::test]
     fn the_two_observed_misspellings_are_repaired() {
         for (written,) in [("Pet",), ("#/components/schemas/pet",)] {
             let (resolved, diagnostics) = resolve_document(with_schemas(json!({
                 "Pet": {"type": "object"},
                 "Other": {"$ref": written},
-            })));
+            })))?;
             assert_eq!(resolved.counts().repaired, 1, "{written}");
             assert_eq!(
-                resolved.follow(id_of(&resolved, "Other")),
-                Some(id_of(&resolved, "Pet")),
+                resolved.follow(id_of(&resolved, "Other")?),
+                Some(id_of(&resolved, "Pet")?),
                 "{written}"
             );
             assert_eq!(diagnostics.len(), 1);
@@ -916,29 +915,29 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_reference_to_nothing_degrades_and_says_so() {
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "A": {"$ref": "#/components/schemas/Nope"},
-        })));
+        })))?;
         assert_eq!(resolved.counts().dangling, 1);
-        assert_eq!(resolved.follow(id_of(&resolved, "A")), None);
+        assert_eq!(resolved.follow(id_of(&resolved, "A")?), None);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].action(), Action::Degrade);
         assert!(diagnostics[0].detail().contains("accepts anything"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_reference_to_another_file_is_out_of_scope_and_counted_separately() {
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "A": {"$ref": "common.yaml#/components/schemas/Pet"},
-        })));
+        })))?;
         assert_eq!(resolved.counts().external, 1);
         assert_eq!(resolved.counts().dangling, 0);
         assert!(diagnostics[0].detail().contains("another document"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_nested_id_becomes_a_base_for_the_references_that_name_it() {
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "Pet": {
@@ -947,37 +946,39 @@ mod tests {
             },
             "Tag": {"$ref": "https://example.test/pet#/properties/tag"},
             "Whole": {"$ref": "https://example.test/pet"},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(resolved.counts().resolved, 2);
         assert_eq!(
-            resolved.follow(id_of(&resolved, "Whole")),
-            Some(id_of(&resolved, "Pet"))
+            resolved.follow(id_of(&resolved, "Whole")?),
+            Some(id_of(&resolved, "Pet")?)
         );
-        let tag = resolved.follow(id_of(&resolved, "Tag")).unwrap();
+        let tag = resolved
+            .follow(id_of(&resolved, "Tag")?)
+            .ok_or_eyre("test fixture should contain this value")?;
         assert_eq!(
             resolved.schemas().address(tag).to_string(),
             "/components/schemas/Pet/properties/tag"
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn an_anchor_resolves_and_a_duplicate_one_does_not() {
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "Pet": {"$anchor": "pet", "type": "object"},
             "A": {"$ref": "#pet"},
-        })));
+        })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
-            resolved.follow(id_of(&resolved, "A")),
-            Some(id_of(&resolved, "Pet"))
+            resolved.follow(id_of(&resolved, "A")?),
+            Some(id_of(&resolved, "Pet")?)
         );
 
         let (resolved, diagnostics) = resolve_document(with_schemas(json!({
             "Pet": {"$anchor": "twice", "type": "object"},
             "Dog": {"$anchor": "twice", "type": "object"},
             "A": {"$ref": "#twice"},
-        })));
+        })))?;
         assert_eq!(resolved.counts().dangling, 1);
         assert!(
             diagnostics
@@ -986,20 +987,20 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_dynamic_reference_resolves_as_a_plain_one() {
         let (resolved, _) = resolve_document(with_schemas(json!({
             "Pet": {"$dynamicAnchor": "node", "type": "object"},
             "A": {"$dynamicRef": "#node"},
-        })));
+        })))?;
         assert_eq!(resolved.counts().dynamic, 1);
         assert_eq!(
-            resolved.follow(id_of(&resolved, "A")),
-            Some(id_of(&resolved, "Pet"))
+            resolved.follow(id_of(&resolved, "A")?),
+            Some(id_of(&resolved, "Pet")?)
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_component_reference_resolves_through_a_chain() {
         let (resolved, diagnostics) = resolve_document(json!({
             "openapi": "3.1.0",
@@ -1012,30 +1013,30 @@ mod tests {
                     "Real": {"description": "the real one"},
                 },
             },
-        }));
+        }))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(resolved.counts().component_references, 2);
         let responses = resolved
             .document()
             .paths
             .as_ref()
-            .unwrap()
+            .ok_or_eyre("test fixture should contain this value")?
             .items
             .get("/a")
-            .unwrap();
+            .ok_or_eyre("test fixture should contain this value")?;
         let crate::doc::MaybeRef::Item(path) = responses else {
             panic!("expected a path item")
         };
         let arm = path
             .get
             .as_ref()
-            .unwrap()
+            .ok_or_eyre("test fixture should contain this value")?
             .responses
             .as_ref()
-            .unwrap()
+            .ok_or_eyre("test fixture should contain this value")?
             .statuses
             .get("200")
-            .unwrap();
+            .ok_or_eyre("test fixture should contain this value")?;
         assert_eq!(
             resolved
                 .response(arm)
@@ -1044,20 +1045,20 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn a_component_reference_to_nothing_is_reported() {
         let (resolved, diagnostics) = resolve_document(json!({
             "openapi": "3.1.0",
             "paths": {
                 "/a": {"get": {"responses": {"200": {"$ref": "#/components/responses/Nope"}}}},
             },
-        }));
+        }))?;
         assert_eq!(resolved.counts().dangling_components, 1);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].detail().contains("#/components/responses"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_component_reference_into_the_wrong_section_does_not_resolve() {
         let (resolved, _) = resolve_document(json!({
             "openapi": "3.1.0",
@@ -1065,7 +1066,7 @@ mod tests {
                 "/a": {"get": {"responses": {"200": {"$ref": "#/components/schemas/Pet"}}}},
             },
             "components": {"schemas": {"Pet": {"type": "object"}}},
-        }));
+        }))?;
         // A Response Object cannot be a schema, so this is a dangling reference and not a
         // silently-wrong one.
         assert_eq!(resolved.counts().dangling_components, 1);

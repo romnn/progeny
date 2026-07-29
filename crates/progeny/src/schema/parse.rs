@@ -281,6 +281,7 @@ fn types(node: &mut Members, ctx: &mut Ctx) -> Option<OneOrMany<TypeName>> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use color_eyre::eyre;
     use serde_json::json;
 
     use super::{super::Schema, super::SchemaStore, super::TypeName, schema};
@@ -288,31 +289,33 @@ mod tests {
 
     fn parse(
         value: serde_json::Value,
-    ) -> (
+    ) -> eyre::Result<(
         SchemaStore,
         Box<super::SchemaObject>,
         Vec<crate::Diagnostic>,
-    ) {
+    )> {
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
-        let id = schema(value, &mut store, &mut ctx).unwrap();
+        let id = schema(value, &mut store, &mut ctx)
+            .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
         let object = match store.get(id).clone() {
             Schema::Object(object) => object,
-            Schema::Bool(_) => panic!("expected an object schema"),
+            Schema::Bool(_) => eyre::bail!("expected an object schema"),
         };
-        (store, object, ctx.into_diagnostics())
+        Ok((store, object, ctx.into_diagnostics()))
     }
 
-    #[test]
+    #[test_util::test]
     fn booleans_are_schemas() {
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
-        let id = schema(json!(false), &mut store, &mut ctx).unwrap();
+        let id = schema(json!(false), &mut store, &mut ctx)
+            .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
         assert_eq!(store.get(id), &Schema::Bool(false));
         assert!(ctx.into_diagnostics().is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn a_scalar_is_not_a_schema_and_comes_back_to_the_caller() {
         let mut store = SchemaStore::default();
         let mut ctx = Ctx::new();
@@ -322,7 +325,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_util::test]
     fn every_keyword_group_is_read() {
         let (_store, object, diagnostics) = parse(json!({
             "$id": "https://example.test/a",
@@ -339,7 +342,7 @@ mod tests {
             "discriminator": {"propertyName": "kind", "mapping": {"a": "#/x"}},
             "xml": {"name": "a", "wrapped": true},
             "externalDocs": {"url": "https://example.test"},
-        }));
+        }))?;
         assert!(diagnostics.is_empty());
         assert_eq!(object.id.as_deref(), Some("https://example.test/a"));
         assert_eq!(object.all_of.as_ref().map(Vec::len), Some(2));
@@ -371,26 +374,26 @@ mod tests {
         assert!(object.unknown.is_empty());
     }
 
-    #[test]
+    #[test_util::test]
     fn unmodelled_keywords_are_kept_verbatim() {
         let (_store, object, diagnostics) = parse(json!({
             "type": "string",
             "x-vendor": {"deep": [1, 2]},
             "futureKeyword": "whatever",
-        }));
+        }))?;
         assert!(diagnostics.is_empty());
         assert_eq!(object.unknown.len(), 2);
         assert_eq!(object.unknown["x-vendor"], json!({"deep": [1, 2]}));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_reference_with_siblings_is_stored_as_written() {
         // 2020-12 applies sibling keywords to the reference; interpreting that is the shape
         // layer's decision, so the model must not pre-chew it.
         let (_store, object, diagnostics) = parse(json!({
             "$ref": "#/components/schemas/Pet",
             "description": "one pet",
-        }));
+        }))?;
         assert!(diagnostics.is_empty());
         assert_eq!(
             object.reference.as_deref(),
@@ -399,29 +402,29 @@ mod tests {
         assert_eq!(object.description.as_deref(), Some("one pet"));
     }
 
-    #[test]
+    #[test_util::test]
     fn a_malformed_keyword_is_kept_and_diagnosed() {
-        let (_store, object, diagnostics) = parse(json!({"required": "a", "type": "object"}));
+        let (_store, object, diagnostics) = parse(json!({"required": "a", "type": "object"}))?;
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].location().to_string(), "/required");
         assert!(object.required.is_none());
         assert_eq!(object.unknown["required"], json!("a"));
     }
 
-    #[test]
+    #[test_util::test]
     fn one_bad_subschema_preserves_the_whole_applicator() {
-        let (_store, object, diagnostics) = parse(json!({"anyOf": [{"type": "string"}, 7]}));
+        let (_store, object, diagnostics) = parse(json!({"anyOf": [{"type": "string"}, 7]}))?;
         assert_eq!(diagnostics.len(), 1);
         assert!(object.any_of.is_none());
         assert_eq!(object.unknown["anyOf"], json!([{"type": "string"}, 7]));
     }
 
-    #[test]
+    #[test_util::test]
     fn recursion_is_just_a_deep_store() {
         let (store, object, _) = parse(json!({
             "type": "object",
             "properties": {"child": {"$ref": "#/x", "properties": {"leaf": true}}},
-        }));
+        }))?;
         assert!(object.properties.is_some());
         assert_eq!(store.len(), 3);
     }

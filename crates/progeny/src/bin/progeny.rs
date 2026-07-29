@@ -33,7 +33,11 @@ fn run() -> Result<ExitCode, String> {
     }
 
     let Some(spec) = &arguments.spec else {
-        return Err(format!("no description given\n\n{USAGE}"));
+        return Err(indoc::formatdoc! {"
+            no description given
+
+            {USAGE}"
+        });
     };
 
     let input =
@@ -63,8 +67,12 @@ fn run() -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
     eprintln!(
-        "\n{} diagnostics are denied by the configuration:",
-        denied.len()
+        "{}",
+        indoc::formatdoc! {"
+
+            {} diagnostics are denied by the configuration:",
+            denied.len()
+        }
     );
     for diagnostic in denied {
         eprintln!("  {diagnostic}");
@@ -105,21 +113,22 @@ fn write(output: &Output, directory: &str) -> Result<(), String> {
     Ok(())
 }
 
-const USAGE: &str = "\
-progeny — generate a Rust client and server from an OpenAPI description
+const USAGE: &str = indoc::indoc! {"
+    progeny — generate a Rust client and server from an OpenAPI description
 
-usage:
-  progeny <description> [--config <progeny.toml>] [--out-dir <directory>]
+    usage:
+      progeny <description> [--config <progeny.toml>] [--out-dir <directory>]
 
-arguments:
-  <description>        the OpenAPI document, JSON or YAML
-  --config <path>      a progeny.toml
-  --out-dir <path>     where to write the generated files
-  -h, --help           this message
-  -V, --version        the version that would generate the output
+    arguments:
+      <description>        the OpenAPI document, JSON or YAML
+      --config <path>      a progeny.toml
+      --out-dir <path>     where to write the generated files
+      -h, --help           this message
+      -V, --version        the version that would generate the output
 
-Exits non-zero when a diagnostic is denied by the configuration, so a build can refuse to \
-proceed on, say, any degradation.";
+    Exits non-zero when a diagnostic is denied by the configuration, so a build can refuse to \
+    proceed on, say, any degradation."
+};
 
 /// The parsed command line.
 ///
@@ -157,10 +166,20 @@ impl Arguments {
                     );
                 }
                 other if other.starts_with('-') => {
-                    return Err(format!("unknown option {other}\n\n{USAGE}"));
+                    return Err(indoc::formatdoc! {"
+                        unknown option {other}
+
+                        {USAGE}"
+                    });
                 }
                 other if parsed.spec.is_none() => parsed.spec = Some(other.to_owned()),
-                other => return Err(format!("unexpected argument {other}\n\n{USAGE}")),
+                other => {
+                    return Err(indoc::formatdoc! {"
+                        unexpected argument {other}
+
+                        {USAGE}"
+                    });
+                }
             }
         }
         Ok(parsed)
@@ -170,40 +189,42 @@ impl Arguments {
 #[cfg(test)]
 mod tests {
     use super::Arguments;
+    use color_eyre::eyre;
 
     fn parse(arguments: &[&str]) -> Result<Arguments, String> {
         Arguments::parse(arguments.iter().map(|argument| (*argument).to_owned()))
     }
 
-    #[test]
+    #[test_util::test]
     fn a_description_and_its_options_are_read() {
-        let parsed = parse(&["api.yaml", "--config", "progeny.toml", "--out-dir", "out"]).unwrap();
+        let parsed = parse(&["api.yaml", "--config", "progeny.toml", "--out-dir", "out"])
+            .map_err(eyre::Report::msg)?;
         assert_eq!(parsed.spec.as_deref(), Some("api.yaml"));
         assert_eq!(parsed.config.as_deref(), Some("progeny.toml"));
         assert_eq!(parsed.out_dir.as_deref(), Some("out"));
         assert!(!parsed.help);
     }
 
-    #[test]
+    #[test_util::test]
     fn an_option_missing_its_value_is_an_error_rather_than_a_default() {
         assert!(parse(&["api.yaml", "--config"]).is_err());
         assert!(parse(&["api.yaml", "--out-dir"]).is_err());
     }
 
-    #[test]
+    #[test_util::test]
     fn unknown_options_and_extra_arguments_are_refused() {
         assert!(parse(&["--wat"]).is_err());
         assert!(parse(&["a.yaml", "b.yaml"]).is_err());
     }
 
-    #[test]
+    #[test_util::test]
     fn help_needs_no_description() {
-        assert!(parse(&["--help"]).unwrap().help);
+        assert!(parse(&["--help"]).map_err(eyre::Report::msg)?.help);
     }
 
-    #[test]
+    #[test_util::test]
     fn version_needs_no_description_either() {
-        assert!(parse(&["--version"]).unwrap().version);
-        assert!(parse(&["-V"]).unwrap().version);
+        assert!(parse(&["--version"]).map_err(eyre::Report::msg)?.version);
+        assert!(parse(&["-V"]).map_err(eyre::Report::msg)?.version);
     }
 }

@@ -7,8 +7,8 @@
 
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use color_eyre::eyre::{self, WrapErr, bail};
 
 use super::{Args, DERIVE, HAND_WRITTEN};
 
@@ -101,7 +101,7 @@ fn modules_on_disk(crate_dir: &Utf8Path) -> Vec<String> {
 ///
 /// Generation happens up front rather than between repetitions: A-B-B-A ordering only means
 /// anything if both variants are sitting on disk before the first measurement starts.
-pub(super) fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
+pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
     if args.reuse {
         return reuse(args);
     }
@@ -154,7 +154,7 @@ pub(super) fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
                 progeny::SerdeImpl::DeriveAlways
             };
             let output = progeny::generate(bytes, &config)
-                .with_context(|| format!("generating {name} ({variant})"))?;
+                .wrap_err_with(|| format!("generating {name} ({variant})"))?;
             let scope = scope_of(
                 output
                     .files
@@ -178,7 +178,7 @@ pub(super) fn plan(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
 }
 
 /// Write down what was rendered and from which tree.
-fn record(planned: &[(String, Vec<Target>)]) -> Result<()> {
+fn record(planned: &[(String, Vec<Target>)]) -> eyre::Result<()> {
     let (revision, dirty) = revision();
     let rendering = Rendering {
         revision,
@@ -189,17 +189,17 @@ fn record(planned: &[(String, Vec<Target>)]) -> Result<()> {
             .collect(),
     };
     let path = rendering_path();
-    let text = toml::to_string_pretty(&rendering).context("rendering the bench plan")?;
-    std::fs::write(&path, text).with_context(|| format!("writing {path}"))
+    let text = toml::to_string_pretty(&rendering).wrap_err("rendering the bench plan")?;
+    std::fs::write(&path, text).wrap_err_with(|| format!("writing {path}"))
 }
 
 /// Measure the crates an earlier run rendered, without rendering anything.
-fn reuse(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
+fn reuse(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
     let path = rendering_path();
-    let text = std::fs::read_to_string(&path).with_context(|| {
+    let text = std::fs::read_to_string(&path).wrap_err_with(|| {
         format!("reading {path}; --reuse measures what --generate-only rendered, and nothing has")
     })?;
-    let rendering: Rendering = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+    let rendering: Rendering = toml::from_str(&text).wrap_err_with(|| format!("parsing {path}"))?;
 
     let (here, _) = revision();
     println!(
@@ -233,7 +233,7 @@ fn reuse(args: &Args) -> Result<Vec<(String, Vec<Target>)>> {
                  `{UNRECORDED}`",
                 target.subject
             );
-            target.scope = UNRECORDED.to_owned();
+            UNRECORDED.clone_into(&mut target.scope);
         }
         let manifest = target.directory.join("Cargo.toml");
         if !manifest.exists() {
@@ -275,7 +275,7 @@ fn revision() -> (String, bool) {
     (head, dirty)
 }
 
-fn package_name(crate_dir: &Utf8PathBuf) -> Result<String> {
+fn package_name(crate_dir: &Utf8PathBuf) -> eyre::Result<String> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         package: Package,
@@ -286,16 +286,18 @@ fn package_name(crate_dir: &Utf8PathBuf) -> Result<String> {
     }
 
     let path = crate_dir.join("Cargo.toml");
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
-    let manifest: Manifest = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
+    let text = std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {path}"))?;
+    let manifest: Manifest = toml::from_str(&text).wrap_err_with(|| format!("parsing {path}"))?;
     Ok(manifest.package.name)
 }
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use super::scope_of;
 
-    #[test]
+    #[test_util::test]
     fn a_rendering_survives_the_file_it_is_written_to() {
         // `--generate-only` writes this and `--reuse` reads it, possibly days apart and across a
         // rebuild of the tool. A shape that serializes and does not deserialize would strand the
@@ -311,8 +313,8 @@ mod tests {
                 scope: "types-only".to_owned(),
             }],
         };
-        let text = toml::to_string_pretty(&rendering).unwrap();
-        let read: super::Rendering = toml::from_str(&text).unwrap();
+        let text = toml::to_string_pretty(&rendering)?;
+        let read: super::Rendering = toml::from_str(&text)?;
         assert_eq!(read.revision, "013655a");
         assert!(read.dirty);
         assert_eq!(read.targets.len(), 1);
@@ -321,13 +323,21 @@ mod tests {
         assert_eq!(read.targets[0].scope, "types-only");
     }
 
-    #[test]
+    #[test_util::test]
     fn a_rendering_from_before_the_scope_was_recorded_still_reads() {
         // The archived stage-4 subject was written without the field, and it is the *one* rendering
         // the corrected baseline has to be taken from. A hard parse error here would strand it.
-        let text = "revision = \"013655a\"\ndirty = true\n\n[[targets]]\nsubject = \"okta\"\n\
-                    variant = \"derive\"\npackage = \"corpus-okta\"\ndirectory = \"/tmp/x\"\n";
-        let read: super::Rendering = toml::from_str(text).unwrap();
+        let text = indoc::indoc! {r#"
+            revision = "013655a"
+            dirty = true
+
+            [[targets]]
+            subject = "okta"
+            variant = "derive"
+            package = "corpus-okta"
+            directory = "/tmp/x"
+        "#};
+        let read: super::Rendering = toml::from_str(text)?;
         assert_eq!(read.targets[0].scope, "");
     }
 
@@ -338,12 +348,11 @@ mod tests {
     /// extend `LAYERS`, or two structurally different crates stringify to the same scope and
     /// the refusal stops refusing. The subject is the committed petstore, which renders every
     /// surface module a default configuration can produce.
-    #[test]
+    #[test_util::test]
     fn the_layer_list_is_the_renderers_module_list() {
         let path = crate::paths::corpus_root().join("specs/petstore-31.yaml");
-        let bytes = std::fs::read(&path).expect("the committed petstore is always available");
-        let output =
-            progeny::generate(&bytes, &progeny::Config::default()).expect("the petstore generates");
+        let bytes = std::fs::read(&path)?;
+        let output = progeny::generate(&bytes, &progeny::Config::default())?;
         for file in output.files.keys() {
             let Some(stem) = file
                 .strip_prefix("src")
@@ -360,7 +369,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_util::test]
     fn a_crate_says_what_it_holds() {
         assert_eq!(scope_of(["lib", "types"]), "types-only");
         // `support` is plumbing the other modules call into, not surface being weighed.

@@ -30,7 +30,7 @@ use crate::api::{
 use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent};
 
-use super::types::{docs as docs_of, type_path as type_tokens};
+use super::types::{docs as docs_of, enum_type_is_boxed, enum_type_path, type_path as type_tokens};
 
 /// Render the client module.
 pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -> TokenStream {
@@ -43,14 +43,18 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         // constructs it — two uses rustc lints, in the consumer's crate, about code the consumer did
         // not write. The method carrying `#[deprecated]` itself exempts neither: being deprecated is
         // not a licence to name deprecated things. The builder's own `impl` already carries the same
-        // allowance for the same reason.
-        let allow = operation
-            .docs
-            .deprecated
-            .then(|| quote! { #[allow(deprecated)] });
+        // expectation for the same reason.
+        let deprecation = operation.docs.deprecated.then(|| {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated accessor deliberately returns a deprecated operation"
+                )]
+            }
+        });
         quote! {
             #docs
-            #allow
+            #deprecation
             #[must_use]
             pub fn #name(&self) -> #builder<'_> {
                 #builder::new(self)
@@ -182,15 +186,18 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
         operation.method.wire(),
         operation.path
     );
-    // Two ways a builder names a deprecated thing, and it needs the allowance for either. Its own
-    // `impl` uses the deprecated *builder* when the operation is deprecated — and an `impl` cannot
-    // itself be deprecated, so the allowance is the only way to say "this is the deprecated thing,
-    // not a use of one". And a parameter, body or response may be a deprecated *schema* type
-    // whatever the operation's own status: `cloudflare` has a live operation with a deprecated
-    // `feedback` parameter, which put the type in a field and in a setter, twice.
-    let deprecation = (operation.docs.deprecated
-        || !super::types::deprecated_use(operation_types(operation), contracts).is_empty())
-    .then(|| quote! { #[allow(deprecated)] });
+    // An `impl` uses its deprecated builder when the operation is deprecated, but an `impl` cannot
+    // itself be deprecated. The expectation says this is the implementation of that deprecated
+    // thing, not a new call site. Deprecated schema types are handled at the exact fields and
+    // methods that name them.
+    let deprecation = operation.docs.deprecated.then(|| {
+        quote! {
+            #[expect(
+                deprecated,
+                reason = "the generated builder deliberately exposes deprecated API"
+            )]
+        }
+    });
 
     quote! {
         #success_decl
@@ -200,7 +207,6 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
         #[doc = ""]
         #[doc = #struct_docs]
         #[derive(Debug, Clone)]
-        #deprecation
         pub struct #name<'a> {
             client: &'a Client,
             #(#fields)*
@@ -359,24 +365,6 @@ struct Rendered {
     declaration: TokenStream,
 }
 
-/// Every type an operation names, for the questions that have to be asked of all of them at once.
-pub(super) fn operation_types(operation: &OperationContract) -> Vec<&crate::contract::TypeRef> {
-    let mut out: Vec<&crate::contract::TypeRef> =
-        operation.params.iter().map(|param| &param.ty).collect();
-    // Every body that has a type, not only the JSON one: a form or multipart body names the same
-    // kind of generated type, and a deprecated one there warns exactly as loudly.
-    out.extend(operation.body.as_ref().and_then(BodyContract::ty));
-    out.extend(
-        operation
-            .responses
-            .arms
-            .iter()
-            .chain(&operation.responses.default)
-            .map(|arm| &arm.ty),
-    );
-    out
-}
-
 /// What a successful call yields.
 fn success_type(operation: &OperationContract, contracts: &Contracts, config: &Config) -> Rendered {
     let arms: Vec<&ResponseArm> = success_arms(operation);
@@ -393,7 +381,6 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             declaration: TokenStream::new(),
         },
         several => {
-            let sized = super::types::variant_sizes();
             let name = format_ident!(
                 "{}Success",
                 operation
@@ -405,7 +392,7 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             );
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
-                let ty = type_tokens(&arm.ty, contracts, config);
+                let ty = enum_type_path(&arm.ty, contracts, config);
                 let docs = docs_of(&arm.docs);
                 quote! { #docs #variant(#ty), }
             });
@@ -418,7 +405,6 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
                 declaration: quote! {
                     #[doc = #docs]
                     #[derive(Debug, Clone)]
-                    #sized
                     pub enum #name { #(#variants)* }
                 },
             }
@@ -475,7 +461,6 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             declaration: TokenStream::new(),
         },
         several => {
-            let sized = super::types::variant_sizes();
             let name = format_ident!(
                 "{}Error",
                 operation
@@ -487,7 +472,7 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             );
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
-                let ty = type_tokens(&arm.ty, contracts, config);
+                let ty = enum_type_path(&arm.ty, contracts, config);
                 let docs = docs_of(&arm.docs);
                 quote! { #docs #variant(#ty), }
             });
@@ -500,7 +485,6 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
                 declaration: quote! {
                     #[doc = #docs]
                     #[derive(Debug, Clone)]
-                    #sized
                     pub enum #name { #(#variants)* }
                 },
             }
@@ -873,6 +857,32 @@ fn dispatch(
 
     let success_arms = arm_matches(&successes, success, successes.len() > 1, false);
     let failure_arms = arm_matches(&failures, failure, wrapped_failure, true);
+    let ranges: BTreeSet<u8> = operation
+        .responses
+        .arms
+        .iter()
+        .filter_map(|arm| match arm.status {
+            crate::api::StatusPattern::Range(hundreds) => Some(hundreds),
+            crate::api::StatusPattern::Exact(_) => None,
+        })
+        .collect();
+    // Clippy reports this lint only when the exact arm is the range's lower bound; an interior
+    // exact arm such as `404` before `4XX` is intentionally accepted, so expecting it there would
+    // create an unfulfilled-lint warning in the generated crate.
+    let overlapping = operation.responses.arms.iter().any(|arm| match arm.status {
+        crate::api::StatusPattern::Exact(code) => {
+            code % 100 == 0 && ranges.contains(&u8::try_from(code / 100).unwrap_or(u8::MAX))
+        }
+        crate::api::StatusPattern::Range(_) => false,
+    });
+    let overlap = overlapping.then(|| {
+        quote! {
+            #[expect(
+                clippy::match_overlapping_arm,
+                reason = "OpenAPI gives an exact status precedence over its declared status range"
+            )]
+        }
+    });
     let fallback = match (&operation.responses.default, claims_success) {
         // No `default`: a status the document never mentioned has no shape progeny has ever seen.
         (None, _) => quote! { _ => ::std::result::Result::Err(Error::UnexpectedStatus(response)), },
@@ -891,14 +901,11 @@ fn dispatch(
             }
         }
     };
-
     quote! {
         let status = response.status().as_u16();
-        // The overlap clippy would report here *is* the contract: OpenAPI says an exact status
-        // claims a response before a range does, so a document declaring both `400` and `4XX` gets
-        // arms that overlap by construction, ordered exact-first by `StatusPattern::precedence`.
-        // The lint reads that as a mistake, which is the one case suppression is for.
-        #[allow(clippy::match_overlapping_arm)]
+        // OpenAPI says an exact status claims a response before a range does, so a document
+        // declaring both `400` and `4XX` gets deliberately overlapping arms in that order.
+        #overlap
         match status {
             #(#success_arms)*
             #(#failure_arms)*
@@ -951,7 +958,15 @@ fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool) -> TokenStream {
         return quote! { support::decode(response).await? };
     }
     let variant = format_ident!("{}", arm.rust_name.as_str());
-    quote! { support::decode(response).await?.map(#ty::#variant) }
+    if enum_type_is_boxed(&arm.ty) {
+        quote! {
+            support::decode(response).await?
+                .map(::std::boxed::Box::new)
+                .map(#ty::#variant)
+        }
+    } else {
+        quote! { support::decode(response).await?.map(#ty::#variant) }
+    }
 }
 
 pub(crate) fn body_type(
