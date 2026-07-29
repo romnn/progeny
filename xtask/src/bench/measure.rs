@@ -122,7 +122,9 @@ impl Summary {
 
 /// Compile the crate once without measuring, so its dependencies are built and cached.
 pub(super) fn warm_up(target: &Target) -> eyre::Result<()> {
-    let status = crate::generated::cargo(&target.directory)
+    let mut command = crate::generated::cargo(&target.directory);
+    disable_incremental(&mut command);
+    let status = command
         .args(["check", "--quiet", "--lib"])
         .status()
         .wrap_err_with(|| format!("warming up {}", target.directory))?;
@@ -167,7 +169,9 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
     let runner = std::env::current_exe().wrap_err("locating this executable")?;
     // `--measure` takes the rest of the line, so the command follows it directly; a `--`
     // separator would be swallowed as its first value.
-    let output = Command::new(runner)
+    let mut command = Command::new(runner);
+    disable_incremental(&mut command);
+    let output = command
         .env("CARGO_TARGET_DIR", crate::generated::shared_target())
         .env_remove("RUSTFLAGS")
         .arg("bench-compile")
@@ -214,6 +218,10 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
         wall_seconds,
         pressured,
     })
+}
+
+fn disable_incremental(command: &mut Command) {
+    command.env("CARGO_INCREMENTAL", "0");
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -336,6 +344,17 @@ pub(crate) fn measure_child(command: &[String]) -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Sample, Summary, order};
+
+    #[test]
+    fn compile_measurements_disable_incremental_state() {
+        let mut command = std::process::Command::new("cargo");
+        super::disable_incremental(&mut command);
+        let incremental = command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("CARGO_INCREMENTAL"))
+            .and_then(|(_, value)| value);
+        assert_eq!(incremental, Some(std::ffi::OsStr::new("0")));
+    }
 
     fn sample(cpu: f64, rss: u64, load_before: f64, load_after: f64) -> Sample {
         // Instant, so the repetition is answerable for none of the load rise and the tests below
