@@ -111,6 +111,11 @@ tasks:
     cmds:
       - cargo run -p xtask --release -- bench-compile {{.CLI_ARGS}}
 
+  bench:runtime:
+    desc: "A/B generated serde over the tier payloads (time + allocations + peak heap)"
+    cmds:
+      - cargo run -p xtask --release -- bench-runtime {{.CLI_ARGS}}
+
   docs:
     desc: "open the rustdoc API documentation preview"
     env:

@@ -13,6 +13,7 @@ mod layers;
 mod paths;
 mod payloads;
 mod probe;
+mod runtime;
 mod snapshot;
 
 use clap::{Parser, Subcommand};
@@ -35,6 +36,8 @@ enum Command {
     Corpus(corpus::Args),
     /// Measure what a generated crate costs to compile.
     BenchCompile(bench::Args),
+    /// Measure the runtime cost of the generated serde strategies.
+    BenchRuntime(runtime::Args),
     /// Check that the pipeline's module graph only ever points leftward.
     LintLayers(layers::Args),
     /// Re-record every document's diagnostics snapshot.
@@ -55,6 +58,7 @@ fn main() -> eyre::Result<()> {
     match cli.command {
         Command::Corpus(args) => corpus::run(&args),
         Command::BenchCompile(args) => bench::run(&args),
+        Command::BenchRuntime(args) => runtime::run(&args),
         Command::LintLayers(args) => layers::run(&args),
         Command::Differential(args) => differential::run(&args),
         Command::Payloads(args) => payloads::run(&args),
