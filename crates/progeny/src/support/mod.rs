@@ -264,7 +264,7 @@ fn edge_tokens(
             .then(|| style_source(STYLE, Some(client_use), None))
             .or_else(|| server.then(|| style_source(STYLE, None, Some(server_use))))
     } else {
-        Some(source(STYLE))
+        Some(source_items(STYLE))
     };
     let multipart = if precise && client && !client_use.multipart {
         None
@@ -273,7 +273,7 @@ fn edge_tokens(
             .then(|| multipart_source(MULTIPART, true, client_use.parts))
             .or_else(|| server.then(|| multipart_source(MULTIPART, false, server_use.parts)))
     } else {
-        Some(source(MULTIPART))
+        Some(source_items(MULTIPART))
     };
     let style = style.map(|style| quote::quote! { pub mod style { #style } });
     let multipart = multipart.map(|multipart| quote::quote! { pub mod multipart { #multipart } });
@@ -288,7 +288,11 @@ fn edge_tokens(
     // items that name one — putting each in its own module is what lets one attribute cover all of
     // them rather than one per item.
     let wire = client.then(|| {
-        let wire = client_source(HTTP, client_use);
+        let wire = if precise {
+            client_source(HTTP, client_use)
+        } else {
+            source_items(HTTP)
+        };
         quote::quote! {
             #calling
             pub mod wire { #wire }
@@ -297,8 +301,12 @@ fn edge_tokens(
         }
     });
     let serve = server.then(|| {
-        let serve = source(SERVE);
-        let router = with_body_limit(ROUTER, body_limit, server_use);
+        let serve = if precise {
+            source(SERVE)
+        } else {
+            source_items(SERVE)
+        };
+        let router = with_body_limit(ROUTER, body_limit, server_use, precise);
         quote::quote! {
             #serving
             pub mod serve { #serve }
@@ -338,10 +346,14 @@ fn with_body_limit(
     text: &str,
     limit: crate::config::BodyLimit,
     used: ServerUse,
+    precise: bool,
 ) -> proc_macro2::TokenStream {
     let Ok(mut file) = syn::parse_file(text) else {
         return text.parse().unwrap_or_default();
     };
+    if !precise {
+        file.attrs.clear();
+    }
     let bytes = limit.0;
     file.items = file
         .items
@@ -353,30 +365,35 @@ fn with_body_limit(
                 item
             }
             syn::Item::Fn(function) => {
-                if let Some(kind) = unused_body_reader(&function.sig.ident, used) {
-                    let reason = format!("this description declares no {kind} request body");
-                    function
-                        .attrs
-                        .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
-                }
-                if let Some(kind) = unused_response_writer(&function.sig.ident, used) {
-                    let reason = format!("this description declares no {kind} response body");
-                    function
-                        .attrs
-                        .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                if precise {
+                    if let Some(kind) = unused_body_reader(&function.sig.ident, used) {
+                        let reason = format!("this description declares no {kind} request body");
+                        function
+                            .attrs
+                            .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                    }
+                    if let Some(kind) = unused_response_writer(&function.sig.ident, used) {
+                        let reason = format!("this description declares no {kind} response body");
+                        function
+                            .attrs
+                            .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                    }
                 }
                 item
             }
             syn::Item::Impl(implementation) => {
-                for implementation_item in &mut implementation.items {
-                    let syn::ImplItem::Fn(function) = implementation_item else {
-                        continue;
-                    };
-                    if let Some(location) = unused_parameter_reader(&function.sig.ident, used) {
-                        let reason = format!("this description declares no {location} parameter");
-                        function
-                            .attrs
-                            .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                if precise {
+                    for implementation_item in &mut implementation.items {
+                        let syn::ImplItem::Fn(function) = implementation_item else {
+                            continue;
+                        };
+                        if let Some(location) = unused_parameter_reader(&function.sig.ident, used) {
+                            let reason =
+                                format!("this description declares no {location} parameter");
+                            function
+                                .attrs
+                                .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                        }
                     }
                 }
                 item
@@ -427,6 +444,14 @@ fn source(text: &str) -> proc_macro2::TokenStream {
     };
     file.items.retain(|item| !is_test_module(item));
     quote::quote! { #file }
+}
+
+fn source_items(text: &str) -> proc_macro2::TokenStream {
+    let Ok(file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    let items = file.items.into_iter().filter(|item| !is_test_module(item));
+    quote::quote! { #(#items)* }
 }
 
 fn client_source(text: &str, used: ClientUse) -> proc_macro2::TokenStream {
