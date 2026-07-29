@@ -241,11 +241,18 @@ where
                 sequence.end()?;
                 Ok(value)
             }
-            Content::Map(members) => visitor.visit_map(MapReplay {
-                members: members.into_iter(),
-                value: None,
-                error: std::marker::PhantomData,
-            }),
+            Content::Map(members) => {
+                let mut map =
+                    de::value::MapDeserializer::new(members.into_iter().map(|(key, value)| {
+                        (
+                            ContentDeserializer::<'de, E>::new(key),
+                            ContentDeserializer::<'de, E>::new(value),
+                        )
+                    }));
+                let value = visitor.visit_map(&mut map)?;
+                map.end()?;
+                Ok(value)
+            }
             Content::Newtype(value) => {
                 visitor.visit_newtype_struct(ContentDeserializer::new(*value))
             }
@@ -315,47 +322,6 @@ where
 
     fn into_deserializer(self) -> Self {
         self
-    }
-}
-
-/// Replays a buffered map.
-struct MapReplay<'de, E> {
-    members: std::vec::IntoIter<(Content<'de>, Content<'de>)>,
-    value: Option<Content<'de>>,
-    error: std::marker::PhantomData<E>,
-}
-
-impl<'de, E> MapAccess<'de> for MapReplay<'de, E>
-where
-    E: de::Error,
-{
-    type Error = E;
-
-    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, E>
-    where
-        K: DeserializeSeed<'de>,
-    {
-        match self.members.next() {
-            Some((key, value)) => {
-                self.value = Some(value);
-                seed.deserialize(ContentDeserializer::new(key)).map(Some)
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, E>
-    where
-        V: DeserializeSeed<'de>,
-    {
-        match self.value.take() {
-            Some(value) => seed.deserialize(ContentDeserializer::new(value)),
-            None => Err(de::Error::custom("value is missing")),
-        }
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(self.members.len())
     }
 }
 
@@ -762,7 +728,40 @@ impl<T> Visitor<'_> for NameSeed<T> {
 #[cfg(test)]
 mod tests {
     use super::{Content, ContentDeserializer};
-    use serde::Deserialize as _;
+    use std::fmt;
+
+    use serde::de::{MapAccess, Visitor};
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Debug)]
+    struct FirstMember;
+
+    impl<'de> Deserialize<'de> for FirstMember {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_map(FirstMemberVisitor)
+        }
+    }
+
+    struct FirstMemberVisitor;
+
+    impl<'de> Visitor<'de> for FirstMemberVisitor {
+        type Value = FirstMember;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map with at least one member")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let _: Option<(String, u64)> = access.next_entry()?;
+            Ok(FirstMember)
+        }
+    }
 
     /// Replaying a buffered sequence into a fixed-arity target must reject the extra elements.
     ///
@@ -795,5 +794,22 @@ mod tests {
         let content = Content::Seq(vec![Content::U64(1), Content::U64(2)]);
         let deserializer = ContentDeserializer::<serde::de::value::Error>::new(content);
         assert_eq!(<(u64, u64)>::deserialize(deserializer), Ok((1, 2)));
+    }
+
+    #[test]
+    fn a_buffered_map_cannot_silently_drop_members_a_visitor_did_not_read() {
+        let direct = serde_json::from_str::<FirstMember>(r#"{"first":1,"second":2}"#);
+        assert!(direct.is_err(), "the format itself accepted {direct:?}");
+
+        let content = Content::Map(vec![
+            (Content::String("first".to_owned()), Content::U64(1)),
+            (Content::String("second".to_owned()), Content::U64(2)),
+        ]);
+        let deserializer = ContentDeserializer::<serde::de::value::Error>::new(content);
+        let replayed = FirstMember::deserialize(deserializer);
+        assert!(
+            replayed.is_err(),
+            "replay accepted {replayed:?} and silently dropped the second member"
+        );
     }
 }
