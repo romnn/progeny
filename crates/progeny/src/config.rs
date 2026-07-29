@@ -52,7 +52,7 @@ pub struct Config {
     /// Which `Deserialize`/`Serialize` implementation strategy to use.
     #[serde(default)]
     pub serde_impl: SerdeImpl,
-    /// Whether to emit a crate or a module tree.
+    /// Whether to emit a crate, a workspace, or a module tree.
     #[serde(default)]
     pub packaging: Packaging,
     /// What to call the emitted crate, when emitting one.
@@ -298,13 +298,15 @@ pub enum SerdeImpl {
     HandWrittenWhereEligible,
 }
 
-/// Whether to emit a crate or a module tree.
+/// How to package the generated source.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Packaging {
     /// A complete crate: a manifest and a `src` tree.
     #[default]
     Crate,
+    /// A workspace containing separate types, client, and server crates.
+    Workspace,
     /// One file to `include!` from a build script or to check in.
     Module,
 }

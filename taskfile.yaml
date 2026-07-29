@@ -49,12 +49,12 @@ tasks:
       - cargo run -p xtask --release -- corpus --fetch {{.CLI_ARGS}}
 
   corpus:compile:
-    desc: "generate a crate per quick-tier document, compile it and lint it"
+    desc: "generate a workspace per quick-tier document, compile it and lint it"
     # `--clippy` denies warnings in the *generated* crates, which `cargo check` does not: a
     # generated warning is a product defect its consumer sees in their own build, about code they
     # did not write. Without it this gate reported "check clean" over four classes of them.
     cmds:
-      - cargo run -p xtask --release -- corpus --quick --compile --clippy {{.CLI_ARGS}}
+      - cargo run -p xtask --release -- corpus --quick --compile --clippy --packaging workspace {{.CLI_ARGS}}
 
   corpus:compile:all:
     desc: "the same, over all 78 documents; hours, not minutes"
@@ -62,7 +62,7 @@ tasks:
     # tier is blind to. `weather-gov` is the standing example: 1 document, 2 operations, a client
     # that did not compile for a whole stage, found by an unrelated errand rather than by a gate.
     cmds:
-      - cargo run -p xtask --release -- corpus --compile --clippy {{.CLI_ARGS}}
+      - cargo run -p xtask --release -- corpus --compile --clippy --packaging workspace {{.CLI_ARGS}}
 
   corpus:snapshots:
     desc: "re-record every document's diagnostics snapshot (read the diff first)"

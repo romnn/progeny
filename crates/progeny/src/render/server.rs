@@ -274,7 +274,7 @@ fn response_enum(
         }
     });
     let empty_match = (arms.is_empty() && operation.responses.default.is_none())
-        .then(|| quote! { Self::NoContent => support::router::respond_json(204u16, &()), });
+        .then(|| quote! { Self::NoContent => support::respond_json(204u16, &()), });
 
     quote! {
         #[doc = #doc]
@@ -300,13 +300,13 @@ fn response_enum(
 fn response(arm: &ResponseArm, status: &TokenStream, body: &TokenStream) -> TokenStream {
     match &arm.body {
         ResponseBody::Json(_) | ResponseBody::Empty => {
-            quote! { support::router::respond_json(#status, &#body) }
+            quote! { support::respond_json(#status, &#body) }
         }
         ResponseBody::Text { content_type } => {
-            quote! { support::router::respond_text(#status, #content_type, *#body) }
+            quote! { support::respond_text(#status, #content_type, *#body) }
         }
         ResponseBody::Bytes { content_type } => {
-            quote! { support::router::respond_bytes(#status, #content_type, *#body) }
+            quote! { support::respond_bytes(#status, #content_type, *#body) }
         }
     }
 }
@@ -446,7 +446,7 @@ fn handler_fn(operation: &OperationContract) -> TokenStream {
         quote! {
             // Taken apart once, so a fourteen-parameter operation makes one pass over the query
             // string rather than fourteen.
-            let incoming = support::router::receive(request).await;
+            let incoming = support::receive(request).await;
         }
     });
     let unused = extractions.is_empty().then(|| quote! { let _ = request; });
@@ -470,17 +470,17 @@ fn handler_fn(operation: &OperationContract) -> TokenStream {
 fn body_extraction(body: &BodyContract, operation: &str) -> TokenStream {
     let required = body.required();
     let read = match body {
-        BodyContract::Json { .. } => quote! { support::router::json_body(incoming).await },
+        BodyContract::Json { .. } => quote! { support::json_body(incoming).await },
         BodyContract::Form { specs, .. } => {
             let specs = super::client::form_specs(specs);
-            quote! { support::router::form_body(incoming, #specs).await }
+            quote! { support::form_body(incoming, #specs).await }
         }
         BodyContract::Multipart { parts, .. } => {
             let specs = super::client::part_specs(parts);
-            quote! { support::router::multipart_body(incoming, #specs).await }
+            quote! { support::multipart_body(incoming, #specs).await }
         }
-        BodyContract::Text { .. } => quote! { support::router::text_body(incoming).await },
-        BodyContract::Bytes { .. } => quote! { support::router::byte_body(incoming).await },
+        BodyContract::Text { .. } => quote! { support::text_body(incoming).await },
+        BodyContract::Bytes { .. } => quote! { support::byte_body(incoming).await },
     };
     let reader = if required {
         quote! { support::required_body }

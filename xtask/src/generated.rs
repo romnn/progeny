@@ -66,20 +66,26 @@ pub fn write(name: &str, output: &Output) -> eyre::Result<Utf8PathBuf> {
             std::fs::create_dir_all(parent).wrap_err_with(|| format!("creating {parent}"))?;
         }
         let contents = if path == Utf8Path::new("Cargo.toml") {
-            // The scratch crate sits inside this repository's directory tree, so cargo would try to
-            // read it as a workspace member. An empty `[workspace]` table detaches it. Appended
-            // here rather than emitted by the renderer: a real generated crate has no business
-            // carrying a marker that only this harness needs.
-            indoc::formatdoc! {"
-                {contents}
-                [workspace]
-            "}
+            detached_manifest(contents)
         } else {
             contents.clone()
         };
         std::fs::write(&full, contents).wrap_err_with(|| format!("writing {full}"))?;
     }
     Ok(directory)
+}
+
+fn detached_manifest(contents: &str) -> String {
+    if contents.lines().any(|line| line.trim() == "[workspace]") {
+        return contents.to_owned();
+    }
+    // The scratch crate sits inside this repository's directory tree, so cargo would try to read it
+    // as a workspace member. An empty table detaches it. A generated workspace already carries its
+    // own table, and a duplicate would make that manifest invalid.
+    indoc::formatdoc! {"
+        {contents}
+        [workspace]
+    "}
 }
 
 /// Append the wire harness's test dependencies and write its integration test.
@@ -218,5 +224,20 @@ mod tests {
             .find(|(key, _)| *key == std::ffi::OsStr::new("CARGO_BUILD_JOBS"))
             .and_then(|(_, value)| value);
         assert_eq!(jobs, Some(std::ffi::OsStr::new("1")));
+    }
+
+    #[test]
+    fn an_emitted_workspace_is_not_given_a_second_workspace_table() {
+        let manifest = indoc::indoc! {"
+            [workspace]
+            members = [\"types\"]
+        "};
+        assert_eq!(super::detached_manifest(manifest), manifest);
+        assert_eq!(
+            super::detached_manifest("[package]\nname = \"api\"\n")
+                .matches("[workspace]")
+                .count(),
+            1
+        );
     }
 }

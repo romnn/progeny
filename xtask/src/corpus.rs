@@ -73,6 +73,10 @@ pub struct Args {
     /// 56-line fixture, which is not a claim about the corpus.
     #[arg(long, value_name = "STRATEGY")]
     serde: Option<SerdeChoice>,
+
+    /// Which ahead-of-time packaging to compile. Ordinary corpus runs keep the crate default.
+    #[arg(long, value_name = "PACKAGING", requires = "compile")]
+    packaging: Option<PackagingChoice>,
 }
 
 /// The two serde strategies, as a command-line word.
@@ -93,6 +97,21 @@ impl From<SerdeChoice> for progeny::SerdeImpl {
         match choice {
             SerdeChoice::Derive => Self::DeriveAlways,
             SerdeChoice::HandWritten => Self::HandWrittenWhereEligible,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum PackagingChoice {
+    Crate,
+    Workspace,
+}
+
+impl From<PackagingChoice> for progeny::Packaging {
+    fn from(choice: PackagingChoice) -> Self {
+        match choice {
+            PackagingChoice::Crate => Self::Crate,
+            PackagingChoice::Workspace => Self::Workspace,
         }
     }
 }
@@ -585,6 +604,9 @@ fn check(
     let mut config = config_for(spec);
     if let Some(choice) = args.serde {
         config.serde_impl = choice.into();
+    }
+    if let Some(packaging) = args.packaging {
+        config.packaging = packaging.into();
     }
     let output = match progeny::generate(&bytes, &config) {
         Ok(output) => output,

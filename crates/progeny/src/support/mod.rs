@@ -54,6 +54,116 @@ const HTTP: &str = include_str!("http.rs");
 /// The serving runtime, compiled the same two ways: it names `axum`.
 const ROUTER: &str = include_str!("router.rs");
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ServerUse {
+    pub(crate) json: bool,
+    pub(crate) form: bool,
+    pub(crate) multipart: bool,
+    pub(crate) text: bool,
+    pub(crate) bytes: bool,
+    pub(crate) path: bool,
+    pub(crate) query: bool,
+    pub(crate) header: bool,
+    pub(crate) cookie: bool,
+    pub(crate) text_response: bool,
+    pub(crate) byte_response: bool,
+    pub(crate) styles: StyleUse,
+    pub(crate) parts: PartUse,
+}
+
+impl ServerUse {
+    const ALL: Self = Self {
+        json: true,
+        form: true,
+        multipart: true,
+        text: true,
+        bytes: true,
+        path: true,
+        query: true,
+        header: true,
+        cookie: true,
+        text_response: true,
+        byte_response: true,
+        styles: StyleUse::ALL,
+        parts: PartUse::ALL,
+    };
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ClientUse {
+    pub(crate) form: bool,
+    pub(crate) multipart: bool,
+    pub(crate) text_response: bool,
+    pub(crate) byte_response: bool,
+    pub(crate) query: bool,
+    pub(crate) path: bool,
+    pub(crate) matrix: bool,
+    pub(crate) header: bool,
+    pub(crate) cookie: bool,
+    pub(crate) styles: StyleUse,
+    pub(crate) parts: PartUse,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StyleUse {
+    pub(crate) form: bool,
+    pub(crate) simple: bool,
+    pub(crate) label: bool,
+    pub(crate) matrix: bool,
+    pub(crate) space_delimited: bool,
+    pub(crate) pipe_delimited: bool,
+    pub(crate) deep_object: bool,
+}
+
+impl StyleUse {
+    const ALL: Self = Self {
+        form: true,
+        simple: true,
+        label: true,
+        matrix: true,
+        space_delimited: true,
+        pipe_delimited: true,
+        deep_object: true,
+    };
+
+    fn contains(self, variant: &syn::Ident) -> bool {
+        match variant.to_string().as_str() {
+            "Form" => self.form,
+            "Simple" => self.simple,
+            "Label" => self.label,
+            "Matrix" => self.matrix,
+            "SpaceDelimited" => self.space_delimited,
+            "PipeDelimited" => self.pipe_delimited,
+            "DeepObject" => self.deep_object,
+            _ => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PartUse {
+    pub(crate) text: bool,
+    pub(crate) file: bool,
+    pub(crate) json: bool,
+}
+
+impl PartUse {
+    const ALL: Self = Self {
+        text: true,
+        file: true,
+        json: true,
+    };
+
+    fn contains(self, variant: &syn::Ident) -> bool {
+        match variant.to_string().as_str() {
+            "Text" => self.text,
+            "File" => self.file,
+            "Json" => self.json,
+            _ => true,
+        }
+    }
+}
+
 /// The support source as tokens, so it composes with the rendered items.
 ///
 /// Parsed rather than pasted so that a syntax error in the shipped source is a progeny test failure
@@ -67,15 +177,106 @@ pub(crate) fn tokens(
     body_limit: crate::config::BodyLimit,
 ) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
+    let edges = edge_tokens(
+        Edge {
+            client,
+            server,
+            gated,
+            precise: false,
+        },
+        body_limit,
+        ClientUse::default(),
+        ServerUse::ALL,
+    );
+    quote::quote! {
+        #buffered
+        #edges
+    }
+}
+
+/// Support owned by a generated types crate.
+pub(crate) fn types_tokens() -> proc_macro2::TokenStream {
+    source(BUFFERED)
+}
+
+/// Support owned by a generated client crate.
+pub(crate) fn client_tokens(used: ClientUse) -> proc_macro2::TokenStream {
+    edge_tokens(
+        Edge::CLIENT,
+        crate::config::BodyLimit::default(),
+        used,
+        ServerUse::default(),
+    )
+}
+
+/// Support owned by a generated server crate.
+pub(crate) fn server_tokens(
+    body_limit: crate::config::BodyLimit,
+    used: ServerUse,
+) -> proc_macro2::TokenStream {
+    edge_tokens(Edge::SERVER, body_limit, ClientUse::default(), used)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Edge {
+    client: bool,
+    server: bool,
+    gated: bool,
+    precise: bool,
+}
+
+impl Edge {
+    const CLIENT: Self = Self {
+        client: true,
+        server: false,
+        gated: false,
+        precise: true,
+    };
+    const SERVER: Self = Self {
+        client: false,
+        server: true,
+        gated: false,
+        precise: true,
+    };
+}
+
+fn edge_tokens(
+    edge: Edge,
+    body_limit: crate::config::BodyLimit,
+    client_use: ClientUse,
+    server_use: ServerUse,
+) -> proc_macro2::TokenStream {
+    let Edge {
+        client,
+        server,
+        gated,
+        precise,
+    } = edge;
     if !client && !server {
-        return buffered;
+        return proc_macro2::TokenStream::new();
     }
     // The shipped tree keeps **progeny's own module layout**: `style` and `multipart` are submodules
     // here and submodules there, so a path that resolves while progeny compiles resolves in the
     // consumer's crate too. Flattening them was a standing chance for the two to disagree, and the
     // disagreement would surface as a compile error in somebody else's build.
-    let style = items(STYLE);
-    let multipart = items(MULTIPART);
+    let style = if precise {
+        client
+            .then(|| style_source(STYLE, Some(client_use), None))
+            .or_else(|| server.then(|| style_source(STYLE, None, Some(server_use))))
+    } else {
+        Some(source(STYLE))
+    };
+    let multipart = if precise && client && !client_use.multipart {
+        None
+    } else if precise {
+        client
+            .then(|| multipart_source(MULTIPART, true, client_use.parts))
+            .or_else(|| server.then(|| multipart_source(MULTIPART, false, server_use.parts)))
+    } else {
+        Some(source(MULTIPART))
+    };
+    let style = style.map(|style| quote::quote! { pub mod style { #style } });
+    let multipart = multipart.map(|multipart| quote::quote! { pub mod multipart { #multipart } });
 
     // Gated only in crate mode. A module tree is `include!`d into somebody else's crate, which has
     // no `client` feature to speak of and never asked for one; the caller opted in by configuring
@@ -87,22 +288,22 @@ pub(crate) fn tokens(
     // items that name one — putting each in its own module is what lets one attribute cover all of
     // them rather than one per item.
     let wire = client.then(|| {
-        let wire = items(HTTP);
+        let wire = client_source(HTTP, client_use);
         quote::quote! {
             #calling
-            pub mod wire { #(#wire)* }
+            pub mod wire { #wire }
             #calling
             pub use wire::*;
         }
     });
     let serve = server.then(|| {
-        let serve = items(SERVE);
-        let router = with_body_limit(items(ROUTER), body_limit);
+        let serve = source(SERVE);
+        let router = with_body_limit(ROUTER, body_limit, server_use);
         quote::quote! {
             #serving
-            pub mod serve { #(#serve)* }
+            pub mod serve { #serve }
             #serving
-            pub mod router { #(#router)* }
+            pub mod router { #router }
             #serving
             pub use serve::*;
             #serving
@@ -111,11 +312,9 @@ pub(crate) fn tokens(
     });
 
     quote::quote! {
-        #buffered
+        #style
 
-        pub mod style { #(#style)* }
-
-        pub mod multipart { #(#multipart)* }
+        #multipart
 
         #wire
         #serve
@@ -136,17 +335,86 @@ pub(crate) fn tokens(
 /// adding a second rewrite beside this one. Building that module today, for one knob, would be the
 /// speculative generality this project refuses everywhere else.
 fn with_body_limit(
-    items: Vec<syn::Item>,
+    text: &str,
     limit: crate::config::BodyLimit,
-) -> impl Iterator<Item = syn::Item> {
+    used: ServerUse,
+) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
     let bytes = limit.0;
-    items.into_iter().map(move |item| match item {
-        syn::Item::Const(mut konst) if konst.ident == "BODY_LIMIT" => {
-            konst.expr = Box::new(syn::parse_quote! { #bytes });
-            syn::Item::Const(konst)
-        }
-        other => other,
-    })
+    file.items = file
+        .items
+        .into_iter()
+        .filter(|item| !is_test_module(item))
+        .map(|mut item| match &mut item {
+            syn::Item::Const(konst) if konst.ident == "BODY_LIMIT" => {
+                *konst.expr = syn::parse_quote! { #bytes };
+                item
+            }
+            syn::Item::Fn(function) => {
+                if let Some(kind) = unused_body_reader(&function.sig.ident, used) {
+                    let reason = format!("this description declares no {kind} request body");
+                    function
+                        .attrs
+                        .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                }
+                if let Some(kind) = unused_response_writer(&function.sig.ident, used) {
+                    let reason = format!("this description declares no {kind} response body");
+                    function
+                        .attrs
+                        .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                }
+                item
+            }
+            syn::Item::Impl(implementation) => {
+                for implementation_item in &mut implementation.items {
+                    let syn::ImplItem::Fn(function) = implementation_item else {
+                        continue;
+                    };
+                    if let Some(location) = unused_parameter_reader(&function.sig.ident, used) {
+                        let reason = format!("this description declares no {location} parameter");
+                        function
+                            .attrs
+                            .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+                    }
+                }
+                item
+            }
+            _ => item,
+        })
+        .collect();
+    quote::quote! { #file }
+}
+
+fn unused_body_reader(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
+    match name.to_string().as_str() {
+        "json_body" if !used.json => Some("JSON"),
+        "form_body" if !used.form => Some("form-urlencoded"),
+        "multipart_body" if !used.multipart => Some("multipart"),
+        "text_body" if !used.text => Some("text"),
+        "byte_body" if !used.bytes => Some("raw-byte"),
+        _ => None,
+    }
+}
+
+fn unused_parameter_reader(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
+    match name.to_string().as_str() {
+        "path_value" if !used.path => Some("path"),
+        "query_value" if !used.query => Some("query"),
+        "header_value" if !used.header => Some("header"),
+        "cookie_value" if !used.cookie => Some("cookie"),
+        _ => None,
+    }
+}
+
+fn unused_response_writer(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
+    match name.to_string().as_str() {
+        "respond_text" if !used.text_response => Some("text"),
+        "respond_bytes" if !used.byte_response => Some("raw-byte"),
+        "respond_raw" if !used.text_response && !used.byte_response => Some("non-JSON"),
+        _ => None,
+    }
 }
 
 /// One shipped file as tokens, without the tests that verify it here.
@@ -161,12 +429,191 @@ fn source(text: &str) -> proc_macro2::TokenStream {
     quote::quote! { #file }
 }
 
+fn client_source(text: &str, used: ClientUse) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    file.items.retain(|item| !is_test_module(item));
+    for item in &mut file.items {
+        match item {
+            syn::Item::Struct(structure) if structure.ident == "NotAForm" && !used.multipart => {
+                expect_dead_code(
+                    &mut structure.attrs,
+                    "this description declares no multipart request body",
+                );
+            }
+            syn::Item::Fn(function) => match function.sig.ident.to_string().as_str() {
+                "to_value" if !used.form && !used.multipart => expect_dead_code(
+                    &mut function.attrs,
+                    "this description declares no form or multipart request body",
+                ),
+                "decode_text" if !used.text_response => expect_dead_code(
+                    &mut function.attrs,
+                    "this description declares no text response body",
+                ),
+                "decode_bytes" if !used.byte_response => expect_dead_code(
+                    &mut function.attrs,
+                    "this description declares no raw-byte response body",
+                ),
+                _ => {}
+            },
+            syn::Item::Impl(implementation)
+                if impl_type_is(implementation, "NotAForm") && !used.multipart =>
+            {
+                for implementation_item in &mut implementation.items {
+                    if let syn::ImplItem::Fn(function) = implementation_item
+                        && function.sig.ident == "new"
+                    {
+                        expect_dead_code(
+                            &mut function.attrs,
+                            "this description declares no multipart request body",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    quote::quote! { #file }
+}
+
+fn impl_type_is(implementation: &syn::ItemImpl, expected: &str) -> bool {
+    let syn::Type::Path(path) = implementation.self_ty.as_ref() else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == expected)
+}
+
+fn expect_dead_code(attributes: &mut Vec<syn::Attribute>, reason: &str) {
+    attributes.push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
+}
+
+fn style_source(
+    text: &str,
+    client: Option<ClientUse>,
+    server: Option<ServerUse>,
+) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    remove_dead_code_file_expectation(&mut file);
+    file.items.retain(|item| !is_test_module(item));
+    for item in &mut file.items {
+        match item {
+            syn::Item::Fn(function)
+                if !style_function_used(&function.sig.ident, client, server) =>
+            {
+                expect_dead_code(
+                    &mut function.attrs,
+                    "this generated edge does not call this serialization direction",
+                );
+            }
+            syn::Item::Enum(enumeration) if enumeration.ident == "Style" => {
+                let mut styles = client.map_or_else(
+                    || server.map_or(StyleUse::ALL, |used| used.styles),
+                    |used| used.styles,
+                );
+                // Both directions construct the default form and compare against deep-object
+                // inside the shared table itself, even when the generated API never writes either
+                // variant explicitly.
+                styles.form = true;
+                styles.deep_object = true;
+                for variant in &mut enumeration.variants {
+                    if !styles.contains(&variant.ident) {
+                        expect_dead_code(
+                            &mut variant.attrs,
+                            "this description does not use this parameter style",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    quote::quote! { #file }
+}
+
+fn style_function_used(
+    name: &syn::Ident,
+    client: Option<ClientUse>,
+    server: Option<ServerUse>,
+) -> bool {
+    match name.to_string().as_str() {
+        "query_pairs" => client.is_some_and(|used| used.query),
+        "form_body" => client.is_some_and(|used| used.form),
+        "from_query" => server.is_some_and(|used| used.query),
+        "query_object" => server.is_some_and(|used| used.form),
+        "path_segment" => client.is_some_and(|used| used.path),
+        "matrix_segment" => client.is_some_and(|used| used.matrix),
+        "header_value" => client.is_some_and(|used| used.header),
+        "cookie_pair" => client.is_some_and(|used| used.cookie),
+        _ => true,
+    }
+}
+
+fn multipart_source(text: &str, client: bool, mut parts: PartUse) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    remove_dead_code_file_expectation(&mut file);
+    file.items.retain(|item| !is_test_module(item));
+    // The shared runtime's inference path constructs both defaults. Only `File` depends entirely
+    // on the description emitting a corresponding `PartSpec`.
+    parts.text = true;
+    parts.json = true;
+    for item in &mut file.items {
+        match item {
+            syn::Item::Fn(function) => {
+                let opposite_direction = if client {
+                    matches!(
+                        function.sig.ident.to_string().as_str(),
+                        "boundary_of" | "parse"
+                    )
+                } else {
+                    function.sig.ident == "body"
+                };
+                if opposite_direction {
+                    expect_dead_code(
+                        &mut function.attrs,
+                        "this generated edge does not call this multipart direction",
+                    );
+                }
+            }
+            syn::Item::Enum(enumeration) if enumeration.ident == "PartKind" => {
+                for variant in &mut enumeration.variants {
+                    if !parts.contains(&variant.ident) {
+                        expect_dead_code(
+                            &mut variant.attrs,
+                            "this description does not use this multipart part kind",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    quote::quote! { #file }
+}
+
+fn remove_dead_code_file_expectation(file: &mut syn::File) {
+    file.attrs.retain(|attribute| {
+        !(attribute.path().is_ident("cfg_attr")
+            && quote::quote! { #attribute }
+                .to_string()
+                .contains("dead_code"))
+    });
+}
+
 /// The same, as items alone.
 ///
 /// A file's own `#![doc]` and `#![expect]` are *inner* attributes, and inner attributes may only
 /// open a block. Two files nested into one module would put the second file's inner attributes
 /// after the first file's items, which is not Rust — and the failure is quiet, because the renderer
 /// falls back to emitting unparsed tokens rather than failing a build.
+#[cfg(test)]
 fn items(text: &str) -> Vec<syn::Item> {
     let Ok(file) = syn::parse_file(text) else {
         return Vec::new();

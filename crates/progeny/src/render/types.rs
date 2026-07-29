@@ -25,9 +25,10 @@ pub(super) fn render(
     contracts: &Contracts,
     api: &ApiModel,
     api_modules: bool,
+    external_api_modules: bool,
     config: &Config,
 ) -> TokenStream {
-    let deprecated = deprecated_aliases(contracts, api, api_modules);
+    let deprecated = deprecated_aliases(contracts, api, api_modules, external_api_modules);
     let items = contracts
         .types()
         .iter()
@@ -41,8 +42,18 @@ pub(super) fn render(
 /// warning. Generated derives and support code use these transparent aliases instead: procedural
 /// macro expansions cannot inherit a field's `#[expect]`, so aliases are the only way to keep those
 /// internal uses clean without a broad `#[allow(deprecated)]`.
-fn deprecated_aliases(contracts: &Contracts, api: &ApiModel, api_modules: bool) -> TokenStream {
+fn deprecated_aliases(
+    contracts: &Contracts,
+    api: &ApiModel,
+    api_modules: bool,
+    external_api_modules: bool,
+) -> TokenStream {
     let needed = deprecated_alias_names(contracts, api, api_modules);
+    let visibility = if external_api_modules {
+        quote! { pub }
+    } else {
+        quote! { pub(crate) }
+    };
     let aliases: Vec<TokenStream> = contracts
         .types()
         .iter()
@@ -56,7 +67,7 @@ fn deprecated_aliases(contracts: &Contracts, api: &ApiModel, api_modules: bool) 
                     deprecated,
                     reason = "generated internals need a non-deprecated path to this public contract"
                 )]
-                pub(crate) type #name = super::#name;
+                #visibility type #name = super::#name;
             }
         })
         .collect();
@@ -65,7 +76,7 @@ fn deprecated_aliases(contracts: &Contracts, api: &ApiModel, api_modules: bool) 
     }
     quote! {
         #[doc(hidden)]
-        pub(crate) mod __progeny_deprecated {
+        #visibility mod __progeny_deprecated {
             #(#aliases)*
         }
     }
