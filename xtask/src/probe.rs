@@ -143,11 +143,6 @@ fn render(krate: &str, plan: &Probe) -> String {
                 .setters
                 .iter()
                 .any(|setter| setter.ty.contains("types::"))
-            || operation
-                .response
-                .answer
-                .as_ref()
-                .is_some_and(|answer| answer.ty.contains("types::"))
     });
     let types_import = if uses_types {
         format!("use {krate}::types;")
@@ -210,6 +205,52 @@ fn render(krate: &str, plan: &Probe) -> String {
 /// One trait method on the double: presence assertions, then the synthesized response.
 fn handler(operation: &ProbeOp) -> String {
     let mut out = String::new();
+    let arguments = handler_arguments(operation);
+    out.push('\n');
+    if operation.body.as_ref().is_some_and(|body| body.deprecated) {
+        let _ = writeln!(
+            out,
+            "    #[expect(deprecated, reason = \"the probe deliberately implements an operation \
+             whose body type is deprecated\")]"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "    async fn {}(&self{arguments}) -> server::{} {{",
+        operation.method, operation.response.enum_name
+    );
+    if operation.skip.is_some() {
+        let _ = writeln!(out, "        unimplemented!(\"skipped by the probe plan\")");
+        out.push_str("    }\n");
+        return out;
+    }
+    // A plan with no skip carries an answer; the type makes reading a sentinel impossible, and
+    // this keeps an answerless method honest if that invariant ever moves.
+    let Some(answer) = &operation.response.answer else {
+        let _ = writeln!(
+            out,
+            "        unimplemented!(\"the plan carries no answer\")"
+        );
+        out.push_str("    }\n");
+        return out;
+    };
+    write_arrival_assertions(&mut out, operation);
+    let value = answer_value(answer);
+    let payload = if answer.boxed {
+        format!("Box::new({value})")
+    } else {
+        value
+    };
+    let _ = writeln!(
+        out,
+        "        server::{}::{}({payload})",
+        operation.response.enum_name, answer.variant,
+    );
+    out.push_str("    }\n");
+    out
+}
+
+fn handler_arguments(operation: &ProbeOp) -> String {
     let mut arguments = String::new();
     for group in &operation.groups {
         let arg = if operation.skip.is_some() || group.optional_fields.is_empty() {
@@ -233,27 +274,10 @@ fn handler(operation: &ProbeOp) -> String {
             let _ = write!(arguments, ", {arg}: ::std::option::Option<{}>", body.ty);
         }
     }
-    out.push('\n');
-    let _ = writeln!(
-        out,
-        "    async fn {}(&self{arguments}) -> server::{} {{",
-        operation.method, operation.response.enum_name
-    );
-    if operation.skip.is_some() {
-        let _ = writeln!(out, "        unimplemented!(\"skipped by the probe plan\")");
-        out.push_str("    }\n");
-        return out;
-    }
-    // A plan with no skip carries an answer; the type makes reading a sentinel impossible, and
-    // this keeps an answerless method honest if that invariant ever moves.
-    let Some(answer) = &operation.response.answer else {
-        let _ = writeln!(
-            out,
-            "        unimplemented!(\"the plan carries no answer\")"
-        );
-        out.push_str("    }\n");
-        return out;
-    };
+    arguments
+}
+
+fn write_arrival_assertions(out: &mut String, operation: &ProbeOp) {
     for group in &operation.groups {
         for field in &group.optional_fields {
             if field.deprecated {
@@ -294,23 +318,25 @@ fn handler(operation: &ProbeOp) -> String {
              the way to the handler\");"
         );
     }
-    let value = if answer.ty == "()" {
-        "()".to_owned()
-    } else {
-        format!("value::<{}>({})", answer.ty, json_literal(&answer.json))
-    };
-    let payload = if answer.boxed {
-        format!("Box::new({value})")
-    } else {
-        value
-    };
-    let _ = writeln!(
-        out,
-        "        server::{}::{}({payload})",
-        operation.response.enum_name, answer.variant,
-    );
-    out.push_str("    }\n");
-    out
+}
+
+fn answer_value(answer: &progeny::harness::ProbeAnswer) -> String {
+    match &answer.value {
+        progeny::harness::ProbeValue::Json { json } => {
+            format!("value({})", json_literal(json))
+        }
+        progeny::harness::ProbeValue::Text(text) => {
+            format!("{}.to_owned()", json_literal(text))
+        }
+        progeny::harness::ProbeValue::Bytes { ty, bytes } => {
+            if ty == "::bytes::Bytes" {
+                format!("::bytes::Bytes::from_static(&{:?})", bytes.as_slice())
+            } else {
+                format!("::std::vec!{:?}", bytes.as_slice())
+            }
+        }
+        progeny::harness::ProbeValue::Empty => "()".to_owned(),
+    }
 }
 
 /// One driver test: set every parameter, send, and expect the declared status back.
@@ -320,7 +346,10 @@ fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String
     let _ = writeln!(out, "#[test_util::test]");
     let _ = writeln!(out, "async fn probe_{}() {{", operation.method);
     let _ = writeln!(out, "    let client = serving().await?;");
-    if operation.deprecated || operation.setters.iter().any(|setter| setter.deprecated) {
+    if operation.deprecated
+        || operation.setters.iter().any(|setter| setter.deprecated)
+        || operation.body.as_ref().is_some_and(|body| body.deprecated)
+    {
         let _ = writeln!(
             out,
             "    #[expect(deprecated, reason = \"the probe deliberately calls this deprecated \

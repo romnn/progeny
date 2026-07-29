@@ -232,6 +232,16 @@ impl server::Api for Double {
         }
     }
 
+    async fn download_bytes(&self) -> server::DownloadBytesResponse {
+        server::DownloadBytesResponse::Ok(Box::new(vec![0, 255, b'{', b'\n']))
+    }
+
+    async fn download_text(&self) -> server::DownloadTextResponse {
+        server::DownloadTextResponse::Ok(Box::new(
+            "plain text\nthat is not JSON".to_owned(),
+        ))
+    }
+
     async fn rejection_probe(
         &self,
         path: server::RejectionProbePath,
@@ -265,6 +275,38 @@ async fn serving() -> eyre::Result<(Double, client::Client)> {
         let _ = axum::serve(listener, router).await;
     });
     Ok((double, client::Client::new(format!("http://{address}"))))
+}
+
+/// Start a hand-written raw server so the generated client cannot agree with its own renderer.
+async fn raw_serving() -> eyre::Result<client::Client> {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::routing::get;
+
+    let router = axum::Router::new()
+        .route(
+            "/download",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE, "application/octet-stream")],
+                    vec![0, 255, b'{', b'\n'],
+                )
+            }),
+        )
+        .route(
+            "/motd",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE, "text/plain")],
+                    "plain text\nthat is not JSON",
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok(client::Client::new(format!("http://{address}")))
 }
 
 #[test_util::test]
@@ -367,6 +409,45 @@ async fn a_declared_error_status_arrives_as_the_typed_error_it_was_sent_as() {
         .kind("neither")
         .send()
         .await?;
+}
+
+#[test_util::test]
+async fn the_client_reads_non_json_response_bodies_from_the_raw_wire() {
+    let client = raw_serving().await?;
+
+    let bytes = client.download_bytes().send().await?.into_value();
+    assert_eq!(bytes, [0, 255, b'{', b'\n']);
+
+    let text = client.download_text().send().await?.into_value();
+    assert_eq!(text, "plain text\nthat is not JSON");
+}
+
+#[test_util::test]
+async fn the_server_writes_declared_non_json_bodies_and_content_types() {
+    let (_, client) = serving().await?;
+    let raw = reqwest::Client::new();
+
+    let bytes = raw
+        .get(format!("{}/download", client.base_url()))
+        .send()
+        .await?;
+    assert_eq!(
+        bytes.headers().get(reqwest::header::CONTENT_TYPE),
+        Some(&reqwest::header::HeaderValue::from_static(
+            "application/octet-stream"
+        ))
+    );
+    assert_eq!(bytes.bytes().await?.as_ref(), [0, 255, b'{', b'\n']);
+
+    let text = raw
+        .get(format!("{}/motd", client.base_url()))
+        .send()
+        .await?;
+    assert_eq!(
+        text.headers().get(reqwest::header::CONTENT_TYPE),
+        Some(&reqwest::header::HeaderValue::from_static("text/plain"))
+    );
+    assert_eq!(text.text().await?, "plain text\nthat is not JSON");
 }
 
 #[test_util::test]

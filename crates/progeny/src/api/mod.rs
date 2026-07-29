@@ -252,10 +252,33 @@ pub(crate) struct ResponseContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResponseArm {
     pub(crate) status: StatusPattern,
-    pub(crate) ty: TypeRef,
+    pub(crate) body: ResponseBody,
     pub(crate) docs: Docs,
     /// The variant name this arm contributes to the response enum.
     pub(crate) rust_name: RustIdent,
+}
+
+/// What one response arm carries on the wire.
+///
+/// The kind owns the payload type where the wire has one, so a JSON decoder cannot accidentally be
+/// paired with a raw body. Text and bytes have no schema-derived Rust type: their wire kind decides
+/// the representation directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResponseBody {
+    Json(TypeRef),
+    Text { content_type: String },
+    Bytes { content_type: String },
+    Empty,
+}
+
+impl ResponseBody {
+    /// The schema-derived type reached by this response, when the response is JSON.
+    pub(crate) fn json_type(&self) -> Option<&TypeRef> {
+        match self {
+            Self::Json(ty) => Some(ty),
+            Self::Text { .. } | Self::Bytes { .. } | Self::Empty => None,
+        }
+    }
 }
 
 /// Which statuses an arm claims.

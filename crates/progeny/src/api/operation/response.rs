@@ -2,7 +2,7 @@
 
 use super::Build;
 use super::body::is_json;
-use crate::api::{ResponseArm, ResponseContract, StatusPattern};
+use crate::api::{ResponseArm, ResponseBody, ResponseContract, StatusPattern};
 use crate::contract::{Namer, RustIdent, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MaybeRef, Operation, Response};
@@ -76,29 +76,39 @@ impl Build<'_> {
             ));
             return ResponseArm {
                 status,
-                ty: TypeRef::Value,
+                body: ResponseBody::Json(TypeRef::Value),
                 docs: Docs::default(),
                 rust_name: used.unique(name),
             };
         };
 
-        let ty = match response.content.as_ref() {
+        let body = match response.content.as_ref() {
             // A response with no content is a status and nothing else: 204, and every arm that
             // says only what went wrong.
-            None => TypeRef::Unit,
+            None => ResponseBody::Empty,
             Some(content) => match Self::select(content, at, ctx) {
-                None => TypeRef::Unit,
-                Some((media_type, entry)) if is_json(media_type) => entry
-                    .schema
-                    .map_or(TypeRef::Value, |id| self.type_at(id))
-                    .clone(),
-                // A body progeny does not type yet arrives as bytes, which is what it is.
-                Some(_) => TypeRef::Vec(Box::new(TypeRef::U64)),
+                None => ResponseBody::Empty,
+                Some((media_type, entry)) if is_json(&media_type_stem(media_type)) => {
+                    ResponseBody::Json(
+                        entry
+                            .schema
+                            .map_or(TypeRef::Value, |id| self.type_at(id))
+                            .clone(),
+                    )
+                }
+                Some((media_type, _)) if media_type_stem(media_type).starts_with("text/") => {
+                    ResponseBody::Text {
+                        content_type: media_type.to_owned(),
+                    }
+                }
+                Some((media_type, _)) => ResponseBody::Bytes {
+                    content_type: media_type.to_owned(),
+                },
             },
         };
         ResponseArm {
             status,
-            ty,
+            body,
             docs: Docs {
                 description: response.description.clone(),
                 ..Docs::default()
@@ -106,6 +116,15 @@ impl Build<'_> {
             rust_name: used.unique(name),
         }
     }
+}
+
+fn media_type_stem(media_type: &str) -> String {
+    media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// A status key as a pattern, or nothing when it is neither.
@@ -155,8 +174,8 @@ mod tests {
     use serde_json::json;
 
     use super::parse_status;
-    use crate::api::StatusPattern;
     use crate::api::tests::{model_of, with_paths};
+    use crate::api::{ResponseBody, StatusPattern};
     use crate::contract::TypeRef;
 
     #[test_util::test]
@@ -189,7 +208,7 @@ mod tests {
         let responses = &model.operations()[0].responses;
         assert_eq!(responses.arms.len(), 2);
         assert_eq!(responses.arms[0].status, StatusPattern::Exact(200));
-        assert_eq!(responses.arms[0].ty, TypeRef::Value);
+        assert_eq!(responses.arms[0].body, ResponseBody::Json(TypeRef::Value));
         assert!(
             diagnostics
                 .iter()
@@ -227,5 +246,50 @@ mod tests {
         assert!(responses.default.is_some());
         assert_eq!(responses.arms[0].rust_name.as_str(), "Ok");
         assert_eq!(responses.arms[2].rust_name.as_str(), "Status2xx");
+    }
+
+    #[test_util::test]
+    fn each_response_arm_carries_the_wire_kind_selected_for_it() {
+        let (model, _) = model_of(with_paths(json!({
+            "/payloads": {
+                "get": {
+                    "operationId": "payloads",
+                    "responses": {
+                        "200": {"description": "json", "content": {
+                            "application/problem+json; charset=utf-8": {
+                                "schema": {"type": "boolean"}
+                            }
+                        }},
+                        "201": {"description": "text", "content": {
+                            "TEXT/PLAIN; charset=utf-8": {"schema": {"type": "string"}}
+                        }},
+                        "202": {"description": "bytes", "content": {
+                            "application/octet-stream": {
+                                "schema": {
+                                    "type": "string",
+                                    "contentMediaType": "application/octet-stream"
+                                }
+                            }
+                        }},
+                        "204": {"description": "empty"},
+                    },
+                },
+            },
+        })))?;
+        let arms = &model.operations()[0].responses.arms;
+        assert_eq!(arms[0].body, ResponseBody::Json(TypeRef::Bool));
+        assert_eq!(
+            arms[1].body,
+            ResponseBody::Text {
+                content_type: "TEXT/PLAIN; charset=utf-8".to_owned(),
+            }
+        );
+        assert_eq!(
+            arms[2].body,
+            ResponseBody::Bytes {
+                content_type: "application/octet-stream".to_owned(),
+            }
+        );
+        assert_eq!(arms[3].body, ResponseBody::Empty);
     }
 }

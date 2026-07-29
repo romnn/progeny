@@ -213,8 +213,8 @@ pub async fn byte_body(incoming: Incoming) -> Result<Option<Vec<u8>>, RequestErr
     incoming.bytes().await
 }
 
-/// One declared arm's reply.
-pub fn respond<T: ::serde::Serialize>(status: u16, body: &T) -> ::axum::response::Response {
+/// One declared JSON arm's reply.
+pub fn respond_json<T: ::serde::Serialize>(status: u16, body: &T) -> ::axum::response::Response {
     use ::axum::response::IntoResponse as _;
     let code = ::axum::http::StatusCode::from_u16(status)
         .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -235,6 +235,55 @@ pub fn respond<T: ::serde::Serialize>(status: u16, body: &T) -> ::axum::response
         )
             .into_response(),
     }
+}
+
+/// One declared text arm's reply.
+pub fn respond_text(
+    status: u16,
+    content_type: &'static str,
+    body: ::std::string::String,
+) -> ::axum::response::Response {
+    respond_raw(status, content_type, body)
+}
+
+/// One declared binary arm's reply.
+pub fn respond_bytes<T>(
+    status: u16,
+    content_type: &'static str,
+    body: T,
+) -> ::axum::response::Response
+where
+    T: ::axum::response::IntoResponse,
+{
+    respond_raw(status, content_type, body)
+}
+
+fn respond_raw<T>(status: u16, content_type: &'static str, body: T) -> ::axum::response::Response
+where
+    T: ::axum::response::IntoResponse,
+{
+    use ::axum::response::IntoResponse as _;
+
+    let code = ::axum::http::StatusCode::from_u16(status)
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    if code == ::axum::http::StatusCode::NO_CONTENT {
+        return code.into_response();
+    }
+    let Ok(content_type) = content_type.parse::<::axum::http::HeaderValue>() else {
+        return (
+            ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ::axum::Json(::serde_json::json!({
+                "message": "the declared response content type is not a valid HTTP header value",
+            })),
+        )
+            .into_response();
+    };
+    let mut response = body.into_response();
+    *response.status_mut() = code;
+    response
+        .headers_mut()
+        .insert(::axum::http::header::CONTENT_TYPE, content_type);
+    response
 }
 
 impl ::axum::response::IntoResponse for super::serve::RejectionResponse {

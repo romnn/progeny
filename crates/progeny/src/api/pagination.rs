@@ -196,10 +196,10 @@ fn success_arm(operation: &OperationContract) -> Option<(RustIdent, TypeRef)> {
         .iter()
         .filter(|arm| arm.status.is_success());
     let only = successes.next()?;
-    successes
-        .next()
-        .is_none()
-        .then(|| (only.rust_name.clone(), only.ty.clone()))
+    if successes.next().is_some() {
+        return None;
+    }
+    Some((only.rust_name.clone(), only.body.json_type()?.clone()))
 }
 
 /// Follow a dotted path of wire names through named struct types.

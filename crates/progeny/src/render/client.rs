@@ -25,12 +25,15 @@ use quote::{format_ident, quote};
 
 use crate::api::{
     ApiModel, BodyContract, FormSpec, Location, OperationContract, ParamContract, PartKind,
-    PartSpec, Piece, ResponseArm, Style,
+    PartSpec, Piece, ResponseArm, ResponseBody, Style,
 };
 use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent};
 
-use super::types::{docs as docs_of, enum_type_is_boxed, enum_type_path, type_path as type_tokens};
+use super::types::{
+    docs as docs_of, response_body_is_boxed, response_enum_type_path, response_type_path,
+    type_path as type_tokens,
+};
 
 /// Render the client module.
 pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -> TokenStream {
@@ -176,7 +179,13 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
 
     let success = success_type(operation, contracts, config);
     let failure = error_type(operation, contracts, config);
-    let send = send(operation, &success.name, &failure.name, operation_name);
+    let send = send(
+        operation,
+        &success.name,
+        &failure.name,
+        operation_name,
+        config,
+    );
     let stream = stream(operation, contracts, config);
 
     let success_decl = &success.declaration;
@@ -377,7 +386,7 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             declaration: TokenStream::new(),
         },
         [only] => Rendered {
-            name: type_tokens(&only.ty, contracts, config),
+            name: response_type_path(&only.body, contracts, config),
             declaration: TokenStream::new(),
         },
         several => {
@@ -392,7 +401,7 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             );
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
-                let ty = enum_type_path(&arm.ty, contracts, config);
+                let ty = response_enum_type_path(&arm.body, contracts, config);
                 let docs = docs_of(&arm.docs);
                 quote! { #docs #variant(#ty), }
             });
@@ -457,7 +466,7 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             declaration: TokenStream::new(),
         },
         [only] => Rendered {
-            name: type_tokens(&only.ty, contracts, config),
+            name: response_type_path(&only.body, contracts, config),
             declaration: TokenStream::new(),
         },
         several => {
@@ -472,7 +481,7 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             );
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
-                let ty = enum_type_path(&arm.ty, contracts, config);
+                let ty = response_enum_type_path(&arm.body, contracts, config);
                 let docs = docs_of(&arm.docs);
                 quote! { #docs #variant(#ty), }
             });
@@ -498,13 +507,14 @@ fn send(
     success: &TokenStream,
     failure: &TokenStream,
     operation_name: &str,
+    config: &Config,
 ) -> TokenStream {
     let method = format_ident!("{}", operation.method.wire());
     let path = path_expression(operation, operation_name);
     let query = query(operation);
     let headers = headers(operation);
     let body = request_body(operation, operation_name);
-    let dispatch = dispatch(operation, success, failure);
+    let dispatch = dispatch(operation, success, failure, config);
     // `mut` only where something actually reassigns it: a generated crate is checked with warnings
     // denied, so an unnecessary `mut` is a defect a consumer sees rather than a wart nobody reads.
     let mutability =
@@ -831,6 +841,7 @@ fn dispatch(
     operation: &OperationContract,
     success: &TokenStream,
     failure: &TokenStream,
+    config: &Config,
 ) -> TokenStream {
     let successes: Vec<&ResponseArm> = operation
         .responses
@@ -855,8 +866,8 @@ fn dispatch(
     // claiming success as well does not stop `_ =>` from decoding through it.
     let wrapped_failure = failures.len() + usize::from(operation.responses.default.is_some()) > 1;
 
-    let success_arms = arm_matches(&successes, success, successes.len() > 1, false);
-    let failure_arms = arm_matches(&failures, failure, wrapped_failure, true);
+    let success_arms = arm_matches(&successes, success, successes.len() > 1, false, config);
+    let failure_arms = arm_matches(&failures, failure, wrapped_failure, true, config);
     let ranges: BTreeSet<u8> = operation
         .responses
         .arms
@@ -888,13 +899,13 @@ fn dispatch(
         (None, _) => quote! { _ => ::std::result::Result::Err(Error::UnexpectedStatus(response)), },
         // A `default` beside declared successes catches what they do not, which is a failure.
         (Some(arm), false) => {
-            let decoded = decode(arm, failure, wrapped_failure);
+            let decoded = decode(arm, failure, wrapped_failure, config);
             quote! { _ => ::std::result::Result::Err(Error::Declared(#decoded)), }
         }
         // A `default` and nothing else: it is the whole contract, so a 2xx through it succeeded.
         (Some(arm), true) => {
-            let ok = decode(arm, success, false);
-            let err = decode(arm, failure, wrapped_failure);
+            let ok = decode(arm, success, false, config);
+            let err = decode(arm, failure, wrapped_failure, config);
             quote! {
                 200..=299 => ::std::result::Result::Ok(#ok),
                 _ => ::std::result::Result::Err(Error::Declared(#err)),
@@ -920,6 +931,7 @@ fn arm_matches(
     ty: &TokenStream,
     wrapped: bool,
     is_error: bool,
+    config: &Config,
 ) -> Vec<TokenStream> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -937,7 +949,7 @@ fn arm_matches(
                 quote! { #low..=#high }
             }
         };
-        let decoded = decode(arm, ty, wrapped);
+        let decoded = decode(arm, ty, wrapped, config);
         out.push(if is_error {
             quote! {
                 #pattern => ::std::result::Result::Err(Error::Declared(#decoded)),
@@ -953,19 +965,34 @@ fn arm_matches(
 ///
 /// Written as a `map` over the response rather than as a `let` and a rebuild, so the body is never
 /// bound to a name: a `204` arm's body is `()`, and binding a unit is a lint the consumer sees.
-fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool) -> TokenStream {
+fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool, config: &Config) -> TokenStream {
+    let decoded = match &arm.body {
+        ResponseBody::Json(_) | ResponseBody::Empty => {
+            quote! { support::decode_json(response).await? }
+        }
+        ResponseBody::Text { .. } => quote! { support::decode_text(response).await? },
+        ResponseBody::Bytes { .. } => match config.formats.bytes {
+            BytesRepr::Vec => quote! { support::decode_bytes(response).await? },
+            BytesRepr::Bytes => {
+                quote! {
+                    support::decode_bytes(response).await?
+                        .map(::bytes::Bytes::from)
+                }
+            }
+        },
+    };
     if !wrapped {
-        return quote! { support::decode(response).await? };
+        return decoded;
     }
     let variant = format_ident!("{}", arm.rust_name.as_str());
-    if enum_type_is_boxed(&arm.ty) {
+    if response_body_is_boxed(&arm.body) {
         quote! {
-            support::decode(response).await?
+            #decoded
                 .map(::std::boxed::Box::new)
                 .map(#ty::#variant)
         }
     } else {
-        quote! { support::decode(response).await?.map(#ty::#variant) }
+        quote! { #decoded.map(#ty::#variant) }
     }
 }
 

@@ -126,6 +126,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /download:
+    get:
+      operationId: downloadBytes
+      summary: Download raw bytes
+      responses:
+        "200":
+          description: Raw bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+  /motd:
+    get:
+      operationId: downloadText
+      summary: Download text
+      responses:
+        "200":
+          description: Verbatim text
+          content:
+            text/plain:
+              schema:
+                type: string
   /rejection-probe/{id}:
     post:
       operationId: rejectionProbe

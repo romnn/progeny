@@ -549,6 +549,21 @@ fn check(
     if args.stats
         && let Ok(stats) = harness::stats(&bytes)
     {
+        if stats.text_response_arms + stats.byte_response_arms > 0 {
+            println!(
+                "  response bodies: {}: {} text, {} bytes",
+                spec.name, stats.text_response_arms, stats.byte_response_arms
+            );
+        }
+        if stats.byte_request_bodies + stats.multipart_file_request_bodies > 0 {
+            println!(
+                "  upload bodies: {}: {} raw bytes, {} multipart with {} file parts",
+                spec.name,
+                stats.byte_request_bodies,
+                stats.multipart_file_request_bodies,
+                stats.multipart_file_parts
+            );
+        }
         totals.merge(&stats);
         *counted += 1;
     }
@@ -914,6 +929,19 @@ fn report_stats(totals: &Stats, documents: usize) {
     println!(
         "  responses with headers      {} ({} headers)",
         totals.responses_with_headers, totals.response_headers
+    );
+    println!(
+        "  selected response arms      {} JSON, {} text, {} bytes, {} empty",
+        totals.json_response_arms,
+        totals.text_response_arms,
+        totals.byte_response_arms,
+        totals.empty_response_arms
+    );
+    println!(
+        "  large-upload candidates     {} raw-byte bodies, {} multipart bodies with {} file parts",
+        totals.byte_request_bodies,
+        totals.multipart_file_request_bodies,
+        totals.multipart_file_parts
     );
     println!("  external $refs              {}", totals.external_refs);
     println!("  $dynamicRef/$dynamicAnchor  {}", totals.dynamic_scoping);

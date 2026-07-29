@@ -132,7 +132,9 @@ fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, 
             .iter()
             .chain(&operation.responses.default)
         {
-            seed(&arm.ty, &mut responses);
+            if let Some(ty) = arm.body.json_type() {
+                seed(ty, &mut responses);
+            }
         }
     }
 

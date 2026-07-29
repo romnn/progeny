@@ -15,7 +15,9 @@
 //! type with no optional escape, a success the document never declares — is a *named skip*, counted
 //! out loud, never a silent cap.
 
-use crate::api::{BodyContract, Location, OperationContract, StatusPattern};
+use crate::api::{
+    BodyContract, Location, OperationContract, ResponseArm, ResponseBody, StatusPattern,
+};
 use crate::config::Config;
 use crate::contract::{ContractKind, Contracts, TypeIndex, TypeRef};
 use crate::diag::{Ctx, RejectError};
@@ -74,6 +76,8 @@ pub struct ProbeField {
 pub struct ProbeBody {
     /// The Rust path of the body type, spelled from inside the generated crate.
     pub ty: String,
+    /// Whether naming the body type deliberately exercises deprecated API.
+    pub deprecated: bool,
     /// A JSON value of that type, synthesized from its contract.
     pub json: String,
     /// Whether the document marked it required. An optional body reaches the trait as an
@@ -115,14 +119,33 @@ pub struct ProbeResponse {
 pub struct ProbeAnswer {
     /// The variant for the arm the double answers with.
     pub variant: String,
-    /// The Rust path of the arm's payload type.
-    pub ty: String,
     /// Whether the response enum indirects this non-unit payload.
     pub boxed: bool,
-    /// A JSON value of that payload.
-    pub json: String,
+    /// The payload in the native representation its response arm carries.
+    pub value: ProbeValue,
     /// The status the client must see.
     pub status: u16,
+}
+
+/// A synthesized response payload, distinguished by its wire representation.
+#[derive(Debug, Clone)]
+pub enum ProbeValue {
+    /// A schema-derived value serialized as JSON.
+    Json {
+        /// A JSON value of that type.
+        json: String,
+    },
+    /// Text written verbatim.
+    Text(String),
+    /// Bytes written without JSON serialization.
+    Bytes {
+        /// The configured Rust byte representation.
+        ty: String,
+        /// The raw octets.
+        bytes: Vec<u8>,
+    },
+    /// No response body.
+    Empty,
 }
 
 /// Build the probe plan for one document.
@@ -152,8 +175,6 @@ pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
 
 /// The plan for one servable operation, with the reason when it cannot be driven.
 fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -> ProbeOp {
-    let path = |ty: &TypeRef| test_path(&render::types::type_path(ty, contracts, config));
-
     let groups = render::server::LOCATIONS
         .iter()
         .filter_map(|&(location, suffix)| {
@@ -179,10 +200,14 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         })
         .collect();
 
-    let body = operation.body.as_ref().map(|body| ProbeBody {
-        ty: test_path(&render::client::body_type(body, contracts, config)),
-        json: String::new(),
-        required: body.required(),
+    let body = operation.body.as_ref().map(|body| {
+        let (ty, deprecated) = test_type(&render::client::body_type(body, contracts, config));
+        ProbeBody {
+            ty,
+            deprecated,
+            json: String::new(),
+            required: body.required(),
+        }
     });
 
     // Skips are decided after the signature is known, because the double has to *implement* a
@@ -218,27 +243,12 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         planned
     });
 
-    let answer = if let Some((variant, ty, status)) = success_arm(operation) {
-        match synthesize(&ty, contracts, &mut Vec::new()) {
-            Ok(value) => Some(ProbeAnswer {
-                variant,
-                ty: path(&ty),
-                boxed: crate::render::types::enum_type_is_boxed(&ty),
-                json: value.to_string(),
-                status,
-            }),
-            Err(reason) => {
-                skip.get_or_insert(format!("the response cannot be synthesized: {reason}"));
-                None
-            }
+    let answer = match probe_answer(operation, contracts, config) {
+        Ok(answer) => Some(answer),
+        Err(reason) => {
+            skip.get_or_insert(reason);
+            None
         }
-    } else {
-        skip.get_or_insert(
-            "no declared success status; only `default` or errors, and which status a `default` \
-             answers with is the handler's choice rather than the description's"
-                .to_owned(),
-        );
-        None
     };
     let response = ProbeResponse {
         enum_name: render::server::response_name(operation).to_string(),
@@ -256,6 +266,39 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
     }
 }
 
+fn probe_answer(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> Result<ProbeAnswer, String> {
+    let (arm, status) = success_arm(operation).ok_or_else(|| {
+        "no declared success status; only `default` or errors, and which status a `default` answers \
+         with is the handler's choice rather than the description's"
+            .to_owned()
+    })?;
+    let value = match &arm.body {
+        ResponseBody::Json(ty) => ProbeValue::Json {
+            json: synthesize(ty, contracts, &mut Vec::new())
+                .map_err(|reason| format!("the response cannot be synthesized: {reason}"))?
+                .to_string(),
+        },
+        ResponseBody::Text { .. } => ProbeValue::Text("probe".to_owned()),
+        ResponseBody::Bytes { .. } => ProbeValue::Bytes {
+            ty: test_path(&render::types::response_type_path(
+                &arm.body, contracts, config,
+            )),
+            bytes: b"probe".to_vec(),
+        },
+        ResponseBody::Empty => ProbeValue::Empty,
+    };
+    Ok(ProbeAnswer {
+        variant: arm.rust_name.as_str().to_owned(),
+        boxed: crate::render::types::response_body_is_boxed(&arm.body),
+        value,
+        status,
+    })
+}
+
 /// A rendered type path, as the probe's test file spells it.
 ///
 /// The renderer writes `super::types::X` because `client` and `server` are sibling modules of
@@ -264,10 +307,17 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
 /// owns the original spelling — the consumer once patched it back with its own string
 /// replacement, and a changed qualification would have slipped past that silently.
 fn test_path(rendered: &proc_macro2::TokenStream) -> String {
-    rendered
-        .to_string()
+    test_type(rendered).0
+}
+
+fn test_type(rendered: &proc_macro2::TokenStream) -> (String, bool) {
+    let rendered = rendered.to_string();
+    let deprecated = rendered.contains("super :: types :: __progeny_deprecated :: ");
+    let path = rendered
+        .replace("super :: types :: __progeny_deprecated :: ", "types::")
         .replace("super :: types :: ", "types::")
-        .replace(' ', "")
+        .replace(' ', "");
+    (path, deprecated)
 }
 
 /// One synthesized setter per settable parameter, recording a skip where none can be.
@@ -308,12 +358,16 @@ fn probe_setters(
             synthesize(&param.ty, contracts, &mut Vec::new())
         };
         match value {
-            Ok(value) => setters.push(ProbeSetter {
-                setter: param.rust_name.as_str().to_owned(),
-                deprecated: param.docs.deprecated,
-                ty: test_path(&render::types::type_path(&param.ty, contracts, config)),
-                json: value.to_string(),
-            }),
+            Ok(value) => {
+                let (ty, deprecated_type) =
+                    test_type(&render::types::type_path(&param.ty, contracts, config));
+                setters.push(ProbeSetter {
+                    setter: param.rust_name.as_str().to_owned(),
+                    deprecated: param.docs.deprecated || deprecated_type,
+                    ty,
+                    json: value.to_string(),
+                });
+            }
             Err(reason) => {
                 skip.get_or_insert(format!(
                     "parameter `{}` cannot be synthesized: {reason}",
@@ -330,22 +384,21 @@ fn probe_setters(
 /// Not `default` — that variant carries its own status precisely because the description does not
 /// say which one it means, and a probe asserting a number the description never stated would be
 /// testing the double rather than the wire.
-fn success_arm(operation: &OperationContract) -> Option<(String, TypeRef, u16)> {
+fn success_arm(operation: &OperationContract) -> Option<(&ResponseArm, u16)> {
     let exact = operation
         .responses
         .arms
         .iter()
         .find_map(|arm| match arm.status {
-            StatusPattern::Exact(code) if (200..300).contains(&code) => {
-                Some((arm.rust_name.as_str().to_owned(), arm.ty.clone(), code))
-            }
+            StatusPattern::Exact(code) if (200..300).contains(&code) => Some((arm, code)),
             _ => None,
         });
     exact.or_else(|| {
-        operation.responses.arms.iter().find_map(|arm| {
-            matches!(arm.status, StatusPattern::Range(2))
-                .then(|| (arm.rust_name.as_str().to_owned(), arm.ty.clone(), 200))
-        })
+        operation
+            .responses
+            .arms
+            .iter()
+            .find_map(|arm| matches!(arm.status, StatusPattern::Range(2)).then_some((arm, 200)))
     })
 }
 

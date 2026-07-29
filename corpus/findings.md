@@ -1241,6 +1241,53 @@ the six are one lesson wearing different clothes: *the wire under-determines the
 reader needs the schema's answer threaded to it* — the same rule the example crate's coercion fix
 established at stage 7, rediscovered at five more positions.
 
+## Non-JSON responses, and the streaming boundary
+
+The response contract used to collapse every selected non-JSON media type to `Vec<u64>` and route it
+through JSON at both transport edges. A census over all generated response arms — after reference
+resolution and the same media-type preference the generator applies, including `default` arms —
+finds **598 selected non-JSON arms across 35 of 78 harness documents: 441 text and 157 bytes**. The
+committed petstore wire fixture contributes one of each; the 77 published descriptions therefore
+contribute **596 arms across 34 documents: 440 text and 156 bytes**.
+
+| document | text | bytes | document | text | bytes |
+| --- | ---: | ---: | --- | ---: | ---: |
+| airbyte | 2 | 1 | aiven | 3 | 5 |
+| anthropic | 0 | 6 | chroma | 2 | 0 |
+| clickhouse-cloud | 4 | 1 | cloudflare | 22 | 22 |
+| codat-accounting | 0 | 9 | deepl | 1 | 1 |
+| discord | 1 | 1 | dub | 0 | 1 |
+| github-31 | 3 | 1 | gladia | 0 | 3 |
+| hubspot-contacts | 0 | 13 | influxdb | 3 | 1 |
+| intercom | 1 | 0 | **jellyfin** | **350** | **31** |
+| lago | 1 | 0 | lithic | 1 | 0 |
+| meilisearch | 1 | 0 | mongodb-atlas | 0 | 7 |
+| netbird | 1 | 0 | okta | 1 | 0 |
+| openai | 0 | 2 | openrouter | 0 | 3 |
+| opensearch | 22 | 0 | oxide | 0 | 5 |
+| petstore-31 (fixture) | 1 | 1 | posthog | 5 | 6 |
+| qdrant | 4 | 4 | superset | 5 | 10 |
+| telnyx | 7 | 10 | twitter | 0 | 2 |
+| weather-gov | 0 | 8 | xai | 0 | 2 |
+| zendesk | 0 | 1 |  |  |  |
+
+Jellyfin supplies 381 of the 596 published arms and is the dominant download API. The audit expected
+GitHub to dominate beside it, but the generated-arm census finds only four GitHub arms; Cloudflare
+is the second-largest document at 44. This distinction matters because the count is selected arms,
+not every alternate media type a response lists.
+
+Correct buffered handling is the shipped boundary: text becomes `String`, binary/unknown becomes
+the configured byte representation, and both are read from and written to the raw HTTP body under
+the declared content type. A raw streaming response handle remains follow-up work, measured against
+a large-body fixture before adoption; buffered correctness does not claim streaming parity.
+
+The upload-side census confirms that its analogous follow-up is real but separate: **41 raw-byte
+request bodies and 89 multipart bodies carrying 108 file parts, across 32 published documents**.
+Cloudflare contributes 12 raw bodies plus 15 multipart bodies, OpenSearch 16 raw bodies, and the
+remaining shapes are distributed rather than concentrated in one API. Request streaming is
+therefore retained as measured follow-up work, to be designed with the raw download handle rather
+than folded into the response correctness repair without a large-body runtime gate.
+
 ## The architecture review, and what reading found that running had not
 
 A full review of the crate and its harness, after the probe work: verdict *sound shape* — the

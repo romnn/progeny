@@ -168,7 +168,7 @@ impl Build<'_> {
             // and their statuses stay; only the payload type becomes what a bodiless response
             // actually carries.
             for arm in responses.arms.iter_mut().chain(responses.default.as_mut()) {
-                arm.ty = crate::contract::TypeRef::Unit;
+                arm.body = crate::api::ResponseBody::Empty;
             }
         }
         Some(OperationContract {

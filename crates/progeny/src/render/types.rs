@@ -7,9 +7,12 @@
 //! selected it renders as function bodies instead. Two renderings of one record, which is the whole
 //! discipline in one sentence.
 
+use std::collections::BTreeSet;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
+use crate::api::{ApiModel, BodyContract, ResponseBody};
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{
     ContractKind, Contracts, DeserStrategy, FieldContract, RustIdent, SkipRule, TypeContract,
@@ -18,8 +21,13 @@ use crate::contract::{
 use crate::shape::{Docs, Format};
 
 /// Render every type in the contract set.
-pub(super) fn render(contracts: &Contracts, config: &Config) -> TokenStream {
-    let deprecated = deprecated_aliases(contracts);
+pub(super) fn render(
+    contracts: &Contracts,
+    api: &ApiModel,
+    api_modules: bool,
+    config: &Config,
+) -> TokenStream {
+    let deprecated = deprecated_aliases(contracts, api, api_modules);
     let items = contracts
         .types()
         .iter()
@@ -33,11 +41,14 @@ pub(super) fn render(contracts: &Contracts, config: &Config) -> TokenStream {
 /// warning. Generated derives and support code use these transparent aliases instead: procedural
 /// macro expansions cannot inherit a field's `#[expect]`, so aliases are the only way to keep those
 /// internal uses clean without a broad `#[allow(deprecated)]`.
-fn deprecated_aliases(contracts: &Contracts) -> TokenStream {
+fn deprecated_aliases(contracts: &Contracts, api: &ApiModel, api_modules: bool) -> TokenStream {
+    let needed = deprecated_alias_names(contracts, api, api_modules);
     let aliases: Vec<TokenStream> = contracts
         .types()
         .iter()
-        .filter(|contract| contract.docs().deprecated)
+        .filter(|contract| {
+            contract.docs().deprecated && needed.contains(contract.rust_name().as_str())
+        })
         .map(|contract| {
             let name = ident(contract.rust_name());
             quote! {
@@ -56,6 +67,56 @@ fn deprecated_aliases(contracts: &Contracts) -> TokenStream {
         #[doc(hidden)]
         pub(crate) mod __progeny_deprecated {
             #(#aliases)*
+        }
+    }
+}
+
+fn deprecated_alias_names(
+    contracts: &Contracts,
+    api: &ApiModel,
+    api_modules: bool,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for contract in contracts.types() {
+        for reference in contract.kind().references() {
+            note_deprecated(reference, contracts, &mut names);
+        }
+        if contract.docs().deprecated && contract.deser() != DeserStrategy::Derive {
+            names.insert(contract.rust_name().as_str().to_owned());
+        }
+    }
+    if !api_modules {
+        return names;
+    }
+    for operation in api.operations() {
+        for param in &operation.params {
+            note_deprecated(&param.ty, contracts, &mut names);
+        }
+        if let Some(ty) = operation.body.as_ref().and_then(BodyContract::ty) {
+            note_deprecated(ty, contracts, &mut names);
+        }
+        for arm in operation
+            .responses
+            .arms
+            .iter()
+            .chain(&operation.responses.default)
+        {
+            if let Some(ty) = arm.body.json_type() {
+                note_deprecated(ty, contracts, &mut names);
+            }
+        }
+    }
+    names
+}
+
+fn note_deprecated(ty: &TypeRef, contracts: &Contracts, names: &mut BTreeSet<String>) {
+    let mut reached = Vec::new();
+    ty.named(&mut reached);
+    for index in reached {
+        if let Some(contract) = contracts.get(index)
+            && contract.docs().deprecated
+        {
+            names.insert(contract.rust_name().as_str().to_owned());
         }
     }
 }
@@ -361,13 +422,41 @@ pub(crate) fn type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) ->
     reference(ty, contracts, config, true)
 }
 
-/// An enum payload named from outside the `types` module.
+/// A response payload named from outside the `types` module.
+pub(crate) fn response_type_path(
+    body: &ResponseBody,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    match body {
+        ResponseBody::Json(ty) => type_path(ty, contracts, config),
+        ResponseBody::Text { .. } => quote! { ::std::string::String },
+        ResponseBody::Bytes { .. } => bytes_type(config),
+        ResponseBody::Empty => quote! { () },
+    }
+}
+
+/// An enum's response payload named from outside the `types` module.
 ///
-/// Every non-unit payload is indirected uniformly, rather than according to dependency-defined
-/// layouts. That bounds every generated enum without making its API change when a format or map
-/// implementation changes size.
-pub(crate) fn enum_type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
-    enum_reference(ty, contracts, config, true)
+/// Every non-empty payload is indirected uniformly rather than according to dependency-defined
+/// layouts. That bounds every generated enum without making its API change when a configured
+/// representation changes size.
+pub(crate) fn response_enum_type_path(
+    body: &ResponseBody,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    let rendered = response_type_path(body, contracts, config);
+    if response_body_is_boxed(body) {
+        quote! { Box<#rendered> }
+    } else {
+        rendered
+    }
+}
+
+/// Whether a response enum payload receives the stable non-unit indirection.
+pub(crate) fn response_body_is_boxed(body: &ResponseBody) -> bool {
+    !matches!(body, ResponseBody::Empty)
 }
 
 /// Whether an enum payload receives the stable non-unit indirection.
@@ -486,6 +575,13 @@ fn format_type(format: Format, config: &Config) -> TokenStream {
         Format::Base64 | Format::Binary => match config.formats.bytes {
             BytesRepr::Vec | BytesRepr::Bytes => quote! { String },
         },
+    }
+}
+
+fn bytes_type(config: &Config) -> TokenStream {
+    match config.formats.bytes {
+        BytesRepr::Vec => quote! { ::std::vec::Vec<u8> },
+        BytesRepr::Bytes => quote! { ::bytes::Bytes },
     }
 }
 

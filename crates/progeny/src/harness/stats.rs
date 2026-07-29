@@ -13,7 +13,7 @@ use crate::doc::{
     Callback, Components, MaybeRef, Operation, ParsedDocument, PathItem, Response, Responses,
 };
 use crate::schema::{OneOrMany, Schema, SchemaId, SchemaObject, SchemaStore, TypeName};
-use crate::{doc, load, normalize};
+use crate::{api, contract, doc, load, normalize, resolve, shape};
 
 /// Counts over one parsed document, for the questions the corpus is the evidence base for.
 ///
@@ -44,6 +44,20 @@ pub struct Stats {
     pub responses_with_headers: usize,
     /// Response headers in total.
     pub response_headers: usize,
+    /// Selected response arms carrying JSON.
+    pub json_response_arms: usize,
+    /// Selected response arms carrying text directly.
+    pub text_response_arms: usize,
+    /// Selected response arms carrying raw bytes.
+    pub byte_response_arms: usize,
+    /// Selected response arms carrying no body.
+    pub empty_response_arms: usize,
+    /// Selected request bodies carrying raw bytes.
+    pub byte_request_bodies: usize,
+    /// Selected multipart request bodies with at least one file part.
+    pub multipart_file_request_bodies: usize,
+    /// File parts across those multipart request bodies.
+    pub multipart_file_parts: usize,
     /// Security scheme kinds, by their `type`.
     pub security_scheme_kinds: BTreeMap<String, usize>,
     /// `$ref` strings that address another file rather than this document.
@@ -101,6 +115,13 @@ impl Stats {
         self.multi_content_operations += other.multi_content_operations;
         self.responses_with_headers += other.responses_with_headers;
         self.response_headers += other.response_headers;
+        self.json_response_arms += other.json_response_arms;
+        self.text_response_arms += other.text_response_arms;
+        self.byte_response_arms += other.byte_response_arms;
+        self.empty_response_arms += other.empty_response_arms;
+        self.byte_request_bodies += other.byte_request_bodies;
+        self.multipart_file_request_bodies += other.multipart_file_request_bodies;
+        self.multipart_file_parts += other.multipart_file_parts;
         for (kind, count) in &other.security_scheme_kinds {
             *self.security_scheme_kinds.entry(kind.clone()).or_default() += count;
         }
@@ -124,7 +145,49 @@ pub fn stats(input: &[u8]) -> Result<Stats, RejectError> {
     let loaded = load::load(input, &mut ctx)?;
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
     let parsed = doc::parse::document(normalized, &mut ctx);
-    Ok(collect(&parsed))
+    let mut stats = collect(&parsed);
+    let resolved = resolve::resolve(parsed, &mut ctx);
+    let shapes = shape::classify(&resolved, &mut ctx);
+    let config = crate::Config::default();
+    let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
+    let api = api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+    for body in api
+        .operations()
+        .iter()
+        .filter_map(|operation| operation.body.as_ref())
+    {
+        match body {
+            api::BodyContract::Bytes { .. } => stats.byte_request_bodies += 1,
+            api::BodyContract::Multipart { parts, .. } => {
+                let files = parts
+                    .iter()
+                    .filter(|part| part.kind == api::PartKind::File)
+                    .count();
+                if files > 0 {
+                    stats.multipart_file_request_bodies += 1;
+                    stats.multipart_file_parts += files;
+                }
+            }
+            api::BodyContract::Json { .. }
+            | api::BodyContract::Form { .. }
+            | api::BodyContract::Text { .. } => {}
+        }
+    }
+    for arm in api.operations().iter().flat_map(|operation| {
+        operation
+            .responses
+            .arms
+            .iter()
+            .chain(&operation.responses.default)
+    }) {
+        match arm.body {
+            api::ResponseBody::Json(_) => stats.json_response_arms += 1,
+            api::ResponseBody::Text { .. } => stats.text_response_arms += 1,
+            api::ResponseBody::Bytes { .. } => stats.byte_response_arms += 1,
+            api::ResponseBody::Empty => stats.empty_response_arms += 1,
+        }
+    }
+    Ok(stats)
 }
 
 fn collect(parsed: &ParsedDocument) -> Stats {

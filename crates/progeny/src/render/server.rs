@@ -21,13 +21,13 @@ use quote::{format_ident, quote};
 
 use crate::api::{
     ApiModel, BodyContract, Location, OperationContract, ParamContract, RegistrableRoute,
-    StatusPattern,
+    ResponseArm, ResponseBody, StatusPattern,
 };
 use crate::config::Config;
 use crate::contract::{Contracts, RustIdent};
 
 use super::client::capitalize;
-use super::types::{docs as docs_of, type_path as type_tokens};
+use super::types::{docs as docs_of, response_enum_type_path, type_path as type_tokens};
 
 /// Render the server module.
 pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -> TokenStream {
@@ -225,14 +225,17 @@ fn response_enum(
     let arms = &operation.responses.arms;
     let variants = arms.iter().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
-        let ty = super::types::enum_type_path(&arm.ty, contracts, config);
+        let ty = response_enum_type_path(&arm.body, contracts, config);
         let docs = docs_of(&arm.docs);
         quote! { #docs #variant(#ty), }
     });
     let matches = arms.iter().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
         let status = status_code(arm.status);
-        quote! { Self::#variant(body) => support::router::respond(#status, &body), }
+        let status = quote! { #status };
+        let body = quote! { body };
+        let response = response(arm, &status, &body);
+        quote! { Self::#variant(body) => #response, }
     });
 
     // The `default` arm carries its status, because `default` means "any status this description
@@ -242,7 +245,7 @@ fn response_enum(
     // because a description with no `default` has no variant to say one with.
     let default_variant = operation.responses.default.as_ref().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
-        let ty = super::types::enum_type_path(&arm.ty, contracts, config);
+        let ty = response_enum_type_path(&arm.body, contracts, config);
         quote! {
             /// A status this description does not name individually.
             ///
@@ -256,7 +259,10 @@ fn response_enum(
     });
     let default_match = operation.responses.default.as_ref().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
-        quote! { Self::#variant { status, body } => support::router::respond(status, &body), }
+        let status = quote! { status };
+        let body = quote! { body };
+        let response = response(arm, &status, &body);
+        quote! { Self::#variant { status, body } => #response, }
     });
 
     // A description that declared no responses at all has nothing to answer with, and an empty
@@ -268,7 +274,7 @@ fn response_enum(
         }
     });
     let empty_match = (arms.is_empty() && operation.responses.default.is_none())
-        .then(|| quote! { Self::NoContent => support::router::respond(204u16, &()), });
+        .then(|| quote! { Self::NoContent => support::router::respond_json(204u16, &()), });
 
     quote! {
         #[doc = #doc]
@@ -287,6 +293,20 @@ fn response_enum(
                     #default_match
                 }
             }
+        }
+    }
+}
+
+fn response(arm: &ResponseArm, status: &TokenStream, body: &TokenStream) -> TokenStream {
+    match &arm.body {
+        ResponseBody::Json(_) | ResponseBody::Empty => {
+            quote! { support::router::respond_json(#status, &#body) }
+        }
+        ResponseBody::Text { content_type } => {
+            quote! { support::router::respond_text(#status, #content_type, *#body) }
+        }
+        ResponseBody::Bytes { content_type } => {
+            quote! { support::router::respond_bytes(#status, #content_type, *#body) }
         }
     }
 }

@@ -191,7 +191,7 @@ pub fn to_value<T: ::serde::Serialize>(
 /// One non-generic-per-operation helper rather than an inline block per `send()`: the body of this
 /// is compiled once per response type instead of once per operation.
 #[doc(hidden)]
-pub async fn decode<T: ::serde::de::DeserializeOwned>(
+pub async fn decode_json<T: ::serde::de::DeserializeOwned>(
     response: ::reqwest::Response,
 ) -> Result<ResponseValue<T>, DecodeError> {
     let status = response.status();
@@ -204,5 +204,36 @@ pub async fn decode<T: ::serde::de::DeserializeOwned>(
     // 204 actually sends. Without this a declared-but-empty success arm would fail to parse.
     let slice: &[u8] = if bytes.is_empty() { b"null" } else { &bytes };
     let value = ::serde_json::from_slice(slice).map_err(|error| DecodeError::new(status, error))?;
+    Ok(ResponseValue::new(status, headers, value))
+}
+
+/// Read a text body directly from the response bytes.
+#[doc(hidden)]
+pub async fn decode_text(
+    response: ::reqwest::Response,
+) -> Result<ResponseValue<::std::string::String>, DecodeError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| DecodeError::new(status, ::serde::de::Error::custom(error)))?;
+    let value = ::std::string::String::from_utf8(bytes.to_vec())
+        .map_err(|error| DecodeError::new(status, ::serde::de::Error::custom(error)))?;
+    Ok(ResponseValue::new(status, headers, value))
+}
+
+/// Read a binary body directly from the response bytes.
+#[doc(hidden)]
+pub async fn decode_bytes(
+    response: ::reqwest::Response,
+) -> Result<ResponseValue<::std::vec::Vec<u8>>, DecodeError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let value = response
+        .bytes()
+        .await
+        .map_err(|error| DecodeError::new(status, ::serde::de::Error::custom(error)))?
+        .to_vec();
     Ok(ResponseValue::new(status, headers, value))
 }

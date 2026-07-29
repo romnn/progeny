@@ -37,10 +37,6 @@ pub(crate) fn run(
     // `emit.types = false` cannot arrive here: `generate` refuses it, because an empty rendering
     // with a success code would be a silent no-op.
     let mut files = BTreeMap::new();
-    let mut body = types::render(contracts, config);
-    body.extend(serde_impl::render(contracts));
-    let mut modules = vec![("types", body)];
-
     // An operation nobody can call is not worth a module: a description with no paths generates a
     // type layer and stops there, rather than emitting a `Client` with no methods and the whole
     // HTTP dependency behind it.
@@ -53,9 +49,6 @@ pub(crate) fn run(
             .operations()
             .iter()
             .any(|operation| operation.pagination.is_some());
-    if http {
-        modules.push(("client", client::render(api, contracts, config)));
-    }
     // The same rule on the serving side, with one extra condition: a description whose every route
     // the router refused has no trait methods to implement, and a trait nobody can implement is not
     // a module.
@@ -64,6 +57,13 @@ pub(crate) fn run(
             .operations()
             .iter()
             .any(|operation| operation.registrable.is_some());
+    let mut body = types::render(contracts, api, http || serves, config);
+    body.extend(serde_impl::render(contracts));
+    let mut modules = vec![("types", body)];
+
+    if http {
+        modules.push(("client", client::render(api, contracts, config)));
+    }
     if serves {
         modules.push(("server", server::render(api, contracts, config)));
     }
@@ -924,6 +924,18 @@ mod tests {
     }
 
     #[test_util::test]
+    fn an_unreferenced_deprecated_type_has_no_unused_internal_alias() {
+        let rendered = types(
+            with_schemas(json!({
+                "Retired": {"deprecated": true},
+            })),
+            &Config::default(),
+        )?;
+        assert!(rendered.contains("pub type Retired"), "{rendered}");
+        assert!(!rendered.contains("pub(crate) type Retired"), "{rendered}");
+    }
+
+    #[test_util::test]
     fn an_operation_whose_only_response_is_default_still_has_a_success_path() {
         // `default` means "anything not otherwise claimed". With no `2XX` beside it, a `200` is
         // exactly that — so treating the arm as a failure would report every successful call as
@@ -1320,9 +1332,9 @@ mod tests {
     ///
     /// A `format: uuid` that appears only as a parameter gets no named contract on purpose — a
     /// `pub type` alias for one scalar would be noise — but the builder still spells `uuid::Uuid`.
-    /// And a binary body under `formats.bytes = "bytes"` is the only place `::bytes::Bytes` is
-    /// spelled at all. A manifest computed from the named contracts alone shipped both as crates
-    /// that do not compile.
+    /// Binary request and response bodies under `formats.bytes = "bytes"` spell `::bytes::Bytes`
+    /// outside the type layer. A manifest computed from the named contracts alone shipped these
+    /// API-surface types as crates that do not compile.
     #[test_util::test]
     fn the_manifest_declares_what_the_surface_names_beyond_the_types() {
         let document = json!({
@@ -1339,6 +1351,17 @@ mod tests {
                     "requestBody": {"content": {"application/octet-stream": {
                         "schema": {"type": "string", "format": "binary"}}}},
                     "responses": {"204": {"description": "done"}},
+                }},
+                "/download": {"get": {
+                    "operationId": "download",
+                    "responses": {"200": {"description": "bytes", "content": {
+                        "application/octet-stream": {
+                            "schema": {
+                                "type": "string",
+                                "contentMediaType": "application/octet-stream"
+                            }
+                        }
+                    }}},
                 }},
             },
         });
@@ -1359,6 +1382,12 @@ mod tests {
         let client = &rendered[camino::Utf8Path::new("src/client.rs")];
         assert!(client.contains("uuid::Uuid"), "{client}");
         assert!(client.contains("::bytes::Bytes"), "{client}");
+        let server = &rendered[camino::Utf8Path::new("src/server.rs")];
+        assert!(server.contains("Box<::bytes::Bytes>"), "{server}");
+        assert!(
+            server.contains(r#"respond_bytes(200u16, "application/octet-stream""#),
+            "{server}"
+        );
         let types = &rendered[camino::Utf8Path::new("src/types.rs")];
         assert!(!types.contains("uuid::Uuid"), "{types}");
     }
