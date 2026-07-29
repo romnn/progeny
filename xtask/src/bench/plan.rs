@@ -18,6 +18,12 @@ pub(super) struct Target {
     /// The document this was generated from, or the directory it was found in.
     pub(super) subject: String,
     pub(super) variant: String,
+    /// The serde strategy, separate from `variant` when each workspace member is its own target.
+    #[serde(default)]
+    pub(super) strategy: String,
+    /// Empty for a single crate; otherwise `types`, `client`, or `server`.
+    #[serde(default)]
+    pub(super) member: String,
     pub(super) package: String,
     pub(super) directory: Utf8PathBuf,
     /// What this rendering held, from [`scope_of`].
@@ -117,6 +123,8 @@ pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
             vec![Target {
                 subject: package.clone(),
                 variant: "as-is".to_owned(),
+                strategy: "as-is".to_owned(),
+                member: String::new(),
                 package,
                 directory: crate_dir.clone(),
                 scope: scope_of(modules.iter().map(String::as_str)),
@@ -135,26 +143,47 @@ pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
         &[DERIVE]
     };
     println!(
-        "bench-compile: {} documents × {} × {} reps, generated into {}",
+        "bench-compile: {} documents × {} × {} reps, {} packaging, generated into {}",
         wanted.len(),
         variants.join(" and "),
         args.reps,
+        match (args.workspace, args.crate_control) {
+            (true, true) => "workspace + crate control",
+            (true, false) => "workspace",
+            (false, _) => "crate",
+        },
         crate::generated::scratch_root()
     );
 
     let mut planned = Vec::new();
     for (spec, bytes) in &crate::corpus::selected(&wanted)? {
-        let name = &spec.name;
-        let mut targets = Vec::new();
-        for &variant in variants {
-            let mut config = crate::corpus::config_for(spec);
-            config.serde_impl = if variant == HAND_WRITTEN {
-                progeny::SerdeImpl::HandWrittenWhereEligible
-            } else {
-                progeny::SerdeImpl::DeriveAlways
-            };
+        planned.push((
+            spec.name.clone(),
+            generated_targets(args, spec, bytes, variants)?,
+        ));
+    }
+    record(&planned)?;
+    Ok(planned)
+}
+
+fn generated_targets(
+    args: &Args,
+    spec: &crate::corpus::Spec,
+    bytes: &[u8],
+    variants: &[&str],
+) -> eyre::Result<Vec<Target>> {
+    let name = &spec.name;
+    let mut targets = Vec::new();
+    for &variant in variants {
+        let mut config = crate::corpus::config_for(spec);
+        config.serde_impl = if variant == HAND_WRITTEN {
+            progeny::SerdeImpl::HandWrittenWhereEligible
+        } else {
+            progeny::SerdeImpl::DeriveAlways
+        };
+        if args.workspace && args.crate_control {
             let output = progeny::generate(bytes, &config)
-                .wrap_err_with(|| format!("generating {name} ({variant})"))?;
+                .wrap_err_with(|| format!("generating {name} ({variant}, crate control)"))?;
             let scope = scope_of(
                 output
                     .files
@@ -162,19 +191,61 @@ pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
                     .filter(|path| path.parent() == Some(Utf8Path::new("src")))
                     .filter_map(|path| path.file_stem()),
             );
-            let directory = crate::generated::write(&format!("bench-{variant}-{name}"), &output)?;
+            let directory =
+                crate::generated::write(&format!("bench-{variant}-crate-{name}"), &output)?;
             targets.push(Target {
                 subject: name.clone(),
-                variant: variant.to_owned(),
+                variant: format!("{variant}.crate"),
+                strategy: variant.to_owned(),
+                member: String::new(),
                 package: config.package.name.clone(),
                 directory,
                 scope,
             });
         }
-        planned.push((name.clone(), targets));
+        if args.workspace {
+            config.packaging = progeny::Packaging::Workspace;
+        }
+        let output = progeny::generate(bytes, &config)
+            .wrap_err_with(|| format!("generating {name} ({variant})"))?;
+        let directory = crate::generated::write(&format!("bench-{variant}-{name}"), &output)?;
+        if args.workspace {
+            for member in ["types", "client", "server"] {
+                let package = format!("{}-{member}", config.package.name);
+                let member_directory = directory.join(&package);
+                if !member_directory.join("Cargo.toml").exists() {
+                    continue;
+                }
+                targets.push(Target {
+                    subject: name.clone(),
+                    variant: format!("{variant}.{member}"),
+                    strategy: variant.to_owned(),
+                    member: member.to_owned(),
+                    package,
+                    directory: member_directory,
+                    scope: scope_of([member]),
+                });
+            }
+        } else {
+            let scope = scope_of(
+                output
+                    .files
+                    .keys()
+                    .filter(|path| path.parent() == Some(Utf8Path::new("src")))
+                    .filter_map(|path| path.file_stem()),
+            );
+            targets.push(Target {
+                subject: name.clone(),
+                variant: variant.to_owned(),
+                strategy: variant.to_owned(),
+                member: String::new(),
+                package: config.package.name.clone(),
+                directory,
+                scope,
+            });
+        }
     }
-    record(&planned)?;
-    Ok(planned)
+    Ok(targets)
 }
 
 /// Write down what was rendered and from which tree.
@@ -308,6 +379,8 @@ mod tests {
             targets: vec![super::Target {
                 subject: "okta".to_owned(),
                 variant: crate::bench::DERIVE.to_owned(),
+                strategy: crate::bench::DERIVE.to_owned(),
+                member: String::new(),
                 package: "corpus-okta".to_owned(),
                 directory: camino::Utf8PathBuf::from("/tmp/bench-derive-okta"),
                 scope: "types-only".to_owned(),

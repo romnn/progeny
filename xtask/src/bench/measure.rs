@@ -98,6 +98,15 @@ impl Summary {
         Some(total / count)
     }
 
+    pub(super) fn mean_wall(&self) -> Option<f64> {
+        let count = u32::try_from(self.kept.len()).ok()?;
+        if count == 0 {
+            return None;
+        }
+        let total: f64 = self.kept.iter().map(|sample| sample.wall_seconds).sum();
+        Some(total / f64::from(count))
+    }
+
     /// The busiest a kept repetition started at.
     ///
     /// The worst rather than the first, which is what was recorded before: taking the first

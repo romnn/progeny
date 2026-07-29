@@ -1,9 +1,9 @@
 //! The recorded baseline: what may be written down, and what a later run may be compared against.
 //!
 //! A baseline's whole job is to be compared against later, so the conditions a figure was taken
-//! under are part of the record rather than a note somewhere — and an entry that fails the
-//! [`discipline`] carries its own verdict in the file, where somebody who never runs the harness
-//! still sees it.
+//! under are part of the record rather than a note somewhere. New entries must meet the
+//! [`discipline`]; legacy provisional entries retain their verdict so they cannot become a
+//! comparison basis by omission.
 
 use std::collections::BTreeMap;
 
@@ -18,11 +18,14 @@ use super::{Args, as_f64, percent};
 ///
 /// The conditions are part of the record rather than a note somewhere, because a baseline's whole
 /// job is to be compared against later — and a comparison between a number taken on a busy machine
-/// and one taken on an idle machine is not a comparison. The rule this encodes: a baseline may be
-/// written on a shared machine, but it may never be *silently* written on one.
+/// and one taken on an idle machine is not a comparison.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct BaselineEntry {
     cpu_seconds: f64,
+    /// Mean elapsed time for one isolated invocation. Zero in records that predate persisted wall
+    /// time, so they remain readable without pretending they measured it.
+    #[serde(default)]
+    wall_seconds: f64,
     peak_rss_bytes: u64,
     /// What the measured crate held, as classified by `scope_of`. Two entries with different scopes
     /// are not comparable, and `--check` refuses to pretend otherwise.
@@ -116,59 +119,54 @@ pub(super) fn baseline(
     check_entries(&entries, scopes, summaries, args)
 }
 
-/// Record this run, with each entry's verdict on itself.
+/// Record this run only when every new entry meets the measurement discipline.
 fn write_entries(
     path: &Utf8PathBuf,
     mut entries: BTreeMap<String, BaselineEntry>,
     scopes: &BTreeMap<String, String>,
     summaries: &BTreeMap<String, Summary>,
 ) -> eyre::Result<()> {
-    let mut provisional = 0usize;
     for (key, summary) in summaries {
-        let Some((cpu, rss)) = summary.mean_cpu().zip(summary.mean_rss()) else {
-            continue;
-        };
-        let load = summary.worst_load();
-        let shortfalls = shortfalls(summary.kept.len(), load, summary.pressured > 0);
-        if !shortfalls.is_empty() {
-            provisional += 1;
-            println!("  {key}: provisional — {}", shortfalls.join("; "));
-        }
-        entries.insert(
-            key.clone(),
-            BaselineEntry {
-                cpu_seconds: cpu,
-                peak_rss_bytes: rss,
-                scope: scopes
-                    .get(key)
-                    .map_or(UNRECORDED, String::as_str)
-                    .to_owned(),
-                kept: summary.kept.len(),
-                discarded: summary.discarded,
-                load,
-                cores: std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
-                pressured: summary.pressured > 0,
-                provisional: shortfalls,
-            },
-        );
+        let scope = scopes.get(key).map_or(UNRECORDED, String::as_str);
+        let entry = disciplined_entry(scope, summary)
+            .wrap_err_with(|| format!("refusing to record {key}"))?;
+        entries.insert(key.clone(), entry);
     }
 
     let text = toml::to_string_pretty(&entries).wrap_err("rendering the baseline")?;
     std::fs::write(path, text).wrap_err_with(|| format!("writing {path}"))?;
     println!("baseline written to {path}");
-    if provisional > 0 {
-        // Written and marked rather than refused outright: a directional row taken on a shared
-        // machine is worth having, and the failure this guards against is not recording one — it
-        // is recording one that reads like the finished measurement.
-        println!(
-            "  {provisional} of {} entries are provisional and may not be quoted as the number; \
-             re-take them with the load at or below {:.2} and at least {} repetitions kept",
-            entries.len(),
-            discipline::MAX_LOAD,
-            discipline::MIN_KEPT
-        );
-    }
     Ok(())
+}
+
+fn disciplined_entry(scope: &str, summary: &Summary) -> eyre::Result<BaselineEntry> {
+    let shortfalls = shortfalls(
+        summary.kept.len(),
+        summary.worst_load(),
+        summary.pressured > 0,
+    );
+    if !shortfalls.is_empty() {
+        bail!("{}", shortfalls.join("; "));
+    }
+    let Some(((cpu_seconds, wall_seconds), peak_rss_bytes)) = summary
+        .mean_cpu()
+        .zip(summary.mean_wall())
+        .zip(summary.mean_rss())
+    else {
+        bail!("no usable repetitions");
+    };
+    Ok(BaselineEntry {
+        cpu_seconds,
+        wall_seconds,
+        peak_rss_bytes,
+        scope: scope.to_owned(),
+        kept: summary.kept.len(),
+        discarded: summary.discarded,
+        load: summary.worst_load(),
+        cores: std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
+        pressured: false,
+        provisional: Vec::new(),
+    })
 }
 
 /// Compare this run against what was recorded, and refuse the comparisons that are not one.
@@ -197,7 +195,13 @@ fn check_entries(
 
         let cpu_delta = percent(previous.cpu_seconds, cpu);
         let rss_delta = percent(as_f64(previous.peak_rss_bytes), as_f64(rss));
-        println!("  {key}: cpu {cpu_delta:+.1}%, peak rss {rss_delta:+.1}%");
+        let wall_delta = summary.mean_wall().and_then(|wall| {
+            (previous.wall_seconds > 0.0).then(|| percent(previous.wall_seconds, wall))
+        });
+        println!(
+            "  {key}: cpu {cpu_delta:+.1}%, peak rss {rss_delta:+.1}%{}",
+            wall_delta.map_or_else(String::new, |delta| format!(", wall {delta:+.1}%"))
+        );
         let load = summary.worst_load();
         // Said every time rather than only on a regression: a reader comparing two numbers is
         // entitled to know whether they were taken under comparable conditions, and finding that
@@ -227,6 +231,11 @@ fn check_entries(
             }
             if rss_delta > args.threshold {
                 regressions.push(format!("{key}: peak rss {rss_delta:+.1}%"));
+            }
+            if let Some(delta) = wall_delta
+                && delta > args.threshold
+            {
+                regressions.push(format!("{key}: wall {delta:+.1}%"));
             }
         }
     }
@@ -281,6 +290,38 @@ mod tests {
 
     use super::{discipline, shortfalls};
 
+    fn sample(wall_seconds: f64, load_before: f64) -> crate::bench::measure::Sample {
+        crate::bench::measure::Sample {
+            cpu_seconds: 1.0,
+            peak_rss_bytes: 1024,
+            load_before,
+            load_after: load_before,
+            wall_seconds,
+            pressured: false,
+        }
+    }
+
+    #[test_util::test]
+    fn a_disciplined_entry_records_wall_time() {
+        let summary = crate::bench::measure::Summary {
+            kept: vec![sample(2.0, 0.5), sample(2.5, 0.5), sample(3.0, 0.5)],
+            discarded: 0,
+            pressured: 0,
+        };
+        let entry = super::disciplined_entry("types-only", &summary)?;
+        assert!((entry.wall_seconds - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test_util::test]
+    fn an_undisciplined_entry_is_refused_instead_of_recorded_provisionally() {
+        let summary = crate::bench::measure::Summary {
+            kept: vec![sample(2.0, discipline::MAX_LOAD + 1.0)],
+            discarded: 0,
+            pressured: 0,
+        };
+        assert!(super::disciplined_entry("types-only", &summary).is_err());
+    }
+
     #[test_util::test]
     fn a_measurement_within_the_discipline_says_nothing() {
         assert!(shortfalls(discipline::MIN_KEPT, discipline::MAX_LOAD, false).is_empty());
@@ -317,6 +358,7 @@ mod tests {
         // runs the harness is exactly the reader the flag exists for.
         let entry = super::BaselineEntry {
             cpu_seconds: 8.30,
+            wall_seconds: 8.50,
             peak_rss_bytes: 1_003_913_216,
             scope: "types-only".to_owned(),
             kept: 1,
@@ -340,6 +382,7 @@ mod tests {
         // word should find it only where it means something.
         let entry = super::BaselineEntry {
             cpu_seconds: 1.0,
+            wall_seconds: 1.1,
             peak_rss_bytes: 2,
             scope: "types-only".to_owned(),
             kept: 4,
@@ -357,6 +400,7 @@ mod tests {
     fn entry(scope: &str, provisional: Vec<String>) -> super::BaselineEntry {
         super::BaselineEntry {
             cpu_seconds: 1.0,
+            wall_seconds: 1.1,
             peak_rss_bytes: 2,
             scope: scope.to_owned(),
             kept: 4,

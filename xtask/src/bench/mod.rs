@@ -28,7 +28,7 @@ pub(crate) mod baseline;
 pub(crate) mod measure;
 mod plan;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
 use clap::Args as ClapArgs;
@@ -53,6 +53,14 @@ pub struct Args {
     /// flag apart.
     #[arg(long)]
     ab: bool,
+
+    /// Generate the opt-in three-crate workspace and measure every member separately.
+    #[arg(long, conflicts_with = "crate_dir")]
+    workspace: bool,
+
+    /// Measure the one-crate rendering beside the workspace members for a packaging A/B.
+    #[arg(long, requires = "workspace", conflicts_with = "crate_dir")]
+    crate_control: bool,
 
     /// Render what would be measured and stop, without compiling or timing anything.
     ///
@@ -203,6 +211,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     }
 
     report(&summaries);
+    report_workspaces(&subjects, &summaries);
+    report_packaging(&subjects, &summaries);
     compare(&subjects, &summaries);
     // Writing or checking a baseline without naming one means the checked-in one: the point of a
     // baseline is that everybody compares against the same file.
@@ -225,10 +235,11 @@ fn report(summaries: &BTreeMap<String, Summary>) {
     println!();
     println!("measurements");
     for (key, summary) in summaries {
-        match (summary.mean_cpu(), summary.mean_rss()) {
-            (Some(cpu), Some(rss)) => {
+        match (summary.mean_cpu(), summary.mean_wall(), summary.mean_rss()) {
+            (Some(cpu), Some(wall), Some(rss)) => {
                 println!(
-                    "  {key:<34} {cpu:>7.2} s cpu   {:>10} peak rss   ({} kept, {} discarded)",
+                    "  {key:<34} {cpu:>7.2} s cpu   {wall:>7.2} s wall   {:>10} peak rss   \
+                     ({} kept, {} discarded)",
                     format_bytes(rss),
                     summary.kept.len(),
                     summary.discarded
@@ -249,6 +260,115 @@ fn report(summaries: &BTreeMap<String, Summary>) {
     }
 }
 
+fn report_workspaces(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summary>) {
+    let split = subjects
+        .iter()
+        .filter(|(_, targets)| targets.iter().any(|target| !target.member.is_empty()));
+    let mut printed = false;
+    for (subject, targets) in split {
+        let strategies: BTreeSet<&str> = targets.iter().map(target_strategy).collect();
+        for strategy in strategies {
+            let members: Vec<&Target> = targets
+                .iter()
+                .filter(|target| !target.member.is_empty())
+                .filter(|target| target_strategy(target) == strategy)
+                .collect();
+            let costs: Option<Vec<(f64, f64, u64)>> = members
+                .iter()
+                .map(|target| {
+                    let summary = summaries.get(&key_of(target))?;
+                    Some((
+                        summary.mean_cpu()?,
+                        summary.mean_wall()?,
+                        summary.mean_rss()?,
+                    ))
+                })
+                .collect();
+            let Some(costs) = costs else {
+                continue;
+            };
+            if !printed {
+                println!();
+                println!("workspace totals");
+                printed = true;
+            }
+            let cpu = costs.iter().map(|(cpu, _, _)| cpu).sum::<f64>();
+            let wall = costs.iter().map(|(_, wall, _)| wall).sum::<f64>();
+            let worst = costs
+                .iter()
+                .map(|(_, _, rss)| *rss)
+                .max()
+                .unwrap_or_default();
+            let sum = costs.iter().map(|(_, _, rss)| *rss).sum::<u64>();
+            println!(
+                "  {subject}.{strategy:<20} worst crate {}, sum of member peaks {}; {:.2} s cpu, \
+                 {:.2} s sequential wall across {} invocations",
+                format_bytes(worst),
+                format_bytes(sum),
+                cpu,
+                wall,
+                members.len(),
+            );
+        }
+    }
+}
+
+fn report_packaging(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summary>) {
+    let mut printed = false;
+    for (subject, targets) in subjects {
+        let strategies: BTreeSet<&str> = targets.iter().map(target_strategy).collect();
+        for strategy in strategies {
+            let Some(control) = targets
+                .iter()
+                .find(|target| target.variant == format!("{strategy}.crate"))
+            else {
+                continue;
+            };
+            let members: Vec<&Target> = targets
+                .iter()
+                .filter(|target| !target.member.is_empty())
+                .filter(|target| target_strategy(target) == strategy)
+                .collect();
+            let Some(control_cost) = summaries.get(&key_of(control)) else {
+                continue;
+            };
+            let member_costs: Option<Vec<&Summary>> = members
+                .iter()
+                .map(|target| summaries.get(&key_of(target)))
+                .collect();
+            let Some(member_costs) = member_costs else {
+                continue;
+            };
+            let Some((control_wall, control_rss)) =
+                control_cost.mean_wall().zip(control_cost.mean_rss())
+            else {
+                continue;
+            };
+            let split_wall: Option<f64> =
+                member_costs.iter().map(|summary| summary.mean_wall()).sum();
+            let split_worst = member_costs
+                .iter()
+                .filter_map(|summary| summary.mean_rss())
+                .max();
+            let Some((split_wall, split_worst)) = split_wall.zip(split_worst) else {
+                continue;
+            };
+            if !printed {
+                println!();
+                println!("workspace against crate packaging");
+                printed = true;
+            }
+            println!(
+                "  {subject}.{strategy:<20} worst rss {:+.1}%, sequential wall {:+.1}% \
+                 ({} invocations vs 1)",
+                percent(as_f64(control_rss), as_f64(split_worst)),
+                percent(control_wall, split_wall),
+                members.len(),
+            );
+        }
+    }
+}
+
 /// The A/B, where a document was measured both ways.
 ///
 /// Reported separately from the baseline comparison because they answer different questions: the
@@ -257,24 +377,42 @@ fn report(summaries: &BTreeMap<String, Summary>) {
 /// outright — the kernel reclaims under pressure and the number reads low, which is an artefact
 /// pointing the same way as a win.
 fn compare(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summary>) {
-    let paired: Vec<&(String, Vec<Target>)> = subjects
+    let paired: Vec<(&str, &Target, &Target)> = subjects
         .iter()
-        .filter(|(_, targets)| targets.len() > 1)
+        .flat_map(|(subject, targets)| {
+            let members: BTreeSet<&str> = targets
+                .iter()
+                .map(|target| target.member.as_str())
+                .collect();
+            members.into_iter().filter_map(move |member| {
+                let derive = targets
+                    .iter()
+                    .find(|target| target.member == member && target_strategy(target) == DERIVE)?;
+                let hand = targets.iter().find(|target| {
+                    target.member == member && target_strategy(target) == HAND_WRITTEN
+                })?;
+                Some((subject.as_str(), derive, hand))
+            })
+        })
         .collect();
     if paired.is_empty() {
         return;
     }
     println!();
     println!("hand-written against derive");
-    for (subject, _) in paired {
-        let (Some(before), Some(after)) = (
-            summaries.get(&format!("{subject}.{DERIVE}")),
-            summaries.get(&format!("{subject}.{HAND_WRITTEN}")),
-        ) else {
+    for (subject, derive, hand) in paired {
+        let (Some(before), Some(after)) =
+            (summaries.get(&key_of(derive)), summaries.get(&key_of(hand)))
+        else {
             continue;
         };
+        let label = if derive.member.is_empty() {
+            subject.to_owned()
+        } else {
+            format!("{subject}/{}", derive.member)
+        };
         let (Some(cpu_before), Some(cpu_after)) = (before.mean_cpu(), after.mean_cpu()) else {
-            println!("  {subject:<24} no usable repetitions");
+            println!("  {label:<24} no usable repetitions");
             continue;
         };
         let (Some(rss_before), Some(rss_after)) = (before.mean_rss(), after.mean_rss()) else {
@@ -282,7 +420,7 @@ fn compare(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summ
         };
         let pressured = before.pressured > 0 || after.pressured > 0;
         println!(
-            "  {subject:<24} cpu {:+.1}%   peak rss {:+.1}%{}",
+            "  {label:<24} cpu {:+.1}%   peak rss {:+.1}%{}",
             percent(cpu_before, cpu_after),
             percent(as_f64(rss_before), as_f64(rss_after)),
             if pressured {
@@ -291,6 +429,17 @@ fn compare(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summ
                 ""
             }
         );
+    }
+}
+
+fn target_strategy(target: &Target) -> &str {
+    if target.strategy.is_empty() {
+        target
+            .variant
+            .split_once('.')
+            .map_or(target.variant.as_str(), |(strategy, _)| strategy)
+    } else {
+        &target.strategy
     }
 }
 
