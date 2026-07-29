@@ -124,8 +124,13 @@ impl Summary {
 pub(super) fn warm_up(target: &Target) -> eyre::Result<()> {
     let mut command = crate::generated::cargo(&target.directory);
     disable_incremental(&mut command);
+    command.args(["check", "--quiet", "--lib"]);
+    select_package(
+        &mut command,
+        &target.package,
+        &target.directory.join("Cargo.toml"),
+    );
     let status = command
-        .args(["check", "--quiet", "--lib"])
         .status()
         .wrap_err_with(|| format!("warming up {}", target.directory))?;
     if !status.success() {
@@ -150,8 +155,9 @@ pub(crate) fn order<'a>(variants: &[&'a str], rep: usize) -> Vec<&'a str> {
 pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample> {
     wait_for_quiet(args.max_load, args.max_wait)?;
 
-    // A cached crate measures nothing, so discard just this package's artifacts and leave its
-    // dependencies compiled: what is under test is the generated code, not the ecosystem.
+    // A cached crate measures nothing. Package selection is mandatory in a generated workspace:
+    // cleaning one member and then checking workspace defaults made alternating repetitions pay
+    // for different sets of crates.
     let cleaned = Command::new("cargo")
         .env("CARGO_TARGET_DIR", crate::generated::shared_target())
         .args(["clean", "--quiet", "-p", &target.package, "--manifest-path"])
@@ -171,7 +177,7 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
     // separator would be swallowed as its first value.
     let mut command = Command::new(runner);
     disable_incremental(&mut command);
-    let output = command
+    command
         .env("CARGO_TARGET_DIR", crate::generated::shared_target())
         .env_remove("RUSTFLAGS")
         .arg("bench-compile")
@@ -181,11 +187,13 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
         .arg("--quiet")
         .arg("--lib")
         .arg("--jobs")
-        .arg(args.jobs.to_string())
-        .arg("--manifest-path")
-        .arg(target.directory.join("Cargo.toml"))
-        .output()
-        .wrap_err("running the measuring process")?;
+        .arg(args.jobs.to_string());
+    select_package(
+        &mut command,
+        &target.package,
+        &target.directory.join("Cargo.toml"),
+    );
+    let output = command.output().wrap_err("running the measuring process")?;
     if !output.status.success() {
         bail!(
             "the measuring process failed: {}",
@@ -222,6 +230,14 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
 
 fn disable_incremental(command: &mut Command) {
     command.env("CARGO_INCREMENTAL", "0");
+}
+
+fn select_package(command: &mut Command, package: &str, manifest: &camino::Utf8Path) {
+    command
+        .arg("-p")
+        .arg(package)
+        .arg("--manifest-path")
+        .arg(manifest);
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -354,6 +370,22 @@ mod tests {
             .find(|(name, _)| *name == std::ffi::OsStr::new("CARGO_INCREMENTAL"))
             .and_then(|(_, value)| value);
         assert_eq!(incremental, Some(std::ffi::OsStr::new("0")));
+    }
+
+    #[test]
+    fn workspace_measurements_select_exactly_one_package() {
+        let mut command = std::process::Command::new("cargo");
+        super::select_package(
+            &mut command,
+            "generated-client",
+            camino::Utf8Path::new("/tmp/generated-client/Cargo.toml"),
+        );
+        let arguments: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        assert!(arguments.windows(2).any(|pair| pair
+            == [
+                std::ffi::OsStr::new("-p"),
+                std::ffi::OsStr::new("generated-client")
+            ]));
     }
 
     fn sample(cpu: f64, rss: u64, load_before: f64, load_after: f64) -> Sample {

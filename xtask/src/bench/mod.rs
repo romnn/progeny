@@ -6,8 +6,9 @@
 //!
 //! The discipline, and why each rule is there:
 //!
-//! * **A-B-B-A ordering** between variants, so a drift in machine state over the run cannot be
-//!   mistaken for a difference between variants.
+//! * **A-B-B-A ordering** between independent variants, so a drift in machine state over the run
+//!   cannot be mistaken for a difference between variants. Members of one workspace stay in
+//!   dependency order: reversing those would make one half reuse freshly rebuilt dependencies.
 //! * **`--jobs 1`**, because parallel rustc invocations make both CPU time and peak resident set
 //!   size depend on scheduling rather than on the code.
 //! * **Load gating**, and *discard* any repetition whose load rose while it ran rather than
@@ -174,10 +175,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             measure::warm_up(target)?;
         }
         for rep in 0..args.reps {
-            for variant in measure::order(&variants, rep) {
-                let Some(target) = targets.iter().find(|target| target.variant == variant) else {
-                    continue;
-                };
+            for target in ordered_targets(targets, rep) {
+                let variant = &target.variant;
                 let sample = measure::measure_once(target, args)?;
                 let summary = summaries.entry(key_of(target)).or_default();
                 if sample.crowded() {
@@ -229,6 +228,32 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         return baseline::baseline(&path, &scopes, &summaries, args);
     }
     Ok(())
+}
+
+fn ordered_targets(targets: &[Target], rep: usize) -> Vec<&Target> {
+    let mut units: Vec<((&str, bool), Vec<&Target>)> = Vec::new();
+    for target in targets {
+        let key = (target_strategy(target), target.member.is_empty());
+        if let Some((_, unit)) = units.iter_mut().find(|(candidate, _)| *candidate == key) {
+            unit.push(target);
+        } else {
+            units.push((key, vec![target]));
+        }
+    }
+    for ((_, is_single_crate), members) in &mut units {
+        if !*is_single_crate {
+            members.sort_by_key(|target| match target.member.as_str() {
+                "types" => 0,
+                "client" => 1,
+                "server" => 2,
+                _ => 3,
+            });
+        }
+    }
+    if rep % 2 == 1 {
+        units.reverse();
+    }
+    units.into_iter().flat_map(|(_, targets)| targets).collect()
 }
 
 fn report(summaries: &BTreeMap<String, Summary>) {
@@ -471,7 +496,63 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, percent};
+    use super::{Target, format_bytes, ordered_targets, percent};
+
+    fn target(strategy: &str, member: &str) -> Target {
+        Target {
+            subject: "fixture".to_owned(),
+            variant: format!("{strategy}.{member}"),
+            strategy: strategy.to_owned(),
+            member: member.to_owned(),
+            package: format!("fixture-{member}"),
+            directory: camino::Utf8PathBuf::from(format!("/tmp/fixture-{member}")),
+            scope: member.to_owned(),
+        }
+    }
+
+    #[test]
+    fn workspace_members_keep_dependency_order_when_units_reverse() {
+        let targets = [
+            target("derive", "types"),
+            target("derive", "client"),
+            target("derive", "server"),
+            target("hand-written", "types"),
+            target("hand-written", "client"),
+            target("hand-written", "server"),
+        ];
+
+        let forward: Vec<&str> = ordered_targets(&targets, 0)
+            .into_iter()
+            .map(|target| target.variant.as_str())
+            .collect();
+        let reverse: Vec<&str> = ordered_targets(&targets, 1)
+            .into_iter()
+            .map(|target| target.variant.as_str())
+            .collect();
+
+        assert_eq!(
+            forward,
+            [
+                "derive.types",
+                "derive.client",
+                "derive.server",
+                "hand-written.types",
+                "hand-written.client",
+                "hand-written.server",
+            ]
+        );
+        assert_eq!(
+            reverse,
+            [
+                "hand-written.types",
+                "hand-written.client",
+                "hand-written.server",
+                "derive.types",
+                "derive.client",
+                "derive.server",
+            ]
+        );
+    }
 
     #[test]
     fn a_change_is_reported_relative_to_where_it_started() {
