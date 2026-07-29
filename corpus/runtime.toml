@@ -1,0 +1,85 @@
+version = 1
+
+[workload]
+scope = "quick-tier generated types, deserialization only, plus one deep/large fixture"
+tier = [
+    "petstore-31",
+    "github-31",
+    "posthog",
+    "cloudflare",
+    "okta",
+    "orb",
+    "jellyfin",
+    "oxide",
+]
+selected_documents = 8
+documents_with_payloads = 4
+tier_payloads = 643
+tier_valid_payloads = 608
+tier_malformed_payloads = 35
+uncheckable_payloads = 171
+valid_payload_bytes = 389581
+malformed_payload_bytes = 292616
+deep_payload_bytes = 277664
+deep_depth = 24
+deep_items = 2048
+iterations = 1000
+
+[budget]
+max_wall_ratio = 4.5
+max_allocations_ratio = 2.25
+max_peak_heap_ratio = 4.0
+malformed_messages_must_match = true
+deep_malformed_must_be_rejected = true
+
+[derive]
+kept = 4
+discarded = 0
+worst_load = 4.85
+cores = 48
+pressured = false
+malformed_cases = 36
+malformed_rejected = 35
+malformed_accepted = 1
+deep_error = 'deep:/tail/.../count: invalid type: string "not an integer", expected i64 at line 1 column 277653'
+
+[derive.valid]
+wall_seconds_per_pass = 0.0007163636047500001
+allocations_per_pass = 12380.0
+peak_heap_bytes = 507904
+
+[derive.malformed]
+wall_seconds_per_pass = 0.00047150290675
+allocations_per_pass = 8425.0
+peak_heap_bytes = 508035
+
+[hand_written]
+kept = 4
+discarded = 0
+worst_load = 4.7
+cores = 48
+pressured = false
+malformed_cases = 36
+malformed_rejected = 35
+malformed_accepted = 1
+deep_error = 'deep:/tail/.../count: invalid type: string "not an integer", expected i64 at line 1 column 277679'
+
+[hand_written.valid]
+wall_seconds_per_pass = 0.00229722915875
+allocations_per_pass = 23414.0
+peak_heap_bytes = 1760240
+
+[hand_written.malformed]
+wall_seconds_per_pass = 0.00173353697475
+allocations_per_pass = 17035.0
+peak_heap_bytes = 1760240
+
+[comparison]
+valid_wall_ratio = 3.20679211439238
+valid_allocations_ratio = 1.8912762520193862
+valid_peak_heap_ratio = 3.465694304435484
+malformed_wall_ratio = 3.676619910360712
+malformed_allocations_ratio = 2.0219584569732936
+malformed_peak_heap_ratio = 3.4648006534982825
+malformed_messages_equal = 36
+malformed_outcomes_total = 36

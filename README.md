@@ -31,8 +31,9 @@ Under construction. What exists today:
   model and compared by value, references resolved and accounted for, generated twice and
   byte-compared, with every finding recorded in a hash-keyed snapshot. What those measurements
   settled is written down in [corpus/findings.md](corpus/findings.md).
-- **The harnesses the later stages are measured by**: the corpus runner, the compile-cost benchmark,
-  the differential serde harness, the module-layer lint, and three fuzz targets.
+- **The harnesses the later stages are measured by**: the corpus runner, the compile-cost and serde
+  runtime benchmarks, the differential serde harness, the module-layer lint, and three fuzz
+  targets.
 
 `generate` reports everything it had to repair or could not represent, every time.
 
@@ -41,6 +42,10 @@ implementation, which needs a *self-describing* format — one that names its me
 and TOML do. If you feed generated structs to `bincode` or `postcard`, set `serde-impl =
 "derive-always"` and every type goes back to the serde derive. Nothing else changes: the two
 strategies are asserted equivalent on the wire, and they agree on every payload in the corpus.
+On the quick-tier payload set plus a 278 KB deep fixture, buffering currently costs 3.21×/3.68×
+derive wall time on valid/malformed paths, 1.89×/2.02× the allocations, and 3.47× peak heap. The
+published budget caps those ratios at 4.5×, 2.25×, and 4× respectively; the full workload and
+measurement conditions live in [corpus/runtime.toml](corpus/runtime.toml).
 
 ## Streams over paginated listings
 
@@ -76,18 +81,19 @@ task example                # the generated client against the generated server,
 task probe                  # the same, generated: every servable operation of the tier
 task audit && task unused   # advisories, and dependencies nothing uses
 task bench:compile -- --ab --reuse --reps 6 --max-load 5 --write-baseline   # needs an idle machine
+task bench:runtime -- --reps 4 --iterations 1000 --max-load 5 --write       # also needs one
 ```
 
-The benchmark is last and separate on purpose: it is the only step whose result depends on what
-else the machine is doing, and the harness refuses to record a figure taken outside its own
-discipline rather than quietly writing one down.
+The benchmarks are last and separate on purpose: their results depend on what else the machine is
+doing, and both harnesses refuse to record a figure taken outside the shared discipline rather than
+quietly writing one down.
 
 ## Layout
 
 | Path              | Contents                                                          |
 | ----------------- | ----------------------------------------------------------------- |
 | `crates/progeny/` | the generator library, and the thin `progeny` regeneration binary |
-| `xtask/`          | corpus runner, compile-cost benchmark, module-layer lint          |
+| `xtask/`          | corpus runner, compile/runtime benchmarks, module-layer lint      |
 | `corpus/`         | the manifest, the quick tier, snapshots, and the committed fixtures |
 | `fuzz/`           | fuzz targets over the front end                                   |
 | `plan/`           | the design documents this implementation follows                  |
@@ -106,6 +112,7 @@ task lint:fc                # the lint gate: every feature combination × target
 task corpus:stats           # the model-level counts the design questions turn on
 task bodies                 # function bodies per type, derive against hand-written (nightly)
 task bench:compile -- --crate-dir <path>   # compile cost; needs an idle machine
+task bench:runtime          # serde time, allocation count and peak heap; needs an idle machine
 task fuzz -- front_end      # soak a fuzz target (nightly + cargo-fuzz)
 ```
 
