@@ -35,6 +35,9 @@ pub(crate) struct Sample {
 /// spend as much time waiting as running before anyone doubts it.
 const MIN_PROGRESS: f64 = 0.5;
 
+/// Load-average movement smaller than this is sampling noise, not evidence of new work.
+const LOAD_NOISE: f64 = 0.5;
+
 impl Sample {
     /// What fraction of a processor this repetition actually got.
     ///
@@ -58,16 +61,16 @@ impl Sample {
     /// variant's repetitions *because it is slow* biases the exact comparison this harness exists
     /// to make, in the direction of a larger apparent win.
     ///
-    /// Starvation is visible from inside the measurement, so it needs no model of the load
-    /// average's decay, nobody's thread count, and no guess about what else is running: when the
-    /// processor is contended, wall-clock time runs away from CPU time. Measured, local, and true
-    /// whatever the rest of the machine is doing.
-    ///
-    /// What this deliberately does *not* catch is memory-bandwidth contention, which inflates CPU
-    /// seconds and wall seconds together and so leaves the ratio alone. That is what the load
-    /// ceiling is for, and why both exist.
+    /// Processor starvation is visible from inside the measurement: wall-clock time runs away from
+    /// CPU time. Memory-bandwidth contention can inflate both together, so the load average remains
+    /// a second signal. The repetition's processor progress bounds the load it could have added
+    /// itself; only a rise beyond that footprint and a sampling tolerance counts as external work.
+    /// This keeps the 21-second derive case above while rejecting a run whose load jumped from 4.8
+    /// to 24.7 around an otherwise fully occupied compiler.
     pub(crate) fn crowded(&self) -> bool {
-        self.progress() < MIN_PROGRESS
+        let progress = self.progress();
+        let external_load = self.load_after - self.load_before > progress + LOAD_NOISE;
+        progress < MIN_PROGRESS || external_load
     }
 }
 
@@ -488,6 +491,11 @@ mod tests {
         assert!(timed_sample(4.0, 1, 0.10, 0.20, 21.0).crowded());
         // `rustc` threading inside one job puts this above 1.0, which is not a problem.
         assert!(!timed_sample(30.0, 1, 0.10, 0.20, 21.0).crowded());
+    }
+
+    #[test]
+    fn a_repetition_with_an_external_load_spike_is_crowded() {
+        assert!(timed_sample(282.31, 1, 4.80, 24.71, 284.0).crowded());
     }
 
     /// A repetition is not discarded for its own footprint.
