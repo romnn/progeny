@@ -22,6 +22,13 @@ use super::{Args, as_f64, percent};
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct BaselineEntry {
     cpu_seconds: f64,
+    /// Cheapest-to-most-expensive CPU spread across the kept repetitions.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    cpu_spread_percent: f64,
+    /// Absolute form of [`Self::cpu_spread_percent`], so small crates are not judged on a large
+    /// percentage of scheduler-scale time.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    cpu_spread_seconds: f64,
     /// Mean elapsed time for one isolated invocation. Zero in records that predate persisted wall
     /// time, so they remain readable without pretending they measured it.
     #[serde(default)]
@@ -49,6 +56,10 @@ struct BaselineEntry {
     provisional: Vec<String>,
 }
 
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
 /// The standard a recorded baseline has to meet before its figures may be quoted as *the* number.
 ///
 /// Deliberately not `--max-load`. That flag is an operator's knob: it says how long *this* run will
@@ -70,6 +81,20 @@ pub(crate) mod discipline {
     /// Repetitions that have to survive discarding, per variant. One is an anecdote and two have no
     /// middle; three is the least that can show a spread at all.
     pub const MIN_KEPT: usize = 3;
+
+    /// Largest cheapest-to-most-expensive CPU spread a recorded compile result may carry.
+    ///
+    /// The regression threshold is 10%; allowing 25% is deliberately loose enough for a shared
+    /// machine while still refusing an obvious host-contention outlier. Load-at-start and
+    /// processor-progress checks cannot see memory-bandwidth contention that begins mid-sample:
+    /// CPU and wall time inflate together.
+    pub const MAX_CPU_SPREAD_PERCENT: f64 = 25.0;
+
+    /// Absolute CPU range that must also be exceeded before spread disqualifies a run.
+    ///
+    /// A few seconds is scheduler-scale variation for a small generated crate. Requiring both
+    /// limits keeps the guard aimed at material host-contention events.
+    pub const MIN_MATERIAL_CPU_SPREAD_SECONDS: f64 = 3.0;
 }
 
 /// Why a recorded entry may not be quoted, or empty when it meets the [`discipline`].
@@ -140,11 +165,7 @@ fn write_entries(
 }
 
 fn disciplined_entry(scope: &str, summary: &Summary) -> eyre::Result<BaselineEntry> {
-    let shortfalls = shortfalls(
-        summary.kept.len(),
-        summary.worst_load(),
-        summary.pressured > 0,
-    );
+    let shortfalls = compile_shortfalls(summary);
     if !shortfalls.is_empty() {
         bail!("{}", shortfalls.join("; "));
     }
@@ -157,16 +178,41 @@ fn disciplined_entry(scope: &str, summary: &Summary) -> eyre::Result<BaselineEnt
     };
     Ok(BaselineEntry {
         cpu_seconds,
+        cpu_spread_percent: summary.cpu_spread_percent(),
+        cpu_spread_seconds: summary.cpu_spread_seconds(),
         wall_seconds,
         peak_rss_bytes,
         scope: scope.to_owned(),
         kept: summary.kept.len(),
-        discarded: summary.discarded,
+        discarded: summary.discarded + summary.pressured,
         load: summary.worst_load(),
         cores: std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
         pressured: false,
         provisional: Vec::new(),
     })
+}
+
+fn compile_shortfalls(summary: &Summary) -> Vec<String> {
+    let mut reasons = shortfalls(summary.kept.len(), summary.worst_load(), false);
+    if let Some(reason) =
+        cpu_spread_shortfall(summary.cpu_spread_percent(), summary.cpu_spread_seconds())
+    {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn cpu_spread_shortfall(percent: f64, seconds: f64) -> Option<String> {
+    (percent > discipline::MAX_CPU_SPREAD_PERCENT
+        && seconds > discipline::MIN_MATERIAL_CPU_SPREAD_SECONDS)
+        .then(|| {
+            format!(
+                "kept CPU samples span {percent:.1}% and {seconds:.2} seconds, above the stability \
+                 ceilings of {:.1}% and {:.1} seconds",
+                discipline::MAX_CPU_SPREAD_PERCENT,
+                discipline::MIN_MATERIAL_CPU_SPREAD_SECONDS
+            )
+        })
 }
 
 /// Compare this run against what was recorded, and refuse the comparisons that are not one.
@@ -213,14 +259,14 @@ fn check_entries(
                 previous.load, previous.cores
             );
         }
-        let here = shortfalls(summary.kept.len(), load, summary.pressured > 0);
+        let here = compile_shortfalls(summary);
         if !here.is_empty() {
             println!(
                 "    this run is itself out of discipline — {}",
                 here.join("; ")
             );
         }
-        if previous.pressured || summary.pressured > 0 {
+        if previous.pressured {
             println!(
                 "    one side ran with thin memory, so the peak rss comparison is not evidence"
             );
@@ -291,8 +337,16 @@ mod tests {
     use super::{discipline, shortfalls};
 
     fn sample(wall_seconds: f64, load_before: f64) -> crate::bench::measure::Sample {
+        sample_with_cpu(1.0, wall_seconds, load_before)
+    }
+
+    fn sample_with_cpu(
+        cpu_seconds: f64,
+        wall_seconds: f64,
+        load_before: f64,
+    ) -> crate::bench::measure::Sample {
         crate::bench::measure::Sample {
-            cpu_seconds: 1.0,
+            cpu_seconds,
             peak_rss_bytes: 1024,
             load_before,
             load_after: load_before,
@@ -320,6 +374,40 @@ mod tests {
             pressured: 0,
         };
         assert!(super::disciplined_entry("types-only", &summary).is_err());
+    }
+
+    #[test_util::test]
+    fn a_run_with_an_obvious_cpu_outlier_cannot_be_recorded() {
+        // This is the real Cloudflare server run that exposed the hole. Every sample began below
+        // load 5 and made enough processor progress to be kept, but the third consumed more than
+        // twice the CPU for identical source. Averaging it would publish host contention as cost.
+        let summary = crate::bench::measure::Summary {
+            kept: vec![
+                sample_with_cpu(108.01, 110.0, 0.5),
+                sample_with_cpu(122.24, 124.0, 0.5),
+                sample_with_cpu(279.02, 281.0, 0.5),
+            ],
+            discarded: 0,
+            pressured: 0,
+        };
+        assert!(super::disciplined_entry("server", &summary).is_err());
+    }
+
+    #[test_util::test]
+    fn a_small_absolute_spread_is_not_an_outlier() {
+        // Orb's server varied by more than 25% because the whole compile takes about ten seconds.
+        // The absolute range is only 2.49 seconds; refusing it would make the rule a small-crate
+        // scheduler-jitter detector rather than a guard against the Cloudflare-class event above.
+        let summary = crate::bench::measure::Summary {
+            kept: vec![
+                sample_with_cpu(9.00, 10.0, 0.5),
+                sample_with_cpu(8.84, 10.0, 0.5),
+                sample_with_cpu(11.33, 12.0, 0.5),
+            ],
+            discarded: 0,
+            pressured: 0,
+        };
+        assert!(super::disciplined_entry("server", &summary).is_ok());
     }
 
     #[test_util::test]
@@ -353,11 +441,23 @@ mod tests {
     }
 
     #[test_util::test]
+    fn a_discarded_pressured_attempt_does_not_poison_valid_repetitions() {
+        let summary = crate::bench::measure::Summary {
+            kept: vec![sample(2.0, 0.5), sample(2.1, 0.5), sample(2.2, 0.5)],
+            discarded: 0,
+            pressured: 1,
+        };
+        assert!(super::disciplined_entry("types-only", &summary).is_ok());
+    }
+
+    #[test_util::test]
     fn a_provisional_entry_survives_the_file_and_stays_provisional() {
         // The record has to carry its own verdict: somebody who finds `baseline.toml` and never
         // runs the harness is exactly the reader the flag exists for.
         let entry = super::BaselineEntry {
             cpu_seconds: 8.30,
+            cpu_spread_percent: 0.0,
+            cpu_spread_seconds: 0.0,
             wall_seconds: 8.50,
             peak_rss_bytes: 1_003_913_216,
             scope: "types-only".to_owned(),
@@ -382,6 +482,8 @@ mod tests {
         // word should find it only where it means something.
         let entry = super::BaselineEntry {
             cpu_seconds: 1.0,
+            cpu_spread_percent: 0.0,
+            cpu_spread_seconds: 0.0,
             wall_seconds: 1.1,
             peak_rss_bytes: 2,
             scope: "types-only".to_owned(),
@@ -400,6 +502,8 @@ mod tests {
     fn entry(scope: &str, provisional: Vec<String>) -> super::BaselineEntry {
         super::BaselineEntry {
             cpu_seconds: 1.0,
+            cpu_spread_percent: 0.0,
+            cpu_spread_seconds: 0.0,
             wall_seconds: 1.1,
             peak_rss_bytes: 2,
             scope: scope.to_owned(),
@@ -454,9 +558,14 @@ mod tests {
                 !entry.scope.is_empty(),
                 "{key} does not say what it measured, so nothing can be compared against it"
             );
+            let mut expected = shortfalls(entry.kept, entry.load, entry.pressured);
+            if let Some(reason) =
+                super::cpu_spread_shortfall(entry.cpu_spread_percent, entry.cpu_spread_seconds)
+            {
+                expected.push(reason);
+            }
             assert_eq!(
-                entry.provisional,
-                shortfalls(entry.kept, entry.load, entry.pressured),
+                entry.provisional, expected,
                 "{key} disagrees with its own recorded conditions"
             );
         }

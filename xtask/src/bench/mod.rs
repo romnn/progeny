@@ -193,6 +193,14 @@ pub fn run(args: &Args) -> eyre::Result<()> {
                 let variant = &target.variant;
                 let sample = measure::measure_once(target, args)?;
                 let summary = summaries.entry(key_of(target)).or_default();
+                if sample.pressured {
+                    summary.pressured += 1;
+                    println!(
+                        "  rep {rep} {variant}: discarded, memory was thin for a {} peak",
+                        format_bytes(sample.peak_rss_bytes)
+                    );
+                    continue;
+                }
                 if sample.crowded() {
                     summary.discarded += 1;
                     println!(
@@ -205,18 +213,10 @@ pub fn run(args: &Args) -> eyre::Result<()> {
                     );
                     continue;
                 }
-                if sample.pressured {
-                    summary.pressured += 1;
-                }
                 println!(
-                    "  rep {rep} {variant}: {:.2} s cpu, {} peak rss{}",
+                    "  rep {rep} {variant}: {:.2} s cpu, {} peak rss",
                     sample.cpu_seconds,
                     format_bytes(sample.peak_rss_bytes),
-                    if sample.pressured {
-                        " (memory was thin: the peak is a floor, not a result)"
-                    } else {
-                        ""
-                    }
                 );
                 summary.kept.push(sample);
             }
@@ -281,19 +281,19 @@ fn report(summaries: &BTreeMap<String, Summary>) {
                      ({} kept, {} discarded)",
                     format_bytes(rss),
                     summary.kept.len(),
-                    summary.discarded
+                    summary.discarded + summary.pressured
                 );
                 if summary.pressured > 0 {
                     println!(
-                        "    {} of those repetitions ran with thin memory; treat the peak as a \
-                         floor, not a result",
-                        summary.pressured
+                        "    {} pressure-disqualified repetition{}",
+                        summary.pressured,
+                        if summary.pressured == 1 { "" } else { "s" }
                     );
                 }
             }
             _ => println!(
                 "  {key:<34} no usable repetitions ({} discarded)",
-                summary.discarded
+                summary.discarded + summary.pressured
             ),
         }
     }
@@ -472,16 +472,10 @@ fn compare(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summ
         let (Some(rss_before), Some(rss_after)) = (before.mean_rss(), after.mean_rss()) else {
             continue;
         };
-        let pressured = before.pressured > 0 || after.pressured > 0;
         println!(
-            "  {label:<24} cpu {:+.1}%   peak rss {:+.1}%{}",
+            "  {label:<24} cpu {:+.1}%   peak rss {:+.1}%",
             percent(cpu_before, cpu_after),
             percent(as_f64(rss_before), as_f64(rss_after)),
-            if pressured {
-                "   (memory was thin; the rss figure is not evidence)"
-            } else {
-                ""
-            }
         );
     }
 }

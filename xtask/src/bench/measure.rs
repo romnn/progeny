@@ -118,6 +118,38 @@ impl Summary {
             .map(|sample| sample.load_before)
             .fold(0.0, f64::max)
     }
+
+    /// Difference between the cheapest and most expensive kept CPU sample, relative to the
+    /// cheapest.
+    pub(super) fn cpu_spread_percent(&self) -> f64 {
+        let Some((minimum, maximum)) = self.cpu_range() else {
+            return 0.0;
+        };
+        if minimum <= 0.0 {
+            return f64::INFINITY;
+        }
+        (maximum - minimum) / minimum * 100.0
+    }
+
+    /// Absolute CPU difference between the cheapest and most expensive kept sample.
+    pub(super) fn cpu_spread_seconds(&self) -> f64 {
+        self.cpu_range()
+            .map_or(0.0, |(minimum, maximum)| maximum - minimum)
+    }
+
+    fn cpu_range(&self) -> Option<(f64, f64)> {
+        let minimum = self
+            .kept
+            .iter()
+            .map(|sample| sample.cpu_seconds)
+            .fold(f64::INFINITY, f64::min);
+        let maximum = self
+            .kept
+            .iter()
+            .map(|sample| sample.cpu_seconds)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (minimum.is_finite() && maximum.is_finite()).then_some((minimum, maximum))
+    }
 }
 
 /// Compile the crate once without measuring, so its dependencies are built and cached.
@@ -398,7 +430,7 @@ mod tests {
             == [
                 std::ffi::OsStr::new("-p"),
                 std::ffi::OsStr::new("generated-client")
-        ]));
+            ]));
     }
 
     #[cfg(target_os = "linux")]
