@@ -1484,6 +1484,53 @@ transport time, and no types-only figure is quoted as a full generated-surface r
 machine-readable workload, raw means, exact offsets, discipline evidence, ratios, and refusal
 thresholds are committed in [`runtime.toml`](runtime.toml).
 
+## The monomorphic assemble experiment, measured and reverted
+
+The fixed-error experiment did reduce the generic source surface it targeted. The body census
+differences nightly expanded output at one and eleven otherwise-identical generated structs:
+
+| rendering | total bodies/type | serde bodies/type | generic bodies/type |
+| --- | ---: | ---: | ---: |
+| derive | 12 | 10 | 8 |
+| hand-written, generic `assemble<E>` | 5 | 3 | 3 |
+| hand-written, fixed assembly error | 5 | 3 | 2 |
+
+On the deserialization side, that is the predicted two generic bodies becoming one; `serialize<S>`
+remains the other generic serde body. The total body count does not change. All 16 differential
+cases preserve their exact error messages under the fixed error and again after its removal.
+
+The compile A/B used archived and experimental renderings of every quick-tier document. Recursive
+source comparison finds only `support.rs` and `types.rs` changed in all eight generated crates, and
+every inspected hunk is the fixed error or `assemble` signature. Each subject includes generated
+types, client, and server in one crate, with incremental compilation disabled and one compiler job.
+Variants alternate A-B-B-A; every recorded side has at least three kept repetitions, starts at load
+at most 5, has memory headroom, and satisfies both the per-attempt crowding rule and the recorded CPU
+spread ceiling.
+
+| document | generic → fixed CPU | CPU delta | generic → fixed peak RSS | RSS delta |
+| --- | ---: | ---: | ---: | ---: |
+| Petstore | 0.296 → 0.303 s | +2.53% | 0.185 → 0.183 GiB | −1.07% |
+| GitHub | 26.070 → 24.300 s | −6.79% | 3.270 → 3.268 GiB | −0.09% |
+| PostHog | 34.890 → 34.490 s | −1.15% | 4.556 → 4.552 GiB | −0.09% |
+| Cloudflare | 74.788 → 74.104 s | −0.91% | 8.844 → 8.823 GiB | −0.24% |
+| Okta | 14.312 → 14.202 s | −0.77% | 2.178 → 2.166 GiB | −0.56% |
+| Orb | 4.919 → 4.756 s | −3.32% | 0.907 → 0.907 GiB | −0.01% |
+| Jellyfin | 6.763 → 6.784 s | +0.30% | 1.175 → 1.173 GiB | −0.19% |
+| Oxide | 5.142 → 5.085 s | −1.11% | 0.885 → 0.886 GiB | +0.13% |
+
+Tier CPU is **167.18 → 164.02 seconds (−1.89%)** and direct wall is
+**167.50 → 164.17 seconds (−1.99%)**. GitHub carries the only result above ordinary low-single-digit
+movement, and its generic side also carries the tier's largest accepted CPU spread at 20.7%;
+Cloudflare, the largest and most decisive subject, moves less than 1% CPU and 0.25% RSS. The
+direction is not even uniform on CPU, and no document has a material RSS change.
+
+The experiment is therefore **not adopted**. Its extra error type and conversion boundary buy no
+measurable compile-memory improvement and only a sub-2% aggregate timing movement, so the generic
+implementation was restored. Item 7's runtime record remains the shipping baseline: reverting the
+experiment means no new allocation or malformed-path behavior enters the product. The exact body
+counts, raw means, repetition/discard counts, loads, spreads, and decision are durable in
+[`assemble.toml`](assemble.toml).
+
 ## The architecture review, and what reading found that running had not
 
 A full review of the crate and its harness, after the probe work: verdict *sound shape* — the

@@ -350,4 +350,13 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn assemble_experiment_record_is_valid_toml() {
+        let record = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../corpus/assemble.toml"
+        ));
+        assert!(toml::from_str::<toml::Value>(record).is_ok());
+    }
 }

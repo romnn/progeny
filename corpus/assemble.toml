@@ -1,0 +1,225 @@
+# Item 8's fixed-error Assemble experiment. The generated controls differed only in support.rs
+# and types.rs, and every hunk was the Assemble error/signature change.
+schema = 1
+recorded_at = "2026-07-30"
+scope = "types+client+server"
+ordering = "A-B-B-A"
+jobs = 1
+incremental = false
+max_load = 5.0
+minimum_kept_repetitions = 3
+control = "Assemble::assemble<E: serde::de::Error>"
+experiment = "Assemble::assemble returning a fixed error converted inside the visitor"
+decision = "reverted: no material compile-time movement"
+
+[body_census]
+method = "difference of nightly -Zunpretty=expanded output at N=1 and N=11"
+derive_total_per_type = 12.0
+derive_serde_per_type = 10.0
+derive_generic_per_type = 8.0
+hand_written_total_per_type = 5.0
+hand_written_serde_per_type = 3.0
+hand_written_generic_per_type = 3.0
+monomorphic_hand_written_total_per_type = 5.0
+monomorphic_hand_written_serde_per_type = 3.0
+monomorphic_hand_written_generic_per_type = 2.0
+
+[tier]
+generic_cpu_seconds = 167.180481716667
+monomorphic_cpu_seconds = 164.02235455
+cpu_delta_percent = -1.88905255819216
+generic_wall_seconds = 167.502101352883
+monomorphic_wall_seconds = 164.16781779835
+wall_delta_percent = -1.99059207472797
+
+["cloudflare.generic"]
+cpu_seconds = 74.7877958
+cpu_spread_percent = 4.672337697483051
+cpu_spread_seconds = 3.408352000000008
+wall_seconds = 74.88721264680001
+peak_rss_bytes = 9496648908
+scope = "types+client+server"
+kept = 5
+discarded = 1
+load = 4.95
+cores = 48
+
+["cloudflare.monomorphic"]
+cpu_seconds = 74.1035128
+cpu_spread_percent = 1.6704375557119824
+cpu_spread_seconds = 1.2263229999999936
+wall_seconds = 74.15409878759999
+peak_rss_bytes = 9473419673
+scope = "types+client+server"
+kept = 5
+discarded = 1
+load = 4.06
+cores = 48
+
+["github-31.generic"]
+cpu_seconds = 26.07027625
+cpu_spread_percent = 20.652011050241143
+cpu_spread_seconds = 5.116354000000001
+wall_seconds = 26.14099204575
+peak_rss_bytes = 3511669760
+scope = "types+client+server"
+kept = 4
+discarded = 0
+load = 4.93
+cores = 48
+
+["github-31.monomorphic"]
+cpu_seconds = 24.30017575
+cpu_spread_percent = 2.8058398123503596
+cpu_spread_seconds = 0.6755679999999984
+wall_seconds = 24.31546203975
+peak_rss_bytes = 3508515840
+scope = "types+client+server"
+kept = 4
+discarded = 0
+load = 4.77
+cores = 48
+
+["jellyfin.generic"]
+cpu_seconds = 6.7632216666666665
+cpu_spread_percent = 0.8790038382093822
+cpu_spread_seconds = 0.059207000000000676
+wall_seconds = 6.780230756666666
+peak_rss_bytes = 1261963946
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.82
+cores = 48
+
+["jellyfin.monomorphic"]
+cpu_seconds = 6.783725666666666
+cpu_spread_percent = 3.2238814399411044
+cpu_spread_seconds = 0.2146360000000005
+wall_seconds = 6.801961489333333
+peak_rss_bytes = 1259522730
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.76
+cores = 48
+
+["okta.generic"]
+cpu_seconds = 14.311926666666666
+cpu_spread_percent = 1.2124437928226444
+cpu_spread_seconds = 0.1727350000000012
+wall_seconds = 14.342230519
+peak_rss_bytes = 2339139584
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.57
+cores = 48
+
+["okta.monomorphic"]
+cpu_seconds = 14.201511333333334
+cpu_spread_percent = 0.820829586516106
+cpu_spread_seconds = 0.11609999999999943
+wall_seconds = 14.211247033666666
+peak_rss_bytes = 2326077440
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.51
+cores = 48
+
+["orb.generic"]
+cpu_seconds = 4.919321666666666
+cpu_spread_percent = 3.4383834912763063
+cpu_spread_seconds = 0.16689799999999977
+wall_seconds = 4.939434935666667
+peak_rss_bytes = 973890901
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.82
+cores = 48
+
+["orb.monomorphic"]
+cpu_seconds = 4.755821
+cpu_spread_percent = 0.3708665282744208
+cpu_spread_seconds = 0.017610000000000348
+wall_seconds = 4.7599046713333335
+peak_rss_bytes = 973785770
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.78
+cores = 48
+
+["oxide.generic"]
+cpu_seconds = 5.142002333333333
+cpu_spread_percent = 1.3400635531654739
+cpu_spread_seconds = 0.0683429999999996
+wall_seconds = 5.153295828333333
+peak_rss_bytes = 950368938
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.89
+cores = 48
+
+["oxide.monomorphic"]
+cpu_seconds = 5.0847066666666665
+cpu_spread_percent = 1.5671564633072406
+cpu_spread_seconds = 0.07912199999999991
+wall_seconds = 5.087397482666667
+peak_rss_bytes = 951607296
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.98
+cores = 48
+
+["petstore-31.generic"]
+cpu_seconds = 0.29586533333333337
+cpu_spread_percent = 4.580676462434159
+cpu_spread_seconds = 0.013218000000000008
+wall_seconds = 0.29716290100000003
+peak_rss_bytes = 198131712
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.98
+cores = 48
+
+["petstore-31.monomorphic"]
+cpu_seconds = 0.3033653333333333
+cpu_spread_percent = 5.489539241325389
+cpu_spread_seconds = 0.016288999999999998
+wall_seconds = 0.30427386366666664
+peak_rss_bytes = 196008618
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 1.98
+cores = 48
+
+["posthog.generic"]
+cpu_seconds = 34.890071999999996
+cpu_spread_percent = 0.672059038843856
+cpu_spread_seconds = 0.23354599999999692
+wall_seconds = 34.96154171966666
+peak_rss_bytes = 4892468565
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 2.29
+cores = 48
+
+["posthog.monomorphic"]
+cpu_seconds = 34.489536
+cpu_spread_percent = 0.6919145284348363
+cpu_spread_seconds = 0.23763700000000654
+wall_seconds = 34.53347243033333
+peak_rss_bytes = 4888196437
+scope = "types+client+server"
+kept = 3
+discarded = 0
+load = 2.22
+cores = 48
