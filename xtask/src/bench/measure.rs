@@ -172,7 +172,7 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
     let load_before = load_average()?;
     let started = std::time::Instant::now();
 
-    let runner = std::env::current_exe().wrap_err("locating this executable")?;
+    let runner = measuring_runner()?;
     // `--measure` takes the rest of the line, so the command follows it directly; a `--`
     // separator would be swallowed as its first value.
     let mut command = Command::new(runner);
@@ -238,6 +238,19 @@ fn select_package(command: &mut Command, package: &str, manifest: &camino::Utf8P
         .arg(package)
         .arg("--manifest-path")
         .arg(manifest);
+}
+
+#[cfg(target_os = "linux")]
+fn measuring_runner() -> eyre::Result<std::path::PathBuf> {
+    // Cargo replaces the on-disk executable during a rebuild. A benchmark may wait for hours
+    // before spawning its fresh measuring child, so the path returned by `current_exe` can vanish
+    // in the meantime. `/proc/self/exe` opens the still-running image instead.
+    Ok(std::path::PathBuf::from("/proc/self/exe"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn measuring_runner() -> eyre::Result<std::path::PathBuf> {
+    std::env::current_exe().wrap_err("locating this executable")
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -385,7 +398,16 @@ mod tests {
             == [
                 std::ffi::OsStr::new("-p"),
                 std::ffi::OsStr::new("generated-client")
-            ]));
+        ]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_measurement_runner_survives_the_on_disk_binary_being_replaced() {
+        assert_eq!(
+            super::measuring_runner().ok().as_deref(),
+            Some(std::path::Path::new("/proc/self/exe"))
+        );
     }
 
     fn sample(cpu: f64, rss: u64, load_before: f64, load_after: f64) -> Sample {
