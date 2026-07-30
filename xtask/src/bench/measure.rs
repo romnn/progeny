@@ -207,6 +207,9 @@ pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample>
     let load_before = load_average()?;
     let started = std::time::Instant::now();
 
+    #[cfg(target_os = "linux")]
+    let runner = measuring_runner();
+    #[cfg(not(target_os = "linux"))]
     let runner = measuring_runner()?;
     // `--measure` takes the rest of the line, so the command follows it directly; a `--`
     // separator would be swallowed as its first value.
@@ -276,11 +279,11 @@ fn select_package(command: &mut Command, package: &str, manifest: &camino::Utf8P
 }
 
 #[cfg(target_os = "linux")]
-fn measuring_runner() -> eyre::Result<std::path::PathBuf> {
+fn measuring_runner() -> std::path::PathBuf {
     // Cargo replaces the on-disk executable during a rebuild. A benchmark may wait for hours
     // before spawning its fresh measuring child, so the path returned by `current_exe` can vanish
     // in the meantime. `/proc/self/exe` opens the still-running image instead.
-    Ok(std::path::PathBuf::from("/proc/self/exe"))
+    std::path::PathBuf::from("/proc/self/exe")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -440,8 +443,8 @@ mod tests {
     #[test]
     fn the_measurement_runner_survives_the_on_disk_binary_being_replaced() {
         assert_eq!(
-            super::measuring_runner().ok().as_deref(),
-            Some(std::path::Path::new("/proc/self/exe"))
+            super::measuring_runner(),
+            std::path::Path::new("/proc/self/exe")
         );
     }
 

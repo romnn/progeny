@@ -56,6 +56,10 @@ struct BaselineEntry {
     provisional: Vec<String>,
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive a reference"
+)]
 fn is_zero(value: &f64) -> bool {
     *value == 0.0
 }
