@@ -1460,7 +1460,7 @@ itself contradicts; another 171 payload positions cannot be checked. The benchma
 277,664-byte body with 2,048 large fields before a depth-24 malformed tail, so the result does not
 quietly extrapolate from short objects.
 
-Four repetitions per strategy were kept, none discarded. The worst starting load was 4.85, below
+Four repetitions per strategy were kept, none discarded. The worst starting load was 4.96, below
 the enforced ceiling of 5, and neither strategy ran under memory pressure. Each value below is one
 complete pass over the tier payloads plus the synthetic fixture; compilation and process startup
 are outside the timed region. Peak heap is the counting allocator's maximum logical live heap, not
@@ -1468,9 +1468,9 @@ process RSS.
 
 | strategy | valid wall | valid allocations | valid peak heap | malformed wall | malformed allocations | malformed peak heap |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| derive | 0.716 ms | 12,380 | 496.0 KiB | 0.472 ms | 8,425 | 496.1 KiB |
-| hand-written | 2.297 ms | 23,414 | 1.68 MiB | 1.734 ms | 17,035 | 1.68 MiB |
-| hand-written / derive | **3.21×** | **1.89×** | **3.47×** | **3.68×** | **2.02×** | **3.46×** |
+| derive | 0.713 ms | 12,380 | 496.0 KiB | 0.470 ms | 8,425 | 496.1 KiB |
+| hand-written | 2.315 ms | 23,414 | 1.68 MiB | 1.744 ms | 17,035 | 1.68 MiB |
+| hand-written / derive | **3.25×** | **1.89×** | **3.47×** | **3.71×** | **2.02×** | **3.46×** |
 
 The published budget is hand-written at no more than **4.5× derive wall time, 2.25× allocations,
 and 4× peak heap** on either path. Both strategies rejected 35 of the 36 malformed cases and

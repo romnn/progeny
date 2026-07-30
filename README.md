@@ -43,7 +43,7 @@ implementation, which needs a *self-describing* format — one that names its me
 and TOML do. If you feed generated structs to `bincode` or `postcard`, set `serde-impl =
 "derive-always"` and every type goes back to the serde derive. Nothing else changes: the two
 strategies are asserted equivalent on the wire, and they agree on every payload in the corpus.
-On the quick-tier payload set plus a 278 KB deep fixture, buffering currently costs 3.21×/3.68×
+On the quick-tier payload set plus a 278 KB deep fixture, buffering currently costs 3.25×/3.71×
 derive wall time on valid/malformed paths, 1.89×/2.02× the allocations, and 3.47× peak heap. The
 published budget caps those ratios at 4.5×, 2.25×, and 4× respectively; the full workload and
 measurement conditions live in [corpus/runtime.toml](corpus/runtime.toml).

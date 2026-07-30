@@ -35,7 +35,7 @@ deep_malformed_must_be_rejected = true
 [derive]
 kept = 4
 discarded = 0
-worst_load = 4.85
+worst_load = 4.96
 cores = 48
 pressured = false
 malformed_cases = 36
@@ -44,19 +44,19 @@ malformed_accepted = 1
 deep_error = 'deep:/tail/.../count: invalid type: string "not an integer", expected i64 at line 1 column 277653'
 
 [derive.valid]
-wall_seconds_per_pass = 0.0007163636047500001
+wall_seconds_per_pass = 0.0007128415207500001
 allocations_per_pass = 12380.0
 peak_heap_bytes = 507904
 
 [derive.malformed]
-wall_seconds_per_pass = 0.00047150290675
+wall_seconds_per_pass = 0.00047038283000000003
 allocations_per_pass = 8425.0
 peak_heap_bytes = 508035
 
 [hand_written]
 kept = 4
 discarded = 0
-worst_load = 4.7
+worst_load = 4.96
 cores = 48
 pressured = false
 malformed_cases = 36
@@ -65,20 +65,20 @@ malformed_accepted = 1
 deep_error = 'deep:/tail/.../count: invalid type: string "not an integer", expected i64 at line 1 column 277679'
 
 [hand_written.valid]
-wall_seconds_per_pass = 0.00229722915875
+wall_seconds_per_pass = 0.0023149723205
 allocations_per_pass = 23414.0
 peak_heap_bytes = 1760240
 
 [hand_written.malformed]
-wall_seconds_per_pass = 0.00173353697475
+wall_seconds_per_pass = 0.0017442373060000001
 allocations_per_pass = 17035.0
 peak_heap_bytes = 1760240
 
 [comparison]
-valid_wall_ratio = 3.20679211439238
+valid_wall_ratio = 3.24752732986759
 valid_allocations_ratio = 1.8912762520193862
 valid_peak_heap_ratio = 3.465694304435484
-malformed_wall_ratio = 3.676619910360712
+malformed_wall_ratio = 3.7081228198741862
 malformed_allocations_ratio = 2.0219584569732936
 malformed_peak_heap_ratio = 3.4648006534982825
 malformed_messages_equal = 36
