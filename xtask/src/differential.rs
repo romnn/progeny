@@ -187,19 +187,20 @@ fn count_bodies() -> eyre::Result<()> {
             measured.push(expand_and_count(&directory)?);
         }
         let (one, eleven) = (
-            measured.first().copied().unwrap_or(0),
-            measured.get(1).copied().unwrap_or(0),
+            measured.first().copied().unwrap_or_default(),
+            measured.get(1).copied().unwrap_or_default(),
         );
-        let per_type =
-            f64::from(u32::try_from(eleven.saturating_sub(one)).unwrap_or(u32::MAX)) / 10.0;
+        let per_type = difference_per_type(eleven.total, one.total);
+        let generic_per_type = difference_per_type(eleven.generic, one.generic);
         let serde_only = per_type - baseline();
         let name = match strategy {
             SerdeImpl::DeriveAlways => "derive",
             SerdeImpl::HandWrittenWhereEligible => "hand-written",
         };
         println!(
-            "bodies: {name:<12} {one:>4} at N=1, {eleven:>4} at N=11 → {per_type:.1} per type, of \
-             which {serde_only:.1} are serde's"
+            "bodies: {name:<12} {:>4} at N=1, {:>4} at N=11 → {per_type:.1} per type, of which \
+             {serde_only:.1} are serde's; {generic_per_type:.1} generic bodies per type",
+            one.total, eleven.total,
         );
         counts.push((name, serde_only));
     }
@@ -213,6 +214,10 @@ fn count_bodies() -> eyre::Result<()> {
         );
     }
     Ok(())
+}
+
+fn difference_per_type(eleven: usize, one: usize) -> f64 {
+    f64::from(u32::try_from(eleven.saturating_sub(one)).unwrap_or(u32::MAX)) / 10.0
 }
 
 /// A document with `copies` differently-named copies of the spike struct.
@@ -276,7 +281,7 @@ fn assemble_single(directory: &Utf8Path, document: &[u8], strategy: SerdeImpl) -
 }
 
 /// Expand a crate and count the function bodies in it.
-fn expand_and_count(directory: &Utf8Path) -> eyre::Result<usize> {
+fn expand_and_count(directory: &Utf8Path) -> eyre::Result<BodyCounts> {
     let output = crate::generated::cargo(directory)
         // Its own target directory: expansion is a nightly build of the same crate the gate above
         // just checked on stable, and sharing one would have each invalidate the other's artefacts.
@@ -297,14 +302,52 @@ fn expand_and_count(directory: &Utf8Path) -> eyre::Result<usize> {
     let expanded = String::from_utf8_lossy(&output.stdout);
     // A body is a `fn` with a block. Counting the keyword is enough here because the difference,
     // not the absolute number, is the measurement — and both sides are counted the same way.
-    Ok(expanded
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("fn ")
-                || trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("const fn ")
-                || trimmed.starts_with("pub const fn ")
-        })
-        .count())
+    Ok(body_counts(&expanded))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BodyCounts {
+    total: usize,
+    generic: usize,
+}
+
+fn body_counts(expanded: &str) -> BodyCounts {
+    let mut counts = BodyCounts::default();
+    for line in expanded.lines() {
+        let trimmed = line.trim_start();
+        let signature = ["fn ", "pub fn ", "const fn ", "pub const fn "]
+            .into_iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix));
+        let Some(signature) = signature else {
+            continue;
+        };
+        counts.total += 1;
+        if signature
+            .find('(')
+            .is_some_and(|arguments| signature[..arguments].contains('<'))
+        {
+            counts.generic += 1;
+        }
+    }
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn expanded_body_counts_distinguish_generic_functions() {
+        let expanded = indoc::indoc! {"
+            fn plain() {}
+            pub fn generic<T>(value: T) {}
+            const fn constant() {}
+            struct NotAFunction;
+        "};
+        assert_eq!(
+            super::body_counts(expanded),
+            super::BodyCounts {
+                total: 3,
+                generic: 1,
+            }
+        );
+    }
 }
