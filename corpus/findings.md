@@ -1323,8 +1323,58 @@ cannot disappear with the transparent reference.
 `uniqueItems` deliberately stays a `Vec`. The 664 active declarations make the constraint real, but
 a set deserializer would silently discard duplicate wire elements and may reorder what arrived.
 Preserving every element in arrival order is the faithful data model; the diagnostic states that
-uniqueness is not enforced. Constraint-carrying newtypes remain a separate, census-first opt-in
-decision. The default is now explicit: preserve, diagnose, and do not enforce.
+uniqueness is not enforced.
+
+No `constraints = "enforce"` mode is added. The 39,074 occurrences are not one feature: they span
+numeric, string, array, object, and `contains` semantics across almost the entire corpus. An honest
+mode would be a second generated validation type system with constructor and deserialization policy
+for every constrained position; a regex-only string newtype would make the broad configuration
+name promise more than it enforces. The default and only mode is therefore explicit: preserve,
+diagnose, and do not enforce. Validation remains application policy until consumer demand can
+justify that API surface, its runtime dependencies, and a disciplined full-surface compile A/B.
+
+## Connection upgrades and IP formats
+
+The status census finds **24 operations declaring exact `101 Switching Protocols` responses across
+4 of 78 documents**: Cloudflare 19, LangSmith 2, Oxide 1, and Telnyx 2. This overturns the audit's
+expectation that Oxide would dominate. Every exact arm now emits a `connection-upgrade` degradation
+stating that the generated arm carries only the status: the client does not return upgraded I/O and
+the server cannot serve it.
+
+Full upgrade support is not generated from that status alone. The four descriptions identify an
+HTTP transition but do not share a contract for subprotocols or frames, so a typed feature would
+invent the protocol it claims to derive. A raw upgraded connection remains part of the measured raw
+streaming transport follow-up, where a full-duplex fixture can define behavior without pretending a
+`101` response schema describes WebSocket frames.
+
+The string-format census finds **41 `ip` occurrences in 2 documents, 31 `ipv4` occurrences in 4,
+and 11 `ipv6` occurrences in 3**. That is enough incidence for a dependency-free fidelity gain:
+the formats now lower to `std::net::IpAddr`, `Ipv4Addr`, and `Ipv6Addr`, and the generated probe
+synthesizes valid addresses for each. `uri` and `hostname` remain strings; this census did not ask
+for a new validation dependency.
+
+## Small surface decisions
+
+- The plan reports configurable `Default` as absent, but the cited `Derive` enum already contains
+  it at the audited commit. Its fixed-point eligibility also already excludes enums and propagates
+  only through members that can default. A direct test now pins that existing behavior; `Default`
+  stays outside the default derive set.
+- `formats.bytes` controls raw binary request and response bodies. A base64 or binary property
+  inside JSON stays `String`, which is the text the wire actually carries; turning it into bytes
+  would silently choose a codec. The renderer no longer matches the byte knob only to return
+  `String` from both arms, and the public configuration docs state the boundary.
+- The compile-cost headline beside `SerdeImpl` now gives both scopes: 65–67% less CPU on the
+  focused type layer, and 31–44% less CPU plus 22–37% less peak RSS over generated types, client,
+  and server.
+- Generated clients keep no hook system. A configured `reqwest::Client` supplies transport-wide
+  authentication, retry, and tracing behavior; what this deliberately loses is automatic
+  per-operation identity. README records the escape for applications that need it: wrap generated
+  operation methods in an application-owned client that creates named spans.
+- The probe's recorder double remains harness infrastructure rather than a new `emit.double`
+  surface. Its renderer synthesizes responses and stores values in a probe-private assertion and
+  lifecycle shape. Shipping that would commit public storage, assertion, and server-lifetime APIs,
+  not merely package reusable code. No consumer demand presently justifies that product surface;
+  the real-socket probe remains its behavioral prototype.
 
 ## Runtime cost of the buffered serde default
 

@@ -20,8 +20,9 @@ Under construction. What exists today:
 - **The type layer.** Schemas are classified into one closed set of shapes, `allOf` is merged, names
   are derived from document positions, structurally identical types are deduplicated, and every
   generated type is described by exactly one wire-contract record.
-- **The types renderer**, emitting either a complete crate or one module to `include!`, with
-  hand-written serde implementations by default or the derive on request.
+- **The types renderer**, emitting a complete crate, one module to `include!`, or an opt-in
+  three-crate types/client/server workspace, with hand-written serde implementations by default or
+  the derive on request.
 - **The client renderer.** One method per operation, with the URL, query string, headers and cookies
   built from the description's own parameter styles, and a typed response per declared status.
 - **The server renderer.** An `Api` trait to implement, an `axum` router, and a rejection envelope —
@@ -46,6 +47,15 @@ On the quick-tier payload set plus a 278 KB deep fixture, buffering currently co
 derive wall time on valid/malformed paths, 1.89×/2.02× the allocations, and 3.47× peak heap. The
 published budget caps those ratios at 4.5×, 2.25×, and 4× respectively; the full workload and
 measurement conditions live in [corpus/runtime.toml](corpus/runtime.toml).
+
+## Client middleware
+
+The generated client has no callback or hook system. Supply a preconfigured `reqwest::Client` for
+transport-wide authentication, retry, and tracing behavior. The trade-off is explicit: generic
+HTTP middleware does not automatically know progeny's operation name, so it cannot attach that
+identity to each trace. Applications that need it can wrap the generated `Client` in an
+application-owned type whose operation-named methods create spans before calling the generated
+builders.
 
 ## Streams over paginated listings
 

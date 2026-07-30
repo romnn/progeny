@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::dedup::references_mut;
 use super::lower::Provisional;
-use super::{ContractKind, Contracts, DeserStrategy, TypeContract, TypeIndex, TypeRef};
+use super::{ContractKind, Contracts, DeserStrategy, Format, TypeContract, TypeIndex, TypeRef};
 use crate::config::{Config, Derive, MapKind, SerdeImpl, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, RejectError, RejectKind};
 use crate::schema::cycles::Sccs;
@@ -345,7 +345,8 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
         // `serde_json::Value` holds a float and orders nothing.
         TypeRef::Value => derive == Derive::PartialEq || derive == Derive::Default,
         TypeRef::F64 => !matches!(derive, Derive::Eq | Derive::Ord | Derive::Hash),
-        TypeRef::String | TypeRef::Format(_) => derive != Derive::Copy,
+        TypeRef::String => derive != Derive::Copy,
+        TypeRef::Format(format) => format_carries(derive, *format, config),
         TypeRef::Vec(inner) => derive != Derive::Copy && carries(derive, inner, supported, config),
         TypeRef::Map(inner) => {
             if derive == Derive::Copy {
@@ -370,6 +371,21 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
             .iter()
             .all(|item| carries(derive, item, supported, config)),
         TypeRef::Unit | TypeRef::Bool | TypeRef::I64 | TypeRef::U64 => true,
+    }
+}
+
+fn format_carries(derive: Derive, format: Format, config: &Config) -> bool {
+    if derive != Derive::Default {
+        return derive != Derive::Copy;
+    }
+    match format {
+        Format::DateTime | Format::Date | Format::Time => matches!(
+            config.formats.date_time,
+            crate::config::DateTimeCrate::String
+        ),
+        Format::Uuid => matches!(config.formats.uuid, crate::config::UuidCrate::String),
+        Format::Base64 | Format::Binary => true,
+        Format::Ip | Format::Ipv4 | Format::Ipv6 => false,
     }
 }
 

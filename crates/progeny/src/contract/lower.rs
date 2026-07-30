@@ -707,6 +707,9 @@ fn format_name(format: Format) -> &'static str {
         Format::Date => "Date",
         Format::Time => "Time",
         Format::Uuid => "Uuid",
+        Format::Ip => "Ip",
+        Format::Ipv4 => "Ipv4",
+        Format::Ipv6 => "Ipv6",
         Format::Base64 => "Base64",
         Format::Binary => "Binary",
     }

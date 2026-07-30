@@ -583,9 +583,10 @@ fn format_type(format: Format, config: &Config) -> TokenStream {
             UuidCrate::String => quote! { String },
             UuidCrate::Uuid => quote! { uuid::Uuid },
         },
-        Format::Base64 | Format::Binary => match config.formats.bytes {
-            BytesRepr::Vec | BytesRepr::Bytes => quote! { String },
-        },
+        Format::Ip => quote! { ::std::net::IpAddr },
+        Format::Ipv4 => quote! { ::std::net::Ipv4Addr },
+        Format::Ipv6 => quote! { ::std::net::Ipv6Addr },
+        Format::Base64 | Format::Binary => quote! { String },
     }
 }
 

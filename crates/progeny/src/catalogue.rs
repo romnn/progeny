@@ -186,6 +186,14 @@ fn wiring(class: BreakageClass) -> Wiring {
             "/a": {"get": {"operationId": "list-pets", "responses": {"200": {"description": "ok"}}}},
             "/b": {"get": {"operationId": "list_pets", "responses": {"200": {"description": "ok"}}}},
         }))),
+        BreakageClass::ConnectionUpgrade => Wiring::Fixture(paths(json!({
+            "/socket": {
+                "get": {
+                    "operationId": "connect",
+                    "responses": {"101": {"description": "switching protocols"}},
+                },
+            },
+        }))),
         BreakageClass::QuerySerializationStyle => Wiring::Fixture(paths(json!({
             "/pets": {
                 "get": {

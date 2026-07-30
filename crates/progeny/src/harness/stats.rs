@@ -46,6 +46,10 @@ pub struct Stats {
     pub value_constraint_documents: BTreeMap<String, usize>,
     /// Fixed arrays whose equal `minItems`/`maxItems` bounds are carried by `[T; N]`.
     pub fixed_array_constraints: usize,
+    /// String schemas using `ip`, `ipv4`, or `ipv6`, keyed by the exact format.
+    pub ip_formats: BTreeMap<String, usize>,
+    /// Documents carrying each IP format.
+    pub ip_format_documents: BTreeMap<String, usize>,
     /// Operations whose request body declares more than one media type.
     pub multi_content_operations: usize,
     /// Responses declaring headers.
@@ -60,6 +64,8 @@ pub struct Stats {
     pub byte_response_arms: usize,
     /// Selected response arms carrying no body.
     pub empty_response_arms: usize,
+    /// Operations declaring an exact `101 Switching Protocols` response.
+    pub upgrade_operations: usize,
     /// Selected request bodies carrying raw bytes.
     pub byte_request_bodies: usize,
     /// Selected multipart request bodies with at least one file part.
@@ -126,6 +132,8 @@ impl Stats {
             &other.value_constraint_documents,
         );
         self.fixed_array_constraints += other.fixed_array_constraints;
+        merge_counts(&mut self.ip_formats, &other.ip_formats);
+        merge_counts(&mut self.ip_format_documents, &other.ip_format_documents);
         self.multi_content_operations += other.multi_content_operations;
         self.responses_with_headers += other.responses_with_headers;
         self.response_headers += other.response_headers;
@@ -133,6 +141,7 @@ impl Stats {
         self.text_response_arms += other.text_response_arms;
         self.byte_response_arms += other.byte_response_arms;
         self.empty_response_arms += other.empty_response_arms;
+        self.upgrade_operations += other.upgrade_operations;
         self.byte_request_bodies += other.byte_request_bodies;
         self.multipart_file_request_bodies += other.multipart_file_request_bodies;
         self.multipart_file_parts += other.multipart_file_parts;
@@ -223,6 +232,11 @@ fn collect(parsed: &ParsedDocument) -> Stats {
         .keys()
         .map(|keyword| (keyword.clone(), 1))
         .collect();
+    stats.ip_format_documents = stats
+        .ip_formats
+        .keys()
+        .map(|format| (format.clone(), 1))
+        .collect();
     document(parsed, &mut stats);
     stats.max_schema_depth = max_depth(parsed);
     stats
@@ -271,6 +285,11 @@ fn schema_object(object: &SchemaObject, store: &SchemaStore, stats: &mut Stats) 
         if bounded {
             stats.bounded_integers += 1;
         }
+    }
+    if declares(object, &TypeName::String)
+        && let Some(format @ ("ip" | "ipv4" | "ipv6")) = object.format.as_deref()
+    {
+        *stats.ip_formats.entry(format.to_owned()).or_default() += 1;
     }
     count_value_constraints(object, stats);
     count_optional_nullable(object, store, stats);
@@ -451,6 +470,9 @@ fn operation_node(operation: &Operation, stats: &mut Stats) {
         stats.multi_content_operations += 1;
     }
     if let Some(responses) = &operation.responses {
+        if responses.statuses.contains_key("101") {
+            stats.upgrade_operations += 1;
+        }
         responses_node(responses, stats);
     }
     for callback in operation.callbacks.iter().flatten().map(|(_, v)| v) {
@@ -644,6 +666,44 @@ mod tests {
         assert_eq!(counted.value_constraints["uniqueItems"], 1);
         assert_eq!(counted.value_constraint_documents["minLength"], 1);
         assert_eq!(counted.value_constraint_documents["uniqueItems"], 1);
+    }
+
+    #[test_util::test]
+    fn exact_switching_protocols_responses_count_operations() {
+        let document = indoc::indoc! {r#"
+            {
+              "openapi": "3.1.0",
+              "paths": {
+                "/socket": {"get": {"responses": {
+                  "101": {"description": "upgrade"},
+                  "1XX": {"description": "informational"}
+                }}}
+              }
+            }"#
+        }
+        .as_bytes();
+        assert_eq!(stats(document)?.upgrade_operations, 1);
+    }
+
+    #[test_util::test]
+    fn ip_formats_are_counted_only_on_string_schemas() {
+        let document = indoc::indoc! {r#"
+            {
+              "openapi": "3.1.0", "paths": {},
+              "components": {"schemas": {
+                "Ip": {"type": "string", "format": "ip"},
+                "V4": {"type": "string", "format": "ipv4"},
+                "V6": {"type": "string", "format": "ipv6"},
+                "NotAString": {"type": "integer", "format": "ipv4"}
+              }}
+            }"#
+        }
+        .as_bytes();
+        let counted = stats(document)?;
+        assert_eq!(counted.ip_formats["ip"], 1);
+        assert_eq!(counted.ip_formats["ipv4"], 1);
+        assert_eq!(counted.ip_formats["ipv6"], 1);
+        assert_eq!(counted.ip_format_documents["ipv4"], 1);
     }
 
     #[test_util::test]

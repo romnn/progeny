@@ -437,6 +437,8 @@ fn synthesize(
             Format::Date => json!("2020-01-01"),
             Format::Time => json!("12:00:00"),
             Format::Uuid => json!("00000000-0000-0000-0000-000000000000"),
+            Format::Ip | Format::Ipv4 => json!("192.0.2.1"),
+            Format::Ipv6 => json!("2001:db8::1"),
             Format::Base64 => json!("cHJvYmU="),
             Format::Binary => json!("probe"),
         },

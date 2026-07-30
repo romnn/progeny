@@ -35,6 +35,16 @@ impl Build<'_> {
                 ));
                 continue;
             };
+            if pattern == StatusPattern::Exact(101) {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::ConnectionUpgrade,
+                    Action::Degrade,
+                    at.child(status.clone()),
+                    "the response switches protocols, but the generated client does not return \
+                     the upgraded connection and the generated server cannot serve it; only the \
+                     status arm is generated",
+                ));
+            }
             arms.push(self.arm(pattern, node, &at.child(status.clone()), &mut used, ctx));
         }
         arms.sort_by_key(|arm| arm.status.precedence());
@@ -213,6 +223,30 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|found| found.class() == crate::BreakageClass::DanglingRef)
+        );
+    }
+
+    #[test_util::test]
+    fn a_switching_protocols_arm_names_the_connection_upgrade_progeny_does_not_perform() {
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/socket": {
+                "get": {
+                    "operationId": "connect",
+                    "responses": {
+                        "101": {"description": "switching protocols"},
+                    },
+                },
+            },
+        })))?;
+
+        assert_eq!(
+            model.operations()[0].responses.arms[0].status,
+            StatusPattern::Exact(101)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|found| found.class() == crate::BreakageClass::ConnectionUpgrade)
         );
     }
 

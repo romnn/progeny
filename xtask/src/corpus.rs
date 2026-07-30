@@ -957,6 +957,15 @@ fn report_stats(totals: &Stats, documents: usize) {
         "    carried as fixed arrays   {:>7}",
         totals.fixed_array_constraints
     );
+    println!("  IP string formats");
+    for (format, occurrences) in &totals.ip_formats {
+        let documents = totals
+            .ip_format_documents
+            .get(format)
+            .copied()
+            .unwrap_or_default();
+        println!("    {format:<22} {occurrences:>7} in {documents:>2} documents");
+    }
     println!(
         "  multi-media-type bodies     {}",
         totals.multi_content_operations
@@ -971,6 +980,10 @@ fn report_stats(totals: &Stats, documents: usize) {
         totals.text_response_arms,
         totals.byte_response_arms,
         totals.empty_response_arms
+    );
+    println!(
+        "  connection upgrades         {} operations declare status 101",
+        totals.upgrade_operations
     );
     println!(
         "  large-upload candidates     {} raw-byte bodies, {} multipart bodies with {} file parts",

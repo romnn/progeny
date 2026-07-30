@@ -95,6 +95,9 @@ pub enum BreakageClass {
     /// reads. A genuine collision names the two identifiers and so stays its own record, which
     /// falls out of aggregating on the sentence rather than on the class alone.
     CollidingOperationId,
+    /// An operation declares a switching-protocols response, but the generated HTTP surfaces do
+    /// not hand the upgraded connection to either side.
+    ConnectionUpgrade,
     /// A (location, style, explode, shape) parameter combination OpenAPI leaves undefined.
     QuerySerializationStyle,
     /// An example payload that contradicts its own schema. Never gates generation.
@@ -156,7 +159,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 26] = [
+    pub(crate) const ALL: [Self; 27] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -169,6 +172,7 @@ impl BreakageClass {
         Self::MultiMediaType,
         Self::WildUnion,
         Self::CollidingOperationId,
+        Self::ConnectionUpgrade,
         Self::QuerySerializationStyle,
         Self::InvalidExample,
         Self::InvalidDefault,
@@ -201,6 +205,7 @@ impl BreakageClass {
             Self::MultiMediaType => "multi-media-type",
             Self::WildUnion => "wild-union",
             Self::CollidingOperationId => "colliding-operation-id",
+            Self::ConnectionUpgrade => "connection-upgrade",
             Self::QuerySerializationStyle => "query-serialization-style",
             Self::InvalidExample => "invalid-example",
             Self::InvalidDefault => "invalid-default",
@@ -269,7 +274,8 @@ impl BreakageClass {
             // report instead.
             Self::MissingFinalLineBreak
             | Self::MultiParentDiscriminator
-            | Self::DiscriminatorEdgeCase => Aggregation::PerOccurrence,
+            | Self::DiscriminatorEdgeCase
+            | Self::ConnectionUpgrade => Aggregation::PerOccurrence,
         }
     }
 }

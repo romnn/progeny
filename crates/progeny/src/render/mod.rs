@@ -1769,4 +1769,52 @@ mod tests {
         let types = &rendered[camino::Utf8Path::new("src/types.rs")];
         assert!(!types.contains("uuid::Uuid"), "{types}");
     }
+
+    #[test_util::test]
+    fn a_base64_property_stays_wire_text_under_the_bytes_representation_knob() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {"schemas": {
+                "Envelope": {
+                    "type": "object",
+                    "required": ["payload"],
+                    "properties": {
+                        "payload": {"type": "string", "contentEncoding": "base64"},
+                    },
+                },
+            }},
+        });
+        let config = Config {
+            formats: crate::config::Formats {
+                bytes: crate::config::BytesRepr::Bytes,
+                ..crate::config::Formats::default()
+            },
+            ..Config::default()
+        };
+
+        let rendered = files(document, &config)?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(types.contains("pub payload: String"), "{types}");
+        assert!(!types.contains("pub payload: ::bytes::Bytes"), "{types}");
+    }
+
+    #[test_util::test]
+    fn ip_formats_use_the_dependency_free_standard_library_types() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {"schemas": {
+                "Address": {"type": "string", "format": "ip"},
+                "V4Address": {"type": "string", "format": "ipv4"},
+                "V6Address": {"type": "string", "format": "ipv6"},
+            }},
+        });
+
+        let rendered = files(document, &Config::default())?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(types.contains("::std::net::IpAddr"), "{types}");
+        assert!(types.contains("::std::net::Ipv4Addr"), "{types}");
+        assert!(types.contains("::std::net::Ipv6Addr"), "{types}");
+    }
 }

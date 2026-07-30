@@ -945,6 +945,48 @@ mod tests {
     }
 
     #[test_util::test]
+    fn default_is_configurable_and_propagates_only_through_defaultable_members() {
+        let config = Config {
+            derives: [crate::config::Derive::Default].into_iter().collect(),
+            ..Config::default()
+        };
+        let (contracts, _) = contracts_of(
+            with_schemas(json!({
+                "Leaf": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "Choice": {"type": "string", "enum": ["a", "b"]},
+                "Good": {"type": "object", "properties": {
+                    "leaf": {"$ref": "#/components/schemas/Leaf"}
+                }},
+                "Blocked": {"type": "object", "properties": {
+                    "choice": {"$ref": "#/components/schemas/Choice"}
+                }},
+                "Address": {"type": "string", "format": "ip"},
+                "BlockedAddress": {"type": "object", "properties": {
+                    "address": {"$ref": "#/components/schemas/Address"}
+                }},
+            })),
+            &config,
+        )?;
+
+        for name in ["Leaf", "Good"] {
+            assert!(
+                named(&contracts, name)?
+                    .derives()
+                    .contains(&crate::config::Derive::Default),
+                "{name} should carry `Default`"
+            );
+        }
+        for name in ["Choice", "Blocked", "Address", "BlockedAddress"] {
+            assert!(
+                !named(&contracts, name)?
+                    .derives()
+                    .contains(&crate::config::Derive::Default),
+                "{name} cannot carry `Default`"
+            );
+        }
+    }
+
+    #[test_util::test]
     fn a_component_becomes_a_struct_named_after_itself() {
         let (contracts, diagnostics) = contracts_of(
             with_schemas(json!({

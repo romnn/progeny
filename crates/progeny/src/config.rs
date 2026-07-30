@@ -159,7 +159,10 @@ pub struct Formats {
     /// `uuid`.
     #[serde(default)]
     pub uuid: UuidCrate,
-    /// `contentEncoding: base64` and binary payloads.
+    /// Raw binary request and response bodies.
+    ///
+    /// A base64 value inside JSON remains `String`: the wire carries text, and choosing a byte
+    /// representation does not implicitly choose a codec.
     #[serde(default)]
     pub bytes: BytesRepr,
 }
@@ -291,9 +294,11 @@ pub enum SerdeImpl {
     /// The hand-written implementation wherever the eligibility function allows it.
     ///
     /// The default, because the compile-time saving is the point of generating this code at all and
-    /// a payoff behind a flag is not one: measured on the type layer, 65–67% less CPU and 47–55%
-    /// less peak RSS than the derive. Fieldless enums take a path that never buffers, so they keep
-    /// working with any format; structs are the ones that need a self-describing one.
+    /// a payoff behind a flag is not one. The focused type layer uses 65–67% less CPU and 47–55%
+    /// less peak RSS than the derive; over the full generated types, client, and server surface the
+    /// measured saving is 31–44% CPU and 22–37% peak RSS. Fieldless enums take a path that never
+    /// buffers, so they keep working with any format; structs are the ones that need a
+    /// self-describing one.
     #[default]
     HandWrittenWhereEligible,
 }

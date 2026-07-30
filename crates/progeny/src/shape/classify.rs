@@ -285,6 +285,9 @@ fn string(view: &View) -> Shape {
         Some("date") => Shape::Format(Format::Date),
         Some("time" | "partial-time") => Shape::Format(Format::Time),
         Some("uuid") => Shape::Format(Format::Uuid),
+        Some("ip") => Shape::Format(Format::Ip),
+        Some("ipv4") => Shape::Format(Format::Ipv4),
+        Some("ipv6") => Shape::Format(Format::Ipv6),
         // Every other `format` is an annotation progeny keeps and gives no type of its own.
         _ => Shape::Scalar(Scalar::String),
     }

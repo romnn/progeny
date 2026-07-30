@@ -153,8 +153,8 @@ pub(crate) enum Scalar {
 
 /// The string formats progeny gives a type other than `String`.
 ///
-/// Closed and short on purpose. Every other `format` — `uri`, `email`, `hostname`, `ipv4` — maps
-/// to `String` in v1, so recognizing it would add a variant that changes nothing. `format` is an
+/// Closed and short on purpose. Every other `format` — `uri`, `email`, `hostname` — maps to
+/// `String` in v1, so recognizing it would add a variant that changes nothing. `format` is an
 /// annotation rather than an assertion, and the model keeps the spelling either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Format {
@@ -162,6 +162,9 @@ pub(crate) enum Format {
     Date,
     Time,
     Uuid,
+    Ip,
+    Ipv4,
+    Ipv6,
     /// `contentEncoding: base64`, or 3.0's `format: byte`.
     Base64,
     /// `contentMediaType: application/octet-stream`, or 3.0's `format: binary`.
