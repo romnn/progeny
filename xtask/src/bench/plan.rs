@@ -10,7 +10,7 @@ use std::process::Command;
 use camino::{Utf8Path, Utf8PathBuf};
 use color_eyre::eyre::{self, WrapErr, bail};
 
-use super::{Args, DERIVE, HAND_WRITTEN};
+use super::{Args, HAND_WRITTEN};
 
 /// One crate to measure, and which rendering of its document it is.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -137,11 +137,7 @@ pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
     } else {
         args.specs.clone()
     };
-    let variants: &[&'static str] = if args.ab {
-        &[DERIVE, HAND_WRITTEN]
-    } else {
-        &[DERIVE]
-    };
+    let variants = super::selected_strategies(args.ab, args.hand_written);
     println!(
         "bench-compile: {} documents × {} × {} reps, {} packaging, generated into {}",
         wanted.len(),

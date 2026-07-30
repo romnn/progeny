@@ -55,6 +55,12 @@ pub struct Args {
     #[arg(long)]
     ab: bool,
 
+    /// Measure only the hand-written serde strategy.
+    ///
+    /// Useful for a packaging A/B after the derive split has already been measured.
+    #[arg(long, conflicts_with = "ab")]
+    hand_written: bool,
+
     /// Generate the opt-in three-crate workspace and measure every member separately.
     #[arg(long, conflicts_with = "crate_dir")]
     workspace: bool,
@@ -128,6 +134,14 @@ pub struct Args {
 /// The serde strategy each variant renders with.
 const DERIVE: &str = "derive";
 const HAND_WRITTEN: &str = "hand-written";
+
+fn selected_strategies(ab: bool, hand_written: bool) -> &'static [&'static str] {
+    match (ab, hand_written) {
+        (true, _) => &[DERIVE, HAND_WRITTEN],
+        (false, true) => &[HAND_WRITTEN],
+        (false, false) => &[DERIVE],
+    }
+}
 
 pub fn run(args: &Args) -> eyre::Result<()> {
     if !args.measure.is_empty() {
@@ -340,6 +354,7 @@ fn report_workspaces(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<St
 
 fn report_packaging(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<String, Summary>) {
     let mut printed = false;
+    let mut totals: BTreeMap<&str, (f64, f64, usize)> = BTreeMap::new();
     for (subject, targets) in subjects {
         let strategies: BTreeSet<&str> = targets.iter().map(target_strategy).collect();
         for strategy in strategies {
@@ -389,6 +404,20 @@ fn report_packaging(subjects: &[(String, Vec<Target>)], summaries: &BTreeMap<Str
                 percent(as_f64(control_rss), as_f64(split_worst)),
                 percent(control_wall, split_wall),
                 members.len(),
+            );
+            let (control_total, split_total, documents) = totals.entry(strategy).or_default();
+            *control_total += control_wall;
+            *split_total += split_wall;
+            *documents += 1;
+        }
+    }
+    if printed {
+        println!("  corpus totals");
+        for (strategy, (control_wall, split_wall, documents)) in totals {
+            println!(
+                "    {strategy:<20} sequential wall {:+.1}% ({control_wall:.2} s → \
+                 {split_wall:.2} s across {documents} documents)",
+                percent(control_wall, split_wall),
             );
         }
     }
@@ -496,7 +525,9 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Target, format_bytes, ordered_targets, percent};
+    use super::{
+        HAND_WRITTEN, Target, format_bytes, ordered_targets, percent, selected_strategies,
+    };
 
     fn target(strategy: &str, member: &str) -> Target {
         Target {
@@ -552,6 +583,11 @@ mod tests {
                 "derive.server",
             ]
         );
+    }
+
+    #[test]
+    fn hand_written_can_be_selected_without_the_derive_control() {
+        assert_eq!(selected_strategies(false, true), [HAND_WRITTEN]);
     }
 
     #[test]
