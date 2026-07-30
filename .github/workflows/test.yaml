@@ -80,12 +80,10 @@ jobs:
       # Both serde strategies compile, because both ship. The step above uses the default, which is
       # the hand-written path; this is the derive escape hatch a caller falls back to for a format
       # that is not self-describing. An escape hatch nobody runs is not one.
-      # `cloudflare` is left out of this one step only: through the derive it needs about 14.7 GiB
-      # for a single rustc invocation, more than a hosted runner has, and one unit cannot be split
-      # across jobs. It still compiles here through the default path, and still runs every other
-      # gate through both. See `corpus/tier.toml`.
+      # Workspace packaging makes Cloudflare's derive rendering three compilation units; its
+      # largest measured member is 9.19 GiB rather than the single crate's 14.7 GiB floor.
       - name: The same, with the derive escape hatch
-        run: task corpus:compile -- --serde derive --except cloudflare
+        run: task corpus:compile -- --serde derive
       # Runs serde against real payloads rather than asking whether source compiles, which makes it
       # the only gate here that can catch output that is wrong on the wire. It found a `default`
       # rendered as `#[serde(default = "…")]`, which put members into 60 requests the caller never

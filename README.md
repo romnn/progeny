@@ -57,6 +57,27 @@ identity to each trace. Applications that need it can wrap the generated `Client
 application-owned type whose operation-named methods create spans before calling the generated
 builders.
 
+## Packaging large APIs
+
+`packaging = "crate"` remains the default: one crate, one artifact, and one version is the simplest
+shape for most descriptions. `packaging = "module"` remains the build-script form. For a large API,
+or a consumer workspace whose domain crates should not inherit an HTTP stack, opt into:
+
+```toml
+packaging = "workspace"
+```
+
+This emits `<name>-types`, `<name>-client`, and `<name>-server`. The types crate has no features and
+the two edge crates depend on its exact generated version, so Cargo feature unification cannot pull
+client or server dependencies into a types-only consumer. Publish in dependency order: types first,
+then client and server. The generated workspace README repeats its concrete names and pins.
+
+The boundary trades time for memory. Across the eight-document quick tier, three sequential
+hand-written crates take 61% more wall time than one crate, while cutting the worst rustc peak by
+44–63% on every non-trivial document. Cloudflare moves from 8.82 to 3.70 GiB (−58%). Choose
+Workspace when peak memory or a types-only dependency boundary matters; keep the default crate when
+one artifact and the shortest clean build matter more.
+
 ## Streams over paginated listings
 
 Declared, never detected. 62 of the 78 corpus documents paginate and no two agree on how to say so

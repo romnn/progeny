@@ -36,9 +36,8 @@ pub struct Args {
 
     /// Leave these documents out of whatever was selected, by name. Repeatable.
     ///
-    /// For a document a run cannot afford rather than one it does not want. `cloudflare` through
-    /// the derive strategy needs about 14.7 GiB for a single rustc invocation, which is more than a
-    /// hosted runner has; no job count reaches that, because one unit is already too large.
+    /// For a document a particular run cannot afford rather than one it does not want. Every
+    /// exclusion is printed, and no standard gate supplies one implicitly.
     #[arg(long = "except", value_name = "NAME")]
     except: Vec<String>,
 

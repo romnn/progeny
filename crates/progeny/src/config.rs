@@ -310,7 +310,10 @@ pub enum Packaging {
     /// A complete crate: a manifest and a `src` tree.
     #[default]
     Crate,
-    /// A workspace containing separate types, client, and server crates.
+    /// A workspace containing `<name>-types`, `<name>-client`, and `<name>-server` crates.
+    ///
+    /// The types crate has no features; the edge crates pin its exact generated version and may be
+    /// published after it.
     Workspace,
     /// One file to `include!` from a build script or to check in.
     Module,

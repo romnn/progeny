@@ -1376,6 +1376,80 @@ for a new validation dependency.
   not merely package reusable code. No consumer demand presently justifies that product surface;
   the real-socket probe remains its behavioral prototype.
 
+## Workspace packaging for large descriptions
+
+`packaging = "workspace"` is an opt-in third shape beside the default single crate and the
+build-script module. It emits `<name>-types`, `<name>-client`, and `<name>-server`; the types member
+has no features, and each edge pins its exact generated types version by path. This is the
+load-bearing boundary: Cargo cannot unify an HTTP feature into a crate that has no such feature, so
+a domain crate can depend on the wire model without inheriting reqwest, axum, or their generated
+source. The generated README records the dependency-order release procedure: publish types first,
+then client and server.
+
+The private support runtime follows the consumer rather than leaking features back into types.
+Buffered serde and shared value helpers stay in types, client HTTP helpers live in client, and
+router/response helpers live in server. All three crates deny warnings. The corpus compile harness
+therefore compiles generated workspaces, not a single crate with a different feature combination;
+the quick tier passes through both serde strategies, including Cloudflare through the derive.
+
+`bench-compile` treats a workspace as one benchmark unit whose members always run in dependency
+order. Each member is selected and cleaned exactly, with incremental compilation disabled, so a
+client sample cannot accidentally reuse a server build or charge a freshly invalidated types crate.
+Independent variants still alternate A-B-B-A. The durable record carries CPU, direct elapsed wall
+time, peak RSS, load, pressure, and scope per member; it refuses fewer than three kept repetitions,
+load above 5, or memory pressure. Wall time is measured rather than inferred from RSS because the
+packaging question adds three sequential Cargo invocations, and memory size says nothing reliable
+about their startup or metadata-loading cost.
+
+The derive Workspace take records every quick-tier member directly:
+
+| document | sequential wall | worst member RSS | sum of member peaks |
+| --- | ---: | ---: | ---: |
+| Petstore | 0.65 s | 161.4 MiB | 0.40 GiB |
+| GitHub | 93.19 s | 3.16 GiB | 9.46 GiB |
+| PostHog | 121.31 s | 3.68 GiB | 11.03 GiB |
+| Cloudflare | 327.22 s | 9.18 GiB | 27.36 GiB |
+| Okta | 59.24 s | 2.05 GiB | 6.15 GiB |
+| Orb | 26.79 s | 1.12 GiB | 3.35 GiB |
+| Jellyfin | 18.23 s | 676.6 MiB | 1.98 GiB |
+| Oxide | 17.16 s | 666.5 MiB | 1.95 GiB |
+
+That is **663.79 seconds of direct sequential wall across 24 invocations**. Cloudflare's six kept
+repetitions put its largest member at 9.18 GiB mean and 9.19 GiB maximum observed, against the old
+single-crate derive take's pressured 14.7 GiB floor. It now fits below the roughly 14.5 GiB
+available on a 16 GB hosted runner with room for the process around rustc, so the derive CI
+exclusion retires. The reduction is at least 37%; the old side is only a floor, so claiming a more
+precise percentage would manufacture precision from memory pressure.
+
+The hand-written packaging A/B measures the wall trade directly on identical renderings:
+
+| document | crate → Workspace wall | wall delta | crate → worst member RSS | RSS delta |
+| --- | ---: | ---: | ---: | ---: |
+| Petstore | 0.33 → 0.70 s | +116.0% | 187.3 → 161.8 MiB | −13.6% |
+| GitHub | 22.45 → 36.40 s | +62.1% | 3.27 → 1.31 GiB | −60.0% |
+| PostHog | 34.56 → 50.64 s | +46.6% | 4.55 → 1.67 GiB | −63.2% |
+| Cloudflare | 69.99 → 116.97 s | +67.1% | 8.82 → 3.70 GiB | −58.0% |
+| Okta | 14.22 → 23.83 s | +67.6% | 2.17 GiB → 926.6 MiB | −58.2% |
+| Orb | 4.82 → 9.48 s | +96.8% | 930.3 → 523.9 MiB | −43.7% |
+| Jellyfin | 6.82 → 9.25 s | +35.8% | 1.17 GiB → 593.7 MiB | −50.6% |
+| Oxide | 5.10 → 7.85 s | +53.8% | 908.6 → 449.9 MiB | −50.5% |
+
+Across the tier, direct sequential wall is **158.27 → 255.14 seconds (+61.2%)**. This is why
+Workspace remains opt-in: it buys a 44–63% worst-unit RSS reduction on every non-trivial tier
+document and a real dependency boundary, while paying for three Cargo/rustc invocations. The
+Cloudflare result reproduces the original hand-split experiment (9.10 → 3.84 GiB) on the product
+renderer at 8.82 → 3.70 GiB.
+
+The shared host also found two holes in the recorder rather than in the packaging. A Cloudflare
+server sample consumed 279 seconds after two at 108/122 while satisfying load-at-start and
+processor-progress checks: memory-bandwidth contention can begin mid-sample and inflate CPU and
+wall together. Recording now persists the cheapest-to-most-expensive CPU range and refuses a range
+exceeding both 25% and 3 seconds. Both limits matter: Orb's 8.84/9.00/11.33-second diagnostic take
+was 28% but only 2.49 scheduler-scale seconds. A memory-pressured Cloudflare attempt then proved
+that pressure must discard an attempt rather than keep it and poison otherwise valid repetitions.
+Both real sample sets are red/green tests; the recorded means contain no pressure-disqualified
+attempt.
+
 ## Runtime cost of the buffered serde default
 
 The compile-time default now has a runtime budget as well as a compile-cost measurement.
