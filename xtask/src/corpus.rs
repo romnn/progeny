@@ -18,7 +18,7 @@ use crate::{generated, paths, snapshot};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Download every document listed in the manifest that is not already cached.
+    /// Download every document listed in the manifest that is not already cached, then stop.
     #[arg(long)]
     fetch: bool,
 
@@ -216,6 +216,9 @@ pub fn run(args: &Args) -> eyre::Result<()> {
 
     if args.fetch {
         fetch_all(&selected, args.refresh)?;
+        // Downloading is all this flag does. Falling through into the run cost CI's fetch step
+        // three minutes of a corpus that the step after it runs again.
+        return Ok(());
     }
     if args.compile {
         generated::require_cargo()?;
