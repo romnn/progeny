@@ -79,6 +79,14 @@ pub use crate::config::{
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
+/// The version of the generator, for a front end to report.
+///
+/// Exposed because the intended workflow checks generated source in, and the reviewer of a diff
+/// needs to know which progeny produced it. A front end published as its own package — as
+/// `progeny-cli` is — would otherwise report its own `CARGO_PKG_VERSION`, which is the same number
+/// only for as long as the two are released together.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Generated source, and everything progeny had to say about the document.
 ///
 /// `diagnostics` is not optional and not a side channel: the only way to obtain generated source

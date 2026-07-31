@@ -30,9 +30,6 @@ serde.workspace = true
 serde_json.workspace = true
 syn.workspace = true
 thiserror.workspace = true
-# `Config` is what a `progeny.toml` deserializes into. Only the `progeny` binary and the
-# configuration's own tests read TOML; the library itself never touches a file.
-toml.workspace = true
 
 [dev-dependencies]
 # Two jobs. One test asserts that the `matchit` progeny asks is the `matchit` axum will use — a
@@ -45,6 +42,10 @@ axum.workspace = true
 color-eyre.workspace = true
 reqwest.workspace = true
 test-util.workspace = true
+# `Config` is what a `progeny.toml` deserializes into, and its own tests read one. A *dev*
+# dependency because reading the file is `progeny-cli`'s job: keeping TOML out of the library's
+# dependency graph is half of why that package exists.
+toml.workspace = true
 
 [lints]
 workspace = true

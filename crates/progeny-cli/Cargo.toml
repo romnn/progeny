@@ -1,0 +1,25 @@
+[package]
+name = "progeny-cli"
+description = "Command line front end for progeny: generate a Rust client and server from an OpenAPI description"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+indoc.workspace = true
+progeny.workspace = true
+# Reading a `progeny.toml` is the front end's job: the library takes a `Config`, never a file.
+toml.workspace = true
+
+[dev-dependencies]
+color-eyre.workspace = true
+test-util.workspace = true
+
+[lints]
+workspace = true

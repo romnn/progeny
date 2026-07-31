@@ -13,10 +13,11 @@
 //! invisible as a target — which is how `resolve`, a whole pipeline stage, went unenforced from the
 //! day it was added until this check existed.
 //!
-//! **No I/O in the library.** `generate` takes bytes and returns strings. The check is here rather
-//! than in a clippy `disallowed_methods` list because clippy's configuration is per-crate and this
-//! crate also contains the `progeny` binary, whose entire job is I/O; a crate-wide fence cannot
-//! tell them apart, and a second `clippy.toml` would fork the lint policy.
+//! **No I/O in the library.** `generate` takes bytes and returns strings. The front end lives in
+//! its own package, so nothing here is exempt: the check used to carve out `src/bin`, whose entire
+//! job is I/O, and an exception is a hole in a rule whoever adds the next binary inherits. It is a
+//! walk rather than a clippy `disallowed_methods` list because a list enumerates methods and this
+//! rejects the modules whole, which is the property actually wanted.
 
 use std::collections::BTreeMap;
 
@@ -86,13 +87,11 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         let text = std::fs::read_to_string(file).wrap_err_with(|| format!("reading {file}"))?;
         let parsed = syn::parse_file(&text).wrap_err_with(|| format!("parsing {file}"))?;
         let module = module_path(&source_root, file);
-        let is_binary = module.first().is_some_and(|segment| segment == "bin");
         // Total, on purpose: a module the table does not rank would otherwise be exempt in both
         // directions — free to import anything, and invisible as a target — and the lint would
         // print "0 violations" while enforcing nothing about it.
         let layer = match module.first() {
             None => ROOT_RANK,
-            Some(_) if is_binary => ROOT_RANK,
             Some(segment) => {
                 if let Some(&rank) = ranks.get(segment.as_str()) {
                     rank
@@ -139,20 +138,18 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             }
         }
 
-        if !is_binary {
-            for (path, line) in &visitor.paths {
-                if IO_ROOTS.iter().any(|root| starts_with(path, root)) {
-                    violations.push(Violation {
-                        file: file.clone(),
-                        line: *line,
-                        detail: format!(
-                            "`{}` reaches for `{}`; the library performs no I/O — bytes in, \
-                             strings out",
-                            module.join("::"),
-                            path.join("::"),
-                        ),
-                    });
-                }
+        for (path, line) in &visitor.paths {
+            if IO_ROOTS.iter().any(|root| starts_with(path, root)) {
+                violations.push(Violation {
+                    file: file.clone(),
+                    line: *line,
+                    detail: format!(
+                        "`{}` reaches for `{}`; the library performs no I/O — bytes in, strings \
+                         out, and the filesystem is `progeny-cli`'s",
+                        module.join("::"),
+                        path.join("::"),
+                    ),
+                });
             }
         }
     }

@@ -48,6 +48,31 @@ derive wall time on valid/malformed paths, 1.89×/2.02× the allocations, and 3.
 published budget caps those ratios at 4.5×, 2.25×, and 4× respectively; the full workload and
 measurement conditions live in [corpus/runtime.toml](corpus/runtime.toml).
 
+## Two ways in
+
+`progeny` is a library and nothing else: it takes bytes and a `Config` and returns rendered source
+as a map of path to string. It performs no I/O, so a build script can generate whatever shape it
+wants — including a whole workspace, which is a `Config` choice rather than a front-end one — and
+write it where it likes.
+
+```toml
+[build-dependencies]
+progeny = "0.0.1"
+```
+
+`progeny-cli` is the front end for the checked-in-output workflow, and the only part that touches
+the filesystem. It ships the same shell under two names: `progeny`, and `cargo progeny` for the
+consumers who would rather not remember a second one.
+
+```sh
+cargo install progeny-cli
+progeny openapi.yaml --config progeny.toml --out-dir generated/
+cargo progeny openapi.yaml --out-dir generated/
+```
+
+`progeny --version` reports the version of the *library* that would generate the output, not of the
+front end, because that is the number a reviewer of a generated diff needs.
+
 ## Client middleware
 
 The generated client has no callback or hook system. Supply a preconfigured `reqwest::Client` for
@@ -121,13 +146,14 @@ quietly writing one down.
 
 ## Layout
 
-| Path              | Contents                                                          |
-| ----------------- | ----------------------------------------------------------------- |
-| `crates/progeny/` | the generator library, and the thin `progeny` regeneration binary |
-| `xtask/`          | corpus runner, compile/runtime benchmarks, module-layer lint      |
-| `corpus/`         | the manifest, the quick tier, snapshots, and the committed fixtures |
-| `fuzz/`           | fuzz targets over the front end                                   |
-| `plan/`           | the design documents this implementation follows                  |
+| Path                  | Contents                                                            |
+| --------------------- | ------------------------------------------------------------------- |
+| `crates/progeny/`     | the generator library: bytes in, strings out, no filesystem         |
+| `crates/progeny-cli/` | the `progeny` and `cargo-progeny` binaries, and the shell they share |
+| `xtask/`              | corpus runner, compile/runtime benchmarks, module-layer lint        |
+| `corpus/`             | the manifest, the quick tier, snapshots, and the committed fixtures |
+| `fuzz/`               | fuzz targets over the front end                                     |
+| `plan/`               | the design documents this implementation follows                    |
 
 ## Working on it
 

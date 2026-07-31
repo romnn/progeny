@@ -58,7 +58,7 @@ assigning_clones = "allow"
 struct_excessive_bools = "allow"
 
 [workspace.dependencies]
-progeny = { path = "crates/progeny", version = "0.0.1" }
+progeny = { path = "crates/progeny" }
 
 serde = { version = "1", features = ["derive"] }
 # `arbitrary_precision` keeps number literals byte-exact through the model
