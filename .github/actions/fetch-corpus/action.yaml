@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-action.json
+name: Fetch corpus
+description: Restore the fetched conformance corpus, download whatever is missing, and cache it.
+
+runs:
+  using: composite
+  steps:
+    # Keyed by day rather than by commit: a run inside the day stays off 77 live vendor endpoints,
+    # and the first run of a day downloads all of them again, so a publisher moving under us
+    # surfaces within a day instead of never. The manifest hash is in the key too, so editing
+    # corpus/manifest.toml refetches immediately rather than at midnight.
+    - name: Corpus cache key
+      id: key
+      shell: bash
+      run: >-
+        echo "key=corpus-${{ hashFiles('corpus/manifest.toml') }}-$(date -u +%Y-%m-%d)"
+        >> "$GITHUB_OUTPUT"
+    - name: Restore the corpus
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: corpus/cache
+        key: ${{ steps.key.outputs.key }}
+    # Downloads only what the restore did not supply, so a partial or failed cache still converges
+    # and a vendor endpoint that was down last run is retried this one.
+    - name: Fetch corpus
+      shell: bash
+      run: task corpus:fetch
+    # Saved here rather than by the cache action's own post-job step: the gates that follow this in
+    # the corpus jobs take an hour and fail often enough that a save conditioned on the job
+    # succeeding would routinely never run.
+    - name: Save the corpus
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: corpus/cache
+        key: ${{ steps.key.outputs.key }}

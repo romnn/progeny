@@ -66,7 +66,7 @@ jobs:
       # and comes from a live vendor endpoint; the runner treats a fetch failure there as
       # infrastructure rather than a gate.
       - name: Fetch corpus
-        run: task corpus:fetch
+        uses: ./.github/actions/fetch-corpus
       # Round-trip, reference resolution, dialect convergence, generation, determinism and the
       # diagnostics snapshots, for all 78.
       - name: Run the corpus
@@ -135,7 +135,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: Fetch corpus
-        run: task corpus:fetch
+        uses: ./.github/actions/fetch-corpus
       - name: Compile and lint every generated crate
         run: task corpus:compile:all
       - name: The wire differential over the whole tier
