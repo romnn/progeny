@@ -19,7 +19,7 @@
 
 use serde_json::Value;
 
-use super::{Scalar, Shape, ShapeRef, Shapes, Struct, Union};
+use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Struct, Union};
 
 /// The checker: the shape table, and the word the reasons call the value being judged.
 pub(crate) struct Fit<'a> {
@@ -119,6 +119,23 @@ impl<'a> Fit<'a> {
             if let Some(reason) = self.through(present, &field.shape) {
                 return Some(format!("at `{}`, {reason}", field.wire));
             }
+        }
+        // `additionalProperties: false` lowers to a deserializer that refuses a member the schema
+        // did not name, so an object carrying one is certainly not a value of this shape. The
+        // untagged unions the payload gate prunes against turn on exactly this: `github`'s
+        // `merge-async` details are three closed branches, and a rule blind to the closure reads
+        // `{message, sha}` as the message-only branch — which serde rejects, taking the branch
+        // that keeps `sha` and leaving the gate to report the surviving member as invented.
+        if structure.extra == Extra::Denied
+            && let Some(undeclared) = object
+                .keys()
+                .find(|key| !structure.fields.iter().any(|field| field.wire == **key))
+        {
+            return Some(format!(
+                "{} carries `{undeclared}`, which the schema does not declare and \
+                 `additionalProperties: false` forbids",
+                self.subject
+            ));
         }
         None
     }

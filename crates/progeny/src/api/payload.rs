@@ -479,6 +479,43 @@ mod tests {
     }
 
     #[test_util::test]
+    fn a_closed_union_branch_does_not_claim_a_payload_carrying_more_than_it_declares() {
+        // `github`'s `merge-async` details, reduced to the two branches that matter: a closed
+        // message-only object, then a closed one that also carries `sha`. Serde refuses the first
+        // over the undeclared member and takes the second, so an expectation pruned under the
+        // first reports the surviving `sha` as invented — which is how this document turned the
+        // payload gate red against generated code that was right.
+        let closed = |required: Value, properties: Value| {
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": required,
+                "properties": properties,
+            })
+        };
+        let found = payloads_of(responding(
+            json!({
+                "type": "object",
+                "required": ["details"],
+                "properties": {"details": {"oneOf": [
+                    closed(json!(["message"]), json!({"message": {"type": "string"}})),
+                    closed(
+                        json!(["message", "sha"]),
+                        json!({"message": {"type": "string"}, "sha": {"type": "string"}}),
+                    ),
+                ]}},
+            }),
+            json!({"details": {"message": "already merged", "sha": "6dcb09b"}}),
+        ))?;
+        assert_eq!(
+            found[0].expected,
+            json!({"details": {"message": "already merged", "sha": "6dcb09b"}})
+        );
+        // And the payload is the vendor's own, not a contradiction: a branch accepts it whole.
+        assert!(!found[0].vendor_defect);
+    }
+
+    #[test_util::test]
     fn a_position_typed_as_arbitrary_json_contributes_nothing_to_check() {
         // `true` accepts everything, so it types as arbitrary JSON: a round trip through it is
         // `Value` in and `Value` out, which asserts nothing about the generated code.
