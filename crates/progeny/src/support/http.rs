@@ -91,6 +91,22 @@ pub enum Error<E> {
     /// The body arrived and did not match the contract the document stated.
     #[error(transparent)]
     Decode(#[from] DecodeError),
+    /// A path parameter whose rendered segment is `.` or `..`.
+    ///
+    /// Every WHATWG URL parser — reqwest's included — folds dot segments away before the
+    /// request leaves, so `/files/{id}/metadata` with `id = ".."` would silently ask for
+    /// `/metadata`: another endpoint entirely. Percent-encoding cannot save the spelling
+    /// (`%2E` segments normalize the same way), so the request is refused before it is built.
+    #[error(
+        "path parameter `{parameter}` renders the segment `{rendered}`, which URL \
+         normalization would fold into another endpoint's path"
+    )]
+    UnsendablePath {
+        /// The first path parameter of the offending segment.
+        parameter: &'static str,
+        /// The segment as it would have gone on the wire.
+        rendered: String,
+    },
 }
 
 impl<E> Error<E> {
@@ -100,7 +116,7 @@ impl<E> Error<E> {
             Self::Request(error) => error.status(),
             Self::Declared(response) => Some(response.status()),
             Self::UnexpectedStatus(response) => Some(response.status()),
-            Self::Decode(_) => None,
+            Self::Decode(_) | Self::UnsendablePath { .. } => None,
         }
     }
 }
@@ -122,27 +138,6 @@ impl DecodeError {
     /// The status whose body failed to parse.
     pub fn status(&self) -> ::reqwest::StatusCode {
         self.status
-    }
-}
-
-/// A required value a builder was never given.
-///
-/// The runtime half of the builder interface: required setters are checked at `send()` rather than
-/// encoded in the type, so this is what "you forgot one" looks like.
-///
-/// Named `Unset` rather than `Missing` because the buffering machinery already ships a `Missing`,
-/// for an absent *member of a payload* — a different thing, in the same module.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("`{operation}` needs `{what}`, which was never set")]
-pub struct Unset {
-    operation: &'static str,
-    what: &'static str,
-}
-
-impl Unset {
-    #[doc(hidden)]
-    pub fn new(operation: &'static str, what: &'static str) -> Self {
-        Self { operation, what }
     }
 }
 

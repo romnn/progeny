@@ -85,6 +85,9 @@ pub enum BreakageClass {
     MultiParentDiscriminator,
     /// A discriminator whose mappings are incomplete or name variants implicitly.
     DiscriminatorEdgeCase,
+    /// A `discriminator` and its `mapping` on a schema that declares no `oneOf` or `anyOf`: the
+    /// inheritance spelling of a union, read as the union its mapping names.
+    InheritanceDiscriminator,
     /// A union whose "any combination may match" semantics has no faithful Rust type.
     WildUnion,
     /// An operation whose method name the document did not choose: it declared no `operationId`,
@@ -104,7 +107,8 @@ pub enum BreakageClass {
     InvalidExample,
     /// A `default` value that does not typecheck against its own schema.
     InvalidDefault,
-    /// A route the generated router could not register, or that collides with another.
+    /// A route the generated router could not register, one that collides with another, or a
+    /// path template and its declared parameters that disagree in either direction.
     UnregistrableRoute,
     /// The draft-04 tuple form `items: [A, B]`, which 2020-12 spells `prefixItems`.
     LegacyTupleItems,
@@ -114,6 +118,9 @@ pub enum BreakageClass {
     /// The 3.0 `format: byte`/`format: binary` spelling in a document that declares 3.1, where
     /// 2020-12 defines neither and keeps both facts on other members.
     LegacyStringFormat,
+    /// The draft-03 `required: true` flag written on a property, which every later draft and both
+    /// OpenAPI dialects spell as an array on the property's parent.
+    LegacyRequiredFlag,
     /// A 3.0 union branch whose only content is `nullable: true`: the one spelling 3.0 has for the
     /// null arm of a union, read literally as a branch that constrains nothing at all.
     NullableUnionBranch,
@@ -138,6 +145,11 @@ pub enum BreakageClass {
     /// excludes: the one generated type serves both directions, so the member travels where the
     /// document says it does not.
     AccessCollapse,
+    /// A schema sent as a `multipart/form-data` body and also used at another wire position:
+    /// one schema is one Rust type, so its binary members keep the JSON spelling `String`
+    /// everywhere, and the multipart parts carry the conventional filename rather than a
+    /// caller-chosen one.
+    EncodingCollapse,
     /// Two shapes whose names sanitize to the same Rust identifier.
     CollidingTypeName,
     /// A derive the caller asked every type for, on a type that cannot have it.
@@ -159,7 +171,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 27] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -169,6 +181,7 @@ impl BreakageClass {
         Self::UnknownSchemaType,
         Self::MultiParentDiscriminator,
         Self::DiscriminatorEdgeCase,
+        Self::InheritanceDiscriminator,
         Self::MultiMediaType,
         Self::WildUnion,
         Self::CollidingOperationId,
@@ -180,11 +193,13 @@ impl BreakageClass {
         Self::LegacyTupleItems,
         Self::LegacyExclusiveBound,
         Self::LegacyStringFormat,
+        Self::LegacyRequiredFlag,
         Self::NullableUnionBranch,
         Self::UnsupportedConstruct,
         Self::IrreconcilableAllOf,
         Self::PresenceCollapse,
         Self::AccessCollapse,
+        Self::EncodingCollapse,
         Self::CollidingTypeName,
         Self::UnsatisfiableDerive,
     ];
@@ -202,6 +217,7 @@ impl BreakageClass {
             Self::UnknownSchemaType => "unknown-schema-type",
             Self::MultiParentDiscriminator => "multi-parent-discriminator",
             Self::DiscriminatorEdgeCase => "discriminator-edge-case",
+            Self::InheritanceDiscriminator => "inheritance-discriminator",
             Self::MultiMediaType => "multi-media-type",
             Self::WildUnion => "wild-union",
             Self::CollidingOperationId => "colliding-operation-id",
@@ -213,11 +229,13 @@ impl BreakageClass {
             Self::LegacyTupleItems => "legacy-tuple-items",
             Self::LegacyExclusiveBound => "legacy-exclusive-bound",
             Self::LegacyStringFormat => "legacy-string-format",
+            Self::LegacyRequiredFlag => "legacy-required-flag",
             Self::NullableUnionBranch => "nullable-union-branch",
             Self::UnsupportedConstruct => "unsupported-construct",
             Self::IrreconcilableAllOf => "irreconcilable-all-of",
             Self::PresenceCollapse => "presence-collapse",
             Self::AccessCollapse => "access-collapse",
+            Self::EncodingCollapse => "encoding-collapse",
             Self::CollidingTypeName => "colliding-type-name",
             Self::UnsatisfiableDerive => "unsatisfiable-derive",
         }
@@ -252,6 +270,8 @@ impl BreakageClass {
             | Self::LegacyTupleItems
             | Self::LegacyExclusiveBound
             | Self::LegacyStringFormat
+            | Self::LegacyRequiredFlag
+            | Self::InheritanceDiscriminator
             | Self::MultiMediaType
             | Self::NullableUnionBranch
             | Self::UnsupportedConstruct
@@ -260,6 +280,12 @@ impl BreakageClass {
             | Self::AccessCollapse
             | Self::CollidingTypeName
             | Self::CollidingOperationId
+            // A scale class since the shape layer learned to read a discriminator a `oneOf`
+            // inherits from the base its branches share. A family written that way is named twice
+            // — once by the base, once by each `oneOf` over it — so every one of its variants has
+            // two parents by construction, and `kundenangaben` alone produced 126 records, four of
+            // them byte-identical because a merged key takes its address from its first part.
+            | Self::MultiParentDiscriminator
             // Moved here at stage 7, when the router turned it into a scale class. A refusal folds
             // on an explicit key ("router-refusal"), so a document with a habit is one record —
             // `twilio-api-v2010` puts `.json` after a path variable in 99 operations, `anthropic`
@@ -273,9 +299,11 @@ impl BreakageClass {
             // a distinct set of document locations a reader has to look at, with no useful count to
             // report instead.
             Self::MissingFinalLineBreak
-            | Self::MultiParentDiscriminator
             | Self::DiscriminatorEdgeCase
-            | Self::ConnectionUpgrade => Aggregation::PerOccurrence,
+            | Self::ConnectionUpgrade
+            // Each occurrence names one position whose schemas a reader would split; the count
+            // is never the finding, and the collapse cannot fire at its siblings' scale.
+            | Self::EncodingCollapse => Aggregation::PerOccurrence,
         }
     }
 }
@@ -910,12 +938,12 @@ mod tests {
     fn a_class_a_reader_must_act_on_keeps_every_occurrence() {
         let mut ctx = Ctx::new();
         assert_eq!(
-            BreakageClass::MultiParentDiscriminator.aggregation(),
+            BreakageClass::DiscriminatorEdgeCase.aggregation(),
             super::Aggregation::PerOccurrence
         );
         for _ in 0..3 {
             ctx.report(Diagnostic::new(
-                BreakageClass::MultiParentDiscriminator,
+                BreakageClass::DiscriminatorEdgeCase,
                 Action::Degrade,
                 JsonPointer::root(),
                 "skipped",

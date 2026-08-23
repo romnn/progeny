@@ -208,7 +208,7 @@ pub fn stats(input: &[u8]) -> Result<Stats, RejectError> {
             .chain(&operation.responses.default)
     }) {
         match arm.body {
-            api::ResponseBody::Json(_) => stats.json_response_arms += 1,
+            api::ResponseBody::Json { .. } => stats.json_response_arms += 1,
             api::ResponseBody::Text { .. } => stats.text_response_arms += 1,
             api::ResponseBody::Bytes { .. } => stats.byte_response_arms += 1,
             api::ResponseBody::Empty => stats.empty_response_arms += 1,

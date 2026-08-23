@@ -24,7 +24,7 @@ pub use crate::resolve::Counts as Resolution;
 pub use convergence::{Convergence, convergence};
 pub use payload::{Payload, Payloads, payloads};
 pub use probe::{
-    Probe, ProbeAnswer, ProbeBody, ProbeField, ProbeGroup, ProbeOp, ProbeResponse, ProbeSetter,
+    Probe, ProbeAnswer, ProbeBody, ProbeField, ProbeGroup, ProbeInput, ProbeOp, ProbeResponse,
     ProbeValue, probe,
 };
 pub use stats::{AnyOfShapes, Stats, stats};

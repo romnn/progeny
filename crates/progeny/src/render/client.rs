@@ -1,4 +1,4 @@
-//! The calling side: one `Client`, one builder per operation.
+//! The calling side: one `Client`, one params struct and one request per operation.
 //!
 //! Everything here is transcription. Which media type a body uses, how a parameter serializes,
 //! which status arms exist and in what order — all of it was decided in [`crate::api`] and is
@@ -6,12 +6,12 @@
 //!
 //! Two shapes are worth knowing before reading the output.
 //!
-//! **Builders are runtime-checked, not typestate.** A required parameter is an `Option` field with
-//! a plain setter, and `send()` refuses when one was never set. Typestate would move that refusal
-//! to compile time at the cost of a type parameter per required field — which is a per-operation
-//! compile cost multiplied by an operation count that reaches four figures in this corpus. The
-//! tie-breaker this project always uses is measurement, and the measurement is in
-//! `cargo xtask bench-compile --builders`.
+//! **Parameters are a struct, checked by construction.** An operation that takes input gets a
+//! `FooParams` struct — a required input is a plain field, an optional one an `Option`, and the
+//! struct literal is the only constructor — so a missing required input, or one the description
+//! adds later, is a missing-field compile error at every call site rather than anything at
+//! runtime. The `FooRequest` the accessor returns binds those params to the client and carries
+//! only what the description does not declare — an extra header — and `send`.
 //!
 //! **A per-operation response type is emitted only when the document needs one.** One success arm
 //! yields that arm's type directly; several yield an enum. The same for errors. An operation with
@@ -28,11 +28,11 @@ use crate::api::{
     PartSpec, Piece, ResponseArm, ResponseBody, Style,
 };
 use crate::config::{BytesRepr, Config};
-use crate::contract::{Contracts, RustIdent};
+use crate::contract::{Contracts, RustIdent, TypeRef};
 
 use super::types::{
-    docs as docs_of, response_body_is_boxed, response_enum_type_path, response_type_path,
-    type_path as type_tokens,
+    docs as docs_of, docs_prose, response_body_is_boxed, response_enum_type_path,
+    response_type_path, type_path as type_tokens,
 };
 
 /// Render the client module.
@@ -40,12 +40,12 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
     let base = default_base_url(model);
     let methods = model.operations().iter().map(|operation| {
         let name = ident(&operation.rust_name);
-        let builder = builder_name(operation);
+        let request = request_name(operation);
         let docs = docs_of(&operation.docs);
-        // A deprecated operation's builder is `#[deprecated]`, and this accessor both returns it and
-        // constructs it — two uses rustc lints, in the consumer's crate, about code the consumer did
-        // not write. The method carrying `#[deprecated]` itself exempts neither: being deprecated is
-        // not a licence to name deprecated things. The builder's own `impl` already carries the same
+        // A deprecated operation's request and params are `#[deprecated]`, and this accessor names
+        // both — uses rustc lints, in the consumer's crate, about code the consumer did not
+        // write. The method carrying `#[deprecated]` itself exempts neither: being deprecated is
+        // not a licence to name deprecated things. The request's own `impl` carries the same
         // expectation for the same reason.
         let deprecation = operation.docs.deprecated.then(|| {
             quote! {
@@ -55,20 +55,32 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
                 )]
             }
         });
+        let arm = if takes_params(operation) {
+            let params = params_name(operation);
+            quote! {
+                pub fn #name(&self, params: #params) -> #request<'_> {
+                    #request::new(self, params)
+                }
+            }
+        } else {
+            quote! {
+                pub fn #name(&self) -> #request<'_> {
+                    #request::new(self)
+                }
+            }
+        };
         quote! {
             #docs
             #deprecation
             #[must_use]
-            pub fn #name(&self) -> #builder<'_> {
-                #builder::new(self)
-            }
+            #arm
         }
     });
 
-    let builders = model
+    let interfaces = model
         .operations()
         .iter()
-        .map(|operation| builder(operation, contracts, config));
+        .map(|operation| interface(operation, contracts, config));
 
     quote! {
         //! The calling side.
@@ -76,7 +88,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         use super::support;
 
         #[doc(inline)]
-        pub use super::support::{DecodeError, Error, ResponseValue, Unset};
+        pub use super::support::{DecodeError, Error, ResponseValue};
 
         /// A client for this API.
         ///
@@ -128,7 +140,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
 
         #base
 
-        #(#builders)*
+        #(#interfaces)*
     }
 }
 
@@ -151,31 +163,34 @@ fn default_base_url(model: &ApiModel) -> TokenStream {
     }
 }
 
-/// One operation's builder, its response types, and its `send`.
-fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config) -> TokenStream {
-    let name = builder_name(operation);
+/// One operation's params struct, its request, its response types, and its `send`.
+fn interface(operation: &OperationContract, contracts: &Contracts, config: &Config) -> TokenStream {
+    let request = request_name(operation);
     let docs = docs_of(&operation.docs);
     let operation_name = operation.rust_name.as_str();
 
-    let fields = operation.params.iter().map(|param| {
-        let field = ident(&param.rust_name);
-        let ty = type_tokens(&param.ty, contracts, config);
-        quote! { #field: ::std::option::Option<#ty>, }
+    let takes = takes_params(operation);
+    let params = params_name(operation);
+    let params_decl = takes.then(|| params_struct(operation, contracts, config));
+    let params_field = takes.then(|| {
+        // The params type is `#[deprecated]` when the operation is, and a field naming it lints
+        // even inside a struct that is itself deprecated — `#[deprecated]` on the holder exempts
+        // nothing. Scoped to the one field that must name the type.
+        let exempt = operation.docs.deprecated.then(|| {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated request deliberately exposes deprecated API"
+                )]
+            }
+        });
+        quote! {
+            #exempt
+            params: #params,
+        }
     });
-    let body_field = operation.body.as_ref().map(|body| {
-        let ty = body_type(body, contracts, config);
-        quote! { body: ::std::option::Option<#ty>, }
-    });
-    let field_inits = operation.params.iter().map(|param| {
-        let field = ident(&param.rust_name);
-        quote! { #field: ::std::option::Option::None, }
-    });
-    let body_init = operation
-        .body
-        .as_ref()
-        .map(|_| quote! { body: ::std::option::Option::None, });
-
-    let setters = setters(operation, contracts, config);
+    let params_arg = takes.then(|| quote! { , params: #params });
+    let params_init = takes.then(|| quote! { params, });
 
     let success = success_type(operation, contracts, config);
     let failure = error_type(operation, contracts, config);
@@ -191,11 +206,19 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
     let success_decl = &success.declaration;
     let failure_decl = &failure.declaration;
     let struct_docs = format!(
-        " The request builder for [`Client::{operation_name}`]: `{} {}`.",
+        " The prepared request for [`Client::{operation_name}`]: `{} {}`.",
         operation.method.wire(),
         operation.path
     );
-    // An `impl` uses its deprecated builder when the operation is deprecated, but an `impl` cannot
+    let holds = if takes {
+        format!(
+            " Holds the client and the operation's [`{params}`]. Everything the description \
+             declares lives on the params; what it does not — an extra header — is set here."
+        )
+    } else {
+        " Holds the client. A header the description does not declare is set here.".to_owned()
+    };
+    // An `impl` uses its deprecated request when the operation is deprecated, but an `impl` cannot
     // itself be deprecated. The expectation says this is the implementation of that deprecated
     // thing, not a new call site. Deprecated schema types are handled at the exact fields and
     // methods that name them.
@@ -203,7 +226,7 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
         quote! {
             #[expect(
                 deprecated,
-                reason = "the generated builder deliberately exposes deprecated API"
+                reason = "the generated request deliberately exposes deprecated API"
             )]
         }
     });
@@ -212,36 +235,149 @@ fn builder(operation: &OperationContract, contracts: &Contracts, config: &Config
         #success_decl
         #failure_decl
 
+        #params_decl
+
         #docs
         #[doc = ""]
         #[doc = #struct_docs]
+        #[doc = ""]
+        #[doc = #holds]
         #[derive(Debug, Clone)]
-        pub struct #name<'a> {
+        pub struct #request<'a> {
             client: &'a Client,
-            #(#fields)*
-            #body_field
+            #params_field
+            headers: ::reqwest::header::HeaderMap,
         }
 
         #deprecation
-        impl<'a> #name<'a> {
-            fn new(client: &'a Client) -> Self {
+        impl<'a> #request<'a> {
+            fn new(client: &'a Client #params_arg) -> Self {
                 Self {
                     client,
-                    #(#field_inits)*
-                    #body_init
+                    #params_init
+                    headers: ::reqwest::header::HeaderMap::new(),
                 }
             }
 
-            #setters
+            /// Set a header the description does not declare.
+            ///
+            /// A header the operation declares is a field of the params and belongs there; one
+            /// set here replaces everything the request assembled under the same name — a
+            /// declared header, the cookies, the body's content type. Typed as reqwest's own
+            /// name and value so an invalid header cannot exist to fail at send time.
+            #[must_use]
+            pub fn header(
+                mut self,
+                name: ::reqwest::header::HeaderName,
+                value: ::reqwest::header::HeaderValue,
+            ) -> Self {
+                self.headers.append(name, value);
+                self
+            }
+
             #send
             #stream
         }
     }
 }
 
+/// The params struct: every input the operation takes, as one caller-built literal.
+///
+/// A required input is a plain field and an optional one an `Option`; there is no constructor and
+/// no `Default`, so the literal is the only way to build one and every call site names every
+/// input. A parameter the description adds later is a missing-field compile error at each of them
+/// rather than a request quietly sent without it.
+fn params_struct(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    let name = params_name(operation);
+    let operation_name = operation.rust_name.as_str();
+    let docs = docs_of(&operation.docs);
+    let fields = operation.params.iter().map(|param| {
+        let field = ident(&param.rust_name);
+        let ty = type_tokens(&param.ty, contracts, config);
+        let ty = if param.required {
+            ty
+        } else {
+            quote! { ::std::option::Option<#ty> }
+        };
+        let docs = docs_prose(&param.docs);
+        let note = requirement_note(param);
+        // The blank line is load-bearing. This sentence is progeny's, appended after the vendor's
+        // prose, and without a paragraph break markdown reads it as a continuation of whatever the
+        // description ended inside — `okta` ends several in a list item, which made progeny's own
+        // sentence a lazy continuation of it. The struct docs and a documented `default` already
+        // separate themselves the same way.
+        quote! {
+            #docs
+            #[doc = ""]
+            #[doc = #note]
+            pub #field: #ty,
+        }
+    });
+    let body_field = operation.body.as_ref().map(|body| {
+        let ty = body_type(body, contracts, config);
+        let (ty, note) = if body.required() {
+            (ty, " The request body. Required.")
+        } else {
+            (quote! { ::std::option::Option<#ty> }, " The request body.")
+        };
+        quote! {
+            #[doc = #note]
+            pub body: #ty,
+        }
+    });
+    let struct_docs = format!(
+        " The parameters of [`Client::{operation_name}`]: `{} {}`.",
+        operation.method.wire(),
+        operation.path
+    );
+    quote! {
+        #docs
+        #[doc = ""]
+        #[doc = #struct_docs]
+        #[doc = ""]
+        #[doc = " Every input the operation takes: a required one as a plain field, an optional \
+                 one as an `Option`. The struct literal is the only constructor, so a call site \
+                 names them all — an input the description adds later is a compile error here \
+                 rather than a request quietly sent without it."]
+        #[derive(Debug, Clone)]
+        pub struct #name {
+            #(#fields)*
+            #body_field
+        }
+    }
+}
+
+/// The provenance line under an input's own docs: where it travels, whether it must be set, and
+/// whether the document deprecates it — in prose, because the field cannot carry
+/// `#[deprecated]` without warning at every literal that is obliged to name it.
+fn requirement_note(param: &ParamContract) -> String {
+    let deprecated = if param.docs.deprecated {
+        "Deprecated. "
+    } else {
+        ""
+    };
+    if param.required {
+        format!(
+            " {deprecated}Required. Sent as the `{}` {} parameter.",
+            param.wire_name,
+            param.style.location().slug()
+        )
+    } else {
+        format!(
+            " {deprecated}Sent as the `{}` {} parameter.",
+            param.wire_name,
+            param.style.location().slug()
+        )
+    }
+}
+
 /// The stream over every item of every page, for an operation whose pagination was declared.
 ///
-/// Built on the builder's own `send`, and on the builder deriving `Clone`: each page is a fresh
+/// Built on the request's own `send`, and on the request deriving `Clone`: each page is a fresh
 /// request with one parameter changed, which is exactly what the declaration describes. Nothing
 /// here is inferred — the cursor parameter, the member holding the next cursor and the member
 /// holding the items were all named by the caller and checked against the document before this ran.
@@ -255,6 +391,22 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
     let item = type_tokens(&pagination.item, contracts, config);
     let failure = error_type(operation, contracts, config).name;
     let cursor = ident(&pagination.cursor_param);
+    // The next cursor is bound bare — the page member is an `Option` by [`attach`]'s own rule,
+    // and the `map` peels it — while the params field wraps the parameter's type in one
+    // `Option` per fact that makes it optional: an omitted `required`, and a nullable type of
+    // its own. The assignment restores exactly those layers.
+    let layers = operation
+        .params
+        .iter()
+        .find(|param| param.rust_name == pagination.cursor_param)
+        .map_or(1, |param| {
+            usize::from(!param.required) + usize::from(matches!(param.ty, TypeRef::Option(_)))
+        });
+    let mut value = quote! { cursor };
+    for _ in 0..layers {
+        value = quote! { ::std::option::Option::Some(#value) };
+    }
+    let assign = quote! { page_request.params.#cursor = #value; };
     let items_path = pagination.items.iter().map(ident);
     let next_path = pagination.next_cursor.iter().map(ident);
     let docs = format!(
@@ -269,23 +421,23 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
         ) -> impl ::futures_core::Stream<
             Item = ::std::result::Result<#item, Error<#failure>>,
         > + 'a {
-            // `try_unfold` carries the builder forward as its state, so the borrow of the client
+            // `try_unfold` carries the request forward as its state, so the borrow of the client
             // lives as long as the stream rather than as long as one page.
             let pages = ::futures_util::stream::try_unfold(
                 ::std::option::Option::Some((self, ::std::option::Option::None)),
                 |state| async move {
-                    let ::std::option::Option::Some((builder, cursor)) = state else {
+                    let ::std::option::Option::Some((request, cursor)) = state else {
                         // The error type is named here and nowhere else in the closure: this arm
                         // never fails, so nothing else in it tells the compiler what `E` is.
                         return ::std::result::Result::<_, Error<#failure>>::Ok(
                             ::std::option::Option::None,
                         );
                     };
-                    let mut request = ::std::clone::Clone::clone(&builder);
+                    let mut page_request = ::std::clone::Clone::clone(&request);
                     if let ::std::option::Option::Some(cursor) = cursor {
-                        request.#cursor = ::std::option::Option::Some(cursor);
+                        #assign
                     }
-                    let page = request.send().await?.into_value();
+                    let page = page_request.send().await?.into_value();
                     // Cloned before the items are moved out of the same value, and in this order
                     // so that a next cursor living beside the items still reads.
                     let next = ::std::clone::Clone::clone(&page #(.#next_path)*);
@@ -293,7 +445,7 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
                     // The end of the stream is the service declining to send a next cursor, which
                     // is the only signal the declaration gives and the only one this trusts. A page
                     // that came back empty is not the same statement and does not stop it.
-                    let state = next.map(|next| (builder, ::std::option::Option::Some(next)));
+                    let state = next.map(|next| (request, ::std::option::Option::Some(next)));
                     ::std::result::Result::Ok(::std::option::Option::Some((items, state)))
                 },
             );
@@ -306,65 +458,6 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
                 }),
             )
         }
-    }
-}
-
-/// One setter per parameter, and one for the body when the operation takes one.
-///
-/// Each takes `impl Into<T>` rather than `T`, so a caller writes `.name("x")` for a `String`.
-fn setters(operation: &OperationContract, contracts: &Contracts, config: &Config) -> TokenStream {
-    let params = operation.params.iter().map(|param| {
-        let field = ident(&param.rust_name);
-        let ty = type_tokens(&param.ty, contracts, config);
-        let docs = docs_of(&param.docs);
-        let requirement = if param.required {
-            format!(
-                " Required. Sent as the `{}` {} parameter.",
-                param.wire_name,
-                param.style.location().slug()
-            )
-        } else {
-            format!(
-                " Sent as the `{}` {} parameter.",
-                param.wire_name,
-                param.style.location().slug()
-            )
-        };
-        // The blank line is load-bearing. This sentence is progeny's, appended after the vendor's
-        // prose, and without a paragraph break markdown reads it as a continuation of whatever the
-        // description ended inside — `okta` ends several in a list item, which made progeny's own
-        // sentence a lazy continuation of it. The struct docs and a documented `default` already
-        // separate themselves the same way.
-        quote! {
-            #docs
-            #[doc = ""]
-            #[doc = #requirement]
-            #[must_use]
-            pub fn #field(mut self, value: impl ::std::convert::Into<#ty>) -> Self {
-                self.#field = ::std::option::Option::Some(value.into());
-                self
-            }
-        }
-    });
-    let body = operation.body.as_ref().map(|body| {
-        let ty = body_type(body, contracts, config);
-        let note = if body.required() {
-            " The request body. Required."
-        } else {
-            " The request body."
-        };
-        quote! {
-            #[doc = #note]
-            #[must_use]
-            pub fn body(mut self, value: impl ::std::convert::Into<#ty>) -> Self {
-                self.body = ::std::option::Option::Some(value.into());
-                self
-            }
-        }
-    });
-    quote! {
-        #(#params)*
-        #body
     }
 }
 
@@ -510,33 +603,14 @@ fn send(
     config: &Config,
 ) -> TokenStream {
     let method = format_ident!("{}", operation.method.wire());
-    let path = path_expression(operation, operation_name);
+    let path = path_expression(operation);
     let query = query(operation);
     let headers = headers(operation);
+    let flag = needs_content_type_flag(operation)
+        .then(|| quote! { let mut declared_content_type = false; });
+    let accept = accept_header(operation);
     let body = request_body(operation, operation_name);
     let dispatch = dispatch(operation, success, failure, config);
-    // `mut` only where something actually reassigns it: a generated crate is checked with warnings
-    // denied, so an unnecessary `mut` is a defect a consumer sees rather than a wart nobody reads.
-    let mutability =
-        (!query.is_empty() || !headers.is_empty() || !body.is_empty()).then(|| quote! { mut });
-    let missing_body = operation
-        .body
-        .as_ref()
-        .filter(|body| body.required())
-        .map(|_| {
-            quote! {
-                if self.body.is_none() {
-                    return ::std::result::Result::Err(Error::Decode(
-                        support::DecodeError::new(
-                            ::reqwest::StatusCode::BAD_REQUEST,
-                            ::serde::de::Error::custom(
-                                support::Unset::new(#operation_name, "a request body"),
-                            ),
-                        ),
-                    ));
-                }
-            }
-        });
 
     quote! {
         /// Perform the request.
@@ -547,12 +621,19 @@ fn send(
         /// description declares as an error, when it answers with one the description does not
         /// declare at all, or when a body does not match the shape the description states.
         pub async fn send(self) -> ::std::result::Result<ResponseValue<#success>, Error<#failure>> {
-            #missing_body
             let url = #path;
-            let #mutability request = self.client.client().request(::reqwest::Method::#method, url);
+            let mut request = self.client.client().request(::reqwest::Method::#method, url);
+            #flag
             #query
             #headers
+            #accept
             #body
+            if !self.headers.is_empty() {
+                // Applied last, and reqwest replaces same-named headers here: a header set on
+                // the request wins over everything the operation assembled for that name — a
+                // declared parameter, the cookies, the body's content type.
+                request = request.headers(self.headers);
+            }
             let response = request.send().await?;
             #dispatch
         }
@@ -560,21 +641,49 @@ fn send(
 }
 
 /// The URL expression: the base, then the template with its variables filled in.
-fn path_expression(operation: &OperationContract, operation_name: &str) -> TokenStream {
+fn path_expression(operation: &OperationContract) -> TokenStream {
     let mut steps = Vec::new();
     for segment in operation.path.segments() {
-        steps.push(quote! { url.push('/'); });
+        let variable_names: Vec<&str> = segment
+            .pieces()
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Variable(name) => Some(name.as_str()),
+                Piece::Literal(_) => None,
+            })
+            .collect();
+        if variable_names.is_empty() {
+            steps.push(quote! { url.push('/'); });
+            for piece in segment.pieces() {
+                let Piece::Literal(text) = piece else {
+                    continue;
+                };
+                let mut characters = text.chars();
+                match (characters.next(), characters.next()) {
+                    (None, _) => {}
+                    // `push_str` with a one-character literal is a lint the consumer sees, and
+                    // a route like `stream.{container}` puts single characters between
+                    // variables often enough for it to be worth the arm.
+                    (Some(only), None) => steps.push(quote! { url.push(#only); }),
+                    _ => steps.push(quote! { url.push_str(#text); }),
+                }
+            }
+            continue;
+        }
+        // A segment with a variable is assembled apart and checked before it joins the URL: a
+        // caller value of `.` or `..` renders a dot segment, which every WHATWG parser —
+        // reqwest's included — folds away before the request leaves, so `/files/{id}/meta`
+        // with `id = ".."` would silently ask for `/meta`. Percent-encoding cannot save it
+        // (`%2E` segments normalize the same way), so the request is refused instead.
+        let mut piece_steps = Vec::new();
         for piece in segment.pieces() {
             match piece {
                 Piece::Literal(text) => {
                     let mut characters = text.chars();
                     match (characters.next(), characters.next()) {
                         (None, _) => {}
-                        // `push_str` with a one-character literal is a lint the consumer sees, and
-                        // a route like `stream.{container}` puts single characters between
-                        // variables often enough for it to be worth the arm.
-                        (Some(only), None) => steps.push(quote! { url.push(#only); }),
-                        _ => steps.push(quote! { url.push_str(#text); }),
+                        (Some(only), None) => piece_steps.push(quote! { segment.push(#only); }),
+                        _ => piece_steps.push(quote! { segment.push_str(#text); }),
                     }
                 }
                 Piece::Variable(name) => {
@@ -593,34 +702,81 @@ fn path_expression(operation: &OperationContract, operation_name: &str) -> Token
                     } else {
                         quote! { support::style::path_segment(&value, #style, #explode) }
                     };
-                    steps.push(quote! {
+                    // Always a direct read: the contract records a path parameter as required
+                    // whatever the document says, so the field is never an `Option`. Bound
+                    // before serializing so the call receives a place of reference type — a
+                    // literal `&` on a `Copy` field is a `needless_borrow` lint in the
+                    // consumer's build.
+                    piece_steps.push(quote! {
                         {
-                            let value = match &self.#field {
-                                ::std::option::Option::Some(value) => ::serde_json::to_value(value)
-                                    .unwrap_or(::serde_json::Value::Null),
-                                ::std::option::Option::None => {
-                                    return ::std::result::Result::Err(Error::Decode(
-                                        support::DecodeError::new(
-                                            ::reqwest::StatusCode::BAD_REQUEST,
-                                            ::serde::de::Error::custom(
-                                                support::Unset::new(#operation_name, #wire),
-                                            ),
-                                        ),
-                                    ));
-                                }
-                            };
-                            url.push_str(&#rendered);
+                            let value = &self.params.#field;
+                            let value = ::serde_json::to_value(value)
+                                .unwrap_or(::serde_json::Value::Null);
+                            segment.push_str(&#rendered);
                         }
                     });
                 }
             }
         }
+        let blame = variable_names.first().copied().unwrap_or_default();
+        steps.push(quote! {
+            {
+                let mut segment = ::std::string::String::new();
+                #(#piece_steps)*
+                if matches!(segment.as_str(), "." | "..") {
+                    return ::std::result::Result::Err(Error::UnsendablePath {
+                        parameter: #blame,
+                        rendered: segment,
+                    });
+                }
+                url.push('/');
+                url.push_str(&segment);
+            }
+        });
     }
+    let reserved = reserved_query(operation);
     quote! {
         {
             let mut url = ::std::string::String::from(self.client.base_url());
             #(#steps)*
+            #reserved
             url
+        }
+    }
+}
+
+/// The query pairs `allowReserved: true` routes around reqwest's encoder.
+///
+/// reqwest's `.query(...)` percent-encodes every reserved character in the values it is handed,
+/// which is exactly the spelling the flag turns off. These pairs are appended to the URL string
+/// directly, through [`support::style::reserved_pair`]'s reserved-preserving encoding; pairs
+/// reqwest adds afterwards join the query string behind them correctly.
+fn reserved_query(operation: &OperationContract) -> TokenStream {
+    let pairs: Vec<TokenStream> = operation
+        .params_at(Location::Query)
+        .filter(|param| param.style.allow_reserved())
+        .map(|param| {
+            let field = ident(&param.rust_name);
+            let wire = &param.wire_name;
+            let style = style_tokens(param.style.style());
+            let explode = param.style.explode();
+            let body = quote! {
+                let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
+                reserved.extend(support::style::query_pairs(#wire, &value, #style, #explode));
+            };
+            read_param(param, &field, &body)
+        })
+        .collect();
+    if pairs.is_empty() {
+        return TokenStream::new();
+    }
+    quote! {
+        let mut reserved: ::std::vec::Vec<(::std::string::String, ::std::string::String)> =
+            ::std::vec::Vec::new();
+        #(#pairs)*
+        for (index, (name, value)) in reserved.iter().enumerate() {
+            url.push(if index == 0 { '?' } else { '&' });
+            url.push_str(&support::style::reserved_pair(name, value));
         }
     }
 }
@@ -628,6 +784,7 @@ fn path_expression(operation: &OperationContract, operation_name: &str) -> Token
 fn query(operation: &OperationContract) -> TokenStream {
     let pairs: Vec<TokenStream> = operation
         .params_at(Location::Query)
+        .filter(|param| !param.style.allow_reserved())
         .map(|param| {
             let field = ident(&param.rust_name);
             let wire = &param.wire_name;
@@ -637,7 +794,7 @@ fn query(operation: &OperationContract) -> TokenStream {
                 let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
                 query.extend(support::style::query_pairs(#wire, &value, #style, #explode));
             };
-            optional(param, operation, &field, &body)
+            read_param(param, &field, &body)
         })
         .collect();
     if pairs.is_empty() {
@@ -663,7 +820,34 @@ fn headers(operation: &OperationContract) -> TokenStream {
             let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
             request = request.header(#wire, support::style::header_value(&value, #explode));
         };
-        pieces.push(optional(param, operation, &field, &body));
+        // The flag `body_content_type` reads: a set `Content-Type` parameter means the body's
+        // automatic header stays home.
+        let mark = (needs_content_type_flag(operation)
+            && param.wire_name.eq_ignore_ascii_case("content-type"))
+        .then(|| quote! { declared_content_type = true; });
+        let body = quote! {
+            #body
+            #mark
+        };
+        // A declared optional `Accept` parameter outranks the configured media types only when
+        // the caller actually set it. Unset, the configured types still have to reach the wire
+        // — suppressing them on the mere declaration left the server free to answer with the
+        // type the configuration refused.
+        let fallback = (!param.required
+            && param.wire_name.eq_ignore_ascii_case("accept")
+            && !operation.responses.accept.is_empty())
+        .then(|| operation.responses.accept.join(", "));
+        if let Some(configured) = fallback {
+            pieces.push(quote! {
+                if let ::std::option::Option::Some(value) = &self.params.#field {
+                    #body
+                } else {
+                    request = request.header(::reqwest::header::ACCEPT, #configured);
+                }
+            });
+        } else {
+            pieces.push(read_param(param, &field, &body));
+        }
     }
 
     let cookies: Vec<TokenStream> = operation
@@ -675,7 +859,7 @@ fn headers(operation: &OperationContract) -> TokenStream {
                 let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
                 cookies.push(support::style::cookie_pair(#wire, &value));
             };
-            optional(param, operation, &field, &body)
+            read_param(param, &field, &body)
         })
         .collect();
     if !cookies.is_empty() {
@@ -692,65 +876,129 @@ fn headers(operation: &OperationContract) -> TokenStream {
     quote! { #(#pieces)* }
 }
 
-/// Read a parameter that may not be set, and do `body` with it.
+/// The `Accept` header a configured response media type earns.
 ///
-/// An `if let` where an unset value simply contributes nothing, and a `match` only where the
-/// document said the parameter is required and there is a refusal to run. A `match` whose second
-/// arm is empty is a lint the consumer of a generated crate sees.
-fn optional(
+/// Emitted only where [`Config::media_types`](crate::config::Config::media_types) chose at one
+/// of this operation's response positions — the choice is an argument with the server, and a
+/// request that never states it leaves the server free to answer with the type the caller
+/// refused. A declared `Accept` header parameter outranks it: the document already gave the
+/// caller that knob, and two spellings of one header is a worse wire than either alone.
+fn accept_header(operation: &OperationContract) -> TokenStream {
+    if operation.responses.accept.is_empty()
+        || operation.params.iter().any(|param| {
+            param.style.location() == Location::Header
+                && param.wire_name.eq_ignore_ascii_case("accept")
+        })
+    {
+        return TokenStream::new();
+    }
+    let value = operation.responses.accept.join(", ");
+    quote! {
+        request = request.header(::reqwest::header::ACCEPT, #value);
+    }
+}
+
+/// Read one input and do `body` with `value` bound to a reference to it.
+///
+/// A required input is a plain params field and reads directly; an optional one is an `if let`
+/// where an unset value simply contributes nothing. Nothing here can refuse: whatever the
+/// description requires already existed when the params struct was built.
+fn read_param(
     param: &ParamContract,
-    operation: &OperationContract,
     field: &proc_macro2::Ident,
     body: &TokenStream,
 ) -> TokenStream {
-    let required = required_guard(param, operation);
-    if required.is_empty() {
-        return quote! {
-            if let ::std::option::Option::Some(value) = &self.#field {
+    if param.required {
+        quote! {
+            {
+                let value = &self.params.#field;
                 #body
             }
-        };
-    }
-    quote! {
-        match &self.#field {
-            ::std::option::Option::Some(value) => { #body }
-            ::std::option::Option::None => { #required }
+        }
+    } else {
+        quote! {
+            if let ::std::option::Option::Some(value) = &self.params.#field {
+                #body
+            }
         }
     }
 }
 
-/// What an unset parameter does, which is nothing unless the document said it is required.
-fn required_guard(param: &ParamContract, operation: &OperationContract) -> TokenStream {
-    if !param.required {
-        return TokenStream::new();
-    }
-    let operation_name = operation.rust_name.as_str();
-    let wire = &param.wire_name;
-    quote! {
-        return ::std::result::Result::Err(Error::Decode(support::DecodeError::new(
-            ::reqwest::StatusCode::BAD_REQUEST,
-            ::serde::de::Error::custom(support::Unset::new(#operation_name, #wire)),
-        )));
+/// The header parameter the description names `Content-Type`, when it declares one.
+///
+/// Real documents do (cloudflare's R2 object upload stores the caller's type), and it makes the
+/// request's content type *caller data*: the automatic body header has to yield to it, or the
+/// wire carries two disagreeing values and the server reads whichever arrived first.
+pub(super) fn content_type_param(operation: &OperationContract) -> Option<&ParamContract> {
+    operation
+        .params_at(Location::Header)
+        .find(|param| param.wire_name.eq_ignore_ascii_case("content-type"))
+}
+
+/// Whether `send()` needs the `declared_content_type` flag: an *optional* declared
+/// `Content-Type` parameter beside a body whose arm writes an explicit content type. A required
+/// parameter always writes, so the body simply never does; plain `application/json` needs
+/// nothing, because reqwest's `json` only fills the header in when it is absent; a multipart
+/// body's type carries the boundary and is never overridden.
+fn needs_content_type_flag(operation: &OperationContract) -> bool {
+    let Some(param) = content_type_param(operation) else {
+        return false;
+    };
+    !param.required
+        && match &operation.body {
+            Some(BodyContract::Json { content_type, .. }) => content_type != "application/json",
+            Some(
+                BodyContract::Form { .. } | BodyContract::Text { .. } | BodyContract::Bytes { .. },
+            ) => true,
+            Some(BodyContract::Multipart { .. }) | None => false,
+        }
+}
+
+/// The body's own content-type write, deferring to a declared `Content-Type` parameter.
+fn body_content_type(operation: &OperationContract, value: &str) -> TokenStream {
+    match content_type_param(operation) {
+        // Required: the parameter always wrote the header, and appending a second value would
+        // put two disagreeing spellings on the wire.
+        Some(param) if param.required => TokenStream::new(),
+        Some(_) => quote! {
+            if !declared_content_type {
+                request = request.header(::reqwest::header::CONTENT_TYPE, #value);
+            }
+        },
+        None => quote! {
+            request = request.header(::reqwest::header::CONTENT_TYPE, #value);
+        },
     }
 }
 
 fn request_body(operation: &OperationContract, operation_name: &str) -> TokenStream {
-    let inner = match &operation.body {
-        None => return TokenStream::new(),
-        Some(BodyContract::Json { .. }) => quote! { request = request.json(body); },
-        Some(BodyContract::Form { specs, .. }) => {
-            let specs = form_specs(specs);
-            quote! {
-                let value = support::to_value(body, #operation_name).map_err(Error::Decode)?;
-                request = request
-                    .header(
-                        ::reqwest::header::CONTENT_TYPE,
-                        "application/x-www-form-urlencoded",
-                    )
-                    .body(support::style::form_body(&value, #specs));
+    let Some(contract) = &operation.body else {
+        return TokenStream::new();
+    };
+    let inner = match contract {
+        BodyContract::Json { content_type, .. } => {
+            if content_type == "application/json" {
+                quote! { request = request.json(body); }
+            } else {
+                // reqwest's `json` writes `application/json` only when the header is absent, so
+                // the declared spelling set first is the one the wire carries.
+                let set = body_content_type(operation, content_type);
+                quote! {
+                    #set
+                    request = request.json(body);
+                }
             }
         }
-        Some(BodyContract::Multipart { parts, .. }) => {
+        BodyContract::Form { specs, .. } => {
+            let specs = form_specs(specs);
+            let set = body_content_type(operation, "application/x-www-form-urlencoded");
+            quote! {
+                let value = support::to_value(body, #operation_name).map_err(Error::Decode)?;
+                #set
+                request = request.body(support::style::form_body(&value, #specs));
+            }
+        }
+        BodyContract::Multipart { parts, .. } => {
             let parts = part_specs(parts);
             // A multipart body whose value is not an object has no member names, so there is
             // nothing to name the parts after. That is a body the document typed as something
@@ -770,19 +1018,28 @@ fn request_body(operation: &OperationContract, operation_name: &str) -> TokenStr
                     .body(bytes);
             }
         }
-        // Text and bytes write the same statement; what differs is the *type* the builder holds,
-        // which `body_type` decides. `reqwest::Body` takes both a `String` and a `Vec<u8>`.
-        Some(
-            BodyContract::Text { content_type, .. } | BodyContract::Bytes { content_type, .. },
-        ) => quote! {
-            request = request
-                .header(::reqwest::header::CONTENT_TYPE, #content_type)
-                .body(body.clone());
-        },
+        // Text and bytes write the same statement; what differs is the *type* the params struct
+        // holds, which `body_type` decides. `reqwest::Body` takes both a `String` and a `Vec<u8>`.
+        BodyContract::Text { content_type, .. } | BodyContract::Bytes { content_type, .. } => {
+            let set = body_content_type(operation, content_type);
+            quote! {
+                #set
+                request = request.body(body.clone());
+            }
+        }
     };
-    quote! {
-        if let ::std::option::Option::Some(body) = &self.body {
-            #inner
+    if contract.required() {
+        quote! {
+            {
+                let body = &self.params.body;
+                #inner
+            }
+        }
+    } else {
+        quote! {
+            if let ::std::option::Option::Some(body) = &self.params.body {
+                #inner
+            }
         }
     }
 }
@@ -967,7 +1224,7 @@ fn arm_matches(
 /// bound to a name: a `204` arm's body is `()`, and binding a unit is a lint the consumer sees.
 fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool, config: &Config) -> TokenStream {
     let decoded = match &arm.body {
-        ResponseBody::Json(_) | ResponseBody::Empty => {
+        ResponseBody::Json { .. } | ResponseBody::Empty => {
             quote! { support::decode_json(response).await? }
         }
         ResponseBody::Text { .. } => quote! { support::decode_text(response).await? },
@@ -1029,16 +1286,32 @@ pub(super) fn style_tokens(style: Style) -> TokenStream {
     quote! { support::style::Style::#ident }
 }
 
-fn builder_name(operation: &OperationContract) -> proc_macro2::Ident {
-    format_ident!(
-        "{}",
-        operation
-            .rust_name
-            .as_str()
-            .split('_')
-            .map(capitalize)
-            .collect::<String>()
-    )
+/// Whether the operation takes any input beyond the client itself.
+///
+/// One with none gets no params struct at all: an accessor with no argument states "no input"
+/// better than an empty literal would, and gaining a first input still changes the accessor's
+/// signature, so the compile error on drift is kept.
+pub(crate) fn takes_params(operation: &OperationContract) -> bool {
+    !operation.params.is_empty() || operation.body.is_some()
+}
+
+/// `FooParams`: the caller-built struct of every input the operation takes.
+pub(crate) fn params_name(operation: &OperationContract) -> proc_macro2::Ident {
+    format_ident!("{}Params", camel(operation))
+}
+
+/// `FooRequest`: the params bound to a client, ready to send.
+fn request_name(operation: &OperationContract) -> proc_macro2::Ident {
+    format_ident!("{}Request", camel(operation))
+}
+
+fn camel(operation: &OperationContract) -> String {
+    operation
+        .rust_name
+        .as_str()
+        .split('_')
+        .map(capitalize)
+        .collect()
 }
 
 pub(super) fn capitalize(word: &str) -> String {

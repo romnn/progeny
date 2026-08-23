@@ -28,7 +28,7 @@ use crate::config::{Config, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::cycles::Sccs;
-use crate::shape::{Docs, Extra, Fit, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes};
+use crate::shape::{Docs, Extra, Fit, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes, TagStyle};
 
 /// One property whose directional distinction was collapsed onto the single shared type.
 ///
@@ -86,6 +86,7 @@ pub(super) fn run(
         resolved,
         shapes,
         config,
+        multipart_bodies: upload_bodies(resolved, shapes, ctx),
         namer: Namer::default(),
         done: BTreeMap::new(),
         types: Vec::new(),
@@ -94,6 +95,7 @@ pub(super) fn run(
         components: BTreeMap::new(),
         needs_name: BTreeSet::new(),
         collapses: Vec::new(),
+        name_conflicts: Vec::new(),
     };
 
     for root in shapes.roots() {
@@ -135,6 +137,7 @@ pub(super) fn run(
         types: lower.types,
         by_shape: lower.done,
         collapses: lower.collapses,
+        name_conflicts: lower.name_conflicts,
     }
 }
 
@@ -143,6 +146,16 @@ pub(super) struct Lowered {
     pub(super) types: Vec<Provisional>,
     pub(super) by_shape: BTreeMap<ShapeKey, TypeRef>,
     pub(super) collapses: Vec<Collapse>,
+    /// Configured type names that could not be honored because the identifier was already
+    /// handed out. A name the caller asked for by name cannot be suffixed behind their back,
+    /// so [`super::build`] rejects the run instead.
+    pub(super) name_conflicts: Vec<NameConflict>,
+}
+
+/// One configured name the namer could not honor.
+pub(super) struct NameConflict {
+    pub(super) chosen: String,
+    pub(super) at: JsonPointer,
 }
 
 /// Which keys have to become named types.
@@ -159,7 +172,13 @@ pub(super) struct Lowered {
 fn names_needed(shapes: &Shapes, declared: &BTreeSet<ShapeKey>) -> BTreeSet<ShapeKey> {
     let mut needed: BTreeSet<ShapeKey> = shapes
         .keys()
-        .filter(|key| declared.contains(*key) || shapes.get(key).is_some_and(nameable))
+        .filter(|key| {
+            // The wrappers come off before the test: `Optional(Inline(Struct))` is an `Option`
+            // *of a struct*, and it is the struct that has no anonymous form. Testing the
+            // unpeeled shape sent every inline nullable struct, string enum, and union to
+            // `inline()`, which can only answer `serde_json::Value` for them — silently.
+            declared.contains(*key) || shapes.get(key).is_some_and(|shape| nameable(peel(shape).1))
+        })
         .cloned()
         .collect();
 
@@ -194,6 +213,9 @@ struct Lower<'a> {
     resolved: &'a ResolvedDocument,
     shapes: &'a Shapes,
     config: &'a Config,
+    /// The shapes that are `multipart/form-data` request bodies: their own binary members become
+    /// [`TypeRef::Upload`] rather than `String`, because those members are file parts.
+    multipart_bodies: BTreeSet<ShapeKey>,
     namer: Namer,
     /// The type each key lowers to, so a shape reached twice is one type.
     done: BTreeMap<ShapeKey, TypeRef>,
@@ -208,6 +230,8 @@ struct Lower<'a> {
     needs_name: BTreeSet<ShapeKey>,
     /// Properties whose optional-and-nullable distinction was collapsed, awaiting a position.
     collapses: Vec<Collapse>,
+    /// Configured names the namer could not honor; see [`Lowered::name_conflicts`].
+    name_conflicts: Vec<NameConflict>,
 }
 
 /// A wrapper peeled off a shape before its core is named.
@@ -261,7 +285,16 @@ impl Lower<'_> {
         let (ident, explicit) = if let Some(chosen) =
             self.config.name_for(component.as_deref(), &rendered)
         {
-            (RustIdent::type_name(std::slice::from_ref(chosen)), true)
+            let wanted = RustIdent::type_name(std::slice::from_ref(chosen));
+            // A configured name joins the namer like any auto-derived one, so later claims step
+            // around it instead of colliding into an `E0428` in source the caller never wrote.
+            if !self.namer.take(&wanted) {
+                self.name_conflicts.push(NameConflict {
+                    chosen: chosen.clone(),
+                    at: address.clone(),
+                });
+            }
+            (wanted, true)
         } else {
             {
                 let named = self.namer.claim(&segments);
@@ -376,9 +409,15 @@ impl Lower<'_> {
                     },
                     Some(tag) => {
                         if let Some(variants) = tagged_variants(variants) {
-                            ContractKind::TaggedEnum {
-                                tag: tag.clone(),
-                                variants,
+                            match tag.style {
+                                TagStyle::Consumed => ContractKind::TaggedEnum {
+                                    tag: tag.property.clone(),
+                                    variants,
+                                },
+                                TagStyle::Carried => ContractKind::CarriedTagEnum {
+                                    tag: tag.property.clone(),
+                                    variants,
+                                },
                             }
                         } else {
                             // A tagged union with a variant nothing names is what
@@ -453,10 +492,17 @@ impl Lower<'_> {
                     .collect(),
             ),
             Shape::Optional(inner) | Shape::Alias(inner) => self.reference(inner, key, ctx),
-            // `Any` is arbitrary JSON by definition. The three nameable shapes are reached only when
-            // one is asked for inline, which `needs_name` prevents; arbitrary JSON is the sound
-            // answer there too.
-            Shape::Any | Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) => {
+            // `Any` is arbitrary JSON by definition.
+            Shape::Any => TypeRef::Value,
+            // The three nameable shapes cannot be asked for inline: `names_needed` names every
+            // key whose peeled core is one of them, and classification only ever inlines a shape
+            // as the direct inner of an `Optional` at a keyed position. The assert keeps the
+            // invariant honest; arbitrary JSON is the sound answer if it ever broke in release.
+            Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) => {
+                debug_assert!(
+                    false,
+                    "a nameable shape reached inline(); names_needed should have named its key"
+                );
                 TypeRef::Value
             }
         }
@@ -496,9 +542,17 @@ impl Lower<'_> {
             .get(index.index())
             .map_or_else(JsonPointer::root, |contract| contract.origin.clone());
 
+        let multipart_body = self.multipart_bodies.contains(key);
         for field in &structure.fields {
             let nullable = matches!(self.shape_of(&field.shape), Some(Shape::Optional(_)));
             let inner = self.reference(&field.shape, key, ctx);
+            // A binary member of a multipart body is a file part, and a file part is bytes plus
+            // metadata no `String` carries.
+            let inner = if multipart_body {
+                upload_shape(self.shapes, &field.shape, 0).unwrap_or(inner)
+            } else {
+                inner
+            };
             let position = origin.child("properties").child(field.wire.clone());
             // An access marker names the direction the member travels; whether this type also
             // crosses the *other* direction is the API model's knowledge, so the fact is recorded
@@ -666,6 +720,7 @@ impl Lower<'_> {
             TypeRef::F64 => "Number".to_owned(),
             TypeRef::String => "Text".to_owned(),
             TypeRef::Format(format) => format_name(*format).to_owned(),
+            TypeRef::Upload => "Upload".to_owned(),
             TypeRef::Value => "Any".to_owned(),
             TypeRef::Option(inner) | TypeRef::Boxed(inner) => self.variant_name(inner),
             TypeRef::Vec(inner) | TypeRef::Array(inner, _) => {
@@ -758,6 +813,329 @@ fn string_variants(values: &[String]) -> Vec<StringVariant> {
             wire_name: value.clone(),
         })
         .collect()
+}
+
+/// One `multipart/form-data` request-body position: the body schema's key, and where the
+/// content map is written.
+struct MultipartPosition {
+    key: ShapeKey,
+    at: JsonPointer,
+}
+
+/// Every schema position that puts a type on a wire, split by whether it is a multipart body.
+struct WirePositions {
+    multipart: Vec<MultipartPosition>,
+    /// Body schemas of every other media type, response schemas, and parameter schemas.
+    elsewhere: BTreeSet<ShapeKey>,
+}
+
+/// Collect every wire position from the document itself, because which wire a schema rides is a
+/// fact about positions and the positions are the document's to declare.
+///
+/// The `elsewhere` side is deliberately broad — it includes `components` entries no operation
+/// references, and positions whose body never serializes the schema (a `text/plain` body is a
+/// `String` whatever its schema says) — because the set only ever *withholds* the upload retype.
+/// Erring broad costs a degraded multipart part; erring narrow silently changes a JSON wire.
+/// One media-type map's schemas into the split, with multipart request bodies kept apart.
+fn split_content(
+    resolved: &ResolvedDocument,
+    positions: &mut WirePositions,
+    content: Option<&BTreeMap<String, crate::doc::MediaType>>,
+    at: &JsonPointer,
+) {
+    for (media_type, entry) in content.into_iter().flatten() {
+        let Some(id) = entry.schema else { continue };
+        let key = crate::shape::key_of(resolved, id);
+        let base = media_type.split(';').next().unwrap_or(media_type).trim();
+        if base.eq_ignore_ascii_case("multipart/form-data") {
+            positions.multipart.push(MultipartPosition {
+                key,
+                at: at.clone(),
+            });
+        } else {
+            positions.elsewhere.insert(key);
+        }
+    }
+}
+
+/// Every schema of a media-type map into `elsewhere`, for positions that are never multipart
+/// request bodies.
+fn other_content(
+    resolved: &ResolvedDocument,
+    positions: &mut WirePositions,
+    content: Option<&BTreeMap<String, crate::doc::MediaType>>,
+) {
+    for (_, entry) in content.into_iter().flatten() {
+        if let Some(id) = entry.schema {
+            positions
+                .elsewhere
+                .insert(crate::shape::key_of(resolved, id));
+        }
+    }
+}
+
+fn parameter_positions(
+    resolved: &ResolvedDocument,
+    positions: &mut WirePositions,
+    node: &crate::doc::MaybeRef<crate::doc::Parameter>,
+) {
+    let Some(parameter) = resolved.parameter(node) else {
+        return;
+    };
+    if let Some(id) = parameter.schema {
+        positions
+            .elsewhere
+            .insert(crate::shape::key_of(resolved, id));
+    }
+    other_content(resolved, positions, parameter.content.as_ref());
+}
+
+fn response_positions(
+    resolved: &ResolvedDocument,
+    positions: &mut WirePositions,
+    node: &crate::doc::MaybeRef<crate::doc::Response>,
+) {
+    if let Some(response) = resolved.response(node) {
+        other_content(resolved, positions, response.content.as_ref());
+        // Response headers are shape roots with named types even though no renderer puts them
+        // on a wire yet; the retype must already treat them as foreign positions so that making
+        // them rendered one day cannot silently put the upload object form into a header type.
+        for header in response.headers.iter().flatten().map(|(_, node)| node) {
+            header_positions(resolved, positions, header);
+        }
+    }
+}
+
+fn header_positions(
+    resolved: &ResolvedDocument,
+    positions: &mut WirePositions,
+    node: &crate::doc::MaybeRef<crate::doc::Header>,
+) {
+    let Some(header) = resolved.header(node) else {
+        return;
+    };
+    if let Some(id) = header.schema {
+        positions
+            .elsewhere
+            .insert(crate::shape::key_of(resolved, id));
+    }
+    other_content(resolved, positions, header.content.as_ref());
+}
+
+fn wire_positions(resolved: &ResolvedDocument) -> WirePositions {
+    let mut positions = WirePositions {
+        multipart: Vec::new(),
+        elsewhere: BTreeSet::new(),
+    };
+    let document = resolved.document();
+    let routes = document
+        .paths
+        .as_ref()
+        .map(|paths| (&paths.items, "paths"))
+        .into_iter()
+        .chain(document.webhooks.as_ref().map(|hooks| (hooks, "webhooks")));
+    for (items, section) in routes {
+        for (route, item) in items {
+            let Some(item) = resolved.path_item(item) else {
+                continue;
+            };
+            for node in item.parameters.iter().flatten() {
+                parameter_positions(resolved, &mut positions, node);
+            }
+            for (method, operation) in item.operations() {
+                for node in operation.parameters.iter().flatten() {
+                    parameter_positions(resolved, &mut positions, node);
+                }
+                if let Some(node) = &operation.request_body
+                    && let Some(body) = resolved.request_body(node)
+                {
+                    let at = JsonPointer::root()
+                        .child(section)
+                        .child(route)
+                        .child(method.slug())
+                        .child("requestBody")
+                        .child("content");
+                    split_content(resolved, &mut positions, body.content.as_ref(), &at);
+                }
+                for node in operation
+                    .responses
+                    .iter()
+                    .flat_map(|responses| responses.statuses.values())
+                    .chain(
+                        operation
+                            .responses
+                            .iter()
+                            .filter_map(|responses| responses.default.as_ref()),
+                    )
+                {
+                    response_positions(resolved, &mut positions, node);
+                }
+            }
+        }
+    }
+    if let Some(components) = &document.components {
+        for (name, node) in components.request_bodies.iter().flatten() {
+            if let Some(body) = resolved.request_body(node) {
+                let at = JsonPointer::root()
+                    .child("components")
+                    .child("requestBodies")
+                    .child(name)
+                    .child("content");
+                split_content(resolved, &mut positions, body.content.as_ref(), &at);
+            }
+        }
+        for (_, node) in components.responses.iter().flatten() {
+            response_positions(resolved, &mut positions, node);
+        }
+        for (_, node) in components.parameters.iter().flatten() {
+            parameter_positions(resolved, &mut positions, node);
+        }
+        for (_, node) in components.headers.iter().flatten() {
+            header_positions(resolved, &mut positions, node);
+        }
+    }
+    positions
+}
+
+/// The multipart request-body schemas whose own binary members become [`TypeRef::Upload`]: the
+/// ones no other wire position can see.
+///
+/// One schema is one Rust type, so a multipart body that is also a JSON body, a response, a
+/// parameter, or a member nested inside another multipart body (a nested member is a JSON part)
+/// would carry the upload object form onto wires the document types as plain strings. That
+/// conflict keeps the JSON spelling: the multipart side degrades — parts get the conventional
+/// filename and no caller-chosen metadata — and says so, rather than the JSON side silently
+/// changing shape.
+fn upload_bodies(
+    resolved: &ResolvedDocument,
+    shapes: &Shapes,
+    ctx: &mut Ctx,
+) -> BTreeSet<ShapeKey> {
+    let positions = wire_positions(resolved);
+    // Each multipart position is resolved to the core key its struct lowers under before
+    // anything else looks at it — see [`core_key`].
+    let multipart: Vec<MultipartPosition> = positions
+        .multipart
+        .into_iter()
+        .map(|position| MultipartPosition {
+            key: core_key(shapes, &position.key),
+            at: position.at,
+        })
+        .collect();
+    // Everything a non-multipart position can see, plus everything *below* a multipart body's
+    // own fields. A file member only ever references a binary scalar, which has no members to
+    // retype, so seeding every child never poisons a legitimate upload root.
+    let mut queue: Vec<ShapeKey> = positions.elsewhere.iter().cloned().collect();
+    for position in &multipart {
+        if let Some(shape) = shapes.get(&position.key) {
+            queue.extend(crate::shape::child_keys(shape));
+        }
+    }
+    let mut reachable: BTreeSet<ShapeKey> = BTreeSet::new();
+    while let Some(key) = queue.pop() {
+        if !reachable.insert(key.clone()) {
+            continue;
+        }
+        if let Some(shape) = shapes.get(&key) {
+            queue.extend(crate::shape::child_keys(shape));
+        }
+    }
+    let mut keys = BTreeSet::new();
+    let mut reported = BTreeSet::new();
+    for position in multipart {
+        if reachable.contains(&position.key) {
+            // Reported only where a file part actually exists: without one the retype is a
+            // no-op and the collapse costs nothing.
+            if has_file_member(shapes, &position.key) && reported.insert(position.at.clone()) {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::EncodingCollapse,
+                    Action::Degrade,
+                    position.at,
+                    "the schema is also sent or received outside this multipart body, and one \
+                     schema is one Rust type, so its binary members keep the JSON spelling \
+                     `String`; the parts are sent under the conventional `file` filename with \
+                     no caller-chosen metadata",
+                ));
+            }
+        } else {
+            keys.insert(position.key);
+        }
+    }
+    keys
+}
+
+/// Whether the shape has a member [`upload_shape`] would retype, mirrored at shape level: an
+/// array of files is a file, and anything else is a JSON part.
+fn has_file_member(shapes: &Shapes, key: &ShapeKey) -> bool {
+    let Some(Shape::Struct(structure)) = shapes.get(key) else {
+        return false;
+    };
+    structure
+        .fields
+        .iter()
+        .any(|field| upload_shape(shapes, &field.shape, 0).is_some())
+}
+
+/// The file-part type a binary-shaped member of a multipart body lowers to, or `None` where the
+/// member is not binary-shaped and keeps its lowered type.
+///
+/// Wrappers that keep the member a file part are looked through: an optional file is still a
+/// file, and an array of files is one part per file. The decision — and the wrapper structure of
+/// the answer — is the *shape's*, because a `$ref` to a named binary alias lowers to the
+/// component's bare name, and judging the lowered type alone would keep the JSON spelling where
+/// the wire wants a file part. Anything that is not binary-shaped — a nested object, a plain
+/// string — answers `None` and stays a JSON part with its own rules.
+fn upload_shape(shapes: &Shapes, reference: &ShapeRef, depth: usize) -> Option<TypeRef> {
+    if depth > 16 {
+        return None;
+    }
+    let shape = match reference {
+        ShapeRef::Inline(shape) => shape,
+        ShapeRef::Key(key) => shapes.get(key)?,
+    };
+    match shape {
+        Shape::Format(Format::Binary) => Some(TypeRef::Upload),
+        Shape::Optional(inner) => Some(TypeRef::Option(Box::new(upload_shape(
+            shapes,
+            inner,
+            depth + 1,
+        )?))),
+        Shape::Alias(inner) => upload_shape(shapes, inner, depth + 1),
+        Shape::Array { item: Some(item) } => Some(TypeRef::Vec(Box::new(upload_shape(
+            shapes,
+            item,
+            depth + 1,
+        )?))),
+        Shape::FixedArray { item, len } => Some(TypeRef::Array(
+            Box::new(upload_shape(shapes, item, depth + 1)?),
+            *len,
+        )),
+        _ => None,
+    }
+}
+
+/// The key a multipart position's struct actually lowers under.
+///
+/// Wrapper shapes — a single-branch `oneOf` classifies as an `Alias` of its target, a nullable
+/// body as an `Optional` — hand their core to [`Lower::key`] under the *target's* key, and that
+/// is the key `fields()` consults for the retype. The collector has to speak about the same key:
+/// recording the wrapper's own key silently skips the retype, and seeding the wrapper's children
+/// counts the core itself as a foreign wire position and manufactures a conflict.
+fn core_key(shapes: &Shapes, key: &ShapeKey) -> ShapeKey {
+    let mut current = key.clone();
+    let mut seen: BTreeSet<ShapeKey> = BTreeSet::new();
+    while seen.insert(current.clone()) {
+        let Some(shape) = shapes.get(&current) else {
+            break;
+        };
+        match peel(shape).1 {
+            Shape::Alias(ShapeRef::Key(next)) | Shape::Optional(ShapeRef::Key(next)) => {
+                current = next.clone();
+            }
+            _ => break,
+        }
+    }
+    current
 }
 
 /// A field name that no other field of the same struct already has.

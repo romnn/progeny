@@ -187,7 +187,7 @@ impl Namer {
         ident
     }
 
-    fn take(&mut self, candidate: &RustIdent) -> bool {
+    pub(crate) fn take(&mut self, candidate: &RustIdent) -> bool {
         let slot = self.taken.entry(candidate.as_str().to_owned()).or_default();
         *slot += 1;
         *slot == 1

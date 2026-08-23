@@ -36,6 +36,9 @@ fn one(contract: &TypeContract) -> TokenStream {
         (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants }) => {
             fieldless(contract, variants)
         }
+        (DeserStrategy::HandWrittenCarriedTag, ContractKind::CarriedTagEnum { tag, variants }) => {
+            carried(contract, tag, variants)
+        }
         // Every other pairing is the derive's, and the eligibility function is what guarantees
         // that: a hand-written strategy on a kind with no implementation here would be a ruling
         // this module never saw.
@@ -44,7 +47,7 @@ fn one(contract: &TypeContract) -> TokenStream {
 }
 
 /// The non-deprecated path generated impls use for a deprecated public contract.
-fn implementation_type(contract: &TypeContract) -> TokenStream {
+pub(super) fn implementation_type(contract: &TypeContract) -> TokenStream {
     let name = ident(contract.rust_name());
     if contract.docs().deprecated {
         quote! { __progeny_deprecated::#name }
@@ -294,6 +297,115 @@ fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant
                         _ => None,
                     }),
                 )
+            }
+        }
+
+        impl serde::Serialize for #name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                match self {
+                    #(#write)*
+                }
+            }
+        }
+    }
+}
+
+/// The impls of a carried-tag enum, which exists only on this path — no serde encoding reads a
+/// tag it leaves in the payload.
+///
+/// Deserializing buffers the payload, reads the tag member, and replays the whole payload — tag
+/// included — into the named variant's type, which declares the member and keeps it. Serializing
+/// is the variant as it is, for the same reason: the value already carries its tag. The match the
+/// resolver runs binds its last variant with a `_` arm, sound because the support `dispatch`
+/// hands back only positions inside `VARIANTS`.
+fn carried(
+    contract: &TypeContract,
+    tag: &str,
+    variants: &[crate::contract::TaggedVariant],
+) -> TokenStream {
+    let name = implementation_type(contract);
+    let literal_name = contract.rust_name().as_str();
+    let wire_names: Vec<&str> = variants
+        .iter()
+        .map(|variant| variant.tag_value.as_str())
+        .collect();
+
+    let read = |variant: &crate::contract::TaggedVariant| {
+        let member = ident(&variant.rust_name);
+        if contract.docs().deprecated {
+            quote! {
+                {
+                    #[expect(
+                        deprecated,
+                        reason = "the generated deserializer must construct this deprecated variant"
+                    )]
+                    let resolved = serde::Deserialize::deserialize(replay).map(Self::#member);
+                    resolved
+                }
+            }
+        } else {
+            quote! { serde::Deserialize::deserialize(replay).map(Self::#member) }
+        }
+    };
+    // One variant needs no match at all — and a `match` over a single `_` arm is a style lint in
+    // the consumer's build about code they did not write.
+    let resolver = if let [only] = variants {
+        let body = read(only);
+        quote! { |_, replay| #body }
+    } else {
+        let arms = variants.iter().enumerate().map(|(index, variant)| {
+            let body = read(variant);
+            if index + 1 == variants.len() {
+                quote! { _ => #body, }
+            } else {
+                quote! { #index => #body, }
+            }
+        });
+        quote! {
+            |variant, replay| match variant {
+                #(#arms)*
+            }
+        }
+    };
+    let write = variants.iter().map(|variant| {
+        let member = ident(&variant.rust_name);
+        let value = variant.tag_value.as_str();
+        // Through the support injector rather than a bare delegation: the payload's own tag
+        // member may be unset or stale in a hand-built value, and the wire must name the arm
+        // the caller chose.
+        let write = quote! {
+            Self::#member(value) => {
+                super::support::serialize_carried(value, #tag, #value, serializer)
+            }
+        };
+        if contract.docs().deprecated {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated serializer must match this deprecated variant"
+                )]
+                #write
+            }
+        } else {
+            write
+        }
+    });
+
+    quote! {
+        impl<'de> serde::Deserialize<'de> for #name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                const NAME: &str = #literal_name;
+                const TAG: &str = #tag;
+                const VARIANTS: &[&str] = &[#(#wire_names),*];
+                let payload: super::support::Content<'de> =
+                    serde::Deserialize::deserialize(deserializer)?;
+                super::support::dispatch(NAME, TAG, VARIANTS, payload, #resolver)
             }
         }
 

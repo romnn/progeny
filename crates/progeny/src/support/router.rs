@@ -73,11 +73,19 @@ pub async fn receive(request: ::axum::extract::Request) -> Incoming {
 }
 
 impl Incoming {
-    /// A path parameter, which the router captured or did not.
-    pub fn path_value(&self, name: &str) -> Option<Value> {
+    /// A path parameter, which the router captured or did not, read by the row the
+    /// description gave it.
+    pub fn path_value(
+        &self,
+        name: &str,
+        style: super::style::Style,
+        explode: bool,
+        array: bool,
+        object: bool,
+    ) -> Option<Value> {
         self.path
             .get(name)
-            .map(|found| Value::String(found.clone()))
+            .map(|found| super::style::from_path(found, name, style, explode, array, object))
     }
 
     /// A query parameter, read by the row the description gave it.
@@ -91,30 +99,70 @@ impl Incoming {
         super::style::from_query(&self.query, name, style, explode, array)
     }
 
-    /// A header, as the text it carries.
+    /// A header, read by the row the description gave it: the raw text alone satisfied serde
+    /// only for string scalars — an array-typed header the generated client itself writes as
+    /// `a,b` was rejected 400 as "a string where a sequence was required".
     ///
     /// # Errors
     /// Returns [`RequestError::Header`] when the header is present and is not valid UTF-8.
-    pub fn header_value(&self, name: &str) -> Result<Option<Value>, RequestError> {
+    pub fn header_value(
+        &self,
+        name: &str,
+        explode: bool,
+        array: bool,
+        object: bool,
+    ) -> Result<Option<Value>, RequestError> {
         let Some(found) = self.headers.get(name) else {
             return Ok(None);
         };
-        Ok(Some(Value::String(found.to_str()?.to_owned())))
+        Ok(Some(super::style::from_header(
+            found.to_str()?,
+            explode,
+            array,
+            object,
+        )))
     }
 
-    /// One cookie out of the `Cookie` header, which carries all of them at once.
+    /// One cookie out of the `Cookie` header, which carries all of them at once, read by the
+    /// shape the description gave it and percent-decoded — the writing side encodes every
+    /// element so caller data cannot spell a crumb boundary.
     ///
     /// # Errors
     /// Returns [`RequestError::Header`] when the header is present and is not valid UTF-8.
-    pub fn cookie_value(&self, name: &str) -> Result<Option<Value>, RequestError> {
+    pub fn cookie_value(
+        &self,
+        name: &str,
+        array: bool,
+        object: bool,
+    ) -> Result<Option<Value>, RequestError> {
         let Some(header) = self.headers.get(::axum::http::header::COOKIE) else {
             return Ok(None);
         };
         let header = header.to_str()?;
         Ok(header.split(';').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
-            (key.trim() == name).then(|| Value::String(value.trim().to_owned()))
+            (key.trim() == name).then(|| super::style::from_cookie(value.trim(), array, object))
         }))
+    }
+
+    /// The base media type the request declares, when it declares one and it is not the one
+    /// the description admits.
+    ///
+    /// Compared on the base type — parameters like `charset` and `boundary` never distinguish
+    /// — and a request with *no* `Content-Type` passes: an absent header says nothing, and an
+    /// optional body is often sent without one. What the comparison closes is the browser
+    /// "simple request" hole: a cross-origin HTML form can post JSON-shaped text as
+    /// `text/plain` with the victim's cookies and no preflight, and a JSON endpoint that
+    /// parses whatever arrived is exactly the CSRF surface `axum::Json`'s own `415` exists to
+    /// close.
+    pub fn mismatched_media_type(&self, declared: &str) -> Option<String> {
+        let sent = self.headers.get(::axum::http::header::CONTENT_TYPE)?;
+        // A header outside UTF-8 names no media type this server accepts.
+        let Ok(sent) = sent.to_str() else {
+            return Some("(unreadable)".to_owned());
+        };
+        let sent_base = base_media_type(sent);
+        (sent_base != base_media_type(declared)).then_some(sent_base)
     }
 
     /// The whole body, or nothing when the request carried none.
@@ -127,6 +175,16 @@ impl Incoming {
         // reading that lets an optional body be optional.
         Ok((!collected.is_empty()).then(|| collected.to_vec()))
     }
+}
+
+/// A media type without its parameters, lowercased: what decides whether two spellings name
+/// one type.
+fn base_media_type(text: &str) -> String {
+    text.split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// How much of a body a generated server will hold in memory.
@@ -214,7 +272,11 @@ pub async fn byte_body(incoming: Incoming) -> Result<Option<Vec<u8>>, RequestErr
 }
 
 /// One declared JSON arm's reply.
-pub fn respond_json<T: ::serde::Serialize>(status: u16, body: &T) -> ::axum::response::Response {
+pub fn respond_json<T: ::serde::Serialize>(
+    status: u16,
+    content_type: &str,
+    body: &T,
+) -> ::axum::response::Response {
     use ::axum::response::IntoResponse as _;
     let code = ::axum::http::StatusCode::from_u16(status)
         .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -226,7 +288,24 @@ pub fn respond_json<T: ::serde::Serialize>(status: u16, body: &T) -> ::axum::res
     }
     match ::serde_json::to_value(body) {
         Ok(Value::Null) => code.into_response(),
-        Ok(value) => (code, ::axum::Json(value)).into_response(),
+        Ok(value) => {
+            let mut response = (code, ::axum::Json(value)).into_response();
+            // The declared spelling is the wire contract; `axum::Json` writes the plain
+            // `application/json`, which is only the common case. A spelling that is not a
+            // legal header value stays the plain one rather than aborting the response.
+            // Written without a let-chain: this file ships into generated crates, whose
+            // manifests say edition 2021, where the chain does not parse.
+            let declared = match content_type {
+                "application/json" => None,
+                other => ::axum::http::HeaderValue::from_str(other).ok(),
+            };
+            if let Some(declared) = declared {
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, declared);
+            }
+            response
+        }
         // A response the handler built and serde cannot render is this server's own defect, not the
         // caller's, so it is a 500 rather than a rejection.
         Err(source) => (
@@ -292,5 +371,70 @@ impl ::axum::response::IntoResponse for super::serve::RejectionResponse {
         let code = ::axum::http::StatusCode::from_u16(status)
             .unwrap_or(::axum::http::StatusCode::BAD_REQUEST);
         (code, ::axum::Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use color_eyre::eyre;
+
+    fn incoming_with(content_type: Option<&str>) -> super::Incoming {
+        let mut headers = ::axum::http::HeaderMap::new();
+        let header = content_type.and_then(|value| ::axum::http::HeaderValue::from_str(value).ok());
+        if let Some(header) = header {
+            headers.insert(::axum::http::header::CONTENT_TYPE, header);
+        }
+        super::Incoming {
+            path: std::collections::BTreeMap::new(),
+            query: String::new(),
+            headers,
+            body: ::axum::body::Body::empty(),
+        }
+    }
+
+    #[test_util::test]
+    fn a_body_claiming_another_media_type_is_named_and_an_absent_claim_passes() {
+        // The browser "simple request": JSON-shaped text posted as `text/plain` cross-origin,
+        // no preflight. The declared type is the contract.
+        assert_eq!(
+            incoming_with(Some("text/plain")).mismatched_media_type("application/json"),
+            Some("text/plain".to_owned())
+        );
+        // Parameters never distinguish.
+        assert_eq!(
+            incoming_with(Some("application/json; charset=utf-8"))
+                .mismatched_media_type("application/json"),
+            None
+        );
+        assert_eq!(
+            incoming_with(Some("multipart/form-data; boundary=b"))
+                .mismatched_media_type("multipart/form-data"),
+            None
+        );
+        // No header says nothing — an optional body is often sent without one.
+        assert_eq!(
+            incoming_with(None).mismatched_media_type("application/json"),
+            None
+        );
+    }
+
+    #[test_util::test]
+    fn a_declared_json_spelling_is_the_content_type_the_response_carries() {
+        let response = super::respond_json(200, "application/problem+json", &42);
+        assert_eq!(
+            response
+                .headers()
+                .get(::axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/problem+json")
+        );
+        let plain = super::respond_json(200, "application/json", &42);
+        assert_eq!(
+            plain
+                .headers()
+                .get(::axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
     }
 }

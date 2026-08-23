@@ -27,6 +27,7 @@ use crate::value::Members;
 /// detection and rewriting.
 pub(crate) fn document(normalized: Normalized, ctx: &mut Ctx) -> ParsedDocument {
     let mut store = SchemaStore::default();
+    let dialect_30 = normalized.dialect_30();
     let root = match normalized.into_value() {
         Value::Object(map) => map,
         // Unreachable: normalization rejects a root that is not an object.
@@ -61,6 +62,7 @@ pub(crate) fn document(normalized: Normalized, ctx: &mut Ctx) -> ParsedDocument 
     ParsedDocument {
         document,
         schemas: store,
+        dialect_30,
     }
 }
 

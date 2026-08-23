@@ -8,35 +8,186 @@
 //! to deserialize as a variant — the property has to come off the type. That is fine when the type
 //! is only ever a variant of this union, and a silent loss when it is also used somewhere else,
 //! because there the property really is on the wire. So the question "may this tag be consumed" is
-//! really "is every one of these variant types used nowhere but here", and answering it needs the
-//! whole shape graph.
+//! really "is every variant type that declares the property used nowhere but here", and answering
+//! it needs the whole shape graph.
 //!
-//! A union whose tag cannot be consumed is demoted to [`Shape::Any`], not matched structurally:
-//! `classify` only proposed a tag because matching by shape was already unsound, and an unsound
-//! match does not become sound by having run out of alternatives.
+//! A union that may not consume its tag can still dispatch on it, provided every variant type
+//! declares the property itself: the tag then stays *on the variants* ([`TagStyle::Carried`]),
+//! nothing comes off any type, and the union reads the property without consuming it. Only when
+//! that is impossible too — some variant does not declare the property, so a value of it would
+//! lose its tag when serialized again — is the union demoted to [`Shape::Any`], not matched
+//! structurally: `classify` only proposed a tag because matching by shape was already unsound, and
+//! an unsound match does not become sound by having run out of alternatives.
+//!
+//! Unions that share a variant type constrain each other — a consumed union must not strip a
+//! property that a carried union's payloads still put on the wire — so the settlement is a
+//! fixpoint: every union starts consumed, each round re-evaluates all of them against the styles
+//! of the rest, and a union only ever moves *away* from consumed, so the rounds run out of moves.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{RootKind, Shape, ShapeKey, ShapeRef, Shapes, Union};
+use super::{RootKind, Shape, ShapeKey, ShapeRef, Shapes, TagStyle, Union};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 
-/// Settle every proposed tag, strip the variants of the ones that survive, and demote the rest.
+/// Settle every proposed tag: strip the variants of the consumed ones, mark the carried ones, and
+/// demote the rest.
 pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ctx) {
     let proposed = proposals(shapes);
     if proposed.is_empty() {
         return;
     }
-    let borrowed = borrowed_outside_tagged_unions(shapes);
+    let base_borrowed = borrowed_outside_tagged_unions(shapes);
 
+    let mut modes: BTreeMap<ShapeKey, Mode> = proposed
+        .iter()
+        .map(|(key, _)| (key.clone(), Mode::Consumed))
+        .collect();
+    // Monotone, so it terminates: a round either flips at least one union away from `Consumed` —
+    // and nothing ever flips back — or it changes nothing and is the fixpoint. The fixpoint
+    // round's strips and warns are the ones reported and applied, because they are computed over
+    // every union still consuming; a demotion's reason is kept from the round it flipped in,
+    // which no later round revisits.
+    let mut reasons: BTreeMap<ShapeKey, String> = BTreeMap::new();
+    let outcome = loop {
+        let round = evaluate(shapes, &proposed, &base_borrowed, &modes);
+        for (key, reason) in &round.demoted {
+            reasons.entry(key.clone()).or_insert_with(|| reason.clone());
+        }
+        if round.modes == modes {
+            break round;
+        }
+        modes = round.modes.clone();
+    };
+
+    for (variant, property, first, union_key) in outcome.shared {
+        // Both parents can have it: the tag is written by whichever enum is doing the
+        // serializing, and the child needs it on neither. Worth saying out loud because a reader
+        // of the generated types will find a property missing and want to know which unions took
+        // it.
+        //
+        // Reported against the *variant*, which is the type that loses the property and so the
+        // thing a reader has to go and look at. Against the union it would be several
+        // byte-identical records whenever a union shares more than one variant with another —
+        // which is what a per-occurrence class is supposed to never produce.
+        ctx.report(
+            Diagnostic::new(
+                BreakageClass::MultiParentDiscriminator,
+                Action::Warn,
+                address(resolved, shapes, &variant),
+                format!(
+                    "`{property}` is the discriminator of more than one union over this variant; \
+                     the variant carries the property in neither, because each union writes it \
+                     itself"
+                ),
+            )
+            .with_related(
+                addresses(resolved, shapes, &first)
+                    .into_iter()
+                    .chain(addresses(resolved, shapes, &union_key)),
+            ),
+        );
+    }
+    // In proposal order rather than flip order, so which round a union fell in leaves no trace in
+    // the report.
+    for (union_key, _) in &proposed {
+        if outcome.modes.get(union_key) != Some(&Mode::Demoted) {
+            continue;
+        }
+        let Some(reason) = reasons.get(union_key) else {
+            continue;
+        };
+        ctx.report(Diagnostic::new(
+            BreakageClass::DiscriminatorEdgeCase,
+            Action::Degrade,
+            address(resolved, shapes, union_key),
+            format!(
+                "this union's variants cannot be told apart by their shape, and its declared \
+                 discriminator cannot be consumed either because {reason}; the value is typed as \
+                 arbitrary JSON rather than matched against whichever branch happens to parse first"
+            ),
+        ));
+        shapes.replace(union_key, Shape::Any);
+    }
+    let carried: Vec<ShapeKey> = outcome
+        .modes
+        .iter()
+        .filter(|(_, mode)| **mode == Mode::Carried)
+        .map(|(key, _)| key.clone())
+        .collect();
+    for union_key in carried {
+        let Some(Shape::Union(union)) = shapes.get(&union_key) else {
+            continue;
+        };
+        let mut settled = union.clone();
+        if let Some(tag) = settled.tag.as_mut() {
+            tag.style = TagStyle::Carried;
+        }
+        shapes.replace(&union_key, Shape::Union(settled));
+    }
+    for (variant, property) in outcome.strip {
+        shapes.strip_property(&variant, &property);
+    }
+}
+
+/// What one union's proposal settled to, this round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Consumed,
+    Carried,
+    Demoted,
+}
+
+/// One round's answers, deterministic in the modes it was asked against.
+#[derive(Debug, Default)]
+struct Round {
+    modes: BTreeMap<ShapeKey, Mode>,
+    /// Why each demoted union was, worded for the diagnostic.
+    demoted: Vec<(ShapeKey, String)>,
+    /// A variant two consumed unions dispatch over: `(variant, property, first union, this union)`.
+    shared: Vec<(ShapeKey, String, ShapeKey, ShapeKey)>,
+    strip: Vec<(ShapeKey, String)>,
+}
+
+/// Re-evaluate every proposal against the modes the previous round settled on.
+///
+/// `Carried` and `Demoted` are terminal: carried eligibility reads only what the variant types
+/// declare, which no round changes, and a demotion is already the last resort. Only `Consumed`
+/// entries are re-asked, because the borrowed set grows as unions turn carried.
+fn evaluate(
+    shapes: &Shapes,
+    proposed: &[(ShapeKey, String)],
+    base_borrowed: &BTreeSet<ShapeKey>,
+    modes: &BTreeMap<ShapeKey, Mode>,
+) -> Round {
+    // A carried union's variant edges are wire positions where the tag property is genuinely in
+    // the payload — that is what carrying means — so for this round they count as borrowed exactly
+    // like a struct member does.
+    let mut borrowed = base_borrowed.clone();
+    for (key, mode) in modes {
+        if *mode != Mode::Carried {
+            continue;
+        }
+        if let Some(shape) = shapes.get(key) {
+            for child in super::child_keys(shape) {
+                borrowed.insert(child);
+            }
+        }
+    }
+
+    let mut round = Round {
+        modes: modes.clone(),
+        ..Round::default()
+    };
     // Which property each variant type has already promised to give up, so a type shared by two
-    // discriminated unions is a finding rather than a race between them.
+    // consumed unions is a finding rather than a race between them.
     let mut claimed: BTreeMap<ShapeKey, (String, ShapeKey)> = BTreeMap::new();
-    let mut strip: Vec<(ShapeKey, String)> = Vec::new();
-    let mut demote: Vec<(ShapeKey, String)> = Vec::new();
 
     for (union_key, property) in proposed {
-        let Some(Shape::Union(union)) = shapes.get(&union_key) else {
+        if modes.get(union_key) != Some(&Mode::Consumed) {
+            continue;
+        }
+        let Some(Shape::Union(union)) = shapes.get(union_key) else {
             continue;
         };
         let named: Vec<(ShapeKey, Option<String>)> = union
@@ -48,72 +199,60 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
             })
             .collect();
         if named.len() != union.variants.len() {
-            demote.push((
-                union_key,
+            round.modes.insert(union_key.clone(), Mode::Demoted);
+            round.demoted.push((
+                union_key.clone(),
                 "one of its variants is written inline rather than as a schema of its own"
                     .to_owned(),
             ));
             continue;
         }
-        let variants: Vec<ShapeKey> = named.iter().map(|(key, _)| key.clone()).collect();
 
-        match refuse(shapes, &borrowed, &claimed, &named, &property) {
-            Some(reason) => demote.push((union_key, reason)),
+        if let Some(reason) = refuse_outright(shapes, &named, property) {
+            round.modes.insert(union_key.clone(), Mode::Demoted);
+            round.demoted.push((union_key.clone(), reason));
+            continue;
+        }
+
+        match refuse_consumption(shapes, &borrowed, &claimed, &named, property) {
             None => {
-                for variant in &variants {
+                for (variant, _) in &named {
+                    if !declares(shapes, variant, property) {
+                        // The union writes the tag and the variant never had the property, so
+                        // there is nothing to take off it — and nothing another union could miss.
+                        continue;
+                    }
                     if let Some((_, first)) = claimed.get(variant) {
-                        // Both parents can have it: the tag is written by whichever enum is doing
-                        // the serializing, and the child needs it on neither. Worth saying out
-                        // loud because a reader of the generated types will find a property
-                        // missing and want to know which unions took it.
-                        //
-                        // Reported against the *variant*, which is the type that loses the
-                        // property and so the thing a reader has to go and look at. Against the
-                        // union it would be several byte-identical records whenever a union shares
-                        // more than one variant with another — which is what a per-occurrence
-                        // class is supposed to never produce.
-                        ctx.report(
-                            Diagnostic::new(
-                                BreakageClass::MultiParentDiscriminator,
-                                Action::Warn,
-                                address(resolved, shapes, variant),
-                                format!(
-                                    "`{property}` is the discriminator of more than one union over \
-                                     this variant; the variant carries the property in neither, \
-                                     because each union writes it itself"
-                                ),
-                            )
-                            .with_related(
-                                addresses(resolved, shapes, first)
-                                    .into_iter()
-                                    .chain(addresses(resolved, shapes, &union_key)),
-                            ),
-                        );
+                        round.shared.push((
+                            variant.clone(),
+                            property.clone(),
+                            first.clone(),
+                            union_key.clone(),
+                        ));
                     } else {
                         claimed.insert(variant.clone(), (property.clone(), union_key.clone()));
-                        strip.push((variant.clone(), property.clone()));
+                        round.strip.push((variant.clone(), property.clone()));
                     }
                 }
             }
+            Some(reason) => match carried_shortfall(shapes, &named, property) {
+                None => {
+                    round.modes.insert(union_key.clone(), Mode::Carried);
+                }
+                Some(shortfall) => {
+                    round.modes.insert(union_key.clone(), Mode::Demoted);
+                    round.demoted.push((
+                        union_key.clone(),
+                        format!(
+                            "{reason}, and the variants cannot carry the tag themselves because \
+                             {shortfall}"
+                        ),
+                    ));
+                }
+            },
         }
     }
-
-    for (union_key, reason) in demote {
-        ctx.report(Diagnostic::new(
-            BreakageClass::DiscriminatorEdgeCase,
-            Action::Degrade,
-            address(resolved, shapes, &union_key),
-            format!(
-                "this union's variants cannot be told apart by their shape, and its declared \
-                 discriminator cannot be consumed either because {reason}; the value is typed as \
-                 arbitrary JSON rather than matched against whichever branch happens to parse first"
-            ),
-        ));
-        shapes.replace(&union_key, Shape::Any);
-    }
-    for (variant, property) in strip {
-        shapes.strip_property(&variant, &property);
-    }
+    round
 }
 
 /// Every union that asked for a tag, in a deterministic order.
@@ -121,20 +260,18 @@ fn proposals(shapes: &Shapes) -> Vec<(ShapeKey, String)> {
     shapes
         .entries()
         .filter_map(|(key, shape)| match shape {
-            Shape::Union(Union {
-                tag: Some(property),
-                ..
-            }) => Some((key.clone(), property.clone())),
+            Shape::Union(Union { tag: Some(tag), .. }) => Some((key.clone(), tag.property.clone())),
             _ => None,
         })
         .collect()
 }
 
-/// Why this union may not consume its tag, if it may not.
-fn refuse(
+/// Why no style can dispatch this union on its tag, if none can.
+///
+/// These are facts about the union and its variant types alone, the same whichever side would own
+/// the property, so a union refused here is demoted without trying the other style.
+fn refuse_outright(
     shapes: &Shapes,
-    borrowed: &BTreeSet<ShapeKey>,
-    claimed: &BTreeMap<ShapeKey, (String, ShapeKey)>,
     variants: &[(ShapeKey, Option<String>)],
     property: &str,
 ) -> Option<String> {
@@ -166,6 +303,36 @@ fn refuse(
                     .to_owned(),
             );
         };
+        // A variant that declares the property under a type the tag cannot take is a defect worth
+        // refusing over: a discriminator is always a string on the wire, whoever writes it.
+        if let Some(field) = structure.fields.iter().find(|field| field.wire == property)
+            && !tag_shaped(shapes, &field.shape)
+        {
+            return Some(format!(
+                "one of its variants declares `{property}` as something other than a string, and \
+                 a discriminator is always a string on the wire"
+            ));
+        }
+    }
+    None
+}
+
+/// Why this union may not *consume* its tag, if it may not.
+///
+/// Only variants that declare the property are asked: taking it off a type that never had it is
+/// nothing at all, so such a variant constrains no one — the union writes the tag itself and the
+/// type is the same everywhere it is used.
+fn refuse_consumption(
+    shapes: &Shapes,
+    borrowed: &BTreeSet<ShapeKey>,
+    claimed: &BTreeMap<ShapeKey, (String, ShapeKey)>,
+    variants: &[(ShapeKey, Option<String>)],
+    property: &str,
+) -> Option<String> {
+    for (variant, _) in variants {
+        if !declares(shapes, variant, property) {
+            continue;
+        }
         if borrowed.contains(variant) {
             return Some(format!(
                 "one of its variants is also used outside this union, where `{property}` really is \
@@ -180,18 +347,40 @@ fn refuse(
                  cannot carry two tags away"
             ));
         }
-        // A variant that declares the property under a type the tag cannot take is a defect worth
-        // refusing over: serde will write a string there whatever the schema said.
-        if let Some(field) = structure.fields.iter().find(|field| field.wire == property)
-            && !tag_shaped(shapes, &field.shape)
-        {
+    }
+    None
+}
+
+/// Why this union may not leave the tag on its variants, if it may not.
+///
+/// One requirement: every variant declares the property. Dispatch replays the whole payload into
+/// the variant type, so a type that declares the property keeps it and writes it back; one that
+/// does not would drop the tag on the way through, and a value serialized again would come out
+/// undispatchable.
+fn carried_shortfall(
+    shapes: &Shapes,
+    variants: &[(ShapeKey, Option<String>)],
+    property: &str,
+) -> Option<String> {
+    for (variant, _) in variants {
+        if !declares(shapes, variant, property) {
             return Some(format!(
-                "one of its variants declares `{property}` as something other than a string, and \
-                 a discriminator is always a string on the wire"
+                "one of them does not declare `{property}` and would lose the tag when serialized \
+                 again"
             ));
         }
     }
     None
+}
+
+/// Whether a variant type declares the tag property at all.
+fn declares(shapes: &Shapes, variant: &ShapeKey, property: &str) -> bool {
+    match shapes.get(variant) {
+        Some(Shape::Struct(structure)) => {
+            structure.fields.iter().any(|field| field.wire == property)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a variant's own declaration of the tag property agrees that it is a string.
@@ -215,7 +404,8 @@ fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
 /// those are exactly the positions where the tag is consumed rather than carried; every other
 /// edge — a struct member, a list element, a map value, a variant of an untagged union — is a
 /// position where the payload really does contain the property, so a type reached that way must
-/// keep it.
+/// keep it. The exclusion is provisional: a proposal that settles on carrying its tag has its
+/// variant edges added back, round by round, in [`evaluate`].
 ///
 /// Edges between shapes are only half of it. A schema an *operation* names directly — a response
 /// body, a request body, a parameter, a header — is a wire position with no edge pointing at it, so

@@ -1,2 +1,2 @@
-{"document":"sha256:21266b84143fa08a670ace44b59fd506738bc9a762839d7d21add0be8ce171ee","diagnostics":1}
+{"document":"sha256:40f0709455f95c0ee95e3801714038868dd595f20f6e69172f12ada17a26ace7","diagnostics":1}
 {"class":"unsupported-construct","action":"degrade","location":"/paths/~1crm~1v3~1objects~1contacts~1{contactId}/patch/parameters/0/schema","detail":"`pattern` narrows which values are valid in a way no Rust type expresses; the generated type accepts more than the document allows","occurrences":3,"related":["/paths/~1crm~1v3~1objects~1contacts~1{contactId}/delete/parameters/0/schema","/paths/~1crm~1v3~1objects~1contacts~1{contactId}/get/parameters/0/schema"]}

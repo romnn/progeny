@@ -218,13 +218,39 @@ pub(crate) struct Variant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Union {
     pub(crate) variants: Vec<Variant>,
-    /// The property that says which variant a payload is, for a union progeny tags internally.
+    /// The property that says which variant a payload is, for a union progeny dispatches by tag.
     ///
     /// `None` is the common case and means the variants are told apart by their shape. A union is
     /// only tagged when structural matching would be *unsound* — see [`super::discriminate`] —
-    /// because tagging costs the variant types the tag property itself, and paying that when the
-    /// shapes already distinguish the variants would be a loss for nothing.
-    pub(crate) tag: Option<String>,
+    /// because a tag has a cost either way: consuming it costs the variant types the property
+    /// itself, and carrying it costs every variant a member the builder of a value must fill in.
+    /// Paying either when the shapes already distinguish the variants would be a loss for nothing.
+    pub(crate) tag: Option<Tag>,
+}
+
+/// The tag of a union whose variants shape alone cannot tell apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tag {
+    /// The property the payload names its own variant in.
+    pub(crate) property: String,
+    pub(crate) style: TagStyle,
+}
+
+/// Which side of a tagged union owns the tag property.
+///
+/// [`super::classify`] always proposes `Consumed`; [`super::discriminate`] settles the style,
+/// because the choice turns on how the variant types are used elsewhere — a fact no single schema
+/// knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TagStyle {
+    /// The union owns the property: taken out of the payload before the variant type reads it,
+    /// written by the union when serializing. The variant types do not declare it.
+    Consumed,
+    /// Every variant type declares the property and keeps it: the union reads it to pick a
+    /// variant, then replays the whole payload — tag included — into that variant's type, and
+    /// serializing writes the variant as it is, which already carries its tag. Settled when
+    /// consuming would take the property off a type that carries it somewhere else on the wire.
+    Carried,
 }
 
 /// What a schema says about itself, for the doc comments a renderer writes.
@@ -318,8 +344,19 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
 
     let mut queue: Vec<ShapeKey> = Vec::new();
     let mut named = Vec::new();
+    // The name `components.schemas` gave each shape, which is the discriminator's implicit
+    // mapping. Collected from the roots because their keys are computed here anyway, and because
+    // a variant's own name is not recoverable from its key: `allOf: [$ref Base, {…}]` contributes
+    // nothing of its own, so the key holds the base's address and the extra part's, and neither
+    // is the name the document knows the variant by.
+    let mut component_names: classify::ComponentNames = BTreeMap::new();
     for site in roots {
         let key = merge::key_of(resolved, site.id);
+        if site.kind == RootKind::Component
+            && let Some(name) = site.hint.first()
+        {
+            component_names.entry(key.clone()).or_insert(name.clone());
+        }
         queue.push(key.clone());
         named.push(Root {
             key,
@@ -333,7 +370,7 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
         if shapes.by_key.contains_key(&key) {
             continue;
         }
-        let shape = classify::key(resolved, &key, ctx);
+        let shape = classify::key(resolved, &key, &component_names, ctx);
         children(&shape, &mut queue);
         if let Some(anchor) = key.anchor() {
             shapes
@@ -413,7 +450,7 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
-    use super::{Extra, Scalar, Shape, ShapeRef, Shapes, classify};
+    use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Tag, TagStyle, classify};
     use crate::diag::{BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
     use crate::{normalize, resolve};
@@ -450,6 +487,107 @@ mod tests {
         shapes
             .get(&root.key)
             .ok_or_else(|| eyre::eyre!("no shape for root named {name}"))
+    }
+
+    /// The polymorphism spelling from OpenAPI's own guide, and the two things it needs: the base
+    /// becomes the union its `mapping` names, and a `oneOf` over the same family inherits the
+    /// discriminator the family's base declares rather than degrading for want of one.
+    #[test_util::test]
+    fn the_inheritance_spelling_of_a_union_is_read_as_one() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Pet": {
+                "type": "object",
+                "properties": {"petType": {"type": "string"}},
+                "required": ["petType"],
+                "discriminator": {
+                    "propertyName": "petType",
+                    "mapping": {
+                        "cat": "#/components/schemas/Cat",
+                        "dog": "#/components/schemas/Dog",
+                    },
+                },
+            },
+            "Cat": {"allOf": [
+                {"$ref": "#/components/schemas/Pet"},
+                {"type": "object", "properties": {"lives": {"type": "integer"}}},
+            ]},
+            "Dog": {"allOf": [
+                {"$ref": "#/components/schemas/Pet"},
+                {"type": "object", "properties": {"pack": {"type": "boolean"}}},
+            ]},
+            "Sighting": {
+                "type": "object",
+                "properties": {
+                    "seen": {"oneOf": [
+                        {"$ref": "#/components/schemas/Cat"},
+                        {"$ref": "#/components/schemas/Dog"},
+                    ]},
+                },
+            },
+        })))?;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class() == BreakageClass::InheritanceDiscriminator),
+            "{diagnostics:?}"
+        );
+        // Nothing degrades: the `oneOf` under `Sighting` would be a wild union without the tag it
+        // inherits, and the base would be a struct holding `petType` and nothing else.
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class() == BreakageClass::WildUnion),
+            "{diagnostics:?}"
+        );
+
+        let tags = |shape: &Shape| match shape {
+            Shape::Union(union) => (
+                union.tag.clone(),
+                union
+                    .variants
+                    .iter()
+                    .map(|variant| variant.tag.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("expected a union, found {other:?}"),
+        };
+        let want = (
+            Some(Tag {
+                property: "petType".to_owned(),
+                style: TagStyle::Consumed,
+            }),
+            vec![Some("cat".to_owned()), Some("dog".to_owned())],
+        );
+        assert_eq!(tags(shape_of(&shapes, "Pet")?), want);
+
+        let seen = match shape_of(&shapes, "Sighting")? {
+            Shape::Struct(structure) => structure
+                .fields
+                .iter()
+                .find(|field| field.wire == "seen")
+                .map(|field| field.shape.clone())
+                .ok_or_eyre("the fixture declares this member")?,
+            other => panic!("expected a struct, found {other:?}"),
+        };
+        let ShapeRef::Key(seen) = seen else {
+            panic!("the member is a reference to a named shape");
+        };
+        let seen = shapes.get(&seen).ok_or_eyre("the shape was classified")?;
+        assert_eq!(tags(seen), want);
+
+        // The tag lives on the union, so it comes off the variants: a variant that still declared
+        // `petType` could not deserialize as one.
+        match shape_of(&shapes, "Cat")? {
+            Shape::Struct(structure) => assert_eq!(
+                structure
+                    .fields
+                    .iter()
+                    .map(|field| field.wire.as_str())
+                    .collect::<Vec<_>>(),
+                ["lives"]
+            ),
+            other => panic!("expected a struct, found {other:?}"),
+        }
     }
 
     #[test_util::test]
@@ -725,7 +863,13 @@ mod tests {
         };
         // Matching these structurally would pick whichever deserialized first, so the tag is what
         // decides, and the mapping is implicit: a variant is known by its component name.
-        assert_eq!(either.tag.as_deref(), Some("kind"));
+        assert_eq!(
+            either.tag,
+            Some(Tag {
+                property: "kind".to_owned(),
+                style: TagStyle::Consumed,
+            })
+        );
         let tags: Vec<Option<&str>> = either
             .variants
             .iter()
@@ -777,7 +921,7 @@ mod tests {
     }
 
     #[test_util::test]
-    fn a_variant_used_outside_its_union_keeps_its_tag_property_and_the_union_degrades() {
+    fn a_variant_used_outside_its_union_keeps_its_tag_property_and_the_union_carries_the_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
             "B": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
@@ -788,14 +932,46 @@ mod tests {
                 ],
                 "discriminator": {"propertyName": "kind"},
             },
-            // The use that makes stripping a loss: here `kind` really is on the wire.
+            // The use that makes consuming a loss: here `kind` really is on the wire.
             "Holder": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
         })))?;
-        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
+        // Consuming would strip `kind` off `A` and lose it at `Holder.a`, so the tag stays on the
+        // variants and the union dispatches without taking it. Nothing is lost anywhere, which is
+        // why this settles silently.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(either) = shape_of(&shapes, "Either")? else {
+            panic!("expected a union");
+        };
+        assert_eq!(
+            either.tag,
+            Some(Tag {
+                property: "kind".to_owned(),
+                style: TagStyle::Carried,
+            })
+        );
         let Shape::Struct(a) = shape_of(&shapes, "A")? else {
             panic!("expected a struct");
         };
         assert_eq!(a.fields.len(), 2);
+    }
+
+    #[test_util::test]
+    fn a_union_whose_variant_lacks_the_tag_property_cannot_carry_it_and_degrades() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            // No `kind` here: replaying a payload into `B` would drop the tag on the way through,
+            // and serializing the value again would lose it.
+            "B": {"type": "object", "properties": {"shared": {"type": "string"}}},
+            "Either": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "Holder": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
+        })))?;
+        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
         let reported = diagnostics
             .iter()
             .find(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase)
@@ -804,6 +980,88 @@ mod tests {
             reported.detail().contains("outside this union"),
             "{reported}"
         );
+        assert!(
+            reported
+                .detail()
+                .contains("cannot carry the tag themselves"),
+            "{reported}"
+        );
+    }
+
+    #[test_util::test]
+    fn a_borrowed_variant_without_the_tag_property_does_not_stop_consumption() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": {"type": "object", "properties": {"shared": {"type": "string"}}},
+            "B": {"type": "object", "properties": {"shared": {"type": "string"}}},
+            "Either": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ],
+                "discriminator": {"propertyName": "kind"},
+            },
+            // Borrowed — but `A` never declared `kind`, so there is nothing to take off it and
+            // nothing this position could lose. The union writes the tag itself either way.
+            "Holder": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(either) = shape_of(&shapes, "Either")? else {
+            panic!("expected a union");
+        };
+        assert_eq!(
+            either.tag,
+            Some(Tag {
+                property: "kind".to_owned(),
+                style: TagStyle::Consumed,
+            })
+        );
+    }
+
+    #[test_util::test]
+    fn unions_sharing_a_variant_settle_on_carrying_the_tag_together() {
+        // `Second` cannot consume, because `C` is used at `Holder.c` — so it carries. That makes
+        // `A`'s payloads at `Second`'s positions carry `kind` on the wire, so `First` cannot strip
+        // it either, and the settlement takes a second round to notice: `First` is asked again
+        // once `Second`'s variant edges count as borrowed.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "B": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "C": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            "First": {
+                "oneOf": [{"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/B"}],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "Second": {
+                "oneOf": [{"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/C"}],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "Holder": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/C"}}},
+        })))?;
+        // Both carried: every variant keeps `kind`, each value carries its own tag, and no union
+        // takes anything off a type — so there is no multi-parent finding to report either.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        for union_name in ["First", "Second"] {
+            let Shape::Union(union) = shape_of(&shapes, union_name)? else {
+                panic!("expected a union");
+            };
+            assert_eq!(
+                union.tag,
+                Some(Tag {
+                    property: "kind".to_owned(),
+                    style: TagStyle::Carried,
+                }),
+                "{union_name}"
+            );
+        }
+        for variant_name in ["A", "B", "C"] {
+            let Shape::Struct(variant) = shape_of(&shapes, variant_name)? else {
+                panic!("expected a struct");
+            };
+            assert!(
+                variant.fields.iter().any(|field| field.wire == "kind"),
+                "{variant_name} lost `kind`: {variant:?}"
+            );
+        }
     }
 
     #[test_util::test]
@@ -1078,10 +1336,10 @@ mod tests {
             }},
         });
         let (shapes, diagnostics) = shapes_of(document)?;
-        // The refusal the union table always specified, from the half of the safety condition that
-        // has no edge to be found by: an API-surface position points at no shape, so a walk over
-        // shapes alone never sees that `FromFile` is a `200` body. Stripping `kind` there loses it
-        // on the wire.
+        // The refusal of consumption comes from the half of the safety condition that has no edge
+        // to be found by: an API-surface position points at no shape, so a walk over shapes alone
+        // never sees that `FromFile` is a `200` body. Stripping `kind` there loses it on the
+        // wire — so the tag stays on the variants and the union carries it instead.
         let Shape::Struct(from_file) = shape_of(&shapes, "FromFile")? else {
             panic!("expected a struct");
         };
@@ -1089,14 +1347,16 @@ mod tests {
             from_file.fields.iter().any(|field| field.wire == "kind"),
             "the response body kept `kind`: {from_file:?}"
         );
-        assert_eq!(shape_of(&shapes, "Source")?, &Shape::Any);
-        let reported = diagnostics
-            .iter()
-            .find(|d| d.class() == crate::BreakageClass::DiscriminatorEdgeCase)
-            .ok_or_eyre("test fixture should contain this value")?;
-        assert!(
-            reported.detail().contains("outside this union"),
-            "{reported}"
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(source) = shape_of(&shapes, "Source")? else {
+            panic!("expected a union");
+        };
+        assert_eq!(
+            source.tag,
+            Some(Tag {
+                property: "kind".to_owned(),
+                style: TagStyle::Carried,
+            })
         );
     }
 
@@ -1155,7 +1415,13 @@ mod tests {
                 shape_of(&shapes, "Source")?
             );
         };
-        assert_eq!(union.tag.as_deref(), Some("kind"));
+        assert_eq!(
+            union.tag,
+            Some(Tag {
+                property: "kind".to_owned(),
+                style: TagStyle::Consumed,
+            })
+        );
         // And the variant gave the property up, because nothing else carries it.
         let Shape::Struct(from_file) = shape_of(&shapes, "FromFile")? else {
             panic!("expected a struct");

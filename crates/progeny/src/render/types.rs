@@ -92,7 +92,10 @@ fn deprecated_alias_names(
         for reference in contract.kind().references() {
             note_deprecated(reference, contracts, &mut names);
         }
-        if contract.docs().deprecated && contract.deser() != DeserStrategy::Derive {
+        if contract.docs().deprecated
+            && (contract.deser() != DeserStrategy::Derive
+                || matches!(contract.kind(), ContractKind::StringEnum { .. }))
+        {
             names.insert(contract.rust_name().as_str().to_owned());
         }
     }
@@ -182,6 +185,14 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                 #body
             }
         }
+        ContractKind::CarriedTagEnum { variants, .. } => {
+            let body = carried_tag_enum(variants, contract, contracts, config);
+            quote! {
+                #docs
+                #derives
+                #body
+            }
+        }
         ContractKind::StringEnum { variants } => {
             let with_serde = contract.deser() == DeserStrategy::Derive;
             let arms = variants.iter().map(|variant| {
@@ -194,12 +205,14 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                     .then(|| quote! { #[serde(rename = #wire)] });
                 quote! { #rename #variant_ident, }
             });
+            let accessor = string_enum_accessor(contract, variants);
             quote! {
                 #docs
                 #derives
                 pub enum #name {
                     #(#arms)*
                 }
+                #accessor
             }
         }
         ContractKind::Newtype { inner } => {
@@ -231,6 +244,49 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
     }
 }
 
+/// The `as_str` accessor of a string enum: each variant's wire value, as a static string.
+///
+/// The mapping already exists inside the type's `Serialize`, but reaching it there costs a
+/// serializer round trip and a caller-side helper that accepts anything `Serialize` — the shape of
+/// workaround this method exists to make unnecessary. A Rust variant name is progeny's spelling
+/// and the wire value is the document's; this hands back the second one, which is the only one
+/// that belongs in a payload or a lookup a caller assembles.
+fn string_enum_accessor(
+    contract: &TypeContract,
+    variants: &[crate::contract::StringVariant],
+) -> TokenStream {
+    let name = super::serde_impl::implementation_type(contract);
+    let arms = variants.iter().map(|variant| {
+        let member = ident(&variant.rust_name);
+        let wire = variant.wire_name.as_str();
+        if contract.docs().deprecated {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated accessor must match this deprecated variant"
+                )]
+                Self::#member => #wire,
+            }
+        } else {
+            quote! { Self::#member => #wire, }
+        }
+    });
+    quote! {
+        impl #name {
+            /// The string this value puts on the wire: the `enum` value the document declares,
+            /// not the Rust variant name.
+            #[must_use]
+            pub fn as_str(&self) -> &'static str {
+                // Through the deref, so that an enum a document declares with no values still has
+                // an exhaustive match: emptiness is only visible on the place itself.
+                match *self {
+                    #(#arms)*
+                }
+            }
+        }
+    }
+}
+
 /// An untagged data-carrying enum: matched by shape, so its variant names never touch the wire and
 /// there is nothing to rename.
 fn data_enum(
@@ -244,7 +300,9 @@ fn data_enum(
         DeserStrategy::Derive => quote! { #[serde(untagged)] },
         // The hand-written path reads the same contract and consults no attributes, so leaving one
         // on would be a second source of truth — and would not resolve without the derive anyway.
-        DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless => {
+        DeserStrategy::HandWrittenBuffered { .. }
+        | DeserStrategy::HandWrittenFieldless
+        | DeserStrategy::HandWrittenCarriedTag => {
             quote! {}
         }
     };
@@ -255,6 +313,30 @@ fn data_enum(
     });
     quote! {
         #tagging
+        pub enum #name {
+            #(#arms)*
+        }
+    }
+}
+
+/// A carried-tag data-carrying enum: a plain enum item.
+///
+/// Nothing serde appears here on purpose. The tag member lives inside each variant's own type,
+/// and both impls are always hand-written (`serde_impl.rs`), so the item is variants and nothing
+/// else — the tag and the wire names are the impls' business.
+fn carried_tag_enum(
+    variants: &[crate::contract::TaggedVariant],
+    contract: &TypeContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    let name = ident(contract.rust_name());
+    let arms = variants.iter().map(|variant| {
+        let variant_ident = ident(&variant.rust_name);
+        let ty = enum_type_ref(&variant.ty, contracts, config);
+        quote! { #variant_ident(#ty), }
+    });
+    quote! {
         pub enum #name {
             #(#arms)*
         }
@@ -279,7 +361,9 @@ fn tagged_enum(
         DeserStrategy::Derive => quote! { #[serde(tag = #tag)] },
         // The hand-written path reads the same contract and consults no attributes, so leaving one
         // on would be a second source of truth — and would not resolve without the derive anyway.
-        DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless => {
+        DeserStrategy::HandWrittenBuffered { .. }
+        | DeserStrategy::HandWrittenFieldless
+        | DeserStrategy::HandWrittenCarriedTag => {
             quote! {}
         }
     };
@@ -411,7 +495,9 @@ fn derives(contract: &TypeContract) -> TokenStream {
     // no serde attributes at all, so it must carry no serde derive either.
     let serde = match contract.deser() {
         DeserStrategy::Derive => quote! { , serde::Serialize, serde::Deserialize },
-        DeserStrategy::HandWrittenBuffered { .. } | DeserStrategy::HandWrittenFieldless => {
+        DeserStrategy::HandWrittenBuffered { .. }
+        | DeserStrategy::HandWrittenFieldless
+        | DeserStrategy::HandWrittenCarriedTag => {
             quote! {}
         }
     };
@@ -440,7 +526,7 @@ pub(crate) fn response_type_path(
     config: &Config,
 ) -> TokenStream {
     match body {
-        ResponseBody::Json(ty) => type_path(ty, contracts, config),
+        ResponseBody::Json { ty, .. } => type_path(ty, contracts, config),
         ResponseBody::Text { .. } => quote! { ::std::string::String },
         ResponseBody::Bytes { .. } => bytes_type(config),
         ResponseBody::Empty => quote! { () },
@@ -520,6 +606,9 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, qualified: bo
         TypeRef::F64 => quote! { f64 },
         TypeRef::String => quote! { String },
         TypeRef::Format(format) => format_type(*format, config),
+        // One level up in every emission mode: the types module and the support module are
+        // siblings, whether they live in one crate or the types crate carries both.
+        TypeRef::Upload => quote! { super::support::Upload },
         TypeRef::Value => quote! { serde_json::Value },
         TypeRef::Option(inner) => {
             let inner = type_ref(inner);
@@ -603,6 +692,18 @@ fn ident(name: &RustIdent) -> proc_macro2::Ident {
 
 /// Doc comments, one attribute per line so a multi-line description reads as one.
 pub(super) fn docs(docs: &Docs) -> TokenStream {
+    let prose = docs_prose(docs);
+    let deprecated = docs.deprecated.then(|| quote! { #[deprecated] });
+    quote! { #prose #deprecated }
+}
+
+/// The doc comments alone, without the `#[deprecated]` attribute.
+///
+/// For a position a consumer cannot avoid naming: a params-struct field appears in every literal
+/// the compiler accepts, so the attribute would make the deprecation warning unavoidable at
+/// every call site. The fact rides the field's prose instead, and the operation-level attribute
+/// still marks the API a caller can choose not to call.
+pub(super) fn docs_prose(docs: &Docs) -> TokenStream {
     let mut lines: Vec<String> = Vec::new();
     if let Some(title) = &docs.title {
         lines.extend(wrap(title));
@@ -617,8 +718,7 @@ pub(super) fn docs(docs: &Docs) -> TokenStream {
         let text = format!(" {line}");
         quote! { #[doc = #text] }
     });
-    let deprecated = docs.deprecated.then(|| quote! { #[deprecated] });
-    quote! { #(#attributes)* #deprecated }
+    quote! { #(#attributes)* }
 }
 
 /// Split a description into doc-comment lines, in markdown a consumer's build will not complain

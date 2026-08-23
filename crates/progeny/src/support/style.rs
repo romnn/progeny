@@ -202,34 +202,46 @@ pub fn from_query(
     explode: bool,
     array: bool,
 ) -> Option<Value> {
-    let pairs: Vec<(String, String)> = query
+    let pairs = split_query(query);
+    if style == Style::DeepObject {
+        return deep_object(&pairs, name);
+    }
+    let mine: Vec<&str> = pairs
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+        .collect();
+    read_values(&mine, style, explode, array)
+}
+
+/// A query string as its decoded pairs, in wire order — the one place the splitting happens.
+fn split_query(query: &str) -> Vec<(String, String)> {
+    query
         .split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| match pair.split_once('=') {
             Some((key, value)) => (decode(key), decode(value)),
             None => (decode(pair), String::new()),
         })
-        .collect();
+        .collect()
+}
 
-    if style == Style::DeepObject {
-        // `a[x]=1`: the members are addressable, so the object is rebuilt from the keys.
-        let prefix = format!("{name}[");
-        let members: serde_json::Map<String, Value> = pairs
-            .iter()
-            .filter_map(|(key, value)| {
-                let member = key.strip_prefix(&prefix)?.strip_suffix(']')?;
-                Some((member.to_owned(), Value::String(value.clone())))
-            })
-            .collect();
-        return (!members.is_empty()).then_some(Value::Object(members));
-    }
-
-    let mine: Vec<&String> = pairs
+/// `a[x]=1`: the members are addressable, so the object is rebuilt from the keys.
+fn deep_object(pairs: &[(String, String)], name: &str) -> Option<Value> {
+    let prefix = format!("{name}[");
+    let members: serde_json::Map<String, Value> = pairs
         .iter()
-        .filter(|(key, _)| key == name)
-        .map(|(_, value)| value)
+        .filter_map(|(key, value)| {
+            let member = key.strip_prefix(&prefix)?.strip_suffix(']')?;
+            Some((member.to_owned(), Value::String(value.clone())))
+        })
         .collect();
-    let first = mine.first()?;
+    (!members.is_empty()).then_some(Value::Object(members))
+}
+
+/// One name's occurrences as the value its row spells.
+fn read_values(values: &[&str], style: Style, explode: bool, array: bool) -> Option<Value> {
+    let first = values.first()?;
     // The schema decides *whether* this is an array and the row decides *how* one is spelled —
     // neither alone is enough, which the wire probe proved on `jellyfin`: `ids=a,b` under
     // `style: form, explode: false` is byte-identical to a scalar that contains a comma, so a
@@ -258,23 +270,17 @@ pub fn from_query(
                 | Style::PipeDelimited
                 | Style::DeepObject,
                 true,
-            ) => split_values(&mine),
+            ) => Value::Array(
+                values
+                    .iter()
+                    .map(|value| Value::String((*value).to_owned()))
+                    .collect(),
+            ),
         }
     } else {
         // A scalar is the first occurrence's text, commas and all.
-        Value::String((*first).clone())
+        Value::String((*first).to_owned())
     })
-}
-
-/// Repeated occurrences as the array they spell. The separator is the repetition itself, which is
-/// why this takes none: the values arrived already apart.
-fn split_values(values: &[&String]) -> Value {
-    Value::Array(
-        values
-            .iter()
-            .map(|value| Value::String((*value).clone()))
-            .collect(),
-    )
 }
 
 fn split_one(value: &str, separator: char) -> Value {
@@ -325,32 +331,41 @@ fn decode(text: &str) -> String {
 /// text — a form body has no types either — and the caller asks serde for the shape afterwards.
 #[must_use]
 pub fn query_object(query: &str, specs: &[FormSpec]) -> Value {
+    // Split, decoded and grouped exactly once; every member's read drives off the same pass.
+    // Re-parsing the whole body per distinct name made a form body an unauthenticated
+    // CPU-exhaustion vector: a hundred thousand one-byte members cost a hundred thousand full
+    // decodes — before any type check ran and inside the byte ceiling.
+    let pairs = split_query(query);
+    let mut grouped: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (key, value) in &pairs {
+        grouped.entry(key).or_default().push(value);
+    }
     let mut members = serde_json::Map::new();
-    for name in query
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .filter_map(|pair| pair.split_once('=').map(|(key, _)| decode(key)))
-    {
-        if members.contains_key(&name) {
+    for (name, _) in &pairs {
+        if members.contains_key(name) {
             continue;
         }
-        let spec = specs.iter().find(|spec| spec.name == name);
+        let spec = specs.iter().find(|spec| spec.name == *name);
         let (style, explode) = spec.map_or((Style::Form, true), |spec| (spec.style, spec.explode));
+        if style == Style::DeepObject {
+            if let Some(value) = deep_object(&pairs, name) {
+                members.insert(name.clone(), value);
+            }
+            continue;
+        }
+        let Some(values) = grouped.get(name.as_str()) else {
+            continue;
+        };
         // The spec table carries every declared member's shape, derived from the body's own
-        // contract — the wire probe caught the cost of guessing on `posthog`, where a one-element
-        // array member is byte-identical to a scalar. The repetition heuristic survives only where
-        // no schema answered: a member outside the table, or a row whose member the schema only
-        // captures — repetition is the one signal the wire itself offers there.
-        let array = spec.and_then(|spec| spec.array).unwrap_or_else(|| {
-            query
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .filter(|(key, _)| decode(key) == name)
-                .count()
-                > 1
-        });
-        if let Some(value) = from_query(query, &name, style, explode, array) {
-            members.insert(name, value);
+        // contract — the wire probe caught the cost of guessing on `posthog`, where a
+        // one-element array member is byte-identical to a scalar. The repetition heuristic
+        // survives only where no schema answered: a member outside the table, or a row whose
+        // member the schema only captures — repetition is the one signal the wire itself
+        // offers there.
+        let array = spec.and_then(|spec| spec.array).unwrap_or(values.len() > 1);
+        if let Some(value) = read_values(values, style, explode, array) {
+            members.insert(name.clone(), value);
         }
     }
     Value::Object(members)
@@ -443,9 +458,208 @@ pub fn header_value(value: &Value, explode: bool) -> String {
 }
 
 /// One `name=value` pair for the `Cookie` header.
+///
+/// RFC 6265 forbids `;`, `,`, whitespace and control bytes in a cookie value, and caller data is
+/// in no position to change that: every element is percent-encoded, which keeps one parameter
+/// from spelling another (`"safe; admin=true"` stays one value) and keeps the element-separating
+/// commas the encoding's own. [`from_cookie`] decodes. `explode` never reaches this wire — one
+/// crumb carries the whole parameter either way — so only the shape decides the spelling.
 #[must_use]
 pub fn cookie_pair(name: &str, value: &Value) -> String {
-    format!("{name}={}", header_value(value, false))
+    let body = match value {
+        Value::Null => String::new(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| encode(&scalar(item)))
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(members) => members
+            .iter()
+            .flat_map(|(key, value)| [encode(key), encode(&scalar(value))])
+            .collect::<Vec<_>>()
+            .join(","),
+        other => encode(&scalar(other)),
+    };
+    format!("{}={body}", encode(name))
+}
+
+/// A path segment as the value its row spells: the inverse of [`path_segment`] and
+/// [`matrix_segment`], reading the text axum captured.
+///
+/// The capture arrives percent-decoded once, whole — axum's `RawPathParams` decodes before
+/// anything here can run — so an encoded separator inside an element (`%2C` in a `simple` array
+/// element) is indistinguishable from a real one by the time it is readable. That is the same
+/// compromise [`from_query`] documents for `ids=a,b`, taken in the same direction: the row's
+/// separator always splits.
+#[must_use]
+pub fn from_path(
+    text: &str,
+    name: &str,
+    style: Style,
+    explode: bool,
+    array: bool,
+    object: bool,
+) -> Value {
+    match style {
+        Style::Matrix => {
+            // `;name=a,b` — or, exploded, `;name=a;name=b` for arrays and `;x=1;y=2` for
+            // objects.
+            let crumbs: Vec<(&str, &str)> = text
+                .split(';')
+                .filter(|part| !part.is_empty())
+                .map(|part| match part.split_once('=') {
+                    Some((key, value)) => (key, value),
+                    None => (part, ""),
+                })
+                .collect();
+            if object && explode {
+                return exploded_pairs(
+                    crumbs
+                        .iter()
+                        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+                );
+            }
+            if array && explode {
+                return Value::Array(
+                    crumbs
+                        .iter()
+                        .filter(|(key, _)| *key == name)
+                        .map(|(_, value)| Value::String((*value).to_owned()))
+                        .collect(),
+                );
+            }
+            let body = crumbs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map_or("", |(_, value)| *value);
+            shaped(body, ',', array, object, false)
+        }
+        Style::Label => {
+            let body = text.strip_prefix('.').unwrap_or(text);
+            if explode && (array || object) {
+                return shaped(body, '.', array, object, false);
+            }
+            shaped(body, ',', array, object, false)
+        }
+        // `simple`, and anything else that reaches a path: bare, comma separated.
+        Style::Form
+        | Style::Simple
+        | Style::SpaceDelimited
+        | Style::PipeDelimited
+        | Style::DeepObject => shaped(text, ',', array, object, false),
+    }
+}
+
+/// A header's text as the value its row spells: the inverse of [`header_value`]. `simple` by
+/// construction, because the classifier admits nothing else for the location.
+///
+/// Elements are trimmed: progeny's own client writes `a,b`, but RFC 7230's list syntax lets a
+/// foreign client write `a, b`, and a typed reader keeping the space rejects a legal request.
+#[must_use]
+pub fn from_header(text: &str, explode: bool, array: bool, object: bool) -> Value {
+    let _ = explode;
+    shaped(text, ',', array, object, true)
+}
+
+/// A cookie crumb's value as the value its row spells: the inverse of [`cookie_pair`],
+/// percent-decoding what the writer encoded.
+#[must_use]
+pub fn from_cookie(text: &str, array: bool, object: bool) -> Value {
+    if object {
+        let elements: Vec<String> = text.split(',').map(decode_percent).collect();
+        let mut members = serde_json::Map::new();
+        let mut pairs = elements.chunks_exact(2);
+        for pair in pairs.by_ref() {
+            if let [key, value] = pair {
+                members.insert(key.clone(), Value::String(value.clone()));
+            }
+        }
+        return Value::Object(members);
+    }
+    if array {
+        return Value::Array(
+            text.split(',')
+                .map(|element| Value::String(decode_percent(element)))
+                .collect(),
+        );
+    }
+    Value::String(decode_percent(text))
+}
+
+/// One text as the shape the schema gives it: `simple`-family splitting over one separator.
+fn shaped(text: &str, separator: char, array: bool, object: bool, trim: bool) -> Value {
+    let element = |part: &str| {
+        if trim {
+            part.trim().to_owned()
+        } else {
+            part.to_owned()
+        }
+    };
+    if object {
+        // The exploded spelling is `k=v<sep>k2=v2` and the flat one alternates `k,v,k2,v2`;
+        // `=` in the element tells them apart more reliably than the explode flag a foreign
+        // client may not have honored, and the two cannot collide: a flat spelling has no `=`.
+        let elements: Vec<String> = text.split(separator).map(element).collect();
+        if elements.iter().any(|part| part.contains('=')) {
+            return exploded_pairs(elements.iter().map(|part| match part.split_once('=') {
+                Some((key, value)) => (key.to_owned(), value.to_owned()),
+                None => (part.clone(), String::new()),
+            }));
+        }
+        let mut members = serde_json::Map::new();
+        let mut pairs = elements.chunks_exact(2);
+        for pair in pairs.by_ref() {
+            if let [key, value] = pair {
+                members.insert(key.clone(), Value::String(value.clone()));
+            }
+        }
+        return Value::Object(members);
+    }
+    if array {
+        return Value::Array(
+            text.split(separator)
+                .map(|part| Value::String(element(part)))
+                .collect(),
+        );
+    }
+    Value::String(element(text))
+}
+
+fn exploded_pairs(pairs: impl Iterator<Item = (String, String)>) -> Value {
+    Value::Object(
+        pairs
+            .map(|(key, value)| (key, Value::String(value)))
+            .collect(),
+    )
+}
+
+/// Undo percent-encoding alone: the cookie rule, where a literal `+` is a `+`.
+fn decode_percent(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes.get(index) {
+            Some(b'%') => {
+                let hex = text
+                    .get(index + 1..index + 3)
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        out.push(byte);
+                        index += 3;
+                        continue;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            Some(byte) => out.push(*byte),
+            None => break,
+        }
+        index += 1;
+    }
+    String::from_utf8(out)
+        .unwrap_or_else(|refused| String::from_utf8_lossy(refused.as_bytes()).into_owned())
 }
 
 /// A scalar as the text it has on the wire.
@@ -474,20 +688,71 @@ fn joined(name: &str, items: &[Value], separator: &str) -> Vec<(String, String)>
 /// deliberately conservative: encoding a character that did not need it is a request that still
 /// works, and failing to encode one that did is a request that goes somewhere else.
 fn encode(text: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(text.len());
     for byte in text.as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(char::from(*byte));
             continue;
         }
-        out.push('%');
-        // `.get` rather than indexing: the shifts already prove both indices are below 16, and a
-        // shipped file has no business being the one place a generated crate can panic.
-        for nibble in [byte >> 4, byte & 0x0f] {
-            if let Some(digit) = HEX.get(usize::from(nibble)) {
-                out.push(char::from(*digit));
-            }
+        percent(&mut out, *byte);
+    }
+    out
+}
+
+fn percent(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    out.push('%');
+    // `.get` rather than indexing: the shifts already prove both indices are below 16, and a
+    // shipped file has no business being the one place a generated crate can panic.
+    for nibble in [byte >> 4, byte & 0x0f] {
+        if let Some(digit) = HEX.get(usize::from(nibble)) {
+            out.push(char::from(*digit));
+        }
+    }
+}
+
+/// One `name=value` query pair under `allowReserved: true`.
+///
+/// RFC 6570's reserved expansion, which is what the flag asks for: the value's RFC 3986
+/// reserved characters — the gen-delims `:/?#[]@` and the sub-delims `!$&'()*+,;=` — reach the
+/// wire unencoded, along with `%` so an already-encoded triplet is not encoded twice. That can
+/// spell `&` and `=` into the value; the document turned the protection off, and re-encoding
+/// them would be exactly the corruption the flag exists to prevent. The name is an ordinary
+/// component and keeps the conservative encoding.
+pub fn reserved_pair(name: &str, value: &str) -> String {
+    let mut out = encode(name);
+    out.push('=');
+    for byte in value.as_bytes() {
+        let literal = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b':'
+                    | b'/'
+                    | b'?'
+                    | b'#'
+                    | b'['
+                    | b']'
+                    | b'@'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b'%'
+            );
+        if literal {
+            out.push(char::from(*byte));
+        } else {
+            percent(&mut out, *byte);
         }
     }
     out
@@ -495,11 +760,23 @@ fn encode(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre::{self, OptionExt as _};
+    use serde_json::json;
+
     use super::{
         FormSpec, Style, cookie_pair, encode, form_body, header_value, matrix_segment,
         path_segment, query_object, query_pairs,
     };
-    use serde_json::json;
+
+    #[test]
+    fn a_reserved_value_keeps_its_reserved_characters_and_nothing_else() {
+        assert_eq!(
+            super::reserved_pair("next", "https://example.test/a?x=1&y=%2F z"),
+            "next=https://example.test/a?x=1&y=%2F%20z"
+        );
+        // The name is an ordinary component: its reserved characters do not pass.
+        assert_eq!(super::reserved_pair("a&b", "c"), "a%26b=c");
+    }
 
     #[test]
     fn a_scalar_query_parameter_is_one_pair_with_no_json_quoting() {
@@ -645,6 +922,113 @@ mod tests {
     }
 
     #[test]
+    fn every_path_row_survives_the_client_writing_it_and_the_server_reading_it() {
+        // The client writes the segment, axum percent-decodes it once, the reader inverts the
+        // row. Matrix goes through the segment writer that names the parameter.
+        let read = |value: &json_types::Value, style, explode| {
+            let written = match style {
+                Style::Matrix => super::matrix_segment("p", value, explode),
+                _ => super::path_segment(value, style, explode),
+            };
+            let decoded = super::decode_percent(&written);
+            super::from_path(
+                &decoded,
+                "p",
+                style,
+                explode,
+                value.is_array(),
+                value.is_object(),
+            )
+        };
+        assert_eq!(read(&json!("a b"), Style::Simple, false), json!("a b"));
+        assert_eq!(
+            read(&json!(["a", "b"]), Style::Simple, false),
+            json!(["a", "b"])
+        );
+        assert_eq!(
+            read(&json!(["a", "b"]), Style::Simple, true),
+            json!(["a", "b"])
+        );
+        assert_eq!(
+            read(&json!({"x": "1", "y": "2"}), Style::Simple, false),
+            json!({"x": "1", "y": "2"})
+        );
+        assert_eq!(
+            read(&json!({"x": "1", "y": "2"}), Style::Simple, true),
+            json!({"x": "1", "y": "2"})
+        );
+        assert_eq!(read(&json!("v"), Style::Label, false), json!("v"));
+        assert_eq!(
+            read(&json!(["a", "b"]), Style::Label, false),
+            json!(["a", "b"])
+        );
+        assert_eq!(
+            read(&json!(["a", "b"]), Style::Label, true),
+            json!(["a", "b"])
+        );
+        assert_eq!(read(&json!("v"), Style::Matrix, false), json!("v"));
+        assert_eq!(
+            read(&json!(["a", "b"]), Style::Matrix, false),
+            json!(["a", "b"])
+        );
+        assert_eq!(
+            read(&json!(["a", "b"]), Style::Matrix, true),
+            json!(["a", "b"])
+        );
+        assert_eq!(
+            read(&json!({"x": "1", "y": "2"}), Style::Matrix, true),
+            json!({"x": "1", "y": "2"})
+        );
+    }
+
+    #[test]
+    fn every_header_shape_survives_the_client_writing_it_and_the_server_reading_it() {
+        let read = |value: &json_types::Value, explode| {
+            let written = super::header_value(value, explode);
+            super::from_header(&written, explode, value.is_array(), value.is_object())
+        };
+        assert_eq!(read(&json!("plain"), false), json!("plain"));
+        assert_eq!(read(&json!(["a", "b"]), false), json!(["a", "b"]));
+        assert_eq!(
+            read(&json!({"x": "1", "y": "2"}), true),
+            json!({"x": "1", "y": "2"})
+        );
+        assert_eq!(
+            read(&json!({"x": "1", "y": "2"}), false),
+            json!({"x": "1", "y": "2"})
+        );
+        // RFC 7230 list syntax: a foreign client may put a space after each comma.
+        assert_eq!(
+            super::from_header("assistants-v2, file-search", false, true, false),
+            json!(["assistants-v2", "file-search"])
+        );
+    }
+
+    #[test_util::test]
+    fn a_cookie_value_cannot_spell_another_cookie_and_round_trips_exactly() {
+        // The writer encodes what RFC 6265 forbids, so `; admin=true` stays inside one value…
+        let written = cookie_pair("session", &json!("safe; admin=true"));
+        assert_eq!(written, "session=safe%3B%20admin%3Dtrue");
+        // …and the generated server's reader undoes exactly that.
+        let (_, value) = written.split_once('=').ok_or_eyre("a pair")?;
+        assert_eq!(
+            super::from_cookie(value, false, false),
+            json!("safe; admin=true")
+        );
+        // Encoded elements make cookie arrays fully invertible: a comma inside an element is
+        // `%2C`, unlike the path case where the decode happens before the reader runs.
+        let written = cookie_pair("ids", &json!(["a,b", "c"]));
+        let (_, value) = written.split_once('=').ok_or_eyre("a pair")?;
+        assert_eq!(super::from_cookie(value, true, false), json!(["a,b", "c"]));
+        let written = cookie_pair("prefs", &json!({"x": "1", "y": "2"}));
+        let (_, value) = written.split_once('=').ok_or_eyre("a pair")?;
+        assert_eq!(
+            super::from_cookie(value, false, true),
+            json!({"x": "1", "y": "2"})
+        );
+    }
+
+    #[test]
     fn a_parameter_the_query_never_carried_is_absent_rather_than_empty() {
         // The distinction the whole optional-parameter rule rests on: a server has to tell "not
         // sent" from "sent empty", and only `None` says the first.
@@ -679,6 +1063,24 @@ mod tests {
         assert_eq!(
             super::from_query("p=50%zz", "p", Style::Form, true, false),
             Some(json!("50%zz"))
+        );
+    }
+
+    #[test_util::test]
+    fn a_form_body_of_many_members_decodes_in_one_pass() {
+        // The fix is structural — split once, group once — and this pins its semantics on a
+        // body large enough that the old per-name re-parse took seconds of CPU per request,
+        // unauthenticated and inside the byte ceiling.
+        let query: String = (0..20_000)
+            .map(|index| format!("k{index}=v{index}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let value = super::query_object(&query, &[]);
+        let members = value.as_object().ok_or_eyre("an object")?;
+        assert_eq!(members.len(), 20_000);
+        assert_eq!(
+            members.get("k19999").and_then(serde_json::Value::as_str),
+            Some("v19999")
         );
     }
 

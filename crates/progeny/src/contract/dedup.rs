@@ -153,7 +153,8 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
         ContractKind::Enum { variants } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
-        ContractKind::TaggedEnum { variants, .. } => {
+        ContractKind::TaggedEnum { variants, .. }
+        | ContractKind::CarriedTagEnum { variants, .. } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
         ContractKind::StringEnum { .. } => Vec::new(),
@@ -190,6 +191,19 @@ fn fingerprint(contract: &Provisional) -> String {
         // would give one of them the other's tags.
         ContractKind::TaggedEnum { tag, variants } => {
             let _ = write!(out, "tagged({tag})");
+            for variant in variants {
+                let _ = write!(
+                    out,
+                    "|{}={}:{:?}",
+                    variant.rust_name, variant.tag_value, variant.ty
+                );
+            }
+        }
+        // Distinct from `tagged(…)` on purpose: the two kinds put different bytes on the wire —
+        // a consumed union writes the tag itself while a carried one relies on the variant to —
+        // so merging one into the other would change what a payload serializes to.
+        ContractKind::CarriedTagEnum { tag, variants } => {
+            let _ = write!(out, "carried({tag})");
             for variant in variants {
                 let _ = write!(
                     out,

@@ -195,7 +195,14 @@ fn success_arm(operation: &OperationContract) -> Option<(RustIdent, TypeRef)> {
         .arms
         .iter()
         .filter(|arm| arm.status.is_success());
-    let only = successes.next()?;
+    let Some(only) = successes.next() else {
+        // No declared success at all: `send()` decodes the `default` arm as this operation's
+        // success (see the client's `success_arms`), so the stream reads its page out of the
+        // same arm. Refusing here while `send()` returns the typed page was the two-answers
+        // disagreement the doc comment above warns about.
+        let default = operation.responses.default.as_ref()?;
+        return Some((default.rust_name.clone(), default.body.json_type()?.clone()));
+    };
     if successes.next().is_some() {
         return None;
     }
@@ -395,6 +402,25 @@ mod tests {
             .as_object_mut()
             .ok_or_eyre("test fixture should contain this value")?
             .insert("2XX".to_owned(), arm);
+        build_on(document, declaring("cursor", "next", "items"))?;
+    }
+
+    /// The `default` arm counts as the page only when nothing else claims success — the same
+    /// rule the client's `success_arms` decodes by, and the same disagreement class as the
+    /// range-key case above: `send()` returned the typed page while this refused to stream it.
+    #[test_util::test]
+    fn a_default_only_success_is_a_page_too() {
+        let mut document = document();
+        let responses = &mut document["paths"]["/pets"]["get"]["responses"];
+        let arm = responses
+            .as_object_mut()
+            .ok_or_eyre("test fixture should contain this value")?
+            .remove("200")
+            .ok_or_eyre("test fixture should contain this value")?;
+        responses
+            .as_object_mut()
+            .ok_or_eyre("test fixture should contain this value")?
+            .insert("default".to_owned(), arm);
         build_on(document, declaring("cursor", "next", "items"))?;
     }
 

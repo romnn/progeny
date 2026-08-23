@@ -42,8 +42,11 @@ pub struct ProbeOp {
     pub groups: Vec<ProbeGroup>,
     /// The body argument, when the operation takes one.
     pub body: Option<ProbeBody>,
-    /// One call per parameter, then `.body(...)` when there is one.
-    pub setters: Vec<ProbeSetter>,
+    /// The params struct's name, spelled from the test file (`client::FooParams`), when the
+    /// operation takes any input.
+    pub params: Option<String>,
+    /// One field of the params literal per parameter; `body` follows when there is one.
+    pub inputs: Vec<ProbeInput>,
     /// What the double answers, and what the driver expects back.
     pub response: ProbeResponse,
     /// Why this operation is implemented as `unimplemented!()` and never driven, when it is.
@@ -85,17 +88,21 @@ pub struct ProbeBody {
     pub required: bool,
 }
 
-/// One builder call the driver makes.
+/// One field the driver writes in the params literal.
 #[derive(Debug, Clone)]
-pub struct ProbeSetter {
-    /// The setter's name, which is the parameter's Rust name.
-    pub setter: String,
-    /// Whether calling the setter deliberately exercises deprecated API.
+pub struct ProbeInput {
+    /// The field's name, which is the parameter's Rust name.
+    pub field: String,
+    /// Whether writing the field deliberately exercises deprecated API.
     pub deprecated: bool,
     /// The Rust path of the parameter's type.
     pub ty: String,
-    /// A JSON value of that type.
-    pub json: String,
+    /// A JSON value of that type, or `None` for a field the driver deliberately leaves unset —
+    /// an optional parameter whose name the wire erases, which no request can usefully carry.
+    pub json: Option<String>,
+    /// Whether the document requires the parameter: a required field takes the value bare, an
+    /// optional one wrapped in `Some`.
+    pub required: bool,
 }
 
 /// The response the double constructs, and the status the driver asserts came back.
@@ -214,7 +221,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
     // skipped operation's trait method either way — only the driver test is dropped.
     let mut skip = None;
 
-    let setters = probe_setters(operation, contracts, config, &mut skip);
+    let inputs = probe_inputs(operation, contracts, config, &mut skip);
 
     let body = body.map(|mut planned| {
         let ty = match operation.body.as_ref() {
@@ -260,7 +267,9 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         deprecated: operation.docs.deprecated,
         groups,
         body,
-        setters,
+        params: render::client::takes_params(operation)
+            .then(|| format!("client::{}", render::client::params_name(operation))),
+        inputs,
         response,
         skip,
     }
@@ -277,7 +286,7 @@ fn probe_answer(
             .to_owned()
     })?;
     let value = match &arm.body {
-        ResponseBody::Json(ty) => ProbeValue::Json {
+        ResponseBody::Json { ty, .. } => ProbeValue::Json {
             json: synthesize(ty, contracts, &mut Vec::new())
                 .map_err(|reason| format!("the response cannot be synthesized: {reason}"))?
                 .to_string(),
@@ -320,20 +329,20 @@ fn test_type(rendered: &proc_macro2::TokenStream) -> (String, bool) {
     (path, deprecated)
 }
 
-/// One synthesized setter per settable parameter, recording a skip where none can be.
-fn probe_setters(
+/// One synthesized params field per parameter, recording a skip where none can be.
+fn probe_inputs(
     operation: &OperationContract,
     contracts: &Contracts,
     config: &Config,
     skip: &mut Option<String>,
-) -> Vec<ProbeSetter> {
-    let mut setters = Vec::new();
+) -> Vec<ProbeInput> {
+    let mut inputs = Vec::new();
     for param in &operation.params {
         if param.style.erased_by_explosion() {
-            // The wire erases the parameter's name, so the server can never see it. Optional:
-            // the client simply leaves it unset and the operation is still probeable. Required:
-            // the builder refuses to send without it and the handler rejects without it, so the
-            // operation cannot cross the wire at all — a named skip, not a red test and not a
+            // The wire erases the parameter's name, so the server can never see it. Optional: the
+            // driver writes the field as `None` — the literal must still name it — and the
+            // operation is probeable. Required: the handler rejects every request without it, so
+            // the operation cannot cross the wire at all — a named skip, not a red test and not a
             // silent cap.
             if param.required {
                 skip.get_or_insert(format!(
@@ -341,7 +350,18 @@ fn probe_setters(
                      erases; no request can carry it in a form the server can read",
                     param.wire_name
                 ));
+                continue;
             }
+            let (ty, _) = test_type(&render::types::type_path(&param.ty, contracts, config));
+            inputs.push(ProbeInput {
+                field: param.rust_name.as_str().to_owned(),
+                // A bare `None` spells neither the type nor anything deprecated — a params
+                // field carries its deprecation in prose — so there is nothing to exempt.
+                deprecated: false,
+                ty,
+                json: None,
+                required: false,
+            });
             continue;
         }
         // The raw text and byte fixtures are both the five bytes `probe`. A different synthesized
@@ -361,11 +381,14 @@ fn probe_setters(
             Ok(value) => {
                 let (ty, deprecated_type) =
                     test_type(&render::types::type_path(&param.ty, contracts, config));
-                setters.push(ProbeSetter {
-                    setter: param.rust_name.as_str().to_owned(),
-                    deprecated: param.docs.deprecated || deprecated_type,
+                inputs.push(ProbeInput {
+                    field: param.rust_name.as_str().to_owned(),
+                    // Only the spelled *type* can lint: a params field carries its deprecation
+                    // in prose, and the field name itself never warns.
+                    deprecated: deprecated_type,
                     ty,
-                    json: value.to_string(),
+                    json: Some(value.to_string()),
+                    required: param.required,
                 });
             }
             Err(reason) => {
@@ -376,7 +399,7 @@ fn probe_setters(
             }
         }
     }
-    setters
+    inputs
 }
 
 /// The first arm the driver can wait for: an exact 2xx, or a 2XX range.
@@ -442,6 +465,13 @@ fn synthesize(
             Format::Base64 => json!("cHJvYmU="),
             Format::Binary => json!("probe"),
         },
+        // The object form an `Upload` serializes to, every field present, so the probe
+        // round-trips exactly.
+        TypeRef::Upload => json!({
+            "bytes": "cHJvYmU=",
+            "filename": "probe.bin",
+            "content_type": "application/octet-stream",
+        }),
         TypeRef::Option(inner) | TypeRef::Boxed(inner) => synthesize(inner, contracts, visiting)?,
         TypeRef::Vec(inner) => json!([synthesize(inner, contracts, visiting)?]),
         // One member, not none: an empty map writes nothing on the wire, and a probe that sends
@@ -525,7 +555,11 @@ fn synthesize_named(
             };
             synthesize(&variant.ty, contracts, visiting)?
         }
-        ContractKind::TaggedEnum { tag, variants } => {
+        // One synthesis for both tag styles. A consumed union's variant lacks the member, so the
+        // insert adds it; a carried union's variant declares it, so the insert overwrites whatever
+        // placeholder the member synthesized as — either way the payload names the variant it is.
+        ContractKind::TaggedEnum { tag, variants }
+        | ContractKind::CarriedTagEnum { tag, variants } => {
             let Some(variant) = variants.first() else {
                 return Err(SynthesisError::EmptyUnion {
                     name: contract.rust_name().as_str().to_owned(),

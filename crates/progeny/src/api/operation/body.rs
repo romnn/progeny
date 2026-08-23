@@ -10,14 +10,28 @@ use crate::contract::{ContractKind, Format, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
 
+/// A request body position, lowered once per declared media type.
+///
+/// The primary is the media type the fixed preference picks — or the one
+/// [`Config::media_types`](crate::config::Config::media_types) names for this position — and it
+/// keeps the operation's own name. Every other declared type becomes a client method of its own,
+/// because which body to *send* is the caller's decision and a position that declares two ways to
+/// upload has declared two operations in every sense a caller cares about.
+pub(super) struct BodyVariants {
+    pub(super) primary: BodyContract,
+    /// The other declared media types, in preference order: each is rendered as a suffixed
+    /// sibling method.
+    pub(super) variants: Vec<(String, BodyContract)>,
+}
+
 impl Build<'_> {
-    /// The one body the operation sends.
-    pub(super) fn body(
-        &self,
+    /// The bodies the operation can send: one per declared media type.
+    pub(super) fn bodies(
+        &mut self,
         operation: &Operation,
         at: &JsonPointer,
         ctx: &mut Ctx,
-    ) -> Option<BodyContract> {
+    ) -> Option<BodyVariants> {
         let node = operation.request_body.as_ref()?;
         let at = at.child("requestBody");
         let Some(body) = self.resolved.request_body(node) else {
@@ -31,15 +45,82 @@ impl Build<'_> {
                 "the request body references a component the document does not declare; the body \
                  is typed as arbitrary JSON",
             ));
-            return Some(BodyContract::Json {
-                ty: TypeRef::Value,
-                required: false,
+            return Some(BodyVariants {
+                primary: BodyContract::Json {
+                    ty: TypeRef::Value,
+                    required: false,
+                    content_type: "application/json".to_owned(),
+                },
+                variants: Vec::new(),
             });
         };
         let required = body.required.unwrap_or(false);
         let content = body.content.as_ref()?;
-        let (media_type, entry) = Self::select(content, &at, ctx)?;
-        Some(self.body_of(media_type, entry, required, &at, ctx))
+        let position = at.child("content").to_string();
+        if !self.config.media_types.is_empty() {
+            self.content_positions
+                .insert(position.clone(), content.keys().cloned().collect());
+        }
+        let configured = self
+            .config
+            .media_types
+            .get(&position)
+            .and_then(|requested| content.keys().find(|declared| *declared == requested));
+        let primary_key = match configured {
+            Some(configured) => configured,
+            None => content
+                .keys()
+                .min_by_key(|media_type| (preference(media_type), media_type.as_str()))?,
+        };
+
+        // Alternates, minus what cannot or need not become a method: a wildcard is not a content
+        // type a client can send, and a second spelling of a base already generated — a `charset`
+        // parameter, usually — would be the same method twice.
+        let mut bases = vec![base_of(primary_key)];
+        let mut variant_keys: Vec<&String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        let mut ordered: Vec<&String> = content.keys().filter(|key| *key != primary_key).collect();
+        ordered.sort_by_key(|media_type| (preference(media_type), media_type.as_str()));
+        for key in ordered {
+            let base = base_of(key);
+            if base.contains('*') {
+                skipped.push(format!("`{key}` is a wildcard"));
+            } else if bases.contains(&base) {
+                skipped.push(format!("`{key}` repeats a media type already generated"));
+            } else {
+                bases.push(base);
+                variant_keys.push(key);
+            }
+        }
+        if !variant_keys.is_empty() || !skipped.is_empty() {
+            let skipped = if skipped.is_empty() {
+                String::new()
+            } else {
+                format!("; {} and is not generated", skipped.join(", and "))
+            };
+            ctx.report(Diagnostic::new(
+                BreakageClass::MultiMediaType,
+                Action::Degrade,
+                at.child("content"),
+                format!(
+                    "the position declares {} media types; each is generated as its own client \
+                     method, and the generated server accepts only `{primary_key}`{skipped}",
+                    content.len(),
+                ),
+            ));
+        }
+
+        let primary = self.body_of(primary_key, &content[primary_key], required, &at, ctx);
+        let variants = variant_keys
+            .into_iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    self.body_of(key, &content[key], required, &at, ctx),
+                )
+            })
+            .collect();
+        Some(BodyVariants { primary, variants })
     }
 
     fn body_of(
@@ -58,7 +139,11 @@ impl Build<'_> {
             .trim()
             .to_ascii_lowercase();
         if is_json(&base) {
-            return BodyContract::Json { ty, required };
+            return BodyContract::Json {
+                ty,
+                required,
+                content_type: media_type.trim().to_owned(),
+            };
         }
         match base.as_str() {
             "application/x-www-form-urlencoded" => BodyContract::Form {
@@ -101,7 +186,11 @@ impl Build<'_> {
                     ),
                 ));
                 if structured {
-                    BodyContract::Json { ty, required }
+                    BodyContract::Json {
+                        ty,
+                        required,
+                        content_type: "application/json".to_owned(),
+                    }
                 } else {
                     BodyContract::Bytes {
                         content_type: chosen.to_owned(),
@@ -198,6 +287,12 @@ impl Build<'_> {
             .flatten()
             .filter_map(|(name, encoding)| Some((name.as_str(), encoding.content_type.as_deref()?)))
             .collect();
+        // A nullable body is an `Option` of the struct and a cycle-broken one a `Box` of it;
+        // the parts belong to the struct either way.
+        let mut ty = ty;
+        while let TypeRef::Option(inner) | TypeRef::Boxed(inner) = ty {
+            ty = inner;
+        }
         let TypeRef::Named(index) = ty else {
             return Vec::new();
         };
@@ -227,18 +322,46 @@ impl Build<'_> {
             .collect()
     }
 
-    /// Which media type an operation's body uses, by fixed preference.
+    /// Which media type a response position decodes: the configured pick, or the fixed
+    /// preference.
     ///
-    /// The alternates are reported rather than silently dropped, because a caller who needs one is
-    /// entitled to know progeny saw it and chose another.
+    /// One, not one per declared type, which is the opposite of the rule a request body gets —
+    /// deliberately. Which body to *send* is the caller's decision, so a request position's
+    /// media types each become a method; which body *arrives* is the server's, so a response
+    /// position gets a single decode and [`Config::media_types`](crate::config::Config::media_types)
+    /// is how a caller states what it will `Accept`. The alternates are reported rather than
+    /// silently dropped, and the report names the pointer a configuration entry would use to
+    /// choose differently. A configured pick that names a media type this position does not
+    /// declare falls through to the preference; generation still stops, because the walk records
+    /// every position it visits and an unhonoured entry is rejected once the walk is done.
     pub(super) fn select<'a>(
+        &mut self,
         content: &'a BTreeMap<String, MediaType>,
         at: &JsonPointer,
+        accept: &mut Vec<String>,
         ctx: &mut Ctx,
     ) -> Option<(&'a str, &'a MediaType)> {
-        let chosen = content
-            .keys()
-            .min_by_key(|media_type| (preference(media_type), media_type.as_str()))?;
+        let position = at.child("content").to_string();
+        if !self.config.media_types.is_empty() {
+            self.content_positions
+                .insert(position.clone(), content.keys().cloned().collect());
+        }
+        let configured = self
+            .config
+            .media_types
+            .get(&position)
+            .and_then(|requested| content.keys().find(|declared| *declared == requested));
+        let chosen = match configured {
+            Some(configured) => configured,
+            None => content
+                .keys()
+                .min_by_key(|media_type| (preference(media_type), media_type.as_str()))?,
+        };
+        // A configured pick is only an argument until the request carries it: the response media
+        // type is the server's choice, and `Accept` is how the client's side of it is said.
+        if configured.is_some() && !accept.contains(chosen) {
+            accept.push(chosen.clone());
+        }
         if content.len() > 1 {
             let others: Vec<&str> = content
                 .keys()
@@ -265,6 +388,55 @@ impl Build<'_> {
             .get_key_value(chosen)
             .map(|(name, entry)| (name.as_str(), entry))
     }
+}
+
+/// The media type without its parameters, lowercased: what decides whether two spellings are one
+/// type.
+fn base_of(media_type: &str) -> String {
+    media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// The method-name suffix a body variant carries: `upload_document` sends the primary, and
+/// `upload_document_multipart` is the same operation sending `multipart/form-data`.
+///
+/// The common types get the word a reader would use for them; anything else falls back to the
+/// subtype — its `+suffix` when it has one, which is what `application/vnd.api+json` is *for* —
+/// sanitized into an identifier. Collisions with a name the document declares are the
+/// [`Namer`](crate::contract::Namer)'s to resolve, the same as everywhere else.
+pub(super) fn method_suffix(media_type: &str) -> String {
+    let base = base_of(media_type);
+    match base.as_str() {
+        "multipart/form-data" => return "multipart".to_owned(),
+        "application/x-www-form-urlencoded" => return "form".to_owned(),
+        "application/octet-stream" => return "bytes".to_owned(),
+        "text/plain" => return "text".to_owned(),
+        _ => {}
+    }
+    let subtype = base.split('/').next_back().unwrap_or(&base);
+    let subtype = subtype.rsplit('+').next().unwrap_or(subtype);
+    let sanitized: String = subtype
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_digit())
+    {
+        return format!("m{sanitized}");
+    }
+    sanitized
 }
 
 /// Where a media type sits in the preference order. Lower wins.
@@ -302,15 +474,16 @@ fn preference(media_type: &str) -> u8 {
 /// multipart parser expects, and 3.0's reading would put a JSON array where a server looks for
 /// several fields.
 ///
-/// The type layer renders `format: binary` as `String` — inside a JSON payload a binary property
-/// *is* a string, and the type layer has no position to tell it otherwise. Here the position
-/// exists, so the string's bytes are what the part carries. The consequence, stated because it is a
-/// real limitation rather than an oversight: a part whose content is not valid UTF-8 cannot be
-/// constructed, because the field that holds it is a `String`. Lifting that would mean the type
-/// depending on the position, which would fork a component type shared with a JSON body.
+/// `PartKind::File` mirrors the type exactly: a member is a file part when and only when the
+/// type layer gave it `support::Upload`, because the server-side parser re-wraps file parts into
+/// the upload object form and only that type's `Deserialize` reads it — a `File` spec over a
+/// `String`-typed member would make the generated server reject its own client. A binary member
+/// the type layer left as `String` — a base64 (`format: byte`) member, or a schema the
+/// encoding-collapse rule kept on the JSON spelling — is a text part whose bytes are the
+/// string's, with the stated consequence that such a part cannot carry invalid UTF-8.
 fn part_of(ty: &TypeRef) -> (PartKind, bool) {
     match ty {
-        TypeRef::Format(Format::Binary | Format::Base64) => (PartKind::File, false),
+        TypeRef::Upload => (PartKind::File, false),
         // An option says nothing about the shape on the wire; a box says nothing at all.
         TypeRef::Option(inner) | TypeRef::Boxed(inner) => part_of(inner),
         // The one wrapper that does say something: each element is its own part.
@@ -336,12 +509,229 @@ pub(super) fn is_json(media_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::preference;
     use crate::api::BodyContract;
-    use crate::api::tests::{model_of, with_paths};
+    use crate::api::tests::{model_of, model_with, with_paths};
+    use crate::config::Config;
     use crate::contract::TypeRef;
+
+    /// A body declaring JSON beside multipart, where the preference alone picks JSON.
+    fn two_media_type_upload() -> Value {
+        with_paths(json!({
+            "/dokumente": {
+                "post": {
+                    "operationId": "uploadDocument",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {"schema": {"type": "object", "properties": {"url": {"type": "string"}}}},
+                            "multipart/form-data": {"schema": {"type": "object", "properties": {
+                                "file": {"type": "string", "format": "binary"},
+                                "anzeigename": {"type": "string"},
+                            }}},
+                        },
+                    },
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+        }))
+    }
+
+    fn media_types(entries: &[(&str, &str)]) -> Config {
+        Config {
+            media_types: entries
+                .iter()
+                .map(|(position, media_type)| ((*position).to_owned(), (*media_type).to_owned()))
+                .collect(),
+            ..Config::default()
+        }
+    }
+
+    #[test_util::test]
+    fn a_file_part_is_exactly_an_upload_typed_member() {
+        // The server-side parser re-wraps `File` parts into the upload object form, which only
+        // `support::Upload`'s `Deserialize` reads — so a `File` spec over a `String`-typed
+        // member (a base64 `format: byte` member here) would make the generated server reject
+        // every request its own client builds.
+        let (model, _) = model_of(with_paths(json!({
+            "/upload": {
+                "post": {
+                    "operationId": "upload",
+                    "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "file": {"type": "string", "format": "binary"},
+                            "checksum": {"type": "string", "contentEncoding": "base64"},
+                            "note": {"type": "string"},
+                        },
+                    }}}},
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+        })))?;
+        let Some(BodyContract::Multipart { parts, .. }) = &model.operations()[0].body else {
+            panic!("the body is multipart");
+        };
+        let kind = |wire: &str| {
+            parts
+                .iter()
+                .find(|part| part.wire_name == wire)
+                .map(|part| part.kind)
+        };
+        assert_eq!(kind("file"), Some(crate::api::PartKind::File));
+        assert_eq!(kind("checksum"), Some(crate::api::PartKind::Text));
+        assert_eq!(kind("note"), Some(crate::api::PartKind::Text));
+    }
+
+    #[test_util::test]
+    fn every_declared_request_media_type_becomes_its_own_method() -> eyre::Result<()> {
+        let (model, diagnostics) = model_of(two_media_type_upload())?;
+        // The preference names JSON as the primary; multipart is the suffixed sibling, sharing
+        // the route and serving only the client.
+        let names: Vec<&str> = model
+            .operations()
+            .iter()
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        assert_eq!(names, ["upload_document", "upload_document_multipart"]);
+        assert!(matches!(
+            model.operations()[0].body,
+            Some(BodyContract::Json { .. })
+        ));
+        assert!(matches!(
+            model.operations()[1].body,
+            Some(BodyContract::Multipart { .. })
+        ));
+        assert!(!model.operations()[0].body_variant);
+        assert!(model.operations()[0].registrable.is_some());
+        assert!(model.operations()[1].body_variant);
+        assert!(model.operations()[1].registrable.is_none());
+        let reported: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+        assert!(
+            reported
+                .iter()
+                .any(|line| line.contains("the generated server accepts only `application/json`")),
+            "{reported:?}"
+        );
+        Ok(())
+    }
+
+    #[test_util::test]
+    fn a_configured_media_type_overrides_the_preference() -> eyre::Result<()> {
+        let (model, diagnostics) = model_with(
+            two_media_type_upload(),
+            &media_types(&[(
+                "/paths/~1dokumente/post/requestBody/content",
+                "multipart/form-data",
+            )]),
+        )?;
+        // The configured pick decides which media type keeps the operation's own name — and which
+        // one the generated server accepts; JSON becomes the suffixed sibling.
+        let names: Vec<&str> = model
+            .operations()
+            .iter()
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        assert_eq!(names, ["upload_document", "upload_document_json"]);
+        assert!(matches!(
+            model.operations()[0].body,
+            Some(BodyContract::Multipart { .. })
+        ));
+        assert!(matches!(
+            model.operations()[1].body,
+            Some(BodyContract::Json { .. })
+        ));
+        let reported: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+        assert!(
+            reported.iter().any(
+                |line| line.contains("the generated server accepts only `multipart/form-data`")
+            ),
+            "{reported:?}"
+        );
+        Ok(())
+    }
+
+    #[test_util::test]
+    fn a_wildcard_alternate_is_reported_and_not_generated() -> eyre::Result<()> {
+        // `jellyfin`, in miniature: the wildcard says something about the server and is never a
+        // content type a client can send, so it stays out of the method list.
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/pets": {
+                "post": {
+                    "operationId": "createPet",
+                    "requestBody": {"content": {
+                        "application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+                        "application/*+json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+                    }},
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+        })))?;
+        let names: Vec<&str> = model
+            .operations()
+            .iter()
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        assert_eq!(names, ["create_pet"]);
+        let reported: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+        assert!(
+            reported
+                .iter()
+                .any(|line| line.contains("`application/*+json` is a wildcard")),
+            "{reported:?}"
+        );
+        Ok(())
+    }
+
+    #[test_util::test]
+    fn a_configured_media_type_may_restate_the_preference() -> eyre::Result<()> {
+        let (model, _) = model_with(
+            two_media_type_upload(),
+            &media_types(&[(
+                "/paths/~1dokumente/post/requestBody/content",
+                "application/json",
+            )]),
+        )?;
+        assert!(matches!(
+            model.operations()[0].body,
+            Some(BodyContract::Json { .. })
+        ));
+        Ok(())
+    }
+
+    #[test_util::test]
+    fn a_configured_media_type_the_position_does_not_declare_is_rejected() {
+        let Err(error) = model_with(
+            two_media_type_upload(),
+            &media_types(&[(
+                "/paths/~1dokumente/post/requestBody/content",
+                "application/xml",
+            )]),
+        ) else {
+            panic!("an unhonourable pick must stop generation");
+        };
+        let message = error.to_string();
+        assert!(message.contains("declares only"), "{message}");
+        assert!(message.contains("`application/json`"), "{message}");
+        assert!(message.contains("`multipart/form-data`"), "{message}");
+    }
+
+    #[test_util::test]
+    fn a_configured_media_type_at_a_position_without_content_is_rejected() {
+        let Err(error) = model_with(
+            two_media_type_upload(),
+            &media_types(&[(
+                "/paths/~1dokumente/get/requestBody/content",
+                "application/json",
+            )]),
+        ) else {
+            panic!("a pointer no position matches must stop generation");
+        };
+        let message = error.to_string();
+        assert!(message.contains("declares no content there"), "{message}");
+    }
 
     #[test_util::test]
     fn the_json_family_is_preferred_over_everything_else() {
@@ -397,7 +787,8 @@ mod tests {
             create.body,
             Some(BodyContract::Json {
                 ty: TypeRef::Named(_),
-                required: false
+                required: false,
+                ..
             })
         ));
     }

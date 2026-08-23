@@ -11,7 +11,7 @@ use crate::shape::Docs;
 impl Build<'_> {
     /// The status arms, in the order overlap resolution puts them.
     pub(super) fn responses(
-        &self,
+        &mut self,
         operation: &Operation,
         at: &JsonPointer,
         ctx: &mut Ctx,
@@ -21,6 +21,7 @@ impl Build<'_> {
         };
         let at = at.child("responses");
         let mut used = Namer::default();
+        let mut accept = Vec::new();
         let mut arms = Vec::new();
         for (status, node) in &responses.statuses {
             let Some(pattern) = parse_status(status) else {
@@ -45,7 +46,14 @@ impl Build<'_> {
                      status arm is generated",
                 ));
             }
-            arms.push(self.arm(pattern, node, &at.child(status.clone()), &mut used, ctx));
+            arms.push(self.arm(
+                pattern,
+                node,
+                &at.child(status.clone()),
+                &mut used,
+                &mut accept,
+                ctx,
+            ));
         }
         arms.sort_by_key(|arm| arm.status.precedence());
 
@@ -58,18 +66,43 @@ impl Build<'_> {
                 node,
                 &at.child("default"),
                 &mut used,
+                &mut accept,
                 ctx,
             )
         });
-        ResponseContract { arms, default }
+        // A configured pick is only worth saying on the wire when it says the *whole* truth:
+        // `Accept: application/problem+json` alone, picked for the 404 arm, would tell a
+        // strictly negotiating server that the client cannot read the 200's `application/json`
+        // — a 406 on the success path the configuration never mentioned. So once any pick makes
+        // the header worth sending, every arm's chosen media type joins it, configured picks
+        // first.
+        if !accept.is_empty() {
+            for arm in arms.iter().chain(default.as_ref()) {
+                let chosen = match &arm.body {
+                    ResponseBody::Json { content_type, .. }
+                    | ResponseBody::Text { content_type }
+                    | ResponseBody::Bytes { content_type } => content_type,
+                    ResponseBody::Empty => continue,
+                };
+                if !accept.contains(chosen) {
+                    accept.push(chosen.clone());
+                }
+            }
+        }
+        ResponseContract {
+            arms,
+            default,
+            accept,
+        }
     }
 
     fn arm(
-        &self,
+        &mut self,
         status: StatusPattern,
         node: &MaybeRef<Response>,
         at: &JsonPointer,
         used: &mut Namer,
+        accept: &mut Vec<String>,
         ctx: &mut Ctx,
     ) -> ResponseArm {
         let name = RustIdent::variant(&status_name(status));
@@ -86,7 +119,10 @@ impl Build<'_> {
             ));
             return ResponseArm {
                 status,
-                body: ResponseBody::Json(TypeRef::Value),
+                body: ResponseBody::Json {
+                    ty: TypeRef::Value,
+                    content_type: "application/json".to_owned(),
+                },
                 docs: Docs::default(),
                 rust_name: used.unique(name),
             };
@@ -96,15 +132,16 @@ impl Build<'_> {
             // A response with no content is a status and nothing else: 204, and every arm that
             // says only what went wrong.
             None => ResponseBody::Empty,
-            Some(content) => match Self::select(content, at, ctx) {
+            Some(content) => match self.select(content, at, accept, ctx) {
                 None => ResponseBody::Empty,
                 Some((media_type, entry)) if is_json(&media_type_stem(media_type)) => {
-                    ResponseBody::Json(
-                        entry
+                    ResponseBody::Json {
+                        ty: entry
                             .schema
                             .map_or(TypeRef::Value, |id| self.type_at(id))
                             .clone(),
-                    )
+                        content_type: media_type.to_owned(),
+                    }
                 }
                 Some((media_type, _)) if media_type_stem(media_type).starts_with("text/") => {
                     ResponseBody::Text {
@@ -200,6 +237,96 @@ mod tests {
     }
 
     #[test_util::test]
+    fn a_configured_media_type_applies_to_a_response_position() -> eyre::Result<()> {
+        // A preview endpoint declaring the image beside its JSON metadata: the preference picks
+        // JSON, and a caller who wants the picture says so at the response's own pointer.
+        let document = with_paths(json!({
+            "/preview": {
+                "get": {
+                    "operationId": "getPreview",
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {"schema": {"type": "object", "properties": {"note": {"type": "string"}}}},
+                                "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                            },
+                        },
+                    },
+                },
+            },
+        }));
+        let config = crate::config::Config {
+            media_types: [(
+                "/paths/~1preview/get/responses/200/content".to_owned(),
+                "image/jpeg".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..crate::config::Config::default()
+        };
+        let (model, _) = crate::api::tests::model_with(document, &config)?;
+        // The pick also rides the request: a choice the server never hears is not one.
+        assert_eq!(
+            model.operations()[0].responses.accept,
+            vec!["image/jpeg".to_owned()]
+        );
+        assert_eq!(
+            model.operations()[0].responses.arms[0].body,
+            ResponseBody::Bytes {
+                content_type: "image/jpeg".to_owned()
+            }
+        );
+        Ok(())
+    }
+
+    #[test_util::test]
+    fn a_pick_on_an_error_arm_still_accepts_the_success_type() -> eyre::Result<()> {
+        // Configuring the 404's decode is a natural thing to want when only the error arm is
+        // ambiguous. The header it earns must still say the client reads the 200's JSON, or a
+        // strictly negotiating server answers 406 on the success path the configuration never
+        // mentioned.
+        let document = with_paths(json!({
+            "/x": {
+                "get": {
+                    "operationId": "getX",
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {"application/json": {"schema": {"type": "boolean"}}},
+                        },
+                        "404": {
+                            "description": "missing",
+                            "content": {
+                                "application/json": {"schema": {"type": "object"}},
+                                "application/problem+json": {"schema": {"type": "object"}},
+                            },
+                        },
+                    },
+                },
+            },
+        }));
+        let config = crate::config::Config {
+            media_types: [(
+                "/paths/~1x/get/responses/404/content".to_owned(),
+                "application/problem+json".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..crate::config::Config::default()
+        };
+        let (model, _) = crate::api::tests::model_with(document, &config)?;
+        assert_eq!(
+            model.operations()[0].responses.accept,
+            vec![
+                "application/problem+json".to_owned(),
+                "application/json".to_owned(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test_util::test]
     fn a_response_referencing_a_component_that_does_not_exist_degrades_its_arm_not_its_operation() {
         // `miro`, in miniature: a reference to a `components.responses` section the document never
         // declares.
@@ -218,7 +345,13 @@ mod tests {
         let responses = &model.operations()[0].responses;
         assert_eq!(responses.arms.len(), 2);
         assert_eq!(responses.arms[0].status, StatusPattern::Exact(200));
-        assert_eq!(responses.arms[0].body, ResponseBody::Json(TypeRef::Value));
+        assert_eq!(
+            responses.arms[0].body,
+            ResponseBody::Json {
+                ty: TypeRef::Value,
+                content_type: "application/json".to_owned(),
+            }
+        );
         assert!(
             diagnostics
                 .iter()
@@ -311,7 +444,15 @@ mod tests {
             },
         })))?;
         let arms = &model.operations()[0].responses.arms;
-        assert_eq!(arms[0].body, ResponseBody::Json(TypeRef::Bool));
+        // The exact declared spelling, parameters included: it is what the generated server
+        // writes as the response's `Content-Type`.
+        assert_eq!(
+            arms[0].body,
+            ResponseBody::Json {
+                ty: TypeRef::Bool,
+                content_type: "application/problem+json; charset=utf-8".to_owned(),
+            }
+        );
         assert_eq!(
             arms[1].body,
             ResponseBody::Text {

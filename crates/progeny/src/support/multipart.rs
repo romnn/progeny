@@ -27,9 +27,9 @@ pub enum PartKind {
     Text,
     /// Written as its bytes, with a `filename`: what a member the document marked binary is.
     ///
-    /// The member's Rust type is still `String`, because inside a JSON payload a `format: binary`
-    /// property *is* a string and the type layer does not know which position it will be used in.
-    /// The bytes that string holds are what goes on the wire.
+    /// The member's Rust type is `Upload` for a multipart body's own members — bytes plus the
+    /// part metadata, arriving here as the object its serializer writes — and `String` where a
+    /// binary property sits deeper in the body, because inside a JSON payload it *is* a string.
     File,
     /// Written as JSON: what a structured member is.
     ///
@@ -94,11 +94,38 @@ pub fn body(value: &Value, specs: &[PartSpec]) -> Option<(String, Vec<u8>)> {
 /// The boundary a `Content-Type` header declares, if it declares one.
 #[must_use]
 pub fn boundary_of(content_type: &str) -> Option<String> {
-    content_type.split(';').skip(1).find_map(|parameter| {
+    let declared = content_type.split(';').skip(1).find_map(|parameter| {
         let (name, value) = parameter.split_once('=')?;
         (name.trim().eq_ignore_ascii_case("boundary"))
             .then(|| value.trim().trim_matches('"').to_owned())
-    })
+    })?;
+    // RFC 2046's grammar: one to seventy characters from its `bchars` set. The length bound
+    // is also this parser's cost bound — hyper accepts header blocks past 400 KB, and a
+    // caller-sized delimiter would make the scan below quadratic in something an attacker
+    // chooses freely.
+    if declared.is_empty() || declared.len() > 70 {
+        return None;
+    }
+    let legal = declared.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'\''
+                    | b'('
+                    | b')'
+                    | b'+'
+                    | b'_'
+                    | b','
+                    | b'-'
+                    | b'.'
+                    | b'/'
+                    | b':'
+                    | b'='
+                    | b'?'
+                    | b' '
+            )
+    });
+    legal.then_some(declared)
 }
 
 /// Read a multipart body back into the object its parts came from.
@@ -126,11 +153,11 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
             return Err(ParseError::MissingHeaderBlock);
         };
         let headers = String::from_utf8_lossy(section.get(..headers_end).unwrap_or_default());
-        let content = section
-            .get(headers_end + 4..)
-            .unwrap_or_default()
-            .strip_suffix(b"\r\n")
-            .unwrap_or_default();
+        let content = section.get(headers_end + 4..).unwrap_or_default();
+        // A part whose final CRLF is missing keeps its content: defaulting to empty read a
+        // slightly non-conforming body as an empty member — silent data loss, where this
+        // module's rule is to read faithfully or refuse out loud.
+        let content = content.strip_suffix(b"\r\n").unwrap_or(content);
         let Some(name) = disposition_name(&headers) else {
             return Err(ParseError::MissingName);
         };
@@ -142,10 +169,29 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
             .iter()
             .find(|spec| spec.name == name)
             .is_some_and(|spec| spec.repeated);
-        let text = String::from_utf8_lossy(content).into_owned();
         let value = match kind {
-            PartKind::Json => serde_json::from_str(&text).map_err(ParseError::InvalidJson)?,
-            PartKind::Text | PartKind::File => Value::String(text),
+            PartKind::Json => {
+                let text = String::from_utf8_lossy(content).into_owned();
+                serde_json::from_str(&text).map_err(ParseError::InvalidJson)?
+            }
+            PartKind::Text => Value::String(String::from_utf8_lossy(content).into_owned()),
+            // The object form an `Upload` deserializes from: the bytes kept intact — a file is
+            // not UTF-8 and a lossy string would corrupt it — and the part metadata the wire
+            // actually carried, so a handler sees the filename the client sent.
+            PartKind::File => {
+                let mut members = serde_json::Map::new();
+                members.insert(
+                    "bytes".to_owned(),
+                    Value::String(super::base64_encode(content)),
+                );
+                if let Some(filename) = disposition_filename(&headers) {
+                    members.insert("filename".to_owned(), Value::String(filename));
+                }
+                if let Some(content_type) = content_type_of(&headers) {
+                    members.insert("content_type".to_owned(), Value::String(content_type));
+                }
+                Value::Object(members)
+            }
         };
         match members.get_mut(&name) {
             // A name seen twice is a repeated member, whatever the table said: what arrived is what
@@ -179,43 +225,131 @@ pub enum ParseError {
 
 /// The `name` of a section, from its `Content-Disposition`.
 fn disposition_name(headers: &str) -> Option<String> {
+    disposition_parameter(headers, "name")
+}
+
+/// The `filename` parameter of the part's disposition, when the sender included one.
+fn disposition_filename(headers: &str) -> Option<String> {
+    disposition_parameter(headers, "filename")
+}
+
+/// One parameter of the part's `Content-Disposition` line, matched by its whole key.
+///
+/// The line is tokenized into `;`-separated parameters with quoting respected, and each key is
+/// compared exactly. A substring search over the whole line found the `name="` *inside*
+/// `filename="` whenever the sender wrote the filename first — a legal ordering — and filed the
+/// part's bytes under its filename.
+fn disposition_parameter(headers: &str, key: &str) -> Option<String> {
     let line = headers.lines().find(|line| {
         line.split(':')
             .next()
             .is_some_and(|name| name.trim().eq_ignore_ascii_case("content-disposition"))
     })?;
-    let start = line.find("name=\"")? + "name=\"".len();
-    let rest = line.get(start..)?;
-    // Undo the escaping the writer applies, so a name with a quote in it survives the round trip.
-    let mut out = String::new();
-    let mut characters = rest.chars();
-    while let Some(character) = characters.next() {
+    let (_, parameters) = line.split_once(':')?;
+    let mut split: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for character in parameters.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
         match character {
-            '"' => return Some(out),
-            '\\' => out.push(characters.next()?),
-            other => out.push(other),
+            '\\' if in_quotes => {
+                current.push(character);
+                escaped = true;
+            }
+            '"' => {
+                current.push('"');
+                in_quotes = !in_quotes;
+            }
+            ';' if !in_quotes => split.push(std::mem::take(&mut current)),
+            other => current.push(other),
         }
     }
+    split.push(current);
+    for parameter in split {
+        let Some((name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let value = value.trim();
+        let Some(rest) = value.strip_prefix('"') else {
+            // An unquoted value ends at the parameter, which the tokenizer already bounded.
+            return Some(value.to_owned());
+        };
+        // Undo the escaping the writer applies, so a name with a quote in it survives the
+        // round trip.
+        let mut out = String::new();
+        let mut characters = rest.chars();
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => return Some(out),
+                '\\' => out.push(characters.next()?),
+                other => out.push(other),
+            }
+        }
+        return None;
+    }
     None
+}
+
+/// The part's own `Content-Type` header, when the sender wrote one.
+fn content_type_of(headers: &str) -> Option<String> {
+    let line = headers.lines().find(|line| {
+        line.split(':')
+            .next()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("content-type"))
+    })?;
+    let (_, value) = line.split_once(':')?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// The body split on a delimiter, each piece with its leading `\r\n` removed.
 fn split_on<'a>(body: &'a [u8], delimiter: &'a [u8]) -> impl Iterator<Item = &'a [u8]> {
     let mut rest = Some(body);
+    let mut first = true;
     std::iter::from_fn(move || {
         let current = rest?;
         // The tail after the last delimiter is still a piece, which is why the `None` arm yields
         // rather than ending the iterator: a body whose final boundary is missing its trailing
         // `--` would otherwise lose its last part silently.
-        let piece = if let Some(at) = find(current, delimiter) {
+        let piece = if let Some(at) = find_at_line_start(current, delimiter, first) {
             rest = current.get(at + delimiter.len()..);
             current.get(..at).unwrap_or_default()
         } else {
             rest = None;
             current
         };
+        first = false;
         Some(piece.strip_prefix(b"\r\n").unwrap_or(piece))
     })
+}
+
+/// The first occurrence of the delimiter at the start of a line.
+///
+/// RFC 2046 requires the boundary delimiter at the beginning of a line, and matching it
+/// mid-line let text that merely *contains* the delimiter — a part name, a body a foreign
+/// client failed to scan — re-frame everything after it. Position 0 counts as a line start
+/// only for the body's own first byte.
+fn find_at_line_start(haystack: &[u8], delimiter: &[u8], first: bool) -> Option<usize> {
+    if first && haystack.starts_with(delimiter) {
+        return Some(0);
+    }
+    let mut from = 0;
+    while let Some(at) = find(haystack.get(from..)?, b"\r\n") {
+        let start = from + at + 2;
+        if haystack.get(start..)?.starts_with(delimiter) {
+            return Some(start);
+        }
+        from = start;
+    }
+    None
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -283,11 +417,38 @@ fn text(value: &Value, content_type: Option<&str>) -> Part {
 }
 
 fn file(value: &Value, content_type: Option<&str>) -> Part {
+    // The object form is what an `Upload` serializes to: the content as real bytes, and the part
+    // metadata — `filename`, the part's own `Content-Type` — that no schema property carries.
+    // Written without a let-chain: this file ships into generated crates, whose manifests say
+    // edition 2021, where the chain does not parse.
+    let upload = match value {
+        Value::Object(members) => match members.get("bytes") {
+            Some(Value::String(encoded)) => {
+                super::base64_decode(encoded).map(|bytes| (members, bytes))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some((members, bytes)) = upload {
+        let field = |name: &str| match members.get(name) {
+            Some(Value::String(text)) => Some(text.clone()),
+            _ => None,
+        };
+        return Part {
+            filename: Some(field("filename").unwrap_or_else(|| "file".to_owned())),
+            content_type: Some(
+                field("content_type")
+                    .or_else(|| content_type.map(ToOwned::to_owned))
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            ),
+            body: bytes,
+        };
+    }
     Part {
         // A `filename` is what makes a server treat the part as an upload rather than a field, and
-        // the document never says what it is. Absent would be faithful and useless; this is the
-        // conventional stand-in, and a caller who needs a real name is describing a parameter the
-        // document did not declare.
+        // a plain string carries none. Absent would be faithful and useless; this is the
+        // conventional stand-in.
         filename: Some("file".to_owned()),
         content_type: Some(
             content_type
@@ -319,14 +480,63 @@ const STEM: &str = "progeny-boundary";
 /// It terminates: each attempt is strictly longer than the last, and a finite body cannot contain a
 /// string longer than itself.
 fn boundary(parts: &[(String, Part)]) -> String {
-    let mut candidate = STEM.to_owned();
+    // The scan covers everything [`write`] will put between two delimiters, *as written*: the
+    // body, and the name, filename and content type in their serialized forms — `quoted` drops
+    // CR and LF, so a filename that hides the stem behind a line break collides only in its
+    // quoted spelling, and the raw form is the wrong thing to ask. The part name is caller
+    // data too, whenever the body is a map or captures unknown members.
+    let collides = |candidate: &str| {
+        parts.iter().any(|(name, part)| {
+            contains(&part.body, candidate.as_bytes())
+                || quoted(name).contains(candidate)
+                || part
+                    .filename
+                    .as_deref()
+                    .is_some_and(|filename| quoted(filename).contains(candidate))
+                || part
+                    .content_type
+                    .as_deref()
+                    .is_some_and(|content_type| header_safe(content_type).contains(candidate))
+        })
+    };
+    // One scan for the stem picks the starting suffix: one past the largest `-N` any
+    // occurrence carries, so content that enumerates `progeny-boundary-1 ... -100000` costs
+    // one pass rather than one pass per candidate. The loop below stays as the correctness
+    // argument — the arithmetic is an optimization, never the proof — and settles immediately
+    // for any input whose suffixes parse as decimals.
     let mut attempt = 0u32;
-    while parts
-        .iter()
-        .any(|(_, part)| contains(&part.body, candidate.as_bytes()))
-    {
-        attempt += 1;
+    let mut candidate = STEM.to_owned();
+    if collides(&candidate) {
+        for (name, part) in parts {
+            for text in [
+                String::from_utf8_lossy(&part.body).into_owned(),
+                quoted(name),
+                part.filename.as_deref().map(quoted).unwrap_or_default(),
+                part.content_type
+                    .as_deref()
+                    .map(header_safe)
+                    .unwrap_or_default(),
+            ] {
+                for (position, _) in text.match_indices(STEM) {
+                    let digits: String = text
+                        .get(position + STEM.len()..)
+                        .unwrap_or_default()
+                        .strip_prefix('-')
+                        .unwrap_or_default()
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    let numbered = digits.parse::<u32>().unwrap_or(0);
+                    attempt = attempt.max(numbered.saturating_add(1));
+                }
+            }
+        }
+        attempt = attempt.max(1);
         candidate = format!("{STEM}-{attempt}");
+        while collides(&candidate) {
+            attempt = attempt.saturating_add(1);
+            candidate = format!("{STEM}-{attempt}");
+        }
     }
     candidate
 }
@@ -612,13 +822,227 @@ mod tests {
                 content_type: None,
             },
         ];
-        let original =
-            json!({"file": "raw", "meta": {"a": 1}, "name": "widget", "tags": ["x", "y"]});
+        let original = json!({
+            "file": {"bytes": "cmF3", "content_type": "application/pdf", "filename": "report.pdf"},
+            "meta": {"a": 1},
+            "name": "widget",
+            "tags": ["x", "y"],
+        });
         let (content_type, bytes) =
             super::body(&original, &specs).ok_or_eyre("test fixture should contain this value")?;
         let boundary = super::boundary_of(&content_type)
             .ok_or_eyre("test fixture should contain this value")?;
         assert_eq!(super::parse(&bytes, &boundary, &specs)?, original);
+    }
+
+    #[test_util::test]
+    fn a_boundary_never_hides_in_a_filename_the_caller_chose() {
+        // The filename rides the part's header block, so a boundary contained in it would split
+        // the framing exactly as one in a body would — and the filename is caller data.
+        let value = serde_json::json!({
+            "file": {
+                "bytes": "aGVsbG8=",
+                "filename": "progeny-boundary",
+            },
+        });
+        let specs = [PartSpec {
+            name: "file",
+            kind: PartKind::File,
+            repeated: false,
+            content_type: None,
+        }];
+        let (content_type, bytes) = super::body(&value, &specs).ok_or_eyre("a form body")?;
+        let boundary = super::boundary_of(&content_type).ok_or_eyre("a declared boundary")?;
+        assert!(
+            !"progeny-boundary".contains(&boundary),
+            "the boundary `{boundary}` hides in the filename"
+        );
+        let parsed = super::parse(&bytes, &boundary, &specs)?;
+        let member = parsed
+            .get("file")
+            .and_then(|member| member.get("bytes"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(member, Some("aGVsbG8="));
+    }
+
+    #[test_util::test]
+    fn a_boundary_never_hides_in_a_part_name_the_caller_chose() {
+        // With a map-typed body the part names are the caller's keys, so a name can carry the
+        // stem into the header block; unscanned, the delimiter landed inside a disposition
+        // line and every later member was dropped without an error.
+        let value = json!({
+            "x-progeny-boundary-y": "first",
+            "note": "second",
+        });
+        let (content_type, bytes) = super::body(&value, &[]).ok_or_eyre("a form body")?;
+        let boundary = super::boundary_of(&content_type).ok_or_eyre("a declared boundary")?;
+        assert!(
+            !"x-progeny-boundary-y".contains(&boundary),
+            "the boundary `{boundary}` hides in the part name"
+        );
+        let parsed = super::parse(&bytes, &boundary, &[])?;
+        assert_eq!(
+            parsed.get("note").and_then(serde_json::Value::as_str),
+            Some("second")
+        );
+    }
+
+    #[test_util::test]
+    fn the_scan_reads_metadata_as_it_is_written_not_as_it_was_given() {
+        // `quoted` drops CR and LF from a filename, so a stem split by a line break exists
+        // only in the serialized spelling — which is the spelling the wire carries and the one
+        // the scan has to ask about.
+        let value = json!({
+            "file": {
+                "bytes": "aGVsbG8=",
+                "filename": "progeny-\r\nboundary",
+            },
+        });
+        let specs = [PartSpec {
+            name: "file",
+            kind: PartKind::File,
+            repeated: false,
+            content_type: None,
+        }];
+        let (content_type, bytes) = super::body(&value, &specs).ok_or_eyre("a form body")?;
+        let boundary = super::boundary_of(&content_type).ok_or_eyre("a declared boundary")?;
+        assert!(
+            !"progeny-boundary".contains(&boundary),
+            "the boundary `{boundary}` hides in the quoted filename"
+        );
+        let parsed = super::parse(&bytes, &boundary, &specs)?;
+        let member = parsed
+            .get("file")
+            .and_then(|member| member.get("bytes"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(member, Some("aGVsbG8="));
+    }
+
+    #[test_util::test]
+    fn a_filename_written_before_the_name_does_not_claim_its_part() {
+        // The parameter order in a disposition line is the sender's choice; a substring search
+        // read the `name="` inside `filename="` and filed the bytes under the filename.
+        let body = b"--b\r\nContent-Disposition: form-data; filename=\"signature\"; name=\"file\"\r\n\r\ncontent\r\n--b--\r\n";
+        let parsed = super::parse(body, "b", &[])?;
+        assert_eq!(
+            parsed.get("file").and_then(serde_json::Value::as_str),
+            Some("content")
+        );
+        assert!(parsed.get("signature").is_none(), "{parsed:?}");
+    }
+
+    #[test_util::test]
+    fn a_part_missing_its_final_line_break_keeps_its_content() {
+        // A slightly non-conforming body read as an *empty* member is silent data loss; the
+        // content stays, trailer text and all.
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nsecret--b--\r\n";
+        let parsed = super::parse(body, "b", &[])?;
+        let note = parsed
+            .get("note")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_eyre("the member survives")?;
+        assert!(note.starts_with("secret"), "{note:?}");
+    }
+
+    #[test_util::test]
+    fn a_delimiter_mid_line_does_not_reframe_the_body() {
+        // RFC 2046 requires the delimiter at a line start; matched mid-line, content that
+        // merely contains it swallowed every later part.
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx--b--y\r\n--b\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nd\r\n--b--\r\n";
+        let parsed = super::parse(body, "b", &[])?;
+        assert_eq!(
+            parsed.get("a").and_then(serde_json::Value::as_str),
+            Some("x--b--y")
+        );
+        assert_eq!(
+            parsed.get("c").and_then(serde_json::Value::as_str),
+            Some("d")
+        );
+    }
+
+    #[test_util::test]
+    fn a_boundary_outside_the_grammar_is_refused() {
+        // RFC 2046 bounds the boundary at seventy characters from a fixed set; the bound is
+        // also what keeps the parser's scan linear in the body alone.
+        let long = "a".repeat(71);
+        assert_eq!(
+            super::boundary_of(&format!("multipart/form-data; boundary={long}")),
+            None
+        );
+        assert_eq!(
+            super::boundary_of("multipart/form-data; boundary=a\x07b"),
+            None
+        );
+        assert_eq!(super::boundary_of("multipart/form-data; boundary="), None);
+        assert_eq!(
+            super::boundary_of("multipart/form-data; boundary=ok-1.2:3"),
+            Some("ok-1.2:3".to_owned())
+        );
+    }
+
+    #[test_util::test]
+    fn an_enumerating_body_settles_the_boundary_in_one_scan() {
+        // Content that lists `progeny-boundary progeny-boundary-1 ... -3` used to cost one
+        // full scan per candidate; the suffix now comes from a single pass.
+        let value = json!({
+            "note": "progeny-boundary progeny-boundary-1 progeny-boundary-2 progeny-boundary-3",
+        });
+        let (content_type, bytes) = super::body(&value, &[]).ok_or_eyre("a form body")?;
+        let boundary = super::boundary_of(&content_type).ok_or_eyre("a declared boundary")?;
+        assert_eq!(boundary, "progeny-boundary-4");
+        let parsed = super::parse(&bytes, &boundary, &[])?;
+        assert!(parsed.get("note").is_some(), "{parsed:?}");
+    }
+
+    #[test_util::test]
+    fn an_upload_object_becomes_a_part_with_its_own_metadata() -> eyre::Result<()> {
+        let specs = [PartSpec {
+            name: "file",
+            kind: PartKind::File,
+            repeated: false,
+            content_type: None,
+        }];
+        // "raw \xFF bytes" — content no UTF-8 string could carry.
+        let encoded = "cmF3IP8gYnl0ZXM=";
+        let (_, bytes) = super::body(
+            &json!({"file": {"bytes": encoded, "filename": "report.pdf", "content_type": "application/pdf"}}),
+            &specs,
+        )
+        .ok_or_eyre("test fixture should contain this value")?;
+        let rendered = String::from_utf8_lossy(&bytes);
+        assert!(
+            rendered.contains("name=\"file\"; filename=\"report.pdf\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Content-Type: application/pdf"),
+            "{rendered}"
+        );
+        let raw = b"raw \xFF bytes";
+        assert!(
+            bytes.windows(raw.len()).any(|window| window == raw),
+            "the part body is the decoded bytes, not the base64 text"
+        );
+        Ok(())
+    }
+
+    #[test_util::test]
+    fn a_file_part_from_a_foreign_body_keeps_its_bytes_and_metadata() -> eyre::Result<()> {
+        // A body some other client wrote: the reader owes the handler the real bytes and the
+        // metadata the wire carried, without inventing what the wire omitted.
+        let specs = [PartSpec {
+            name: "file",
+            kind: PartKind::File,
+            repeated: false,
+            content_type: None,
+        }];
+        let body =
+            b"--b\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\ncontent\r\n--b--\r\n";
+        assert_eq!(
+            super::parse(body, "b", &specs)?,
+            json!({"file": {"bytes": "Y29udGVudA=="}})
+        );
+        Ok(())
     }
 
     #[test_util::test]

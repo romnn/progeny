@@ -312,14 +312,20 @@ async fn raw_serving() -> eyre::Result<client::Client> {
 #[test_util::test]
 async fn a_query_parameter_survives_the_round_trip() {
     let (double, client) = serving().await?;
-    let pets = client.list_pets().limit(3i64).send().await?;
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: Some(3) })
+        .send()
+        .await?;
     assert_eq!(double.seen().limit, Some(3));
     assert_eq!(pets.into_value()[0].name, "Rex");
 
     // And an unset optional parameter arrives unset, rather than as a default the caller never
-    // chose — the same rule the client's builder and the server's extractor have to agree on.
+    // chose — the same rule the client's params and the server's extractor have to agree on.
     let (double, client) = serving().await?;
-    let _ = client.list_pets().send().await?;
+    let _ = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await?;
     assert_eq!(double.seen().limit, None);
 }
 
@@ -327,8 +333,9 @@ async fn a_query_parameter_survives_the_round_trip() {
 async fn a_path_parameter_survives_the_round_trip() {
     let (double, client) = serving().await?;
     let pet = client
-        .show_pet_by_id()
-        .pet_id("a pet/with slashes")
+        .show_pet_by_id(client::ShowPetByIdParams {
+            pet_id: "a pet/with slashes".to_owned(),
+        })
         .send()
         .await?;
     // Percent-encoded on the way out and decoded on the way in, which is the pair of rules a
@@ -350,12 +357,13 @@ async fn every_parameter_location_arrives_at_once() {
     };
     let expected = (sent.id, sent.name.clone());
     client
-        .rejection_probe()
-        .id(9i64)
-        .limit(11i64)
-        .x_mode("strict")
-        .session(1234i64)
-        .body(sent)
+        .rejection_probe(client::RejectionProbeParams {
+            id: 9,
+            limit: 11,
+            x_mode: "strict".to_owned(),
+            session: 1234,
+            body: sent,
+        })
         .send()
         .await?;
     let seen = double.seen();
@@ -372,12 +380,13 @@ async fn a_multipart_body_survives_the_round_trip() {
     // both ends actually run.
     let (double, client) = serving().await?;
     let reply = client
-        .upload_pet_photo()
-        .pet_id(5i64)
-        .body(types::UploadPetPhotoBody {
-            file: "not really a png".to_owned(),
-            note: Some("a note".to_owned()),
-            rating: Some(4),
+        .upload_pet_photo(client::UploadPetPhotoParams {
+            pet_id: 5,
+            body: types::UploadPetPhotoBody {
+                file: "not really a png".to_owned(),
+                note: Some("a note".to_owned()),
+                rating: Some(4),
+            },
         })
         .send()
         .await?;
@@ -393,8 +402,9 @@ async fn a_declared_error_status_arrives_as_the_typed_error_it_was_sent_as() {
     // the assertion that they agree about which arm a status lands in.
     let (_, client) = serving().await?;
     let error = client
-        .typed_errors()
-        .kind("conflict")
+        .typed_errors(client::TypedErrorsParams {
+            kind: "conflict".to_owned(),
+        })
         .send()
         .await
         .err()
@@ -405,8 +415,9 @@ async fn a_declared_error_status_arrives_as_the_typed_error_it_was_sent_as() {
 
     let (_, client) = serving().await?;
     client
-        .typed_errors()
-        .kind("neither")
+        .typed_errors(client::TypedErrorsParams {
+            kind: "neither".to_owned(),
+        })
         .send()
         .await?;
 }
@@ -453,8 +464,8 @@ async fn the_server_writes_declared_non_json_bodies_and_content_types() {
 #[test_util::test]
 async fn a_request_the_description_does_not_describe_is_rejected_in_one_place() {
     // Not sent through the generated client, because the generated client cannot build a request
-    // this wrong — which is the point of the builder. The rejection envelope exists for every
-    // *other* client, and this is what it answers with.
+    // this wrong — which is the point of the params struct. The rejection envelope exists for
+    // every *other* client, and this is what it answers with.
     let (_, client) = serving().await?;
     let raw = reqwest::Client::new();
     let response = raw

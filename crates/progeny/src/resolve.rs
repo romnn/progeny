@@ -19,7 +19,9 @@
 //! general machinery for it would be exactly the speculative generality this project deletes —
 //! but each is *held* losslessly and behaves predictably, which is what keeps the choice reversible.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::Value;
 
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{
@@ -41,7 +43,19 @@ pub(crate) struct ResolvedDocument {
     targets: BTreeMap<SchemaId, SchemaId>,
     /// Each document-level reference string, mapped to the component name it ends up naming after
     /// any chain of references is followed.
-    component_targets: BTreeMap<String, String>,
+    component_targets: BTreeMap<(Section, String), String>,
+    /// The schemas parsed out of positions the document walk did not read, and the names the
+    /// positions gave them. Kept so the shape layer can name them the way it names any other
+    /// entry in a section of `components`, rather than after the pointer that reached them.
+    materialized: Vec<(SchemaId, String)>,
+    /// Every `discriminator` mapping value in the document, exactly as written, mapped to the
+    /// schema it names.
+    ///
+    /// Resolved here rather than by the shape layer for the reason every other reference is: one
+    /// phase turns strings into addresses, and a mapping value is a reference wearing a different
+    /// member name. Keyed by the written string, so the two spellings OpenAPI allows — a `$ref`
+    /// and a bare component name — each find their own way to the same schema.
+    discriminator_targets: BTreeMap<String, SchemaId>,
     #[cfg(any(feature = "harness", test))]
     counts: Counts,
 }
@@ -95,14 +109,32 @@ impl ResolvedDocument {
         self.targets.get(&id).copied()
     }
 
+    /// The schemas read out of positions the document walk did not interpret, with the name each
+    /// position gave.
+    pub(crate) fn materialized(&self) -> &[(SchemaId, String)] {
+        &self.materialized
+    }
+
+    /// The schema a `discriminator` mapping value names, if it names one.
+    pub(crate) fn discriminator_target(&self, written: &str) -> Option<SchemaId> {
+        self.discriminator_targets.get(written).copied()
+    }
+
     #[cfg(any(feature = "harness", test))]
     pub(crate) fn counts(&self) -> Counts {
         self.counts
     }
 
-    /// The component name a document-level reference ends up naming.
-    fn component_target(&self, node: &Reference) -> Option<&String> {
-        self.component_targets.get(node.target.as_deref()?)
+    /// The component name a document-level reference ends up naming, in the section the
+    /// reader belongs to.
+    ///
+    /// Keyed by section as well as by the written string: `#/components/parameters/Trace`
+    /// used from a parameter position and from a response-header position are two different
+    /// questions, and answering the second with the first's registration would silently read
+    /// a same-named entry out of the wrong section.
+    fn component_target(&self, node: &Reference, section: Section) -> Option<&String> {
+        self.component_targets
+            .get(&(section, node.target.as_deref()?.to_owned()))
     }
 }
 
@@ -113,13 +145,13 @@ impl ResolvedDocument {
 /// be handed the section by the caller — which is the mistake: the caller knowing which section a
 /// `MaybeRef<Response>` lives in is how a reference to the wrong section becomes invisible.
 macro_rules! component_reader {
-    ($name:ident, $ty:ty, $section:ident) => {
+    ($name:ident, $ty:ty, $section:ident, $variant:ident) => {
         impl ResolvedDocument {
             pub(crate) fn $name<'a>(&'a self, node: &'a MaybeRef<$ty>) -> Option<&'a $ty> {
                 match node {
                     MaybeRef::Item(item) => Some(item),
                     MaybeRef::Reference(reference) => {
-                        let name = self.component_target(reference)?;
+                        let name = self.component_target(reference, Section::$variant)?;
                         match self
                             .parsed
                             .document
@@ -142,14 +174,15 @@ macro_rules! component_reader {
     };
 }
 
-component_reader!(response, Response, responses);
-component_reader!(parameter, Parameter, parameters);
-component_reader!(header, Header, headers);
-component_reader!(request_body, RequestBody, request_bodies);
-component_reader!(path_item, PathItem, path_items);
+component_reader!(response, Response, responses, Responses);
+component_reader!(parameter, Parameter, parameters, Parameters);
+component_reader!(header, Header, headers, Headers);
+component_reader!(request_body, RequestBody, request_bodies, RequestBodies);
+component_reader!(path_item, PathItem, path_items, PathItems);
 
 /// Resolve every reference in the document.
-pub(crate) fn resolve(parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument {
+pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument {
+    let materialized = materialize(&mut parsed, ctx);
     let index = Index::build(&parsed.schemas);
     let mut counts = Counts::default();
     let mut targets = BTreeMap::new();
@@ -210,6 +243,8 @@ pub(crate) fn resolve(parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument
         }
     }
 
+    let discriminator_targets = discriminator_targets(&index, &parsed.schemas);
+
     let mut walk = Walk {
         components: parsed.document.components.as_ref(),
         targets: BTreeMap::new(),
@@ -233,8 +268,181 @@ pub(crate) fn resolve(parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument
         parsed,
         targets,
         component_targets,
+        materialized,
+        discriminator_targets,
         #[cfg(any(feature = "harness", test))]
         counts,
+    }
+}
+
+/// Resolve every `discriminator` mapping value the document writes.
+///
+/// A mapping value that names nothing is left out rather than reported here: what a broken mapping
+/// costs depends on whether the union it belongs to is carried by its tag at all, which only the
+/// shape layer knows.
+fn discriminator_targets(index: &Index, store: &SchemaStore) -> BTreeMap<String, SchemaId> {
+    let mut targets = BTreeMap::new();
+    for (_, schema) in store.iter() {
+        let Schema::Object(object) = schema else {
+            continue;
+        };
+        let Some(discriminator) = &object.discriminator else {
+            continue;
+        };
+        for written in discriminator.mapping.iter().flatten().map(|(_, to)| to) {
+            if targets.contains_key(written) {
+                continue;
+            }
+            // The two spellings OpenAPI allows: a `$ref`, and the bare name of a schema component.
+            let address = match written.strip_prefix('#') {
+                Some(pointer) => pointer.to_owned(),
+                None => format!("/components/schemas/{written}"),
+            };
+            if let Some(&id) = index.addresses.get(&address) {
+                targets.insert(written.clone(), id);
+            }
+        }
+    }
+    targets
+}
+
+/// How many rounds of materialization to run.
+///
+/// A materialized schema can reference another position nothing parsed, so one pass is not enough;
+/// each round can only reach positions the round before it made reachable, so a document with no
+/// such references stops after one. The bound is a backstop against a document whose uninterpreted
+/// positions chain further than any real one does.
+const MAX_MATERIALIZE_ROUNDS: usize = 8;
+
+/// Parse the schemas that `$ref`s prove are schemas, at positions the document walk did not read.
+///
+/// A JSON Pointer fragment addresses a *position*, and JSON Schema reads whatever is there as a
+/// schema. The document walk reads the positions OpenAPI defines and hands everything else to the
+/// nearest `extensions` map, so a reference into one of those resolved to nothing and its whole
+/// type was lost — `fincrm` keeps eight enums under `#/components/attributes/` and reaches them 13
+/// times, which is 13 properties typed as arbitrary JSON for a section name.
+///
+/// The reference is the evidence: the model holds the node either way, and something reading it as
+/// a schema is what says it is one. Nothing is materialized speculatively, so a document whose
+/// uninterpreted members are genuinely not schemas is untouched.
+fn materialize(parsed: &mut ParsedDocument, ctx: &mut Ctx) -> Vec<(SchemaId, String)> {
+    let mut materialized = Vec::new();
+    for _ in 0..MAX_MATERIALIZE_ROUNDS {
+        let known: BTreeSet<String> = parsed
+            .schemas
+            .iter()
+            .map(|(id, _)| parsed.schemas.address(id).to_string())
+            .collect();
+        // Keyed by address so a position referenced twice is parsed once, and so the order the
+        // positions are parsed in does not depend on the order the references were found in.
+        let mut wanted: BTreeMap<String, Vec<JsonPointer>> = BTreeMap::new();
+        for (id, schema) in parsed.schemas.iter() {
+            let Schema::Object(object) = schema else {
+                continue;
+            };
+            let Some(written) = object
+                .reference
+                .as_ref()
+                .or(object.dynamic_reference.as_ref())
+            else {
+                continue;
+            };
+            // Only a fragment-only reference: a base names another document, and this document's
+            // uninterpreted members are not it.
+            let (base, Some(fragment)) = split(written) else {
+                continue;
+            };
+            if !base.is_empty() || !fragment.starts_with('/') {
+                continue;
+            }
+            let Some(pointer) = JsonPointer::parse(fragment) else {
+                continue;
+            };
+            if known.contains(&pointer.to_string()) {
+                continue;
+            }
+            if !holds_schema(&parsed.document, pointer.tokens()) {
+                continue;
+            }
+            wanted
+                .entry(pointer.to_string())
+                .or_default()
+                .push(parsed.schemas.address(id).child("$ref"));
+        }
+        if wanted.is_empty() {
+            return materialized;
+        }
+        for address in wanted.keys() {
+            let Some(pointer) = JsonPointer::parse(address) else {
+                continue;
+            };
+            let Some(mut value) = uninterpreted(&parsed.document, pointer.tokens()).cloned() else {
+                continue;
+            };
+            // The dialect rewrite the positional walk could not reach, now that the reference has
+            // said this node is a schema.
+            crate::normalize::schema_at(&mut value, parsed.dialect_30, pointer.clone(), ctx);
+            let parsed_id = at_pointer(ctx, pointer.tokens(), |ctx| {
+                crate::schema::parse::schema(value, &mut parsed.schemas, ctx).ok()
+            });
+            // The position's own last segment, which is the name the document gave it — the same
+            // rule `components.schemas` follows, applied to a section OpenAPI does not define.
+            if let (Some(id), Some(name)) = (parsed_id, pointer.tokens().last()) {
+                materialized.push((id, name.clone()));
+            }
+        }
+        for sites in wanted.into_values() {
+            for site in sites {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::DanglingRef,
+                    Action::Repair,
+                    site,
+                    "`$ref` addresses a position no part of an OpenAPI document is defined at, so \
+                     nothing parsed it; the document holds a schema there, and a reference to it \
+                     is what says it is one, so it was read as a schema",
+                ));
+            }
+        }
+    }
+    materialized
+}
+
+/// Whether the document holds something a schema could be read out of at `tokens`.
+fn holds_schema(document: &Document, tokens: &[String]) -> bool {
+    matches!(
+        uninterpreted(document, tokens),
+        Some(Value::Object(_) | Value::Bool(_))
+    )
+}
+
+/// The node at `tokens`, when it lies inside a member the document walk did not interpret.
+///
+/// Two roots, because there are two `extensions` maps a pointer's first segments can land in: the
+/// document's own, and `components`'.
+fn uninterpreted<'a>(document: &'a Document, tokens: &[String]) -> Option<&'a Value> {
+    let (mut node, rest) = match tokens {
+        [] => return None,
+        [first, second, rest @ ..] if first == "components" => {
+            (document.components.as_ref()?.extensions.get(second)?, rest)
+        }
+        [first, rest @ ..] => (document.extensions.get(first)?, rest),
+    };
+    for token in rest {
+        node = match node {
+            Value::Object(map) => map.get(token)?,
+            Value::Array(items) => items.get(token.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(node)
+}
+
+/// Run `f` with the diagnostic context positioned at `tokens`, which is the address the schema
+/// store records for whatever the callee parses.
+fn at_pointer<T>(ctx: &mut Ctx, tokens: &[String], f: impl FnOnce(&mut Ctx) -> T) -> T {
+    match tokens.split_first() {
+        None => f(ctx),
+        Some((head, rest)) => ctx.scoped(head, |ctx| at_pointer(ctx, rest, f)),
     }
 }
 
@@ -468,13 +676,13 @@ fn join(base: &JsonPointer, relative: &JsonPointer) -> JsonPointer {
 /// The document walk that finds every reference to a component.
 struct Walk<'a> {
     components: Option<&'a Components>,
-    targets: BTreeMap<String, String>,
+    targets: BTreeMap<(Section, String), String>,
     ctx: &'a mut Ctx,
     counts: &'a mut Counts,
 }
 
 /// The sections of `components` a document-level reference can address.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Section {
     Responses,
     Parameters,
@@ -523,11 +731,11 @@ impl Walk<'_> {
         let Some(written) = node.target.as_deref() else {
             return;
         };
-        if self.targets.contains_key(written) {
+        if self.targets.contains_key(&(section, written.to_owned())) {
             return;
         }
         if let Some(name) = self.chase(written, section) {
-            self.targets.insert(written.to_owned(), name);
+            self.targets.insert((section, written.to_owned()), name);
         } else {
             {
                 self.counts.dangling_components += 1;
@@ -788,7 +996,7 @@ mod tests {
     use crate::diag::{Action, BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
     use crate::normalize;
-    use crate::schema::Schema;
+    use crate::schema::{Schema, TypeName};
 
     fn resolve_document(document: Value) -> eyre::Result<(ResolvedDocument, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
@@ -831,6 +1039,109 @@ mod tests {
             .and_then(|schemas| schemas.get(name))
             .copied()
             .ok_or_eyre("test fixture should contain the named schema")
+    }
+
+    #[test_util::test]
+    fn a_pointer_into_a_section_openapi_does_not_define_reads_the_node_as_a_schema() {
+        let (resolved, diagnostics) = resolve_document(json!({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {
+                "attributes": {"tone": {"type": "string", "enum": ["warm", "cool"]}},
+                "schemas": {
+                    "Paint": {
+                        "type": "object",
+                        "properties": {"tone": {"$ref": "#/components/attributes/tone"}},
+                    },
+                },
+            },
+        }))?;
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].class(), BreakageClass::DanglingRef);
+        assert_eq!(diagnostics[0].action(), Action::Repair);
+        assert_eq!(resolved.counts().dangling, 0);
+        assert_eq!(resolved.counts().resolved, 1);
+        // The position keeps its own name, so the generated type is `Tone` rather than one named
+        // after the pointer that reached it.
+        assert_eq!(
+            resolved
+                .materialized()
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["tone"]
+        );
+
+        let tone = match schema_named(&resolved, "Paint")? {
+            Schema::Object(object) => object
+                .properties
+                .as_ref()
+                .ok_or_eyre("test fixture should contain this value")?["tone"],
+            Schema::Bool(_) => panic!("expected an object schema"),
+        };
+        let target = resolved
+            .follow(tone)
+            .ok_or_eyre("the reference should resolve to the materialized schema")?;
+        match resolved.schema(target) {
+            Schema::Object(object) => assert_eq!(
+                object.enumeration.as_deref(),
+                Some(&[json!("warm"), json!("cool")][..])
+            ),
+            Schema::Bool(_) => panic!("expected an object schema"),
+        }
+    }
+
+    #[test_util::test]
+    fn a_pointer_at_a_node_that_is_not_a_schema_stays_dangling() {
+        let (resolved, diagnostics) = resolve_document(json!({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {
+                "attributes": {"tone": "warm"},
+                "schemas": {
+                    "Paint": {
+                        "type": "object",
+                        "properties": {"tone": {"$ref": "#/components/attributes/tone"}},
+                    },
+                },
+            },
+        }))?;
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].class(), BreakageClass::DanglingRef);
+        assert_eq!(diagnostics[0].action(), Action::Degrade);
+        assert_eq!(resolved.counts().dangling, 1);
+        assert!(resolved.materialized().is_empty());
+    }
+
+    #[test_util::test]
+    fn a_materialized_schema_is_normalized_for_the_dialect_the_document_declares() {
+        let (resolved, _) = resolve_document(json!({
+            "openapi": "3.0.3",
+            "paths": {},
+            "components": {
+                "attributes": {"tone": {"type": "string", "nullable": true}},
+                "schemas": {
+                    "Paint": {
+                        "type": "object",
+                        "properties": {"tone": {"$ref": "#/components/attributes/tone"}},
+                    },
+                },
+            },
+        }))?;
+        let (id, _) = resolved
+            .materialized()
+            .first()
+            .ok_or_eyre("the reference should have materialized a schema")?;
+        match resolved.schema(*id) {
+            Schema::Object(object) => assert_eq!(
+                object
+                    .types
+                    .as_ref()
+                    .map(|types| types.iter().cloned().collect::<Vec<_>>()),
+                Some(vec![TypeName::String, TypeName::Null])
+            ),
+            Schema::Bool(_) => panic!("expected an object schema"),
+        }
     }
 
     #[test_util::test]
@@ -1056,6 +1367,42 @@ mod tests {
         assert_eq!(resolved.counts().dangling_components, 1);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].detail().contains("#/components/responses"));
+    }
+
+    #[test_util::test]
+    fn one_reference_string_used_from_two_sections_is_two_questions() {
+        // The same `$ref` string, read as a parameter (legal) and as a response header (a
+        // different section). Registering the string once, unkeyed by section, suppressed the
+        // header side's dangling diagnostic — and with a same-named entry under
+        // `components.headers` the header read silently answered with the *wrong section's*
+        // node.
+        let (resolved, diagnostics) = resolve_document(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/a": {"get": {
+                    "parameters": [{"$ref": "#/components/parameters/Trace"}],
+                    "responses": {"200": {
+                        "description": "ok",
+                        "headers": {"X": {"$ref": "#/components/parameters/Trace"}},
+                    }},
+                }},
+            },
+            "components": {
+                "parameters": {
+                    "Trace": {"name": "trace", "in": "query", "schema": {"type": "string"}},
+                },
+                "headers": {
+                    "Trace": {"schema": {"type": "integer"}},
+                },
+            },
+        }))?;
+        assert_eq!(resolved.counts().dangling_components, 1);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.detail().contains("#/components/headers")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test_util::test]

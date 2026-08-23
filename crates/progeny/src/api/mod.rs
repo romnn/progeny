@@ -95,6 +95,13 @@ pub(crate) struct OperationContract {
     /// two of them apart. Carried as a type only the classifier constructs, so an unregistrable
     /// route cannot reach the server renderer at all.
     pub(crate) registrable: Option<RegistrableRoute>,
+    /// Whether this method sends one of the further media types its request body position
+    /// declares, rather than the primary.
+    ///
+    /// A variant is a client method only: it shares its route and method with the primary, and a
+    /// router that registered both would be registering one route twice. The generated server
+    /// accepts the primary's media type, which the `multi-media-type` diagnostic states.
+    pub(crate) body_variant: bool,
     /// How this operation paginates, when the configuration declared it and the document supported
     /// the declaration. Never detected — see [`pagination`].
     pub(crate) pagination: Option<PaginationContract>,
@@ -142,6 +149,11 @@ pub(crate) enum BodyContract {
     Json {
         ty: TypeRef,
         required: bool,
+        /// The declared media type, exactly as the document spells it. `application/json` for
+        /// most positions — but a `+json` structured-syntax type (`application/vnd.api+json`,
+        /// a versioned vendor type) is the position's actual wire contract, and the client
+        /// sends the declared spelling rather than the family default.
+        content_type: String,
     },
     /// `application/x-www-form-urlencoded`: the same typed value as a JSON body, encoded with the
     /// form style row instead of as JSON. 109 bodies across 11 corpus documents, 103 of them an
@@ -247,6 +259,13 @@ pub(crate) struct ResponseContract {
     pub(crate) arms: Vec<ResponseArm>,
     /// The `default` arm, which catches what no other arm claims.
     pub(crate) default: Option<ResponseArm>,
+    /// Media types [`Config::media_types`](crate::config::Config::media_types) chose at this
+    /// operation's response positions, deduplicated in arm order.
+    ///
+    /// The response media type is the server's choice, and configuring one is only a statement
+    /// about what the client will decode — unless the request says so too. These become the
+    /// `Accept` header, so the server the configuration argues with actually hears the argument.
+    pub(crate) accept: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,9 +284,18 @@ pub(crate) struct ResponseArm {
 /// the representation directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseBody {
-    Json(TypeRef),
-    Text { content_type: String },
-    Bytes { content_type: String },
+    Json {
+        ty: TypeRef,
+        /// The exact declared spelling — `application/problem+json`, a vendor type — which is
+        /// what the generated server writes; `application/json` is only the common case.
+        content_type: String,
+    },
+    Text {
+        content_type: String,
+    },
+    Bytes {
+        content_type: String,
+    },
     Empty,
 }
 
@@ -275,7 +303,7 @@ impl ResponseBody {
     /// The schema-derived type reached by this response, when the response is JSON.
     pub(crate) fn json_type(&self) -> Option<&TypeRef> {
         match self {
-            Self::Json(ty) => Some(ty),
+            Self::Json { ty, .. } => Some(ty),
             Self::Text { .. } | Self::Bytes { .. } | Self::Empty => None,
         }
     }
@@ -320,7 +348,7 @@ pub(crate) fn build(
     config: &Config,
     ctx: &mut Ctx,
 ) -> Result<ApiModel, crate::diag::RejectError> {
-    let mut model = operation::run(resolved, contracts, config, ctx);
+    let mut model = operation::run(resolved, contracts, config, ctx)?;
     model.servers = servers(resolved);
     // After the operations exist and before anything renders: a declaration that the document
     // cannot support has to stop generation rather than produce a method that cannot work.
@@ -358,14 +386,21 @@ pub(crate) mod tests {
 
     /// Build the API model for a document, keeping what was said about it.
     pub(crate) fn model_of(document: Value) -> eyre::Result<(ApiModel, Vec<Diagnostic>)> {
-        let config = Config::default();
+        model_with(document, &Config::default())
+    }
+
+    /// The same, under a caller-supplied configuration.
+    pub(crate) fn model_with(
+        document: Value,
+        config: &Config,
+    ) -> eyre::Result<(ApiModel, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
-        let model = build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
+        let model = build(&resolved, &shapes, &contracts, config, &mut ctx)?;
         Ok((model, ctx.into_diagnostics()))
     }
 

@@ -70,12 +70,40 @@ pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
     let mut router = matchit::Router::new();
     let mut templates: BTreeSet<String> = BTreeSet::new();
     for operation in operations {
+        // A body variant is its primary's route under another media type; the primary carries the
+        // registration, and giving the variant one too would register the same route twice.
+        if operation.body_variant {
+            continue;
+        }
         let path = operation.path.to_string();
         if templates.contains(&path) {
             operation.registrable = Some(RegistrableRoute {
                 path,
                 method: operation.method,
             });
+            continue;
+        }
+        // axum validates on top of matchit before inserting: `Router::route` panics at startup
+        // for any segment starting with `:` or `*` — the 0.7 capture spellings, common in
+        // documents converted from Express-style routing — while matchit itself accepts both
+        // as literals. Asked-not-modelled cannot reach that check (axum is a dev-dependency
+        // here on purpose), so its two rules are replicated; the dev-dependency parity test
+        // exercises the real `Router::route` against both spellings to keep the copy honest.
+        let v07_spelling = path
+            .split('/')
+            .any(|segment| segment.starts_with(':') || segment.starts_with('*'));
+        if v07_spelling {
+            ctx.report(Diagnostic::new(
+                BreakageClass::UnregistrableRoute,
+                Action::Degrade,
+                operation.origin.clone(),
+                format!(
+                    "`{} {path}` has a segment starting with `:` or `*`, which axum refuses at \
+                     startup (its 0.7 capture spellings); the generated server omits this \
+                     operation and the client keeps it",
+                    operation.method.slug().to_uppercase()
+                ),
+            ));
             continue;
         }
         match router.insert(&path, path.clone()) {
@@ -150,6 +178,7 @@ mod tests {
 
     fn operation(method: Method, template: &str) -> eyre::Result<OperationContract> {
         Ok(OperationContract {
+            body_variant: false,
             rust_name: RustIdent::method(&[template.to_owned()]),
             method,
             path: route::parse(template)?,
@@ -158,6 +187,7 @@ mod tests {
             responses: ResponseContract {
                 arms: Vec::new(),
                 default: None,
+                accept: Vec::new(),
             },
             docs: Docs::default(),
             registrable: None,
@@ -286,6 +316,46 @@ mod tests {
     /// being guarded against would have passed. Counting lockfile entries delegates compatibility
     /// to cargo itself: it unifies versions within one compatible range, so a second `matchit`
     /// entry appears exactly when progeny and axum stop sharing one router.
+    #[test_util::test]
+    fn a_v07_capture_spelling_is_degraded_not_a_startup_panic() {
+        // `/repos/:owner` and `/files/*path` — what a Swagger/Express conversion writes.
+        // matchit takes both as literals, so the bare-router question misses them, and the
+        // panic would land at the consumer's server startup.
+        let (model, diagnostics) =
+            crate::api::tests::model_of(crate::api::tests::with_paths(serde_json::json!({
+                "/repos/:owner": {"get": {
+                    "operationId": "byOwner",
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/plain": {"get": {
+                    "operationId": "plain",
+                    "responses": {"204": {"description": "done"}},
+                }},
+            })))?;
+        let registrable: Vec<&str> = model
+            .operations()
+            .iter()
+            .filter(|operation| operation.registrable.is_some())
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        assert_eq!(registrable, ["plain"], "{registrable:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.detail().contains("axum refuses at startup")),
+            "{diagnostics:?}"
+        );
+        // The replicated rule stays honest against the real router: axum's own `route` panics
+        // for exactly these spellings.
+        for path in ["/repos/:owner", "/files/*path"] {
+            let refused = std::panic::catch_unwind(|| {
+                let _: axum::Router<()> =
+                    axum::Router::new().route(path, axum::routing::get(|| async {}));
+            });
+            assert!(refused.is_err(), "axum now accepts `{path}`");
+        }
+    }
+
     #[test_util::test]
     fn the_router_progeny_asks_is_the_router_axum_uses() {
         let _: axum::Router<()> = axum::Router::new();

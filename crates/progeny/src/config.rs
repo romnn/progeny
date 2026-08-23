@@ -49,6 +49,22 @@ pub struct Config {
     /// other, even when they are structurally identical.
     #[serde(default)]
     pub names: BTreeMap<String, String>,
+    /// Which media type wins at a content position that declares several, keyed by the
+    /// position's JSON Pointer — the same pointer the `multi-media-type` diagnostic prints, e.g.
+    /// `/paths/~1dokumente/post/requestBody/content`.
+    ///
+    /// The two halves of a position differ. At a **request body**, every declared media type is
+    /// generated as its own client method; the entry picks the *primary* — the method that keeps
+    /// the operation's bare name, and the only media type the generated server accepts — while
+    /// the other declared types keep their suffixed siblings (`_json`, `_multipart`, …). At a
+    /// **response**, the media type is the server's choice: the entry picks the single type the
+    /// client decodes, and the request carries it as an `Accept` header so the server hears the
+    /// preference; the types not decoded are reported. Without an entry, either position gets
+    /// the fixed preference order (JSON first). Like [`Config::type_derives`], a request that
+    /// cannot be honoured — a pointer where the document declares no content, or a media type
+    /// the position does not declare — is an error rather than a note.
+    #[serde(default)]
+    pub media_types: BTreeMap<String, String>,
     /// Which `Deserialize`/`Serialize` implementation strategy to use.
     #[serde(default)]
     pub serde_impl: SerdeImpl,
@@ -317,6 +333,73 @@ pub enum Packaging {
     Workspace,
     /// One file to `include!` from a build script or to check in.
     Module,
+}
+
+impl Package {
+    /// Why this package cannot be rendered, when it cannot be.
+    ///
+    /// Rendering assumes both fields are well-formed: the name reaches `format_ident!`, which
+    /// panics on anything that is not a legal identifier once `-` becomes `_`, and the version
+    /// is written into a manifest cargo has to parse. Both are caller strings, so the check
+    /// runs before any of that — a panic in generated-code assembly is never the right way to
+    /// hear about a typo in a config file.
+    pub(crate) fn validity(&self) -> Result<(), String> {
+        let name_shape = !self.name.is_empty()
+            && self
+                .name
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && self.name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            });
+        // The identifier check catches what the shape check cannot: a keyword. `match` is a
+        // shape-legal crate name whose module spelling does not parse.
+        let as_identifier = self.name.replace('-', "_");
+        if !name_shape || syn::parse_str::<syn::Ident>(&as_identifier).is_err() {
+            return Err(format!(
+                "the configured package name `{}` is not a name cargo and rustc both accept; \
+                 use ASCII letters, digits, `-` and `_`, starting with a letter, and avoid \
+                 keywords",
+                self.name
+            ));
+        }
+        if !semver_shaped(&self.version) {
+            return Err(format!(
+                "the configured package version `{}` is not a semantic version cargo accepts; \
+                 use `MAJOR.MINOR.PATCH` with optional `-prerelease` and `+build` parts",
+                self.version
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Whether a version string has semver's shape: three numeric components, then optional
+/// `-prerelease` and `+build` parts from semver's character set.
+fn semver_shaped(version: &str) -> bool {
+    let (rest, build) = match version.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (version, None),
+    };
+    let (core, prerelease) = match rest.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (rest, None),
+    };
+    let numbers = core.split('.').collect::<Vec<_>>();
+    if numbers.len() != 3
+        || numbers
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    [prerelease, build].into_iter().flatten().all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+    })
 }
 
 /// What to call the emitted crate.

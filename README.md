@@ -23,8 +23,12 @@ Under construction. What exists today:
 - **The types renderer**, emitting a complete crate, one module to `include!`, or an opt-in
   three-crate types/client/server workspace, with hand-written serde implementations by default or
   the derive on request.
-- **The client renderer.** One method per operation, with the URL, query string, headers and cookies
-  built from the description's own parameter styles, and a typed response per declared status.
+- **The client renderer.** A params struct and one method per operation — plus one per further
+  request media type the position declares (`_json`, `_multipart`, …) — with the URL, query string,
+  headers and cookies built from the description's own parameter styles, and a typed response per
+  declared status. A required input is a plain field and an optional one an `Option`, so a missing
+  or upstream-added input is a compile error at the call site rather than anything at runtime; a
+  header the description does not declare rides one request through `.header(...)`.
 - **The server renderer.** An `Api` trait to implement, an `axum` router, and a rejection envelope —
   emitting a handler only for routes a router will actually accept, which is asked of `matchit`
   rather than guessed from the template's shape.
@@ -79,8 +83,8 @@ The generated client has no callback or hook system. Supply a preconfigured `req
 transport-wide authentication, retry, and tracing behavior. The trade-off is explicit: generic
 HTTP middleware does not automatically know progeny's operation name, so it cannot attach that
 identity to each trace. Applications that need it can wrap the generated `Client` in an
-application-owned type whose operation-named methods create spans before calling the generated
-builders.
+application-owned type whose operation-named methods create spans before sending the generated
+requests. A single undeclared header rides an individual request through its `.header(...)`.
 
 ## Packaging large APIs
 
@@ -102,6 +106,21 @@ hand-written crates take 61% more wall time than one crate, while cutting the wo
 44–63% on every non-trivial document. Cloudflare moves from 8.82 to 3.70 GiB (−58%). Choose
 Workspace when peak memory or a types-only dependency boundary matters; keep the default crate when
 one artifact and the shortest clean build matter more.
+
+## Choosing among several media types
+
+A content position that declares more than one media type keeps them all on the calling side —
+every declared request media type is its own client method — and the `media-types` table picks
+which one is primary, keyed by the pointer the `multi-media-type` diagnostic prints:
+
+```toml
+[media-types]
+"/paths/~1dokumente/post/requestBody/content" = "multipart/form-data"
+```
+
+At a request body the pick keeps the operation's bare name and is the one media type the generated
+server accepts. At a response it picks the single type the client decodes, and the request carries
+it as an `Accept` header. An entry the document cannot honour is an error, not a note.
 
 ## Streams over paginated listings
 

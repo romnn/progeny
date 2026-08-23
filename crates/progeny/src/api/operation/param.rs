@@ -39,30 +39,30 @@ impl Build<'_> {
         }
 
         let mut used = Namer::default();
-        // The builder interface reserves these, so a parameter that wants one has to take a
-        // suffix. `client` and `body` are fields of every builder and `new`/`send` are its methods;
-        // `jellyfin` declares a query parameter called `client`, and without this the generated
-        // struct declares the field twice and does not compile. Reserved here rather than in the
-        // renderer because which names the interface occupies is a fact about the interface, and a
-        // renderer that renamed a parameter would be a renderer making a decision.
-        for reserved in ["client", "body", "new", "send"] {
-            let _ = used.unique(RustIdent::field(reserved));
-        }
+        // The params struct reserves this: `body` is the field the request body lives in, and a
+        // parameter with the same name would declare the field twice. The other interface names —
+        // `client`, `params`, `headers`, and the request's methods — live on the request struct,
+        // which holds no parameter fields, so parameters keep those names freely. Reserved here
+        // rather than in the renderer because which names the interface occupies is a fact about
+        // the interface, and a renderer that renamed a parameter would be a renderer making a
+        // decision.
+        let _ = used.unique(RustIdent::field("body"));
         let mut params = Vec::new();
         for ((name, _), parameter) in merged {
-            let required = parameter.required.unwrap_or(false);
+            // A path parameter is required whatever the document says — the URL has a hole in it
+            // either way — so the record carries the flag OpenAPI obliges the document to write,
+            // and both halves of the interface treat the parameter as the URL does.
+            let required = parameter.required.unwrap_or(false)
+                || parameter.location.as_deref() == Some("path");
             let (ty, shape) = self.param_type(parameter);
             let style = match style::classify(parameter, shape) {
                 Ok(style) => style,
                 Err(undefined) => {
-                    // A path parameter is required whatever the document says: the URL has a hole
-                    // in it either way.
-                    let load_bearing = required || parameter.location.as_deref() == Some("path");
                     ctx.report(Diagnostic::new(
                         BreakageClass::QuerySerializationStyle,
                         Action::Degrade,
                         at.child("parameters").child(name.clone()),
-                        if load_bearing {
+                        if required {
                             format!(
                                 "{}; the parameter is required, so the operation is skipped rather \
                                  than called without it",
@@ -76,7 +76,7 @@ impl Build<'_> {
                             )
                         },
                     ));
-                    if load_bearing {
+                    if required {
                         return None;
                     }
                     continue;
@@ -164,7 +164,8 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
     match ty {
         TypeRef::Option(inner) | TypeRef::Boxed(inner) => param_shape(inner, contracts),
         TypeRef::Vec(_) | TypeRef::Array(..) | TypeRef::Tuple(_) => ParamShape::Array,
-        TypeRef::Map(_) => ParamShape::Object,
+        // Serialized as an object; it only ever sits in a multipart body, never a parameter.
+        TypeRef::Map(_) | TypeRef::Upload => ParamShape::Object,
         TypeRef::Named(index) => match contracts
             .get(*index)
             .map(crate::contract::TypeContract::kind)
@@ -182,7 +183,8 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
             Some(
                 ContractKind::StringEnum { .. }
                 | ContractKind::Enum { .. }
-                | ContractKind::TaggedEnum { .. },
+                | ContractKind::TaggedEnum { .. }
+                | ContractKind::CarriedTagEnum { .. },
             )
             | None => ParamShape::Primitive,
         },
@@ -199,13 +201,14 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre;
+    use color_eyre::eyre::{self, OptionExt as _};
 
     use serde_json::json;
 
     use crate::api::Location;
     use crate::api::tests::{model_of, with_paths};
     use crate::contract::TypeRef;
+    use crate::diag::Action;
 
     #[test_util::test]
     fn an_optional_parameter_with_no_defined_serialization_is_dropped_and_the_operation_stays() {
@@ -285,10 +288,11 @@ mod tests {
     }
 
     #[test_util::test]
-    fn a_parameter_that_wants_a_name_the_builder_uses_takes_a_suffix() {
-        // `jellyfin` declares a query parameter called `client`. Every builder has a `client`
-        // field, so without a rename the generated struct declares it twice and does not compile —
-        // which the tier compile gate is exactly what found.
+    fn a_parameter_that_wants_a_name_the_params_struct_uses_takes_a_suffix() {
+        // The params struct holds the request body in a field called `body`, so a parameter with
+        // that name would declare the field twice and not compile. `client` is no such name: it
+        // lives on the request struct, which holds no parameter fields — `jellyfin` declares a
+        // query parameter called `client` and keeps it.
         let (model, _) = model_of(with_paths(json!({
             "/sessions": {
                 "get": {
@@ -307,7 +311,47 @@ mod tests {
             .map(|param| (param.wire_name.as_str(), param.rust_name.as_str()))
             .collect();
         // The wire names are untouched; only the Rust side moves, which is the rule everywhere.
-        assert_eq!(names, [("body", "body2"), ("client", "client2")]);
+        assert_eq!(names, [("body", "body2"), ("client", "client")]);
+    }
+
+    #[test_util::test]
+    fn a_path_parameter_the_template_never_names_is_left_out() {
+        // Declared `in: path` with no matching template variable: the client has nowhere to
+        // write it and the extractor nothing to read, so transcribing it — required, per the
+        // path rule — would demand a value nobody can send and reject every request server-side.
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "parameters": [{"name": "petId", "in": "path", "schema": {"type": "string"}}],
+                    "responses": {"200": {"description": "ok"}},
+                },
+            },
+        })))?;
+        assert!(model.operations()[0].params.is_empty());
+        let report = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.detail().contains("no variable of `/pets`"))
+            .ok_or_eyre("the drop is reported")?;
+        assert_eq!(report.action(), Action::Degrade);
+    }
+
+    #[test_util::test]
+    fn a_path_parameter_is_required_even_when_the_document_omits_the_flag() {
+        // OpenAPI obliges a path parameter to say `required: true`; a document that forgets still
+        // described a URL with a hole in it, and the record carries what the URL says.
+        let (model, _) = model_of(with_paths(json!({
+            "/pets/{petId}": {
+                "get": {
+                    "operationId": "showPetById",
+                    "parameters": [{"name": "petId", "in": "path", "schema": {"type": "string"}}],
+                    "responses": {"200": {"description": "ok"}},
+                },
+            },
+        })))?;
+        let param = &model.operations()[0].params[0];
+        assert_eq!(param.wire_name, "petId");
+        assert!(param.required);
     }
 
     #[test_util::test]

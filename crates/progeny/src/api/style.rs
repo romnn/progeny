@@ -97,6 +97,9 @@ pub(crate) struct StyleContract {
     style: Style,
     explode: bool,
     shape: ParamShape,
+    /// `allowReserved: true` — the value's RFC 3986 reserved characters go on the wire
+    /// unencoded. Defined by OpenAPI for query parameters only; false everywhere else.
+    allow_reserved: bool,
 }
 
 impl StyleContract {
@@ -125,8 +128,18 @@ impl StyleContract {
         )
     }
 
+    /// Whether the schema says this parameter is an object — like [`Self::array`], a fact the
+    /// wire alone cannot recover.
+    pub(crate) fn object(self) -> bool {
+        matches!(self.shape, ParamShape::Object)
+    }
+
     pub(crate) fn explode(self) -> bool {
         self.explode
+    }
+
+    pub(crate) fn allow_reserved(self) -> bool {
+        self.allow_reserved
     }
 }
 
@@ -197,6 +210,7 @@ pub(crate) fn classify(
         style,
         explode,
         shape,
+        allow_reserved: location == Location::Query && parameter.allow_reserved == Some(true),
     })
 }
 

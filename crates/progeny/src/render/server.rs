@@ -45,7 +45,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
     let items = servable
         .iter()
         .map(|(operation, _)| operation_items(operation, contracts, config));
-    let routes = router(&servable);
+    let routes = router(&servable, config);
 
     quote! {
         #![doc = " The serving side."]
@@ -273,8 +273,9 @@ fn response_enum(
             NoContent,
         }
     });
-    let empty_match = (arms.is_empty() && operation.responses.default.is_none())
-        .then(|| quote! { Self::NoContent => support::respond_json(204u16, &()), });
+    let empty_match = (arms.is_empty() && operation.responses.default.is_none()).then(
+        || quote! { Self::NoContent => support::respond_json(204u16, "application/json", &()), },
+    );
 
     quote! {
         #[doc = #doc]
@@ -299,8 +300,11 @@ fn response_enum(
 
 fn response(arm: &ResponseArm, status: &TokenStream, body: &TokenStream) -> TokenStream {
     match &arm.body {
-        ResponseBody::Json(_) | ResponseBody::Empty => {
-            quote! { support::respond_json(#status, &#body) }
+        ResponseBody::Json { content_type, .. } => {
+            quote! { support::respond_json(#status, #content_type, &#body) }
+        }
+        ResponseBody::Empty => {
+            quote! { support::respond_json(#status, "application/json", &#body) }
         }
         ResponseBody::Text { content_type } => {
             quote! { support::respond_text(#status, #content_type, *#body) }
@@ -326,7 +330,7 @@ fn status_code(status: StatusPattern) -> u16 {
 /// Registers exactly the routes the classifier accepted, which is why the `axum`-panics-at-startup
 /// failure mode is unreachable rather than unlikely: a route the router would refuse never became
 /// a trait method in the first place.
-fn router(servable: &[(&OperationContract, &RegistrableRoute)]) -> TokenStream {
+fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config) -> TokenStream {
     // Grouped by path so that two methods on one route are one `route()` call with two handlers,
     // which is what `axum` requires — registering the same path twice panics even when the methods
     // differ.
@@ -354,7 +358,9 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)]) -> TokenStream {
         }
     });
 
-    let handlers = servable.iter().map(|(operation, _)| handler_fn(operation));
+    let handlers = servable
+        .iter()
+        .map(|(operation, _)| handler_fn(operation, config));
 
     quote! {
         /// A router serving every operation this description declares that a router can register.
@@ -377,7 +383,7 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)]) -> TokenStream {
 /// Generated as a free function per operation rather than a closure so that its extraction is
 /// readable in the emitted source, which is the thing a reader of a checked-in generated crate is
 /// actually going to look at.
-fn handler_fn(operation: &OperationContract) -> TokenStream {
+fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
     let name = handler_name(operation);
     let method = ident(&operation.rust_name);
     let response = response_name(operation);
@@ -402,11 +408,12 @@ fn handler_fn(operation: &OperationContract) -> TokenStream {
             // The schema's shape rides along because the wire alone cannot say whether `ids=a,b`
             // is an array or a scalar with a comma in it.
             let array = param.style.array();
+            let object = param.style.object();
             let source = match location {
                 Location::Path => {
                     quote! {
                         ::std::result::Result::<_, ::std::convert::Infallible>::Ok(
-                            incoming.path_value(#wire)
+                            incoming.path_value(#wire, #style, #explode, #array, #object)
                         )
                     }
                 }
@@ -417,8 +424,10 @@ fn handler_fn(operation: &OperationContract) -> TokenStream {
                         )
                     }
                 }
-                Location::Header => quote! { incoming.header_value(#wire) },
-                Location::Cookie => quote! { incoming.cookie_value(#wire) },
+                Location::Header => {
+                    quote! { incoming.header_value(#wire, #explode, #array, #object) }
+                }
+                Location::Cookie => quote! { incoming.cookie_value(#wire, #array, #object) },
             };
             quote! {
                 #field: match support::read(#source, #wire, #required, #operation_label) {
@@ -434,7 +443,12 @@ fn handler_fn(operation: &OperationContract) -> TokenStream {
     }
 
     if let Some(body) = &operation.body {
-        let read = body_extraction(body, operation_label);
+        let read = body_extraction(
+            body,
+            operation_label,
+            config,
+            super::client::content_type_param(operation).is_some(),
+        );
         extractions.push(read);
         arguments.push(quote! { body });
     }
@@ -467,27 +481,79 @@ fn handler_fn(operation: &OperationContract) -> TokenStream {
 }
 
 /// Reading the request body into whatever the description said it is.
-fn body_extraction(body: &BodyContract, operation: &str) -> TokenStream {
+fn body_extraction(
+    body: &BodyContract,
+    operation: &str,
+    config: &Config,
+    content_type_declared: bool,
+) -> TokenStream {
     let required = body.required();
-    let read = match body {
-        BodyContract::Json { .. } => quote! { support::json_body(incoming).await },
+    let (declared, read) = match body {
+        BodyContract::Json { content_type, .. } => (
+            content_type.clone(),
+            quote! { support::json_body(incoming).await },
+        ),
         BodyContract::Form { specs, .. } => {
             let specs = super::client::form_specs(specs);
-            quote! { support::form_body(incoming, #specs).await }
+            (
+                "application/x-www-form-urlencoded".to_owned(),
+                quote! { support::form_body(incoming, #specs).await },
+            )
         }
         BodyContract::Multipart { parts, .. } => {
             let specs = super::client::part_specs(parts);
-            quote! { support::multipart_body(incoming, #specs).await }
+            (
+                "multipart/form-data".to_owned(),
+                quote! { support::multipart_body(incoming, #specs).await },
+            )
         }
-        BodyContract::Text { .. } => quote! { support::text_body(incoming).await },
-        BodyContract::Bytes { .. } => quote! { support::byte_body(incoming).await },
+        BodyContract::Text { content_type, .. } => (
+            content_type.clone(),
+            quote! { support::text_body(incoming).await },
+        ),
+        BodyContract::Bytes { content_type, .. } => {
+            // The handler's argument comes from `client::body_type`, which under
+            // `formats.bytes = "bytes"` says `::bytes::Bytes`; the reader hands back `Vec<u8>`,
+            // so the seam converts — or the generated crate does not compile.
+            let read = match config.formats.bytes {
+                crate::config::BytesRepr::Bytes => quote! {
+                    support::byte_body(incoming)
+                        .await
+                        .map(|body| body.map(::bytes::Bytes::from))
+                },
+                crate::config::BytesRepr::Vec => quote! { support::byte_body(incoming).await },
+            };
+            (content_type.clone(), read)
+        }
     };
     let reader = if required {
         quote! { support::required_body }
     } else {
         quote! { support::optional_body }
     };
+    // The gate stands down when the description declares its own `Content-Type` header
+    // parameter: the document made the request's type caller data (cloudflare's R2 object
+    // upload stores it), and refusing what the description invites would reject the generated
+    // client's own requests.
+    let gate = (!content_type_declared).then(|| {
+        quote! {
+            // The declared media type is part of the contract: a body claiming another type is
+            // refused `415` before it is parsed, which is the same protection `axum::Json`
+            // gives a hand-written handler against a cross-origin form's `text/plain` "simple
+            // request".
+            if let ::std::option::Option::Some(sent) = incoming.mismatched_media_type(#declared) {
+                return api
+                    .on_rejection(support::Rejection::UnsupportedMediaType {
+                        operation: #operation,
+                        declared: #declared,
+                        sent,
+                    })
+                    .into_response();
+            }
+        }
+    });
     quote! {
+        #gate
         let body = match #reader(#read, #operation) {
             ::std::result::Result::Ok(value) => value,
             ::std::result::Result::Err(rejection) => {

@@ -24,25 +24,37 @@ mod response;
 use super::route::{self, PathTemplate};
 use super::style::Location;
 use super::{ApiModel, Method, OperationContract};
+use std::collections::BTreeMap;
+
 use crate::config::Config;
 use crate::contract::{Contracts, Namer, RustIdent, TypeRef};
-use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
+use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind};
 use crate::doc::{Operation, PathItem};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
 use crate::shape::Docs;
 
 /// Every operation the document declares, named and lowered.
+///
+/// # Errors
+///
+/// Returns a rejection when [`Config::media_types`] names a content position the document does
+/// not have, or a media type the position does not declare. The caller picked a position by
+/// pointer and stated an intent that cannot be honoured, and quietly ignoring it would be the
+/// forbidden failure mode applied to the configuration instead of to the document.
 pub(super) fn run(
     resolved: &ResolvedDocument,
     contracts: &Contracts,
-    _config: &Config,
+    config: &Config,
     ctx: &mut Ctx,
-) -> ApiModel {
+) -> Result<ApiModel, RejectError> {
     let mut build = Build {
         resolved,
         contracts,
+        config,
+        content_positions: BTreeMap::new(),
         namer: Namer::default(),
+        stems: Namer::default(),
     };
     let mut operations = Vec::new();
     // Webhooks are deliberately absent: they are carried losslessly in the document model and are
@@ -61,19 +73,61 @@ pub(super) fn run(
         };
         build.path_item(item, route, &mut operations, ctx);
     }
+    build.check_media_type_requests()?;
 
     super::registrable::classify(&mut operations, ctx);
-    ApiModel {
+    Ok(ApiModel {
         operations,
         servers: Vec::new(),
-    }
+    })
 }
 
 struct Build<'a> {
     resolved: &'a ResolvedDocument,
     contracts: &'a Contracts,
+    config: &'a Config,
+    /// Every content position visited and the media types it declares, recorded only while
+    /// [`Config::media_types`] has entries to validate against.
+    content_positions: BTreeMap<String, Vec<String>>,
     /// Method names, kept unique across the whole client.
     namer: Namer,
+    /// The camel stems the renderers build per-operation type names from (`X1Params`,
+    /// `X1Response`), claimed beside the method names: the stem derivation is not injective
+    /// (`x_1` and `x1` both camel to `X1`), so unique method names alone still let two
+    /// operations' generated types collide.
+    stems: Namer,
+}
+
+impl Build<'_> {
+    /// Every [`Config::media_types`] entry, checked against the positions the walk visited.
+    fn check_media_type_requests(&self) -> Result<(), RejectError> {
+        for (position, requested) in &self.config.media_types {
+            let Some(declared) = self.content_positions.get(position) else {
+                return Err(RejectError::new(
+                    RejectKind::UnsatisfiableConfig,
+                    format!(
+                        "the configuration picks a media type at `{position}`, and the document \
+                         declares no content there"
+                    ),
+                ));
+            };
+            if !declared.iter().any(|entry| entry == requested) {
+                return Err(RejectError::new(
+                    RejectKind::UnsatisfiableConfig,
+                    format!(
+                        "the configuration picks `{requested}` at `{position}`, and the position \
+                         declares only {}",
+                        declared
+                            .iter()
+                            .map(|entry| format!("`{entry}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Build<'_> {
@@ -106,7 +160,7 @@ impl Build<'_> {
             let at = at.child(method.slug());
             if let Some(built) = self.operation(operation, item, method, &template, route, &at, ctx)
             {
-                out.push(built);
+                out.extend(built);
             }
         }
     }
@@ -126,8 +180,30 @@ impl Build<'_> {
         route: &str,
         at: &JsonPointer,
         ctx: &mut Ctx,
-    ) -> Option<OperationContract> {
-        let params = self.params(operation, item, at, ctx)?;
+    ) -> Option<Vec<OperationContract>> {
+        let mut params = self.params(operation, item, at, ctx)?;
+
+        // A parameter declared `in: path` whose name matches no template variable can ride no
+        // URL: the client has nowhere to write it and the server extractor nothing to read, so
+        // transcribing it — a required field per the path rule — would make a field nobody can
+        // send and an extraction no request satisfies. It is left out instead.
+        params.retain(|param| {
+            let ghost = param.style.location() == Location::Path
+                && !template.variables().any(|name| name == param.wire_name);
+            if ghost {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::UnregistrableRoute,
+                    Action::Degrade,
+                    at.child("parameters").child(param.wire_name.clone()),
+                    format!(
+                        "the path parameter `{}` matches no variable of `{route}`, so no \
+                         request can carry it; it is left out",
+                        param.wire_name
+                    ),
+                ));
+            }
+            !ghost
+        });
 
         // A template variable nothing declares leaves a hole in the URL. Checked after the
         // parameters, because path-level parameters count and only the merge knows all of them.
@@ -158,7 +234,7 @@ impl Build<'_> {
         let rust_name = self.name(operation, method, route, at, ctx);
         // Body first, then responses: the order the struct literal used to evaluate them in, kept
         // so that hoisting the calls does not reorder their diagnostics under the fold cap.
-        let body = self.body(operation, at, ctx);
+        let bodies = self.bodies(operation, at, ctx);
         let mut responses = self.responses(operation, at, ctx);
         if method == Method::Head {
             // A `HEAD` response has no body on the wire — the transport strips it, whatever the
@@ -171,7 +247,11 @@ impl Build<'_> {
                 arm.body = crate::api::ResponseBody::Empty;
             }
         }
-        Some(OperationContract {
+        let (body, variants) = match bodies {
+            Some(body::BodyVariants { primary, variants }) => (Some(primary), variants),
+            None => (None, Vec::new()),
+        };
+        let primary = OperationContract {
             rust_name,
             method,
             path: template.clone(),
@@ -182,9 +262,36 @@ impl Build<'_> {
             // Filled in once every operation exists: whether a route collides is a question about
             // the whole set, so it cannot be answered while the set is still being built.
             registrable: None,
+            body_variant: false,
             pagination: None,
             origin: at.clone(),
-        })
+        };
+        // One sibling method per further declared media type. Everything but the name, the body,
+        // and the sentence saying which encoding it sends is the primary's: same route, same
+        // parameters, same responses.
+        let mut built = Vec::with_capacity(1 + variants.len());
+        for (media_type, variant_body) in variants {
+            let base = primary.rust_name.as_str();
+            let suffix = body::method_suffix(&media_type);
+            let rust_name = self.claim(&RustIdent::method(&[format!("{base}_{suffix}")]));
+            let mut docs = docs_of(operation);
+            let sent = format!(
+                "The same operation as `{base}`, sending the `{media_type}` body this position \
+                 also declares."
+            );
+            docs.description = Some(match docs.description.take() {
+                Some(original) => format!("{sent}\n\n{original}"),
+                None => sent,
+            });
+            let mut variant = primary.clone();
+            variant.rust_name = rust_name;
+            variant.body = Some(variant_body);
+            variant.docs = docs;
+            variant.body_variant = true;
+            built.push(variant);
+        }
+        built.insert(0, primary);
+        Some(built)
     }
 
     /// The method name, kept unique across the client.
@@ -231,7 +338,7 @@ impl Build<'_> {
             }
         };
 
-        let unique = self.namer.unique(wanted.clone());
+        let unique = self.claim(&wanted);
         if unique != wanted {
             ctx.report(Diagnostic::new(
                 BreakageClass::CollidingOperationId,
@@ -245,6 +352,22 @@ impl Build<'_> {
             ));
         }
         unique
+    }
+
+    /// A method name that is free in both spellings: its own, and the camel stem the renderers
+    /// derive the operation's type names from. A taken stem sends the method name to its next
+    /// suffix, so `x_1` beside `x1` becomes `x_12` rather than colliding at `X1Params`.
+    fn claim(&mut self, wanted: &RustIdent) -> RustIdent {
+        loop {
+            let candidate = self.namer.unique(wanted.clone());
+            let stem: String = candidate.as_str().split('_').map(capitalize).collect();
+            if self
+                .stems
+                .take(&RustIdent::type_name(std::slice::from_ref(&stem)))
+            {
+                return candidate;
+            }
+        }
     }
 
     /// The type a schema at an API position became.
@@ -265,12 +388,45 @@ fn docs_of(operation: &Operation) -> Docs {
     }
 }
 
+/// One word of the renderers' stem derivation, duplicated deliberately: [`crate::render`]
+/// builds per-operation type stems with exactly `split('_').map(capitalize)` over the
+/// snake-case method name, and the stem claim has to speak about the same strings.
+fn capitalize(word: &str) -> String {
+    let mut characters = word.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
     use crate::api::tests::{model_of, with_paths};
+
+    #[test_util::test]
+    fn two_ids_whose_stems_collide_keep_distinct_type_names() {
+        // `x1` and `x_1` are distinct method names, but both camel to `X1` — the stem every
+        // generated `…Params` / `…Response` type is built from. The second operation's method
+        // takes a suffix so the stems stay apart.
+        let (model, _) = model_of(with_paths(json!({
+            "/a": {"get": {"operationId": "x1", "responses": {"204": {"description": "done"}}}},
+            "/b": {"get": {"operationId": "x_1", "responses": {"204": {"description": "done"}}}},
+        })))?;
+        let names: Vec<&str> = model
+            .operations()
+            .iter()
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        let stems: Vec<String> = names
+            .iter()
+            .map(|name| name.split('_').map(super::capitalize).collect())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert_ne!(stems[0], stems[1], "{names:?}");
+    }
 
     #[test_util::test]
     fn an_operation_with_no_operation_id_is_named_after_its_method_and_path() {

@@ -91,6 +91,12 @@ impl Walk<'_> {
             // `components.schemas` entry is, and one that is referenced is reached again through
             // the operation that references it.
             self.kind = RootKind::Named;
+            // A schema at a position OpenAPI does not define, which a `$ref` proved is one, is
+            // named after that position's own last segment — the rule `components.schemas`
+            // follows. After the declared sections, so a real component wins the name outright.
+            for (id, name) in self.resolved.materialized() {
+                self.push(*id, vec![name.clone()], RootKind::Named);
+            }
             for (name, body) in components.request_bodies.iter().flatten() {
                 if let Some(body) = self.resolved.request_body(body) {
                     self.content(body.content.as_ref(), std::slice::from_ref(name));

@@ -120,6 +120,9 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
              on the type layer, so there is nothing left to generate",
         ));
     }
+    if let Err(reason) = config.package.validity() {
+        return Err(RejectError::new(RejectKind::UnsatisfiableConfig, reason));
+    }
     let mut ctx = diag::Ctx::new();
     let loaded = load::load(input, &mut ctx)?;
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
@@ -145,6 +148,46 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
 
     const PETSTORE: &[u8] = include_bytes!("../../../corpus/specs/petstore-31.yaml");
+
+    #[test_util::test]
+    fn a_package_name_or_version_rendering_cannot_survive_is_rejected_up_front() {
+        // `bad.name` reaches `format_ident!` and panics; `match` is shape-legal but not an
+        // identifier; `dev` is a version cargo refuses. Each is a config typo, and a panic in
+        // generated-code assembly is never the way to hear about one.
+        for (name, version) in [
+            ("bad.name", "0.1.0"),
+            ("match", "0.1.0"),
+            ("1starts-with-digit", "0.1.0"),
+            ("fine", "dev"),
+            ("fine", "1.2"),
+        ] {
+            let config = Config {
+                package: crate::config::Package {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                },
+                ..Config::default()
+            };
+            let refused = generate(PETSTORE, &config)
+                .err()
+                .ok_or_eyre(format!("`{name}`/`{version}` must be rejected"))?;
+            assert_eq!(refused.kind(), RejectKind::UnsatisfiableConfig, "{refused}");
+        }
+        // The shapes the rule must keep accepting.
+        for (name, version) in [
+            ("api-client", "0.1.0"),
+            ("api_client", "1.2.3-rc.1+build.5"),
+        ] {
+            let config = Config {
+                package: crate::config::Package {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                },
+                ..Config::default()
+            };
+            generate(PETSTORE, &config)?;
+        }
+    }
 
     #[test_util::test]
     fn a_document_that_needs_no_repair_produces_no_diagnostics() {

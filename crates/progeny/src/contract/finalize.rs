@@ -113,8 +113,20 @@ fn decide(kind: &ContractKind, unknown_fields: UnknownFields, config: &Config) -
     match config.serde_impl {
         // The escape hatch. Every corpus document is generated both ways from stage 8 on, because
         // an escape hatch nobody runs is not one — the first corpus run in the other mode failed on
-        // all eight tier documents.
-        SerdeImpl::DeriveAlways => DeserStrategy::Derive,
+        // all eight tier documents. One kind is exempt from it: a carried-tag enum has no derive
+        // encoding at all — see [`DeserStrategy::HandWrittenCarriedTag`] — so it takes the
+        // hand-written path under both configurations, and the differential harness compares two
+        // renderings that are identical there by construction.
+        SerdeImpl::DeriveAlways => match kind {
+            ContractKind::CarriedTagEnum { .. } => DeserStrategy::HandWrittenCarriedTag,
+            ContractKind::Struct { .. }
+            | ContractKind::Enum { .. }
+            | ContractKind::TaggedEnum { .. }
+            | ContractKind::StringEnum { .. }
+            | ContractKind::Newtype { .. }
+            | ContractKind::Tuple { .. }
+            | ContractKind::Alias { .. } => DeserStrategy::Derive,
+        },
         SerdeImpl::HandWrittenWhereEligible => match kind {
             ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
             ContractKind::Struct { fields } => match unknown_fields {
@@ -143,6 +155,7 @@ fn decide(kind: &ContractKind, unknown_fields: UnknownFields, config: &Config) -
             | ContractKind::Newtype { .. }
             | ContractKind::Tuple { .. }
             | ContractKind::Alias { .. } => DeserStrategy::Derive,
+            ContractKind::CarriedTagEnum { .. } => DeserStrategy::HandWrittenCarriedTag,
         },
     }
 }
@@ -264,11 +277,12 @@ fn box_target(ty: &mut TypeRef, target: TypeIndex) -> bool {
     }
 }
 
-fn references(kind: &ContractKind) -> Vec<&TypeRef> {
+pub(crate) fn references(kind: &ContractKind) -> Vec<&TypeRef> {
     match kind {
         ContractKind::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
         ContractKind::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
-        ContractKind::TaggedEnum { variants, .. } => {
+        ContractKind::TaggedEnum { variants, .. }
+        | ContractKind::CarriedTagEnum { variants, .. } => {
             variants.iter().map(|variant| &variant.ty).collect()
         }
         ContractKind::StringEnum { .. } => Vec::new(),
@@ -345,7 +359,8 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
         // `serde_json::Value` holds a float and orders nothing.
         TypeRef::Value => derive == Derive::PartialEq || derive == Derive::Default,
         TypeRef::F64 => !matches!(derive, Derive::Eq | Derive::Ord | Derive::Hash),
-        TypeRef::String => derive != Derive::Copy,
+        // A `String`, and `support::Upload` (a `Vec<u8>` plus options): everything but `Copy`.
+        TypeRef::String | TypeRef::Upload => derive != Derive::Copy,
         TypeRef::Format(format) => format_carries(derive, *format, config),
         TypeRef::Vec(inner) => derive != Derive::Copy && carries(derive, inner, supported, config),
         TypeRef::Map(inner) => {
@@ -397,6 +412,7 @@ fn defaults(contract: &Provisional, supported: &[BTreeSet<Derive>], config: &Con
     match &contract.kind {
         ContractKind::Enum { .. }
         | ContractKind::TaggedEnum { .. }
+        | ContractKind::CarriedTagEnum { .. }
         | ContractKind::StringEnum { .. } => false,
         ContractKind::Struct { fields } => fields
             .iter()

@@ -30,6 +30,9 @@ use crate::schema::{ExternalDocs, SchemaId, SchemaStore};
 pub(crate) struct ParsedDocument {
     pub(crate) document: Document,
     pub(crate) schemas: SchemaStore,
+    /// Whether the document declared 3.0, carried for the one rewrite that cannot happen before
+    /// resolution: a schema at a position nothing parsed, proven to be one by a `$ref`.
+    pub(crate) dialect_30: bool,
 }
 
 /// Either a reference to a component or the component itself.

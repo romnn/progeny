@@ -2,8 +2,8 @@
 //! generated server.
 //!
 //! `xtask example` is this exact idea for one hand-written document; the probe is the generated
-//! form of it for any document. The plan — which setters to call, what the double answers, which
-//! operations cannot be driven and why — comes from `progeny::harness::probe`, built from the same
+//! form of it for any document. The plan — the params literal to build, what the double answers,
+//! which operations cannot be driven and why — comes from `progeny::harness::probe`, built from the same
 //! frozen contracts the renderers read. What is asserted per operation:
 //!
 //! * the request the client builds **extracts cleanly** in the server — no rejection, which is the
@@ -140,9 +140,9 @@ fn render(krate: &str, plan: &Probe) -> String {
             .as_ref()
             .is_some_and(|body| body.ty.contains("types::"))
             || operation
-                .setters
+                .inputs
                 .iter()
-                .any(|setter| setter.ty.contains("types::"))
+                .any(|input| input.json.is_some() && input.ty.contains("types::"))
     });
     let types_import = if uses_types {
         format!("use {krate}::types;")
@@ -339,7 +339,7 @@ fn answer_value(answer: &progeny::harness::ProbeAnswer) -> String {
     }
 }
 
-/// One driver test: set every parameter, send, and expect the declared status back.
+/// One driver test: build the params literal, send, and expect the declared status back.
 fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String {
     let mut out = String::new();
     out.push('\n');
@@ -347,7 +347,7 @@ fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String
     let _ = writeln!(out, "async fn probe_{}() {{", operation.method);
     let _ = writeln!(out, "    let client = serving().await?;");
     if operation.deprecated
-        || operation.setters.iter().any(|setter| setter.deprecated)
+        || operation.inputs.iter().any(|input| input.deprecated)
         || operation.body.as_ref().is_some_and(|body| body.deprecated)
     {
         let _ = writeln!(
@@ -356,27 +356,38 @@ fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String
              generated API\")]"
         );
     }
-    let _ = write!(out, "    let response = client.{}()", operation.method);
-    for setter in &operation.setters {
-        out.push('\n');
-        let _ = write!(
+    if let Some(params) = &operation.params {
+        let _ = writeln!(
             out,
-            "        .{}(value::<{}>({}))",
-            setter.setter,
-            setter.ty,
-            json_literal(&setter.json)
+            "    let response = client.{}({params} {{",
+            operation.method
         );
+        for input in &operation.inputs {
+            let value = match &input.json {
+                // An optional parameter whose name the wire erases: the literal must still name
+                // the field, and `None` is the only value the server could ever tell apart.
+                None => "None".to_owned(),
+                Some(json) if input.required => {
+                    format!("value::<{}>({})", input.ty, json_literal(json))
+                }
+                Some(json) => {
+                    format!("Some(value::<{}>({}))", input.ty, json_literal(json))
+                }
+            };
+            let _ = writeln!(out, "        {}: {value},", input.field);
+        }
+        if let Some(body) = &operation.body {
+            let value = format!("value::<{}>({})", body.ty, json_literal(&body.json));
+            if body.required {
+                let _ = writeln!(out, "        body: {value},");
+            } else {
+                let _ = writeln!(out, "        body: Some({value}),");
+            }
+        }
+        let _ = writeln!(out, "    }})");
+    } else {
+        let _ = writeln!(out, "    let response = client.{}()", operation.method);
     }
-    if let Some(body) = &operation.body {
-        out.push('\n');
-        let _ = write!(
-            out,
-            "        .body(value::<{}>({}))",
-            body.ty,
-            json_literal(&body.json)
-        );
-    }
-    out.push('\n');
     let _ = writeln!(out, "        .send()");
     let _ = writeln!(out, "        .await");
     let _ = writeln!(out, "        ?;");

@@ -30,6 +30,9 @@ use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectErr
 #[derive(Debug)]
 pub(crate) struct Normalized {
     value: Value,
+    /// Whether the document declared 3.0, kept because one rewrite happens after this phase:
+    /// a schema at a position nothing parsed is normalized when a `$ref` proves it is one.
+    dialect_30: bool,
     #[cfg(any(feature = "harness", test))]
     version: Version,
 }
@@ -42,6 +45,10 @@ impl Normalized {
 
     pub(crate) fn into_value(self) -> Value {
         self.value
+    }
+
+    pub(crate) fn dialect_30(&self) -> bool {
+        self.dialect_30
     }
 
     #[cfg(any(feature = "harness", test))]
@@ -108,18 +115,36 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
         report_dialect(ctx, JsonPointer::root().child("jsonSchemaDialect"), dialect);
     }
 
+    let dialect_30 = version.minor == 0;
     Walk {
         ctx,
         at: JsonPointer::root(),
-        dialect_30: version.minor == 0,
+        dialect_30,
     }
     .document(&mut root);
 
     Ok(Normalized {
         value: Value::Object(root),
+        dialect_30,
         #[cfg(any(feature = "harness", test))]
         version,
     })
+}
+
+/// Rewrite one schema that the positional walk did not reach.
+///
+/// The walk descends through the positions a document keeps schemas, and deliberately refuses to
+/// guess at anything else — rewriting an object merely because it holds a `nullable` member is how
+/// example payloads get corrupted. A `$ref` addressing a position outside those is the evidence
+/// that turns the guess into a fact: something reads that node as a schema, so it is one, and
+/// [`crate::resolve`] normalizes it here before parsing it.
+pub(crate) fn schema_at(value: &mut Value, dialect_30: bool, at: JsonPointer, ctx: &mut Ctx) {
+    Walk {
+        ctx,
+        at,
+        dialect_30,
+    }
+    .schema(value);
 }
 
 fn version(root: &Map<String, Value>) -> Result<Version, RejectError> {
@@ -439,6 +464,7 @@ impl Walk<'_> {
             self.repair_string_format(map);
         }
         self.repair_tuple_items(map);
+        self.repair_required_flags(map);
 
         for key in SUBSCHEMA {
             if let Some(entry) = map.get_mut(key) {
@@ -532,6 +558,67 @@ impl Walk<'_> {
             "`items` holds an array of schemas, which is the draft-04 tuple form; rewrote it as \
              `prefixItems` (and any `additionalItems` as `items`), so the element types are kept",
         );
+    }
+
+    /// The draft-03 per-property `required` flag, in a document of any version.
+    ///
+    /// draft-03 marked a property required on the property itself; every draft since, and both
+    /// OpenAPI dialects, say it with an array on the parent. Read literally the flag is a member no
+    /// keyword claims, so the requirement is simply dropped and every member of the type becomes
+    /// optional — a document saying less than it meant, with nothing to show for it. `fincrm`
+    /// writes 76 of them in a document declaring 3.0.
+    ///
+    /// Repair rather than degrade: the intent of `required: true` on a property has one reading,
+    /// and it is the reading the array on the parent spells.
+    fn repair_required_flags(&mut self, map: &mut Map<String, Value>) {
+        let mut flagged = Vec::new();
+        let mut required = Vec::new();
+        if let Some(Value::Object(properties)) = map.get_mut("properties") {
+            for (name, property) in properties.iter_mut() {
+                let Value::Object(property) = property else {
+                    continue;
+                };
+                if !matches!(property.get("required"), Some(Value::Bool(_))) {
+                    continue;
+                }
+                flagged.push(name.clone());
+                if property.remove("required") == Some(Value::Bool(true)) {
+                    required.push(Value::String(name.clone()));
+                }
+            }
+        }
+        if flagged.is_empty() {
+            return;
+        }
+        // Only when the parent has an array there, or has nothing there at all. A parent already
+        // writing something else in `required` is saying two contradictory things, and merging
+        // into one of them would discard the other; the parser preserves it verbatim and
+        // diagnoses it.
+        match map.get_mut("required") {
+            Some(Value::Array(existing)) => {
+                for name in required {
+                    if !existing.contains(&name) {
+                        existing.push(name);
+                    }
+                }
+            }
+            None => {
+                if !required.is_empty() {
+                    map.insert("required".to_owned(), Value::Array(required));
+                }
+            }
+            Some(_) => {}
+        }
+        for name in flagged {
+            // The detail carries no values: two occurrences of one finding have to render
+            // identically or they cannot be aggregated into one record.
+            self.report(
+                BreakageClass::LegacyRequiredFlag,
+                self.at.child("properties").child(name).child("required"),
+                "`required` is a boolean, which is draft-03's way of marking the property itself; \
+                 every dialect since says it with an array on the parent, so it was moved there",
+            );
+        }
     }
 
     /// The 3.0 boolean bound flag, in a document that does not declare 3.0.
@@ -669,9 +756,34 @@ fn nullable(map: &mut Map<String, Value>) {
         Some(Value::Array(names)) if !names.iter().any(|name| name == "null") => {
             names.push(Value::String("null".to_owned()));
         }
-        // With no `type`, nothing narrows the instance to a non-null value, so there is
-        // nothing to widen.
-        _ => {}
+        Some(_) => {}
+        // With no `type` of its own, a bare annotation schema narrows nothing and there is
+        // nothing to widen — but a composition sibling does narrow. `{"nullable": true,
+        // "allOf": [{"$ref": X}]}` is precisely the spelling 3.0 generators emit for a
+        // nullable reference (a 3.0 `$ref` cannot carry siblings, so tools wrap it), and
+        // dropping the flag there silently narrowed away the `null` the document allows on
+        // a member the vendor may document `null` as meaningful for. The composition moves
+        // into one branch of an `anyOf` beside an explicit `{"type": "null"}` branch — the
+        // 3.1 nullable-emulation form classification already reads as an `Option`. The
+        // annotations and any non-composition constraints stay where they were: `null`
+        // satisfies a string- or object-scoped constraint vacuously, so leaving them
+        // conjunct does not narrow the null branch away.
+        None => {
+            let mut composition = Map::new();
+            for keyword in ["$ref", "allOf", "oneOf", "anyOf"] {
+                if let Some(member) = map.remove(keyword) {
+                    composition.insert(keyword.to_owned(), member);
+                }
+            }
+            if !composition.is_empty() {
+                let mut null_branch = Map::new();
+                null_branch.insert("type".to_owned(), Value::String("null".to_owned()));
+                map.insert(
+                    "anyOf".to_owned(),
+                    Value::Array(vec![Value::Object(composition), Value::Object(null_branch)]),
+                );
+            }
+        }
     }
 
     if let Some(Value::Array(values)) = map.get_mut("enum")
@@ -835,6 +947,52 @@ mod tests {
         assert_eq!(
             normalized_schema(&json!({"nullable": true, "description": "d"}))?,
             json!({"description": "d"})
+        );
+    }
+
+    #[test_util::test]
+    fn nullable_beside_a_composition_becomes_a_null_branch() {
+        // `allOf` — the spelling 3.0 generators emit for a nullable reference, since a 3.0
+        // `$ref` cannot carry siblings.
+        assert_eq!(
+            normalized_schema(
+                &json!({"nullable": true, "allOf": [{"$ref": "#/components/schemas/T"}]})
+            )?,
+            json!({"anyOf": [
+                {"allOf": [{"$ref": "#/components/schemas/T"}]},
+                {"type": "null"},
+            ]})
+        );
+        // A bare `$ref` sibling: ignored by 3.0's letter, but the flag is unambiguous intent.
+        assert_eq!(
+            normalized_schema(&json!({"nullable": true, "$ref": "#/components/schemas/T"}))?,
+            json!({"anyOf": [{"$ref": "#/components/schemas/T"}, {"type": "null"}]})
+        );
+        assert_eq!(
+            normalized_schema(&json!({"nullable": true, "oneOf": [{"type": "string"}]}))?,
+            json!({"anyOf": [{"oneOf": [{"type": "string"}]}, {"type": "null"}]})
+        );
+        assert_eq!(
+            normalized_schema(&json!({"nullable": true, "anyOf": [{"type": "string"}]}))?,
+            json!({"anyOf": [{"anyOf": [{"type": "string"}]}, {"type": "null"}]})
+        );
+    }
+
+    #[test_util::test]
+    fn annotations_stay_beside_the_null_branch_wrapper() {
+        assert_eq!(
+            normalized_schema(&json!({
+                "nullable": true,
+                "description": "d",
+                "allOf": [{"$ref": "#/components/schemas/T"}],
+            }))?,
+            json!({
+                "description": "d",
+                "anyOf": [
+                    {"allOf": [{"$ref": "#/components/schemas/T"}]},
+                    {"type": "null"},
+                ],
+            })
         );
     }
 
@@ -1044,6 +1202,66 @@ mod tests {
             normalized_schema(&json!({"items": [{"type": "string"}]}))?,
             json!({"prefixItems": [{"type": "string"}]})
         );
+    }
+
+    #[test_util::test]
+    fn a_draft_03_required_flag_moves_onto_the_parent() {
+        let (rewritten, diagnostics) = normalized_schema_31(&json!({
+            "type": "object",
+            "required": ["already"],
+            "properties": {
+                "already": {"type": "string"},
+                "name": {"type": "string", "required": true},
+                "nickname": {"type": "string", "required": false},
+            },
+        }))?;
+        assert_eq!(
+            rewritten,
+            json!({
+                "type": "object",
+                "required": ["already", "name"],
+                "properties": {
+                    "already": {"type": "string"},
+                    "name": {"type": "string"},
+                    "nickname": {"type": "string"},
+                },
+            })
+        );
+        // Both flags are findings — `required: false` says nothing the name's absence from the
+        // array does not, but it is still a member of a dialect this document does not speak —
+        // and the class aggregates, so the two occurrences are one record.
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].class(), BreakageClass::LegacyRequiredFlag);
+        assert_eq!(diagnostics[0].action(), Action::Repair);
+        assert_eq!(
+            diagnostics[0].location().to_string(),
+            "/components/schemas/S/properties/name/required"
+        );
+
+        // A 3.0 document writes the same defect, and gets the same repair.
+        assert_eq!(
+            normalized_schema(&json!({"properties": {"a": {"required": true}}}))?,
+            json!({"required": ["a"], "properties": {"a": {}}})
+        );
+    }
+
+    #[test_util::test]
+    fn a_parent_whose_required_is_neither_an_array_nor_absent_keeps_what_it_wrote() {
+        let (rewritten, diagnostics) = normalized_schema_31(&json!({
+            "type": "object",
+            "required": "name",
+            "properties": {"name": {"type": "string", "required": true}},
+        }))?;
+        assert_eq!(
+            rewritten,
+            json!({
+                "type": "object",
+                "required": "name",
+                "properties": {"name": {"type": "string"}},
+            })
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].class(), BreakageClass::LegacyRequiredFlag);
     }
 
     #[test_util::test]

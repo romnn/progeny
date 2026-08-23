@@ -55,6 +55,28 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::PresenceCollapse => Wiring::Fixture(document(json!({
             "Thing": {"type": "object", "properties": {"both": {"type": ["string", "null"]}}},
         }))),
+        // The collapse needs the same schema on two wires: a binary member sent as a multipart
+        // body by one operation and as JSON by another.
+        BreakageClass::EncodingCollapse => Wiring::Fixture(document_with(
+            json!({
+                "Payload": {"type": "object", "properties": {
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+            }),
+            "paths",
+            json!({
+                "/form": {"post": {
+                    "operationId": "sendForm",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/Payload"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/json": {"post": {
+                    "operationId": "sendJson",
+                    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Payload"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            }),
+        )),
         // The marker only costs something where the type crosses the direction it excludes, so
         // the fixture needs an operation: a `readOnly` member in a request body.
         BreakageClass::AccessCollapse => Wiring::Fixture(document_with(
@@ -96,7 +118,9 @@ fn wiring(class: BreakageClass) -> Wiring {
         }))),
         BreakageClass::DiscriminatorEdgeCase => Wiring::Fixture(document(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
-            "B": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
+            // `B` does not declare `kind`, which closes the carried style too: replaying a
+            // payload into `B` would drop the tag on the way through.
+            "B": {"type": "object", "properties": {"shared": {"type": "string"}}},
             "Either": {
                 "oneOf": [
                     {"$ref": "#/components/schemas/A"},
@@ -104,8 +128,32 @@ fn wiring(class: BreakageClass) -> Wiring {
                 ],
                 "discriminator": {"propertyName": "kind"},
             },
-            // The use that makes taking `kind` off `A` a loss, and the union unrepresentable.
+            // The use that makes taking `kind` off `A` a loss, and consumption unsound.
             "Holder": {"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}},
+        }))),
+        // The polymorphism spelling from OpenAPI's own guide: the tag and the mapping live on a
+        // base schema, each variant `allOf`s that base, and no `oneOf` appears anywhere.
+        BreakageClass::InheritanceDiscriminator => Wiring::Fixture(document(json!({
+            "Pet": {
+                "type": "object",
+                "properties": {"petType": {"type": "string"}},
+                "required": ["petType"],
+                "discriminator": {
+                    "propertyName": "petType",
+                    "mapping": {
+                        "cat": "#/components/schemas/Cat",
+                        "dog": "#/components/schemas/Dog",
+                    },
+                },
+            },
+            "Cat": {"allOf": [
+                {"$ref": "#/components/schemas/Pet"},
+                {"type": "object", "properties": {"lives": {"type": "integer"}}},
+            ]},
+            "Dog": {"allOf": [
+                {"$ref": "#/components/schemas/Pet"},
+                {"type": "object", "properties": {"pack": {"type": "boolean"}}},
+            ]},
         }))),
         BreakageClass::MultiParentDiscriminator => Wiring::Fixture(document(json!({
             "A": {"type": "object", "properties": {"kind": {"type": "string"}, "shared": {"type": "string"}}},
@@ -131,6 +179,13 @@ fn wiring(class: BreakageClass) -> Wiring {
             "Upload": {
                 "type": "object",
                 "properties": {"file": {"type": "string", "format": "binary"}},
+            },
+        }))),
+        // draft-03's per-property flag, which `fincrm` writes 76 times in a 3.0 document.
+        BreakageClass::LegacyRequiredFlag => Wiring::Fixture(document(json!({
+            "Person": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "required": true}},
             },
         }))),
         BreakageClass::NullableUnionBranch => Wiring::Fixture(dialect_30(json!({

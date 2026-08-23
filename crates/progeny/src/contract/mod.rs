@@ -68,6 +68,13 @@ pub(crate) enum TypeRef {
     String,
     /// A format with a `Config`-chosen type.
     Format(Format),
+    /// `support::Upload`: a binary member of a `multipart/form-data` body.
+    ///
+    /// Only there — a binary string anywhere else stays [`TypeRef::Format`]. A file part is
+    /// bytes, which a `String` cannot hold, and it carries a `filename` and its own
+    /// `Content-Type`, which no schema property declares; the support type is the one place all
+    /// three fit.
+    Upload,
     /// `serde_json::Value`: the degradation target.
     Value,
     Option(Box<TypeRef>),
@@ -82,6 +89,32 @@ pub(crate) enum TypeRef {
 }
 
 impl TypeRef {
+    /// Whether the spelled-out type names `support::Upload` anywhere.
+    ///
+    /// Exhaustive so a future container variant cannot silently hide an upload from the
+    /// support-module decision that reads this.
+    pub(crate) fn holds_upload(&self) -> bool {
+        match self {
+            Self::Upload => true,
+            Self::Option(inner)
+            | Self::Vec(inner)
+            | Self::Map(inner)
+            | Self::Array(inner, _)
+            | Self::Boxed(inner) => inner.holds_upload(),
+            Self::Tuple(items) => items.iter().any(Self::holds_upload),
+            // A named type is its own contract, scanned on its own turn.
+            Self::Named(_)
+            | Self::Unit
+            | Self::Bool
+            | Self::I64
+            | Self::U64
+            | Self::F64
+            | Self::String
+            | Self::Format(_)
+            | Self::Value => false,
+        }
+    }
+
     /// The named types this reference reaches, and whether it reaches them indirectly.
     ///
     /// A cycle through a `Vec`, a map or a `Box` is fine; a cycle through none of them is a type of
@@ -106,6 +139,7 @@ impl TypeRef {
             | Self::F64
             | Self::String
             | Self::Format(_)
+            | Self::Upload
             | Self::Value => {}
         }
     }
@@ -147,6 +181,7 @@ impl TypeRef {
             | Self::F64
             | Self::String
             | Self::Format(_)
+            | Self::Upload
             | Self::Value => {}
         }
     }
@@ -197,6 +232,14 @@ pub(crate) enum DeserStrategy {
     },
     /// Hand-written with no buffering, for a fieldless enum.
     HandWrittenFieldless,
+    /// Hand-written, buffering the payload to read its tag member, for a carried-tag enum.
+    ///
+    /// The only strategy such an enum can take, whatever the configuration says: serde's derive
+    /// repertoire — external, `tag`, `tag`+`content`, `untagged` — has no encoding that reads a
+    /// tag and leaves it in the payload. Nothing is conceded to non-self-describing formats by
+    /// this, because the encodings a tagged union could otherwise take (`tag = "…"`, `untagged`)
+    /// buffer through serde's private `Content` and already require a self-describing format.
+    HandWrittenCarriedTag,
 }
 
 /// What kind of Rust item a type is.
@@ -222,6 +265,22 @@ pub(crate) enum ContractKind {
     /// constructed at all, where it used to be a pairing four comments asserted and nothing
     /// enforced.
     TaggedEnum {
+        /// The member of every payload that carries its variant's name.
+        tag: String,
+        variants: Vec<TaggedVariant>,
+    },
+    /// A data-carrying enum whose payload names its own variant in a member that the variant
+    /// types keep: the union reads the member to pick a variant and replays the whole payload —
+    /// tag included — into it, and serializing writes the variant as it is, which already carries
+    /// its tag.
+    ///
+    /// Used where matching by shape would be unsound *and* the tag cannot be consumed, because
+    /// some variant type also puts the property on the wire somewhere else ([`crate::shape`]). A
+    /// kind of its own rather than a flag beside [`ContractKind::TaggedEnum`] for the same reason
+    /// that kind is one beside [`ContractKind::Enum`]: the two render nothing alike — a consumed
+    /// tag is a serde attribute, a carried one is a pair of hand-written impls — and a flag would
+    /// put that ruling back inside the renderer.
+    CarriedTagEnum {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
@@ -252,7 +311,7 @@ impl ContractKind {
         match self {
             Self::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
             Self::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
-            Self::TaggedEnum { variants, .. } => {
+            Self::TaggedEnum { variants, .. } | Self::CarriedTagEnum { variants, .. } => {
                 variants.iter().map(|variant| &variant.ty).collect()
             }
             Self::StringEnum { .. } => Vec::new(),
@@ -367,6 +426,16 @@ impl Contracts {
         &self.types
     }
 
+    /// Whether any type holds an upload, and therefore whether the types module names
+    /// `support::Upload`.
+    pub(crate) fn uses_upload(&self) -> bool {
+        self.types.iter().any(|contract| {
+            finalize::references(contract.kind())
+                .iter()
+                .any(|ty| ty.holds_upload())
+        })
+    }
+
     pub(crate) fn get(&self, index: TypeIndex) -> Option<&TypeContract> {
         self.types.get(index.index())
     }
@@ -396,6 +465,18 @@ pub(crate) fn build(
     ctx: &mut Ctx,
 ) -> Result<Contracts, crate::diag::RejectError> {
     let mut lowered = lower::run(resolved, shapes, config, ctx);
+    if let Some(conflict) = lowered.name_conflicts.first() {
+        return Err(crate::diag::RejectError::new(
+            crate::diag::RejectKind::UnsatisfiableConfig,
+            format!(
+                "the configuration names this type `{}`, but that identifier already belongs \
+                 to another generated type; a configured name cannot be suffixed behind the \
+                 caller's back, so pick one nothing else uses",
+                conflict.chosen
+            ),
+        )
+        .at(conflict.at.clone()));
+    }
     // Validated against the shapes that were actually reserved, which is exactly the universe the
     // keyed lookups consulted during lowering — a key that matched nothing here matched nothing
     // anywhere, and honoring the configuration around it would be a silent no-op.
@@ -715,6 +796,132 @@ mod tests {
                 target: TypeRef::Vec(Box::new(TypeRef::String))
             }
         );
+    }
+
+    #[test_util::test]
+    fn a_30_nullable_allof_reference_on_a_required_member_is_an_option() {
+        // oxide `InstanceUpdate.auto_restart_policy`, in miniature: 3.0, required, and
+        // `{nullable: true, allOf: [$ref]}` — the vendor documents `null` as the way to unset
+        // the policy, so a type that cannot hold the null narrows the API.
+        let mut ctx = Ctx::new();
+        let document = serde_json::json!({
+            "openapi": "3.0.3",
+            "paths": {},
+            "components": {"schemas": {
+                "Policy": {"oneOf": [
+                    {"description": "no", "type": "string", "enum": ["never"]},
+                    {"description": "yes", "type": "string", "enum": ["best_effort"]},
+                ]},
+                "InstanceUpdate": {
+                    "type": "object",
+                    "required": ["policy"],
+                    "properties": {
+                        "policy": {
+                            "nullable": true,
+                            "description": "`null` unsets the policy.",
+                            "allOf": [{"$ref": "#/components/schemas/Policy"}],
+                        },
+                    },
+                },
+            }},
+        });
+        let normalized = normalize::normalize(document, &mut ctx)?;
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = shape::classify(&resolved, &mut ctx);
+        let contracts = build(&resolved, &shapes, &Config::default(), &mut ctx)?;
+        let ContractKind::Struct { fields } = named(&contracts, "InstanceUpdate")?.kind() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].presence, super::Presence::Nullable, "{fields:?}");
+        assert!(
+            matches!(&fields[0].ty, TypeRef::Option(inner) if matches!(inner.as_ref(), TypeRef::Named(_))),
+            "{:?}",
+            fields[0].ty
+        );
+    }
+
+    #[test_util::test]
+    fn a_configured_name_the_namer_cannot_honor_stops_generation() {
+        let mut config = Config::default();
+        config.names.insert("Widget".to_owned(), "Pet".to_owned());
+        let result = contracts_of(
+            with_schemas(json!({
+                "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "Widget": {"type": "object", "properties": {"size": {"type": "integer"}}},
+            })),
+            &config,
+        );
+        // `Pet` claims its own name first; suffixing the configured name behind the caller's
+        // back — or emitting `pub struct Pet` twice — are both worse than stopping.
+        let Err(err) = result else {
+            eyre::bail!("the collision is a rejection");
+        };
+        assert!(err.to_string().contains("already belongs"), "{err}");
+    }
+
+    #[test_util::test]
+    fn a_configured_name_claims_first_and_a_later_component_steps_aside() {
+        let mut config = Config::default();
+        config.names.insert("AWidget".to_owned(), "Pet".to_owned());
+        let (contracts, diagnostics) = contracts_of(
+            with_schemas(json!({
+                "AWidget": {"type": "object", "properties": {"size": {"type": "integer"}}},
+                "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
+            })),
+            &config,
+        )?;
+        named(&contracts, "Pet")?;
+        named(&contracts, "Pet2")?;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.detail().contains("taken already")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test_util::test]
+    fn an_inline_nullable_nameable_is_a_named_option_not_arbitrary_json() {
+        let (contracts, _) = contracts_of(
+            with_schemas(json!({
+                "Holder": {
+                    "type": "object",
+                    "required": ["data", "state", "either"],
+                    "properties": {
+                        "data": {
+                            "type": ["object", "null"],
+                            "required": ["id"],
+                            "properties": {"id": {"type": "string"}},
+                        },
+                        "state": {"type": ["string", "null"], "enum": ["on", "off", null]},
+                        "either": {"anyOf": [
+                            {"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}},
+                            {"type": "object", "required": ["b"], "properties": {"b": {"type": "string"}}},
+                            {"type": "null"},
+                        ]},
+                    },
+                },
+            })),
+            &Config::default(),
+        )?;
+        let ContractKind::Struct { fields } = named(&contracts, "Holder")?.kind() else {
+            panic!("expected a struct");
+        };
+        // Every member is an inline nullable *nameable* — a struct, a string enum, a union —
+        // and each has to come out as an `Option` of a named type. Testing the unpeeled shape
+        // in `names_needed` sent all three to `serde_json::Value`, silently.
+        for field in fields {
+            let TypeRef::Option(inner) = &field.ty else {
+                panic!("`{}` is {:?}, not an Option", field.wire_name, field.ty);
+            };
+            assert!(
+                matches!(inner.as_ref(), TypeRef::Named(_)),
+                "`{}` holds {inner:?}, not a named type",
+                field.wire_name
+            );
+        }
     }
 
     #[test_util::test]

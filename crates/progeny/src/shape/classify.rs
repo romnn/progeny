@@ -10,21 +10,30 @@
 //!   they would accept would be a bug in the generated client.
 //! * **Nothing degrades quietly.** Every arm that gives up says so through `ctx`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use serde_json::Value;
 
 use super::merge::{self, Discriminated, View};
 use super::{
-    Docs, Extra, Field, Format, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey, ShapeRef, Struct, Union,
-    Variant,
+    Docs, Extra, Field, Format, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey, ShapeRef, Struct, Tag,
+    TagStyle, Union, Variant,
 };
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
-use crate::schema::TypeName;
+use crate::schema::{Schema, SchemaId, TypeName};
+
+/// The name `components.schemas` gave each shape, which is what a discriminator falls back to
+/// when its mapping does not name a branch.
+pub(super) type ComponentNames = BTreeMap<ShapeKey, String>;
 
 /// Classify one key.
-pub(crate) fn key(resolved: &ResolvedDocument, key: &ShapeKey, ctx: &mut Ctx) -> Shape {
+pub(crate) fn key(
+    resolved: &ResolvedDocument,
+    key: &ShapeKey,
+    component_names: &ComponentNames,
+    ctx: &mut Ctx,
+) -> Shape {
     let mut view = merge::view(resolved, key);
     let at = key.anchor().map_or_else(JsonPointer::root, |id| {
         resolved.schemas().address(id).clone()
@@ -55,12 +64,93 @@ pub(crate) fn key(resolved: &ResolvedDocument, key: &ShapeKey, ctx: &mut Ctx) ->
     }
     report_unknown_types(&mut view, ctx, &at);
     report_uninterpreted(&view, ctx, &at);
+    inheritance_union(resolved, &mut view, key, ctx, &at);
 
-    nullable(resolved, &view, ctx, &at)
+    nullable(resolved, &view, component_names, ctx, &at)
+}
+
+/// The inheritance spelling of a discriminated union, turned into the union it describes.
+///
+/// OpenAPI's own polymorphism guide writes a union without writing `oneOf`: the base schema carries
+/// the `discriminator` and its `mapping`, and each variant `allOf`s that base. Read literally the
+/// base is a struct with one property and the mapping says nothing at all, so a `Vermietet` payload
+/// deserializes into a value holding its tag and none of its own members — output that is wrong
+/// without being visibly wrong, which is the failure mode progeny does not permit. The mapping is
+/// the document naming its own variants, so it is read as the union it names.
+///
+/// **Only for the schema that declares the discriminator**, which is what one part means. A variant
+/// merges the base into its own key, so its view carries the discriminator too; synthesizing there
+/// would make every variant a union of its own siblings.
+fn inheritance_union(
+    resolved: &ResolvedDocument,
+    view: &mut View,
+    key: &ShapeKey,
+    ctx: &mut Ctx,
+    at: &JsonPointer,
+) {
+    if view.union.is_some() {
+        return;
+    }
+    let Some(declared) = &view.discriminator else {
+        return;
+    };
+    if declared.mapping.is_empty() || key.parts().len() != 1 {
+        return;
+    }
+
+    let mut branches: Vec<ShapeKey> = Vec::new();
+    let mut unmapped: Vec<&str> = Vec::new();
+    for target in declared.mapping.values() {
+        let Some(id) = resolved.discriminator_target(target) else {
+            unmapped.push(target);
+            continue;
+        };
+        let branch = merge::key_of(resolved, id);
+        // A mapping naming the base itself would make the union one of its own variants, which is
+        // a type that contains itself by value.
+        if &branch != key && !branches.contains(&branch) {
+            branches.push(branch);
+        }
+    }
+    for target in unmapped {
+        degrade(
+            ctx,
+            at,
+            BreakageClass::DiscriminatorEdgeCase,
+            &format!(
+                "this discriminator maps a tag to `{target}`, which names no schema in this \
+                 document, so that variant is not one of the union's"
+            ),
+        );
+    }
+    // Fewer than two variants is not a union, and the literal reading — the base as it is written —
+    // loses nothing that a one-armed enum would keep.
+    if branches.len() < 2 {
+        return;
+    }
+    ctx.report(Diagnostic::new(
+        BreakageClass::InheritanceDiscriminator,
+        Action::Repair,
+        at.clone(),
+        format!(
+            "this schema declares a `discriminator` with a `mapping` and no `oneOf`, which is \
+             how OpenAPI's polymorphism guide writes a union; read as the union of the {} \
+             schemas the mapping names, because the literal reading is a struct holding the \
+             tag and nothing each variant adds",
+            branches.len()
+        ),
+    ));
+    view.union = Some(branches);
 }
 
 /// Peel `null` off the front, since every other arm is about a value that is not null.
-fn nullable(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Shape {
+fn nullable(
+    resolved: &ResolvedDocument,
+    view: &View,
+    component_names: &ComponentNames,
+    ctx: &mut Ctx,
+    at: &JsonPointer,
+) -> Shape {
     let nulls = view
         .types
         .as_ref()
@@ -76,7 +166,7 @@ fn nullable(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPo
         return Shape::Null;
     }
 
-    let core = core(resolved, view, others.as_ref(), ctx, at);
+    let core = core(resolved, view, others.as_ref(), component_names, ctx, at);
     // An `enum` widened with `null` is nullable too, which is how 3.0's `nullable: true` beside an
     // enum arrives here after normalization.
     let enum_null = view
@@ -94,11 +184,12 @@ fn core(
     resolved: &ResolvedDocument,
     view: &View,
     types: Option<&BTreeSet<TypeName>>,
+    component_names: &ComponentNames,
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
     if let Some(branches) = &view.union {
-        return union(resolved, view, branches, ctx, at);
+        return union(resolved, view, branches, component_names, ctx, at);
     }
     if let Some(values) = string_values(view, ctx, at) {
         return Shape::StringEnum(values);
@@ -307,6 +398,7 @@ fn union(
     resolved: &ResolvedDocument,
     view: &View,
     branches: &[ShapeKey],
+    component_names: &ComponentNames,
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
@@ -347,7 +439,7 @@ fn union(
                             .collect(),
                         tag: None,
                     }),
-                    Some(reason) => tagged(resolved, view, rest, &reason, ctx, at),
+                    Some(reason) => tagged(resolved, view, rest, component_names, &reason, ctx, at),
                 }
             }
         }
@@ -369,11 +461,17 @@ fn tagged(
     resolved: &ResolvedDocument,
     view: &View,
     branches: Vec<ShapeKey>,
+    component_names: &ComponentNames,
     reason: &str,
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
-    let Some(declared) = &view.discriminator else {
+    let inherited = view
+        .discriminator
+        .is_none()
+        .then(|| shared_base_discriminator(resolved, &branches))
+        .flatten();
+    let Some(declared) = view.discriminator.as_ref().or(inherited.as_ref()) else {
         // No discriminator and no way to tell the variants apart. An untagged enum here picks
         // whichever variant happens to deserialize first, which is the predecessor's "wild union
         // semantics" breakage class and the one forbidden failure mode.
@@ -393,7 +491,7 @@ fn tagged(
     let variants = branches
         .into_iter()
         .map(|key| {
-            let tag = tag_value(resolved, declared, &key);
+            let tag = tag_value(resolved, declared, component_names, &key);
             Variant {
                 shape: ShapeRef::Key(key),
                 tag,
@@ -402,50 +500,116 @@ fn tagged(
         .collect();
     Shape::Union(Union {
         variants,
-        tag: Some(declared.property.clone()),
+        // Always proposed as consumed: [`super::discriminate`] may settle on carried instead,
+        // once it can see how the variant types are used elsewhere.
+        tag: Some(Tag {
+            property: declared.property.clone(),
+            style: TagStyle::Consumed,
+        }),
+    })
+}
+
+/// The discriminator every branch of this union inherits from one base schema.
+///
+/// A `oneOf` listing the members of a polymorphic family, where the `discriminator` is written once
+/// on the family's base and each member `allOf`s that base. OpenAPI asks for the discriminator to
+/// be repeated beside the `oneOf` and real documents do not: `kundenangaben` writes 37 such unions,
+/// every one of which would otherwise be arbitrary JSON for want of a member the document already
+/// says, one level up.
+///
+/// Inherited only from bases **every** branch shares. A document may write more than one — a
+/// variant that belongs to two families `allOf`s both, and `kundenangaben` does exactly that for
+/// its `Verwendung` types — so several are merged when they agree, and refused when they do not:
+/// two bases naming one tag for two different schemas are two answers to "what is this", and
+/// picking one of them would be a guess.
+fn shared_base_discriminator(
+    resolved: &ResolvedDocument,
+    branches: &[ShapeKey],
+) -> Option<Discriminated> {
+    let mut shared: Option<BTreeSet<SchemaId>> = None;
+    for branch in branches {
+        let bases: BTreeSet<SchemaId> = branch
+            .parts()
+            .iter()
+            .copied()
+            .filter(|&id| mapping_of(resolved, id).is_some())
+            .collect();
+        shared = Some(match shared {
+            None => bases,
+            Some(previous) => previous.intersection(&bases).copied().collect(),
+        });
+    }
+
+    let mut merged: Option<Discriminated> = None;
+    for base in shared? {
+        let declared = mapping_of(resolved, base)?;
+        let Some(into) = merged.as_mut() else {
+            merged = Some(declared);
+            continue;
+        };
+        // Two families tagging their members by different property names have no one answer.
+        if into.property != declared.property {
+            return None;
+        }
+        for (tag, target) in declared.mapping {
+            match into.mapping.entry(tag) {
+                btree_map::Entry::Vacant(slot) => {
+                    slot.insert(target);
+                }
+                btree_map::Entry::Occupied(slot) => {
+                    if slot.get() != &target {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// The declared discriminator of one schema, when it names both a property and a mapping.
+fn mapping_of(resolved: &ResolvedDocument, id: SchemaId) -> Option<Discriminated> {
+    let Schema::Object(object) = resolved.schema(id) else {
+        return None;
+    };
+    let declared = object.discriminator.as_ref()?;
+    let mapping = declared.mapping.clone()?;
+    if mapping.is_empty() {
+        return None;
+    }
+    Some(Discriminated {
+        property: declared.property_name.clone()?,
+        mapping,
     })
 }
 
 /// The name a discriminated union knows one branch by.
 ///
 /// The resolution order OpenAPI defines: an explicit `mapping` entry naming this branch wins, and
-/// otherwise the branch's own component name stands in. A mapping value is either a `$ref` or the
-/// bare component name, and both spellings mean the same position.
+/// otherwise the branch's own component name stands in.
+///
+/// Both halves work on the **branch's key** rather than on the addresses its parts were written
+/// at, and that is what makes them right for the inheritance spelling. A variant written as
+/// `allOf: [$ref Base, {…}]` contributes nothing of its own, so its key is the base's schema plus
+/// the extra part — the mapping's `#/components/schemas/BasicAuthApplication` is not among those
+/// addresses, and the one address that *is* a clean component is the base's, which every sibling
+/// shares. Reading a tag off that gave `okta` twenty unions whose variants were all tagged with
+/// their base's name.
 fn tag_value(
     resolved: &ResolvedDocument,
     declared: &Discriminated,
+    component_names: &ComponentNames,
     branch: &ShapeKey,
 ) -> Option<String> {
-    let addresses: Vec<String> = branch
-        .parts()
-        .iter()
-        .map(|&id| resolved.schemas().address(id).to_string())
-        .collect();
     for (name, target) in &declared.mapping {
-        if addresses.iter().any(|address| address == &mapped(target)) {
+        if let Some(id) = resolved.discriminator_target(target)
+            && &merge::key_of(resolved, id) == branch
+        {
             return Some(name.clone());
         }
     }
     // No explicit entry: the component's own name is the implicit mapping.
-    component_name(&addresses)
-}
-
-/// The document position a discriminator mapping value names.
-fn mapped(target: &str) -> String {
-    match target.strip_prefix('#') {
-        Some(pointer) => pointer.to_owned(),
-        // The shorthand OpenAPI allows: a bare name means a schema component.
-        None => format!("/components/schemas/{target}"),
-    }
-}
-
-/// The `components.schemas` name among a key's addresses, if one is there.
-fn component_name(addresses: &[String]) -> Option<String> {
-    addresses
-        .iter()
-        .find_map(|address| address.strip_prefix("/components/schemas/"))
-        .filter(|name| !name.contains('/'))
-        .map(ToOwned::to_owned)
+    component_names.get(branch).cloned()
 }
 
 /// Why matching these branches by shape alone would be unsound, if it would be.

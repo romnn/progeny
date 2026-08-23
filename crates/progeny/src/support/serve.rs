@@ -45,6 +45,15 @@ pub enum Rejection {
         operation: &'static str,
         detail: String,
     },
+    /// A body whose declared `Content-Type` is not the one the description admits.
+    #[error("`{operation}` accepts `{declared}`, and the request declares `{sent}`")]
+    UnsupportedMediaType {
+        operation: &'static str,
+        /// The media type the description admits at this position.
+        declared: &'static str,
+        /// The base media type the request declared instead.
+        sent: String,
+    },
 }
 
 impl Rejection {
@@ -65,6 +74,9 @@ impl Rejection {
             | Self::InvalidParameter { .. }
             | Self::MissingBody { .. }
             | Self::InvalidBody { .. } => 400,
+            // The one variant with its own number: `415` *is* this refusal's status by
+            // definition, not a house style.
+            Self::UnsupportedMediaType { .. } => 415,
         }
     }
 
@@ -75,7 +87,8 @@ impl Rejection {
             Self::MissingParameter { operation, .. }
             | Self::InvalidParameter { operation, .. }
             | Self::MissingBody { operation }
-            | Self::InvalidBody { operation, .. } => operation,
+            | Self::InvalidBody { operation, .. }
+            | Self::UnsupportedMediaType { operation, .. } => operation,
         }
     }
 }

@@ -9,6 +9,11 @@
 mod buffered;
 mod multipart;
 mod serve;
+mod upload;
+// The names `multipart.rs` reaches with `super::`: in a generated crate the upload file is
+// spliced flat into the support root, so this import makes progeny's own module tree answer the
+// same paths.
+use upload::{base64_decode, base64_encode};
 // Crate-visible for one reason: the bridge test beside the client renderer holds this file's
 // `Style` and the API layer's to the same variant list through an exhaustive match, which a
 // private module would put out of the test's reach.
@@ -36,6 +41,9 @@ mod router;
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
 const BUFFERED: &str = include_str!("buffered.rs");
 
+/// The file-part payload type multipart bodies hold.
+const UPLOAD: &str = include_str!("upload.rs");
+
 /// Parameter serialization, one function per style row.
 const STYLE: &str = include_str!("style.rs");
 
@@ -61,6 +69,9 @@ pub(crate) struct ServerUse {
     pub(crate) multipart: bool,
     pub(crate) text: bool,
     pub(crate) bytes: bool,
+    /// Any body-bearing operation whose media-type gate is emitted — one that does *not*
+    /// declare its own `Content-Type` header parameter.
+    pub(crate) media_type_gate: bool,
     pub(crate) path: bool,
     pub(crate) query: bool,
     pub(crate) header: bool,
@@ -78,6 +89,7 @@ impl ServerUse {
         multipart: true,
         text: true,
         bytes: true,
+        media_type_gate: true,
         path: true,
         query: true,
         header: true,
@@ -100,6 +112,9 @@ pub(crate) struct ClientUse {
     pub(crate) matrix: bool,
     pub(crate) header: bool,
     pub(crate) cookie: bool,
+    /// Any query parameter with `allowReserved: true` — the one caller of the
+    /// reserved-expansion encoder.
+    pub(crate) reserved: bool,
     pub(crate) styles: StyleUse,
     pub(crate) parts: PartUse,
 }
@@ -177,6 +192,7 @@ pub(crate) fn tokens(
     body_limit: crate::config::BodyLimit,
 ) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
+    let upload = source_items(UPLOAD);
     let edges = edge_tokens(
         Edge {
             client,
@@ -190,23 +206,36 @@ pub(crate) fn tokens(
     );
     quote::quote! {
         #buffered
+        #upload
         #edges
     }
 }
 
 /// Support owned by a generated types crate.
 pub(crate) fn types_tokens() -> proc_macro2::TokenStream {
-    source(BUFFERED)
+    let buffered = source(BUFFERED);
+    let upload = source_items(UPLOAD);
+    quote::quote! {
+        #buffered
+        #upload
+    }
 }
 
 /// Support owned by a generated client crate.
 pub(crate) fn client_tokens(used: ClientUse) -> proc_macro2::TokenStream {
-    edge_tokens(
+    // Shipped only where the multipart writer's `super::base64_decode` needs resolving; with no
+    // multipart body in the description nothing here would be live at all.
+    let upload = used.multipart.then(|| upload_source(UPLOAD, true));
+    let edges = edge_tokens(
         Edge::CLIENT,
         crate::config::BodyLimit::default(),
         used,
         ServerUse::default(),
-    )
+    );
+    quote::quote! {
+        #upload
+        #edges
+    }
 }
 
 /// Support owned by a generated server crate.
@@ -214,7 +243,60 @@ pub(crate) fn server_tokens(
     body_limit: crate::config::BodyLimit,
     used: ServerUse,
 ) -> proc_macro2::TokenStream {
-    edge_tokens(Edge::SERVER, body_limit, ClientUse::default(), used)
+    let upload = upload_source(UPLOAD, false);
+    let edges = edge_tokens(Edge::SERVER, body_limit, ClientUse::default(), used);
+    quote::quote! {
+        #upload
+        #edges
+    }
+}
+
+/// The upload source for an edge crate, with the half the edge cannot reach expected dead.
+///
+/// An edge crate's multipart machinery calls exactly one base64 direction — the client's writer
+/// decodes the object form, the server's parser encodes into it — and never names `Upload`
+/// itself: the type an edge serializes lives in the types it imports, and this splice exists
+/// only so the multipart submodule's `super::` calls resolve. rustc treats an item referenced
+/// solely from a dead item's impls as dead too, which is why the visitor is expected alongside
+/// the struct.
+fn upload_source(text: &str, client: bool) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    remove_dead_code_file_expectation(&mut file);
+    file.items.retain(|item| !is_test_module(item));
+    let unused = if client {
+        "base64_encode"
+    } else {
+        "base64_decode"
+    };
+    for item in &mut file.items {
+        match item {
+            syn::Item::Struct(structure)
+                if structure.ident == "Upload" || structure.ident == "UploadVisitor" =>
+            {
+                expect_dead_code(
+                    &mut structure.attrs,
+                    "the edge names the types module's `Upload`, never this splice's",
+                );
+            }
+            syn::Item::Impl(implementation) if implementation.trait_.is_none() => {
+                expect_dead_code(
+                    &mut implementation.attrs,
+                    "the edge names the types module's `Upload`, never this splice's",
+                );
+            }
+            syn::Item::Fn(function) if function.sig.ident == unused => {
+                expect_dead_code(
+                    &mut function.attrs,
+                    "this generated edge calls only the other base64 direction",
+                );
+            }
+            _ => {}
+        }
+    }
+    let items = file.items;
+    quote::quote! { #(#items)* }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -421,6 +503,10 @@ fn unused_parameter_reader(name: &syn::Ident, used: ServerUse) -> Option<&'stati
         "query_value" if !used.query => Some("query"),
         "header_value" if !used.header => Some("header"),
         "cookie_value" if !used.cookie => Some("cookie"),
+        // The media-type gate guards a body read except where a declared `Content-Type`
+        // parameter stands it down, so it is dead exactly when no handler emits it;
+        // "parameter" is close enough for the reason string's shape.
+        "mismatched_media_type" if !used.media_type_gate => Some("gated body"),
         _ => None,
     }
 }
@@ -567,7 +653,9 @@ fn style_function_used(
     server: Option<ServerUse>,
 ) -> bool {
     match name.to_string().as_str() {
-        "query_pairs" => client.is_some_and(|used| used.query),
+        // Both query paths produce their pairs here: the reqwest-encoded one and the
+        // reserved-expansion one.
+        "query_pairs" => client.is_some_and(|used| used.query || used.reserved),
         "form_body" => client.is_some_and(|used| used.form),
         "from_query" => server.is_some_and(|used| used.query),
         "query_object" => server.is_some_and(|used| used.form),
@@ -575,6 +663,10 @@ fn style_function_used(
         "matrix_segment" => client.is_some_and(|used| used.matrix),
         "header_value" => client.is_some_and(|used| used.header),
         "cookie_pair" => client.is_some_and(|used| used.cookie),
+        "reserved_pair" => client.is_some_and(|used| used.reserved),
+        "from_path" => server.is_some_and(|used| used.path),
+        "from_header" => server.is_some_and(|used| used.header),
+        "from_cookie" => server.is_some_and(|used| used.cookie),
         _ => true,
     }
 }
@@ -682,16 +774,38 @@ mod tests {
     /// legitimate there.)
     #[test_util::test]
     fn the_flattened_buffered_source_names_no_super_paths() {
-        let items = super::items(super::BUFFERED);
-        let spelled = quote::quote! { #(#items)* }.to_string();
-        assert!(
-            !spelled.contains("super ::"),
-            "{}",
-            indoc::indoc! {"
-                buffered.rs names `super::`, which resolves differently once the file is spliced \
-                flat into the generated support root"
+        for (name, text) in [
+            ("buffered.rs", super::BUFFERED),
+            ("upload.rs", super::UPLOAD),
+        ] {
+            let items = super::items(text);
+            let spelled = quote::quote! { #(#items)* }.to_string();
+            assert!(
+                !spelled.contains("super ::"),
+                "{name} names `super::`, which resolves differently once the file is spliced \
+                 flat into the generated support root",
+            );
+        }
+    }
+
+    /// The two flattened files share one namespace, so a named import in the second is a
+    /// collision waiting for the first to declare the same name — which `std::fmt` and
+    /// `serde::de` already did. Only trait-anchoring `as _` imports bind no name.
+    #[test_util::test]
+    fn the_second_flattened_source_imports_no_names() {
+        let Ok(file) = syn::parse_file(super::UPLOAD) else {
+            panic!("upload.rs should parse");
+        };
+        for item in &file.items {
+            if let syn::Item::Use(import) = item {
+                let spelled = quote::quote! { #import }.to_string();
+                assert!(
+                    spelled.ends_with("as _ ;"),
+                    "upload.rs imports `{spelled}`, which can collide with buffered.rs once both \
+                     are spliced flat into the generated support root; qualify the path instead",
+                );
             }
-        );
+        }
     }
 
     /// The shipped source has to parse as a file, both ways.
