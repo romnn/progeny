@@ -77,6 +77,28 @@ cargo progeny openapi.yaml --out-dir generated/
 `progeny --version` reports the version of the *library* that would generate the output, not of the
 front end, because that is the number a reviewer of a generated diff needs.
 
+## Preserving explicit null
+
+Optional and nullable properties normally use `Option<T>`, which cannot distinguish an omitted
+property from an explicit `null`. Opt into a three-state `Presence<T>` representation globally:
+
+```toml
+preserve-optional-nullable = true
+```
+
+For a specification that does not declare a confirmed null-capable property nullable, pin a
+reviewed override to its schema pointer and current declared type:
+
+```toml
+[nullability-overrides]
+"/components/schemas/Patch/properties/nickname" = "string"
+```
+
+An override implies three-state presence for that property. Generation fails if the pointer no
+longer exists, its declared type or shape changes, or the specification makes it nullable itself;
+the entry must then be reviewed and removed or updated. Globally preserving presence also enriches
+response fields because request and response bodies intentionally share one generated type graph.
+
 ## Client middleware
 
 The generated client has no callback or hook system. Supply a preconfigured `reqwest::Client` for

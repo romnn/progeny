@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
-use crate::diag::{Action, BreakageClass, Diagnostic};
+use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer};
 
 /// How progeny should generate, and what the caller refuses to accept.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -42,6 +42,23 @@ pub struct Config {
     /// The same, for named types.
     #[serde(default)]
     pub type_unknown_fields: BTreeMap<String, UnknownFields>,
+    /// Whether optional and nullable properties retain absent, null, and value as distinct states.
+    ///
+    /// Generated request and response bodies share one type graph, so this applies to every such
+    /// property rather than splitting shared schemas by direction.
+    #[serde(default)]
+    pub preserve_optional_nullable: bool,
+    /// Schema properties to treat as nullable, keyed by their JSON Pointer.
+    ///
+    /// Each value pins the property's declared type.
+    /// Generation fails if the pointer disappears, its declaration changes shape, or it becomes
+    /// nullable in the document, so a specification refresh cannot silently invalidate the
+    /// override.
+    ///
+    /// An entry also preserves all three presence states for that property, without requiring
+    /// [`Config::preserve_optional_nullable`].
+    #[serde(default)]
+    pub nullability_overrides: BTreeMap<String, SchemaType>,
     /// Names to use instead of the ones progeny derives, keyed by component name or by the
     /// schema's JSON Pointer.
     ///
@@ -296,6 +313,39 @@ pub enum UnknownFields {
     Capture,
 }
 
+/// A JSON Schema type pinned by a nullability override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchemaType {
+    /// `boolean`.
+    Boolean,
+    /// `object`.
+    Object,
+    /// `array`.
+    Array,
+    /// `number`.
+    Number,
+    /// `string`.
+    String,
+    /// `integer`.
+    Integer,
+}
+
+impl SchemaType {
+    /// The JSON Schema spelling written in a document.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Object => "object",
+            Self::Array => "array",
+            Self::Number => "number",
+            Self::String => "string",
+            Self::Integer => "integer",
+        }
+    }
+}
+
 /// Which `Deserialize`/`Serialize` implementation to emit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -473,6 +523,14 @@ impl<'a> Address<'a> {
 }
 
 impl Config {
+    /// Whether this optional and nullable property keeps all three presence states.
+    pub(crate) fn preserves_optional_nullable_at(&self, address: &JsonPointer) -> bool {
+        self.preserve_optional_nullable
+            || self
+                .nullability_overrides
+                .contains_key(&address.to_string())
+    }
+
     /// Whichever of these derives the caller asked for by name, for a type named either by its
     /// component name or by its JSON Pointer.
     pub(crate) fn derives_for(&self, component: Option<&str>, address: &str) -> &BTreeSet<Derive> {
@@ -628,6 +686,23 @@ mod tests {
                 [deny]
                 classes = ["whatever"]"#})
             .is_err()
+        );
+    }
+
+    #[test_util::test]
+    fn presence_and_nullability_override_configuration_is_typed() {
+        let config: Config = toml::from_str(indoc::indoc! {r#"
+            preserve-optional-nullable = true
+
+            [nullability-overrides]
+            "/components/schemas/Patch/properties/nickname" = "string"
+        "#})?;
+        assert!(config.preserve_optional_nullable);
+        assert_eq!(
+            config
+                .nullability_overrides
+                .get("/components/schemas/Patch/properties/nickname"),
+            Some(&super::SchemaType::String)
         );
     }
 }

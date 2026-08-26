@@ -162,7 +162,9 @@ impl Build<'_> {
 /// types are looked *into*, because an alias of an array is an array on the wire.
 pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
     match ty {
-        TypeRef::Option(inner) | TypeRef::Boxed(inner) => param_shape(inner, contracts),
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            param_shape(inner, contracts)
+        }
         TypeRef::Vec(_) | TypeRef::Array(..) | TypeRef::Tuple(_) => ParamShape::Array,
         // Serialized as an object; it only ever sits in a multipart body, never a parameter.
         TypeRef::Map(_) | TypeRef::Upload => ParamShape::Object,

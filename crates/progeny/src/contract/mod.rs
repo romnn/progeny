@@ -78,6 +78,8 @@ pub(crate) enum TypeRef {
     /// `serde_json::Value`: the degradation target.
     Value,
     Option(Box<TypeRef>),
+    /// `support::Presence<T>`: an optional and nullable property without presence collapse.
+    Presence(Box<TypeRef>),
     Vec(Box<TypeRef>),
     /// The `Config`-chosen map type, keyed by `String`.
     Map(Box<TypeRef>),
@@ -97,6 +99,7 @@ impl TypeRef {
         match self {
             Self::Upload => true,
             Self::Option(inner)
+            | Self::Presence(inner)
             | Self::Vec(inner)
             | Self::Map(inner)
             | Self::Array(inner, _)
@@ -115,6 +118,29 @@ impl TypeRef {
         }
     }
 
+    /// Whether the spelled-out type names `support::Presence` anywhere.
+    pub(crate) fn holds_presence(&self) -> bool {
+        match self {
+            Self::Presence(_) => true,
+            Self::Option(inner)
+            | Self::Vec(inner)
+            | Self::Map(inner)
+            | Self::Array(inner, _)
+            | Self::Boxed(inner) => inner.holds_presence(),
+            Self::Tuple(items) => items.iter().any(Self::holds_presence),
+            Self::Named(_)
+            | Self::Unit
+            | Self::Bool
+            | Self::I64
+            | Self::U64
+            | Self::F64
+            | Self::String
+            | Self::Format(_)
+            | Self::Upload
+            | Self::Value => false,
+        }
+    }
+
     /// The named types this reference reaches, and whether it reaches them indirectly.
     ///
     /// A cycle through a `Vec`, a map or a `Box` is fine; a cycle through none of them is a type of
@@ -125,7 +151,9 @@ impl TypeRef {
             Self::Named(index) => out.push((*index, indirect)),
             // Neither an option nor a fixed array indirects: both are their content's size plus at
             // most a discriminant.
-            Self::Option(inner) | Self::Array(inner, _) => inner.reaches(indirect, out),
+            Self::Option(inner) | Self::Presence(inner) | Self::Array(inner, _) => {
+                inner.reaches(indirect, out);
+            }
             Self::Vec(inner) | Self::Map(inner) | Self::Boxed(inner) => inner.reaches(true, out),
             Self::Tuple(items) => {
                 for item in items {
@@ -165,6 +193,7 @@ impl TypeRef {
                 }
             }
             Self::Option(inner)
+            | Self::Presence(inner)
             | Self::Vec(inner)
             | Self::Map(inner)
             | Self::Boxed(inner)
@@ -189,9 +218,8 @@ impl TypeRef {
 
 /// Whether a member may be absent, null, both, or neither.
 ///
-/// Kept even though v1 collapses the last two onto one `Option`, because it is the fact the
-/// document stated and the thing a later `Patch<T>` would need. The collapse is diagnosed rather
-/// than silent.
+/// Kept independently of the generated type so the contract records the document's fact whether
+/// configuration preserves it or prices its collapse onto one [`Option`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Presence {
     /// The key is always there and never null.
@@ -211,6 +239,8 @@ pub(crate) enum SkipRule {
     Never,
     /// Left out when it is `None`.
     WhenNone,
+    /// Left out when its explicit presence state is `Omitted`.
+    WhenOmitted,
 }
 
 /// Which `Deserialize` implementation a type gets.
@@ -433,6 +463,15 @@ impl Contracts {
             finalize::references(contract.kind())
                 .iter()
                 .any(|ty| ty.holds_upload())
+        })
+    }
+
+    /// Whether any field names the generated three-state presence support type.
+    pub(crate) fn uses_presence(&self) -> bool {
+        self.types.iter().any(|contract| {
+            finalize::references(contract.kind())
+                .iter()
+                .any(|ty| ty.holds_presence())
         })
     }
 

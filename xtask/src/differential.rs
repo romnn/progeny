@@ -153,6 +153,7 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> eyre::Re
 fn render(document: &[u8], strategy: SerdeImpl) -> eyre::Result<String> {
     let config = Config {
         serde_impl: strategy,
+        preserve_optional_nullable: true,
         packaging: Packaging::Module,
         // The two serde renderings are a question about the shared type layer; a client would be
         // the same source in both halves and an HTTP stack compiled twice to prove it.

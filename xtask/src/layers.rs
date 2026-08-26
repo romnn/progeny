@@ -1,12 +1,15 @@
 //! The two structural invariants of the generator crate, held mechanically.
 //!
-//! **Pipeline directionality.** The module graph *is* the pipeline —
-//! `load → normalize → schema/doc → resolve → shape → contract → api → render` — with dependencies
-//! pointing strictly leftward. Private fields already stop a later stage from constructing or
-//! mutating an earlier stage's values, but Rust cannot make a leftward `use` a compile error inside
-//! one crate, so this walks the crate's `use` graph instead. When workspace build parallelism ever
-//! justifies splitting the crate, these module seams are already the crate seams and the rule
-//! becomes compiler-enforced for free.
+//! **Pipeline directionality.**
+//!
+//! The module graph *is* the pipeline —
+//! `load → normalize → schema/doc → overrides → resolve → shape → contract → api → render` — with
+//! dependencies pointing strictly leftward.
+//! Private fields already stop a later stage from constructing or mutating an earlier stage's
+//! values, but Rust cannot make a leftward `use` a compile error inside one crate, so this walks the
+//! crate's `use` graph instead.
+//! When workspace build parallelism ever justifies splitting the crate, these module seams are
+//! already the crate seams and the rule becomes compiler-enforced for free.
 //!
 //! The layer table is **total**: a top-level module the table does not rank is itself a violation.
 //! An unranked module used to be silently exempt in both directions — free to import anything, and
@@ -49,6 +52,7 @@ const LAYERS: &[(&str, u32)] = &[
     ("normalize", 20),
     ("schema", 30),
     ("doc", 40),
+    ("overrides", 42),
     ("resolve", 45),
     ("shape", 50),
     ("contract", 60),

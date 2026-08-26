@@ -8,6 +8,8 @@
 
 mod buffered;
 mod multipart;
+#[cfg(test)]
+mod presence;
 mod serve;
 mod upload;
 // The names `multipart.rs` reaches with `super::`: in a generated crate the upload file is
@@ -40,6 +42,9 @@ mod router;
 
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
 const BUFFERED: &str = include_str!("buffered.rs");
+
+/// Three-state optional and nullable property presence.
+const PRESENCE: &str = include_str!("presence.rs");
 
 /// The file-part payload type multipart bodies hold.
 const UPLOAD: &str = include_str!("upload.rs");
@@ -162,6 +167,22 @@ pub(crate) struct PartUse {
     pub(crate) json: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresenceUse {
+    Omitted,
+    Preserved,
+}
+
+impl From<bool> for PresenceUse {
+    fn from(preserved: bool) -> Self {
+        if preserved {
+            Self::Preserved
+        } else {
+            Self::Omitted
+        }
+    }
+}
+
 impl PartUse {
     const ALL: Self = Self {
         text: true,
@@ -190,8 +211,10 @@ pub(crate) fn tokens(
     server: bool,
     gated: bool,
     body_limit: crate::config::BodyLimit,
+    presence: PresenceUse,
 ) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
+    let presence = (presence == PresenceUse::Preserved).then(presence_tokens);
     let upload = source_items(UPLOAD);
     let edges = edge_tokens(
         Edge {
@@ -206,18 +229,45 @@ pub(crate) fn tokens(
     );
     quote::quote! {
         #buffered
+        #presence
         #upload
         #edges
     }
 }
 
 /// Support owned by a generated types crate.
-pub(crate) fn types_tokens() -> proc_macro2::TokenStream {
+pub(crate) fn types_tokens(presence: bool) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
+    let presence = presence.then(presence_tokens);
     let upload = source_items(UPLOAD);
     quote::quote! {
         #buffered
+        #presence
         #upload
+    }
+}
+
+fn presence_tokens() -> proc_macro2::TokenStream {
+    let presence = source_items(PRESENCE);
+    quote::quote! {
+        #presence
+
+        /// Reads a presence-preserving field, defaulting only when the member is absent.
+        pub(crate) fn take_presence_or_default<'de, T, E>(
+            buffer: &mut Buffer<'de>,
+            name: &'static str,
+        ) -> Result<T, E>
+        where
+            T: serde::Deserialize<'de> + Default,
+            E: serde::de::Error,
+        {
+            match buffer.position(name) {
+                Some(content) => serde::Deserialize::deserialize(
+                    ContentDeserializer::new(content),
+                ),
+                None => Ok(T::default()),
+            }
+        }
     }
 }
 
@@ -818,7 +868,8 @@ mod tests {
         for client in [false, true] {
             for server in [false, true] {
                 for gated in [false, true] {
-                    let tokens = super::tokens(client, server, gated, BodyLimit::default());
+                    let tokens =
+                        super::tokens(client, server, gated, BodyLimit::default(), false.into());
                     syn::parse2::<syn::File>(tokens.clone()).map_err(|error| {
                         eyre::eyre!(
                             "{}",
@@ -834,17 +885,19 @@ mod tests {
         }
         // And each half is really there when it was asked for, so the check above is not passing
         // because there was nothing to compose.
-        let both = super::tokens(true, true, true, BodyLimit::default()).to_string();
+        let both = super::tokens(true, true, true, BodyLimit::default(), false.into()).to_string();
         assert!(both.contains("ResponseValue"), "{both}");
         assert!(both.contains("Rejection"), "{both}");
         assert!(both.contains("cfg (feature = \"client\")"), "{both}");
         assert!(both.contains("cfg (feature = \"server\")"), "{both}");
 
-        let calling = super::tokens(true, false, true, BodyLimit::default()).to_string();
+        let calling =
+            super::tokens(true, false, true, BodyLimit::default(), false.into()).to_string();
         assert!(calling.contains("ResponseValue"), "{calling}");
         assert!(!calling.contains("Rejection"), "{calling}");
 
-        let serving = super::tokens(false, true, true, BodyLimit::default()).to_string();
+        let serving =
+            super::tokens(false, true, true, BodyLimit::default(), false.into()).to_string();
         assert!(!serving.contains("ResponseValue"), "{serving}");
         assert!(serving.contains("Rejection"), "{serving}");
 
@@ -854,7 +907,7 @@ mod tests {
 
         // In module mode nothing is gated: there is no crate whose feature could turn it on.
         assert!(
-            !super::tokens(true, true, false, BodyLimit::default())
+            !super::tokens(true, true, false, BodyLimit::default(), false.into())
                 .to_string()
                 .contains("cfg (feature"),
         );
@@ -868,13 +921,14 @@ mod tests {
     /// Saying so in a comment was not enough, so it became configuration.
     #[test_util::test]
     fn the_body_ceiling_is_the_configured_one() {
-        let rendered = super::tokens(false, true, false, BodyLimit(4096)).to_string();
+        let rendered = super::tokens(false, true, false, BodyLimit(4096), false.into()).to_string();
         assert!(
             rendered.contains("BODY_LIMIT : usize = 4096"),
             "the configured ceiling did not reach the shipped constant"
         );
         // And the default is still the default rather than something a caller has to know to set.
-        let fallback = super::tokens(false, true, false, BodyLimit::default()).to_string();
+        let fallback =
+            super::tokens(false, true, false, BodyLimit::default(), false.into()).to_string();
         assert!(
             fallback.contains("BODY_LIMIT : usize = 2097152"),
             "{fallback}"

@@ -270,7 +270,9 @@ fn box_target(ty: &mut TypeRef, target: TypeIndex) -> bool {
             *ty = TypeRef::Boxed(Box::new(TypeRef::Named(target)));
             true
         }
-        TypeRef::Option(inner) | TypeRef::Array(inner, _) => box_target(inner, target),
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Array(inner, _) => {
+            box_target(inner, target)
+        }
         TypeRef::Tuple(items) => items.iter_mut().any(|item| box_target(item, target)),
         // Already indirect, so nothing here closes a cycle.
         _ => false,
@@ -378,6 +380,9 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
         }
         TypeRef::Option(inner) | TypeRef::Array(inner, _) => {
             carries(derive, inner, supported, config)
+        }
+        TypeRef::Presence(inner) => {
+            derive == Derive::Default || carries(derive, inner, supported, config)
         }
         TypeRef::Boxed(inner) => {
             derive != Derive::Copy && carries(derive, inner, supported, config)

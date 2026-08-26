@@ -8,8 +8,9 @@
 //!
 //! * **Parse, don't validate.** Untrusted input becomes a typed value once, at the edge.
 //!   Downstream code cannot receive malformed data because there is no shape for it to arrive in.
-//! * **One direction.** `load → normalize → document → resolve → shape → contract → api →
-//!   render`. Each conversion is total: it produces a value plus diagnostics, or it rejects.
+//! * **One direction.**
+//!   `load → normalize → document → overrides → resolve → shape → contract → api → render`.
+//!   Each conversion is total: it produces a value plus diagnostics, or it rejects.
 //! * **Silently wrong output is the only forbidden failure mode.** Generating less, with a
 //!   diagnostic, always beats generating something plausible. Every deviation from the input
 //!   document appears in [`Output::diagnostics`]; the caller decides which ones stop the build.
@@ -58,6 +59,7 @@ mod diag;
 mod doc;
 mod load;
 mod normalize;
+mod overrides;
 mod render;
 mod resolve;
 mod schema;
@@ -75,7 +77,7 @@ use camino::Utf8PathBuf;
 
 pub use crate::config::{
     BodyLimit, BytesRepr, Config, DateTimeCrate, Deny, Derive, Emit, Formats, MapKind, Package,
-    Packaging, Pagination, SerdeImpl, UnknownFields, UuidCrate,
+    Packaging, Pagination, SchemaType, SerdeImpl, UnknownFields, UuidCrate,
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
@@ -126,7 +128,8 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
     let mut ctx = diag::Ctx::new();
     let loaded = load::load(input, &mut ctx)?;
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
-    let parsed = doc::parse::document(normalized, &mut ctx);
+    let mut parsed = doc::parse::document(normalized, &mut ctx);
+    overrides::apply(&mut parsed, config)?;
     let resolved = resolve::resolve(parsed, &mut ctx);
     let shapes = shape::classify(&resolved, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
@@ -144,10 +147,21 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{Config, RejectKind, generate};
     use color_eyre::eyre::{self, OptionExt as _};
 
     const PETSTORE: &[u8] = include_bytes!("../../../corpus/specs/petstore-31.yaml");
+
+    const PRESENCE_SPEC: &[u8] = br#"{
+        "openapi": "3.1.0",
+        "paths": {},
+        "components": {"schemas": {"Patch": {
+            "type": "object",
+            "properties": {"nickname": {"type": "string"}}
+        }}}
+    }"#;
 
     #[test_util::test]
     fn a_package_name_or_version_rendering_cannot_survive_is_rejected_up_front() {
@@ -273,6 +287,44 @@ mod tests {
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
+    }
+
+    /// An opted-in field's generated shape is pinned as a reviewable source snapshot.
+    #[test_util::test]
+    fn a_nullability_override_emits_three_state_presence() {
+        let pointer = "/components/schemas/Patch/properties/nickname";
+        let config = Config {
+            nullability_overrides: BTreeMap::from([(
+                pointer.to_owned(),
+                crate::SchemaType::String,
+            )]),
+            ..Config::default()
+        };
+        let output = generate(PRESENCE_SPEC, &config)?;
+        let types = &output.files[camino::Utf8Path::new("src/types.rs")];
+        assert!(
+            types.contains("pub nickname: super::support::Presence<String>"),
+            "{types}"
+        );
+        let support = &output.files[camino::Utf8Path::new("src/support.rs")];
+        assert!(support.contains("pub enum Presence<T>"), "{support}");
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.class() != crate::BreakageClass::PresenceCollapse),
+            "{:#?}",
+            output.diagnostics
+        );
+
+        let default = generate(PRESENCE_SPEC, &Config::default())?;
+        let default_types = &default.files[camino::Utf8Path::new("src/types.rs")];
+        assert!(
+            default_types.contains("pub nickname: Option<String>"),
+            "{default_types}"
+        );
+        let default_support = &default.files[camino::Utf8Path::new("src/support.rs")];
+        assert!(!default_support.contains("pub enum Presence<T>"));
     }
 
     /// One declared dialect is one record.

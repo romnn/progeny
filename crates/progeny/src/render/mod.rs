@@ -75,7 +75,12 @@ pub(crate) fn run(
     // Emitted only when something calls into it: an unused module is compile time the consumer did
     // not ask for. An upload field counts — the types module spells `support::Upload` even when
     // no hand-written serde and no edge asked for the module.
-    if http || serves || serde_impl::needed(contracts) || contracts.uses_upload() {
+    if http
+        || serves
+        || serde_impl::needed(contracts)
+        || contracts.uses_upload()
+        || contracts.uses_presence()
+    {
         modules.push((
             "support",
             crate::support::tokens(
@@ -83,6 +88,7 @@ pub(crate) fn run(
                 serves,
                 config.packaging == Packaging::Crate,
                 config.body_limit,
+                contracts.uses_presence().into(),
             ),
         ));
     }
@@ -193,7 +199,8 @@ fn insert_types_crate(
     // `pub` for the same reason the one-crate packaging makes it public: an upload body field is
     // `support::Upload`, and a consumer who has to fill that field has to be able to name the
     // type — a private module would make the field itself a `private_interfaces` defect.
-    let needed = serde_impl::needed(contracts) || contracts.uses_upload();
+    let needed =
+        serde_impl::needed(contracts) || contracts.uses_upload() || contracts.uses_presence();
     let support = needed.then(|| {
         quote! {
             #[doc(hidden)]
@@ -212,7 +219,7 @@ fn insert_types_crate(
     if needed {
         files.insert(
             directory.join("src/support.rs"),
-            source(&crate::support::types_tokens()),
+            source(&crate::support::types_tokens(contracts.uses_presence())),
         );
     }
 }

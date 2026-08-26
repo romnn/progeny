@@ -472,7 +472,9 @@ fn synthesize(
             "filename": "probe.bin",
             "content_type": "application/octet-stream",
         }),
-        TypeRef::Option(inner) | TypeRef::Boxed(inner) => synthesize(inner, contracts, visiting)?,
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            synthesize(inner, contracts, visiting)?
+        }
         TypeRef::Vec(inner) => json!([synthesize(inner, contracts, visiting)?]),
         // One member, not none: an empty map writes nothing on the wire, and a probe that sends
         // nothing asserts nothing — `jellyfin`'s `deepObject` maps only round-trip because this

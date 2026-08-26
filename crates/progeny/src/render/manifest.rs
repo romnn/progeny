@@ -427,6 +427,7 @@ fn collect(ty: &TypeRef, formats: &mut BTreeSet<Format>, maps: &mut bool) {
             collect(inner, formats, maps);
         }
         TypeRef::Option(inner)
+        | TypeRef::Presence(inner)
         | TypeRef::Vec(inner)
         | TypeRef::Boxed(inner)
         | TypeRef::Array(inner, _) => collect(inner, formats, maps),

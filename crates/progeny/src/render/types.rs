@@ -459,6 +459,12 @@ fn member(
     if field.skip_serializing_if == SkipRule::WhenNone && !field.flatten {
         attributes.push(quote! { skip_serializing_if = "Option::is_none" });
     }
+    if field.skip_serializing_if == SkipRule::WhenOmitted && !field.flatten {
+        attributes.push(quote! {
+            default,
+            skip_serializing_if = "super::support::Presence::is_omitted"
+        });
+    }
     let serde = (!attributes.is_empty()).then(|| quote! { #[serde(#(#attributes),*)] });
     quote! { #docs #serde #nesting pub #name: #ty, }
 }
@@ -613,6 +619,10 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, qualified: bo
         TypeRef::Option(inner) => {
             let inner = type_ref(inner);
             quote! { Option<#inner> }
+        }
+        TypeRef::Presence(inner) => {
+            let inner = type_ref(inner);
+            quote! { super::support::Presence<#inner> }
         }
         TypeRef::Vec(inner) => {
             let inner = type_ref(inner);

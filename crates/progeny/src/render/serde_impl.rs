@@ -102,16 +102,22 @@ fn reading(
 
     let defaulted = fields
         .iter()
-        // Always false: a declared default is documentation about the server, not an instruction
-        // to fill the member in on the way in — see `types::with_default`. The flag stays in the
-        // shipped trait because the *sequence* form of a struct needs it to tell a short sequence
-        // from a defaulted tail, and both serde paths have to answer that question the same way.
-        .map(|_| false);
+        // A presence-preserving field uses its own `Default` only to represent an absent member.
+        // OpenAPI's declared `default` remains documentation about the server and never enters
+        // this decision — see `types::with_default`.
+        .map(|field| field.skip_serializing_if == SkipRule::WhenOmitted);
     let reads = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let wire = field.wire_name.as_str();
         let deprecated = deprecated_field(field, contract.docs().deprecated);
-        quote! { #deprecated #member: buffer.take(#wire)?, }
+        if field.skip_serializing_if == SkipRule::WhenOmitted {
+            quote! {
+                #deprecated
+                #member: super::support::take_presence_or_default(buffer, #wire)?,
+            }
+        } else {
+            quote! { #deprecated #member: buffer.take(#wire)?, }
+        }
     });
     // A struct with no members reads nothing out of the buffer, and an unused binding is a warning
     // in the consumer's build. `cloudflare`, `github-31` and `okta` all declare one — an object
@@ -166,11 +172,19 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
         .count();
     let conditional: Vec<TokenStream> = fields
         .iter()
-        .filter(|field| field.skip_serializing_if == SkipRule::WhenNone)
+        .filter(|field| field.skip_serializing_if != SkipRule::Never)
         .map(|field| {
             let member = ident(&field.rust_name);
             let deprecated = deprecated_field(field, contract.docs().deprecated);
-            quote! { #deprecated if self.#member.is_some() { count += 1; } }
+            match field.skip_serializing_if {
+                SkipRule::Never => quote! {},
+                SkipRule::WhenNone => {
+                    quote! { #deprecated if self.#member.is_some() { count += 1; } }
+                }
+                SkipRule::WhenOmitted => {
+                    quote! { #deprecated if !self.#member.is_omitted() { count += 1; } }
+                }
+            }
         })
         .collect();
     // `mut` only when something mutates it. A struct whose members are all unconditional never
@@ -202,6 +216,14 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
                     state.serialize_field(#wire, &self.#member)?;
                 } else {
                     state.skip_field(#wire)?;
+                }
+            },
+            SkipRule::WhenOmitted => quote! {
+                #deprecated
+                if self.#member.is_omitted() {
+                    state.skip_field(#wire)?;
+                } else {
+                    state.serialize_field(#wire, &self.#member)?;
                 }
             },
         }

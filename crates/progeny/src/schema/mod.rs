@@ -86,6 +86,15 @@ impl SchemaStore {
         self.schemas.get(id.index()).unwrap_or(&ANY)
     }
 
+    /// The schema written at `address`, when the parser registered one there.
+    pub(crate) fn at_mut(&mut self, address: &JsonPointer) -> Option<&mut Schema> {
+        let index = self
+            .addresses
+            .iter()
+            .position(|candidate| candidate == address)?;
+        self.schemas.get_mut(index)
+    }
+
     /// Where the schema was written. The root pointer for an id from no store, which is the same
     /// answer [`SchemaStore::get`] gives: an impossible id degrades rather than panicking.
     pub(crate) fn address(&self, id: SchemaId) -> &JsonPointer {

@@ -35,6 +35,8 @@ components:
           type: string
         optional:
           type: integer
+        clearable:
+          type: [string, "null"]
         wireName:
           type: boolean
         limit:

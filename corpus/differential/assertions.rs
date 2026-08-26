@@ -105,6 +105,27 @@ fn an_explicit_null_and_an_absent_member_are_treated_alike_by_both() {
 }
 
 #[test_util::test]
+fn preserved_presence_distinguishes_omit_null_and_value_on_the_wire() {
+    let (omitted_left, omitted_right) = both(r#"{"required":"a"}"#)?
+        .map_err(|(left, right)| eyre::eyre!("both refused omission: {left} / {right}"))?;
+    assert_eq!(omitted_left, omitted_right);
+    assert!(!omitted_left.contains("\"clearable\""), "{omitted_left}");
+
+    let (null_left, null_right) = both(r#"{"required":"a","clearable":null}"#)?
+        .map_err(|(left, right)| eyre::eyre!("both refused null: {left} / {right}"))?;
+    assert_eq!(null_left, null_right);
+    assert!(null_left.contains("\"clearable\":null"), "{null_left}");
+
+    let (value_left, value_right) = both(r#"{"required":"a","clearable":"set"}"#)?
+        .map_err(|(left, right)| eyre::eyre!("both refused a value: {left} / {right}"))?;
+    assert_eq!(value_left, value_right);
+    assert!(
+        value_left.contains("\"clearable\":\"set\""),
+        "{value_left}"
+    );
+}
+
+#[test_util::test]
 fn a_declared_default_is_applied_by_neither() {
     let (left, right) = both(r#"{"required":"a"}"#)?
         .map_err(|(left, right)| eyre::eyre!("both refused it: {left} / {right}"))?;
@@ -244,14 +265,15 @@ fn an_unknown_variant_is_refused_the_same_way() {
 /// of" into "every combination of them".
 #[test_util::test]
 fn every_combination_of_presence_agrees() {
-    const MEMBERS: [(&str, [&str; 2]); 4] = [
+    const MEMBERS: [(&str, [&str; 2]); 5] = [
         ("optional", ["1", "null"]),
+        ("clearable", [r#""set""#, "null"]),
         ("wireName", ["true", "null"]),
         ("limit", ["7", "null"]),
         ("state", [r#""done""#, "null"]),
     ];
-    // Three states per member — present, present-and-null, absent — over four members.
-    for mask in 0..3_u32.pow(4) {
+    // Three states per member — present, present-and-null, absent — over five members.
+    for mask in 0..3_u32.pow(5) {
         let mut members = vec![r#""required":"a""#.to_owned()];
         let mut divisor = 1;
         for (name, values) in MEMBERS {

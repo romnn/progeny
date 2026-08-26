@@ -572,28 +572,8 @@ impl Lower<'_> {
                     kind: CollapseKind::WriteOnly,
                 });
             }
-            let (presence, ty, skip) = match (field.required, nullable) {
-                (true, false) => (Presence::Required, inner, SkipRule::Never),
-                // Already an `Option` from the shape: the key is there and may be null.
-                (true, true) => (Presence::Nullable, inner, SkipRule::Never),
-                (false, false) => (
-                    Presence::Optional,
-                    TypeRef::Option(Box::new(inner)),
-                    SkipRule::WhenNone,
-                ),
-                (false, true) => {
-                    // Recorded rather than reported. The finding is real here, but *which half of
-                    // the API it costs* is not knowable here: a collapse on the way in loses a
-                    // caller's explicit null, and one on the way out loses a server's — different
-                    // consequences, and nothing knows a position until the API model exists.
-                    self.collapses.push(Collapse {
-                        owner: index,
-                        at: position,
-                        kind: CollapseKind::Presence,
-                    });
-                    (Presence::OptionalNullable, inner, SkipRule::WhenNone)
-                }
-            };
+            let (presence, ty, skip) =
+                self.field_presence(field.required, nullable, inner, index, position);
             let default = self.default(field, &origin, ctx);
             fields.push(FieldContract {
                 rust_name: unique_field(&mut used, &field.wire),
@@ -644,6 +624,52 @@ impl Lower<'_> {
             });
         }
         (fields, policy)
+    }
+
+    /// The generated representation of one property's declared presence states.
+    fn field_presence(
+        &mut self,
+        required: bool,
+        nullable: bool,
+        inner: TypeRef,
+        owner: TypeIndex,
+        position: JsonPointer,
+    ) -> (Presence, TypeRef, SkipRule) {
+        match (required, nullable) {
+            (true, false) => (Presence::Required, inner, SkipRule::Never),
+            // Already an `Option` from the shape: the key is there and may be null.
+            (true, true) => (Presence::Nullable, inner, SkipRule::Never),
+            (false, false) => (
+                Presence::Optional,
+                TypeRef::Option(Box::new(inner)),
+                SkipRule::WhenNone,
+            ),
+            (false, true) if self.config.preserves_optional_nullable_at(&position) => {
+                let value = match inner {
+                    TypeRef::Option(value) => value,
+                    // Multipart file detection replaces the nullable wrapper with the richer
+                    // upload payload before presence is ruled on.
+                    other => Box::new(other),
+                };
+                (
+                    Presence::OptionalNullable,
+                    TypeRef::Presence(value),
+                    SkipRule::WhenOmitted,
+                )
+            }
+            (false, true) => {
+                // Recorded rather than reported. The finding is real here, but *which half of the
+                // API it costs* is not knowable here: a collapse on the way in loses a caller's
+                // explicit null, and one on the way out loses a server's — different consequences,
+                // and nothing knows a position until the API model exists.
+                self.collapses.push(Collapse {
+                    owner,
+                    at: position,
+                    kind: CollapseKind::Presence,
+                });
+                (Presence::OptionalNullable, inner, SkipRule::WhenNone)
+            }
+        }
     }
 
     fn shape_of<'a>(&'a self, reference: &'a ShapeRef) -> Option<&'a Shape> {
@@ -722,7 +748,9 @@ impl Lower<'_> {
             TypeRef::Format(format) => format_name(*format).to_owned(),
             TypeRef::Upload => "Upload".to_owned(),
             TypeRef::Value => "Any".to_owned(),
-            TypeRef::Option(inner) | TypeRef::Boxed(inner) => self.variant_name(inner),
+            TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+                self.variant_name(inner)
+            }
             TypeRef::Vec(inner) | TypeRef::Array(inner, _) => {
                 format!("{}List", self.variant_name(inner))
             }
