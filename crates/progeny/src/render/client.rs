@@ -1157,11 +1157,19 @@ fn dispatch(
     });
     let fallback = match (&operation.responses.default, claims_success) {
         // No `default`: a status the document never mentioned has no shape progeny has ever seen.
-        (None, _) => quote! { _ => ::std::result::Result::Err(Error::UnexpectedStatus(response)), },
+        (None, _) => quote! {
+            _ => ::std::result::Result::Err(
+                Error::UnexpectedStatus(::std::boxed::Box::new(response)),
+            ),
+        },
         // A `default` beside declared successes catches what they do not, which is a failure.
         (Some(arm), false) => {
             let decoded = decode(arm, failure, wrapped_failure, config);
-            quote! { _ => ::std::result::Result::Err(Error::Declared(#decoded)), }
+            quote! {
+                _ => ::std::result::Result::Err(
+                    Error::Declared(::std::boxed::Box::new(#decoded)),
+                ),
+            }
         }
         // A `default` and nothing else: it is the whole contract, so a 2xx through it succeeded.
         (Some(arm), true) => {
@@ -1169,7 +1177,9 @@ fn dispatch(
             let err = decode(arm, failure, wrapped_failure, config);
             quote! {
                 200..=299 => ::std::result::Result::Ok(#ok),
-                _ => ::std::result::Result::Err(Error::Declared(#err)),
+                _ => ::std::result::Result::Err(
+                    Error::Declared(::std::boxed::Box::new(#err)),
+                ),
             }
         }
     };
@@ -1213,7 +1223,9 @@ fn arm_matches(
         let decoded = decode(arm, ty, wrapped, config);
         out.push(if is_error {
             quote! {
-                #pattern => ::std::result::Result::Err(Error::Declared(#decoded)),
+                #pattern => ::std::result::Result::Err(
+                    Error::Declared(::std::boxed::Box::new(#decoded)),
+                ),
             }
         } else {
             quote! { #pattern => ::std::result::Result::Ok(#decoded), }

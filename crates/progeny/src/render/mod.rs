@@ -2241,7 +2241,7 @@ mod tests {
             }}},
         }))?;
         assert!(
-            rendered.contains("Error::UnexpectedStatus(response)"),
+            rendered.contains("Error::UnexpectedStatus(::std::boxed::Box::new(response))"),
             "{rendered}"
         );
 
@@ -2257,7 +2257,7 @@ mod tests {
             }}},
         }))?;
         assert!(
-            !with_default.contains("Error::UnexpectedStatus(response)"),
+            !with_default.contains("Error::UnexpectedStatus("),
             "{with_default}"
         );
     }

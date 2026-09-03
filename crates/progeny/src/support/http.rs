@@ -70,6 +70,11 @@ impl<T> ResponseValue<T> {
 ///
 /// `E` is the operation's declared error payload, so a caller matches on a type rather than
 /// re-parsing a body the document already described.
+///
+/// The two variants that carry a whole response are boxed. This type is the `Err` half of every
+/// operation's return, so its width is paid on the success path too — and unboxed, a `HeaderMap`
+/// alone puts it past the width at which `clippy::result_large_err` calls a `Result` too expensive
+/// to return by value, in the generated crate and in its consumer's build alike.
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E> {
     /// The request never completed: DNS, TLS, connection, timeout.
@@ -77,7 +82,7 @@ pub enum Error<E> {
     Request(#[from] ::reqwest::Error),
     /// A status the document declares as an error, with its payload parsed.
     #[error("the server answered {}", .0.status())]
-    Declared(ResponseValue<E>),
+    Declared(::std::boxed::Box<ResponseValue<E>>),
     /// A status the document does not declare at all, handed back raw.
     ///
     /// Undeclared rather than unexpected in the ordinary sense: a document that lists only `200`
@@ -87,7 +92,7 @@ pub enum Error<E> {
         "the server answered {}, which the description does not declare",
         .0.status()
     )]
-    UnexpectedStatus(::reqwest::Response),
+    UnexpectedStatus(::std::boxed::Box<::reqwest::Response>),
     /// The body arrived and did not match the contract the document stated.
     #[error(transparent)]
     Decode(#[from] DecodeError),
@@ -164,8 +169,8 @@ impl NotAForm {
 ///
 /// Returns the narrow error rather than `Error<E>`, and the caller widens it with `?`. Two things
 /// follow: this is not generic over the operation's error payload, so it is compiled once per body
-/// type instead of once per (body type × error type); and it does not carry `Error`'s largest
-/// variant — a whole `reqwest::Response` — through a return value that can never hold one.
+/// type instead of once per (body type × error type); and its `Err` names the one failure
+/// serializing a body can produce rather than variants this call can never reach.
 #[doc(hidden)]
 pub fn to_value<T: ::serde::Serialize>(
     body: &T,
