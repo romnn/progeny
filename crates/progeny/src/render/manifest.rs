@@ -177,6 +177,7 @@ fn package(name: &str, version: &str) -> String {
         name = {name:?}
         version = {version:?}
         edition = "2021"
+        rust-version = "1.87"
         publish = false
 
     "#}
@@ -245,6 +246,11 @@ pub(super) fn render(
     let _ = writeln!(out, "name = {:?}", config.package.name);
     let _ = writeln!(out, "version = {:?}", config.package.version);
     out.push_str("edition = \"2021\"\n");
+    // The floor the emitted source stands on, stated so that an older toolchain says so up front
+    // rather than in the middle of a generated module: the reflection's accessors are `const fn`s
+    // reading a `static` table (1.83), and the shipped support runtime uses
+    // `u64::is_multiple_of` (1.87), which clippy's `incompatible_msrv` holds the number to.
+    out.push_str("rust-version = \"1.87\"\n");
     out.push_str(indoc::indoc! {"
         publish = false
 

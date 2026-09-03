@@ -82,9 +82,16 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         .iter()
         .map(|operation| interface(operation, contracts, config));
 
+    let http_methods = super::operations::METHODS.map(|(variant, token)| {
+        let variant = format_ident!("{variant}");
+        let constant = format_ident!("{token}");
+        quote! { operations::Method::#variant => ::reqwest::Method::#constant, }
+    });
+
     quote! {
         //! The calling side.
 
+        use super::operations;
         use super::support;
 
         #[doc(inline)]
@@ -139,6 +146,19 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         }
 
         #base
+
+        /// The `reqwest` method for a declared one, for a caller that builds its own request or
+        /// keys middleware by operation.
+        ///
+        /// A free function rather than a `From` impl: under Workspace packaging both types are
+        /// foreign to this crate, and the impl would be an orphan-rule error. `reqwest::Method`
+        /// is `http::Method`, so this and the server's `http_method` yield one type.
+        #[must_use]
+        pub fn http_method(method: operations::Method) -> ::reqwest::Method {
+            match method {
+                #(#http_methods)*
+            }
+        }
 
         #(#interfaces)*
     }
