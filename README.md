@@ -108,6 +108,45 @@ identity to each trace. Applications that need it can wrap the generated `Client
 application-owned type whose operation-named methods create spans before sending the generated
 requests. A single undeclared header rides an individual request through its `.header(...)`.
 
+## Operations as data
+
+Every generation with something to call also emits an `operations` module: the description's
+operation set as Rust data, rendered from the same finalized model as `client` and `server`, so the
+three cannot disagree. It has no dependency and no flag, and it is emitted in all three packagings —
+in a workspace it lives in `<name>-types` and both edge crates re-export it beside `types`.
+
+```rust
+use api::operations::{Method, Operation, Route};
+
+// Every operation, in document order. Exhaustive on purpose: a table keyed on it stops compiling
+// when the description gains, loses, or renames an operation.
+for operation in Operation::ALL {
+    println!("{} {}", operation.method().as_str(), operation.path());
+}
+
+// The routes `server::router()` registers — the operations a real router accepted — so naming
+// a route the server never serves is a compile error rather than a mock that never fires.
+assert_eq!(Route::ShowPetById.path(), "/pets/{petId}");
+assert_eq!(Route::ShowPetById.operation(), Operation::ShowPetById);
+
+// From what axum matched back to the route, in a middleware: the request-line method and the
+// template `MatchedPath` reports. A `HEAD` request falls back to the `GET` route axum
+// dispatched it to.
+let route = Route::from_matched(Method::from_token("GET")?, "/pets/{petId}");
+assert_eq!(route, Some(Route::ShowPetById));
+```
+
+The variant is the upper-camel stem every other generated item for the operation already uses:
+`Operation::ShowPetById`, `ShowPetByIdParams`, `Client::show_pet_by_id`, and `Api::show_pet_by_id`
+share one stem, and `Operation::rust_name()` is that method name — the `[pagination]` key and the
+label a server `Rejection` carries. Nothing here is promised stable across revisions of the
+description: a renamed `operationId` renames the variant, and every caller fails to compile, which
+is the point. `Method` is progeny's own enum because the types layer has no HTTP dependency;
+`server::http_method` turns one into an `axum::http::Method` for keying extractors and middleware,
+and `reqwest` shares that type. The router registers every template *through* `Route::X.path()`, so
+the reflection and the server cannot drift apart, and the wire probe drives every route through the
+generated router and checks that `Route::from_matched` names the one it drove.
+
 ## Packaging large APIs
 
 `packaging = "crate"` remains the default: one crate, one artifact, and one version is the simplest
