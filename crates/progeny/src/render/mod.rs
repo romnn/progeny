@@ -2351,7 +2351,7 @@ mod tests {
         // One registration for the template, spelled through the reflection, and one handler
         // per method merged into it; no template literal in the router at all.
         assert!(
-            server.contains(".route(\n            operations::Route::ListPets.path(),"),
+            server.contains("const { operations::Route::ListPets.path() }"),
             "{server}"
         );
         assert!(!server.contains(r#""/pets""#), "{server}");
