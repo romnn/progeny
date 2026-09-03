@@ -1629,6 +1629,52 @@ The corpus also pinned the disagreement shut end-to-end: one wrong literal writt
 property's `default` and the payload's `example` produces both records, same reason, each in its
 own words.
 
+## The operations reflection, measured
+
+`operations` is a fourth module beside `types`, `client` and `server`: every operation the model
+kept as an exhaustive enum, the registrable subset as a second one, and one `static` table of
+`rust_name`, method and template per operation, rendered from the same finalized model as the other
+two and emitted whenever there is something to call. It has no dependency and no flag, so the
+question it had to answer before landing was what it costs the crate that carries it — the types
+member of a Workspace, which is also the crate a types-only consumer pays for.
+
+Measured as an archived A/B: the quick tier rendered by the tree before the module and by the tree
+with it, both under Workspace packaging and the hand-written serde default, the before side renamed
+so both could sit in one plan and alternate A-B-B-A within each repetition. Three repetitions on an
+11-core Apple M-series laptop at `--max-load 6`; two of 144 repetitions were discarded for external
+load (a browser and Spotlight, neither the benchmark's), and posthog was re-measured alone after its
+first take read two before-side server peaks 0.3 GiB apart for identical source. The machine reports
+no available-memory figure, so the pressure check was off throughout.
+
+| document | types CPU | types peak RSS | client CPU | server CPU |
+| --- | ---: | ---: | ---: | ---: |
+| petstore-31 | 0.14 → 0.15 s (+7.1%) | 119.8 → 121.6 MiB (+1.5%) | +2.9% | +6.9% |
+| github-31 | 9.04 → 8.77 s (−3.0%) | 1.58 → 1.70 GiB (+7.6%) | −5.8% | −5.4% |
+| posthog | 13.12 → 13.58 s (+3.5%) | 2.42 → 2.36 GiB (−2.5%) | +0.8% | +1.9% |
+| cloudflare | 24.17 → 24.86 s (+2.9%) | 3.25 → 3.27 GiB (+0.6%) | +1.1% | +1.5% |
+| okta | 4.78 → 4.71 s (−1.5%) | 1010.5 MiB → 1.01 GiB (+2.3%) | +1.1% | +1.3% |
+| orb | 2.56 → 2.57 s (+0.4%) | 564.1 → 567.9 MiB (+0.7%) | +2.5% | +0.6% |
+| jellyfin | 1.52 → 1.57 s (+3.3%) | 384.4 → 398.0 MiB (+3.5%) | +0.4% | +1.1% |
+| oxide | 1.32 → 1.44 s (+9.1%) | 370.4 → 383.2 MiB (+3.5%) | +2.9% | −4.2% |
+
+The bound the design set — no member past the 10% regression threshold, and the `cloudflare` and
+`github-31` types members within 3% CPU — holds. Cloudflare's types member pays +2.9% CPU for 3,200
+rows and github's reads −3.0%; posthog's, with 8,198 rows the largest table in the tier, +3.5%. The
+largest CPU movement anywhere is oxide's types member at +9.1%, which is 0.12 s of a 1.3 s compile,
+below the 3-second floor the recorder itself uses to tell a material spread from scheduler jitter.
+Peak RSS on the types member moves by −2.5% to +7.6%, the table and the two enums being one more
+item rustc holds; the client and server members are within noise, because neither reads the table
+— the router only spells its templates through `Route::X.path()`. So the module stays always-on,
+and the `Emit::operations` fallback the design held in reserve is not taken.
+
+Two things the run said about the recorder rather than the module. The scope string now includes
+the reflection (`types+operations`), so the checked-in baseline's `types-only` entries are not a
+comparison basis for a types member until the baseline is re-recorded on the reference machine —
+the refusal working as designed. And macOS has no `/proc/loadavg`, which the load gate read, so no
+repetition could start there until it asked `sysctl` instead; available memory stays unknown on
+macOS, and a peak taken under pressure there reads low without being flagged, which is what the
+first posthog take showed.
+
 ## Diagnostics the corpus produces
 
 Every finding, per document, is recorded in `corpus/snapshots/*.jsonl`, keyed by the SHA-256 of the
