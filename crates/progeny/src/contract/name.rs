@@ -43,6 +43,23 @@ impl RustIdent {
         Self(guard(&name.to_upper_camel_case(), "Variant", Case::Upper))
     }
 
+    /// The upper-camel stem every generated item of an operation is built from.
+    ///
+    /// For the method name `get_me`: `GetMeParams`, `GetMeRequest`, `GetMeResponse`, and
+    /// `operations::Operation::GetMe` all share the stem `GetMe`. Each `_`-separated word of the
+    /// method name is capitalized and nothing is re-cased, so `get_x_y` stays `GetXY` and an
+    /// operation called `String` still yields `StringParams`; the one guard is a leading `_` when
+    /// the stem would start with a digit (`_2fa_verify` → `_2faVerify`), which is otherwise the
+    /// invalid identifier that panics rendering. The derivation lives in one place because the
+    /// stem namer in [`crate::api`] has to speak about the same strings the renderers spell.
+    pub(crate) fn type_stem(&self) -> String {
+        let mut stem: String = self.0.split('_').map(capitalize).collect();
+        if stem.starts_with(|character: char| character.is_ascii_digit()) {
+            stem.insert(0, '_');
+        }
+        stem
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -97,6 +114,15 @@ fn guard(converted: &str, fallback: &str, case: Case) -> String {
         cleaned.push('_');
     }
     cleaned
+}
+
+/// One word of a stem: its first character upper-cased, the rest as written.
+fn capitalize(word: &str) -> String {
+    let mut characters = word.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
 }
 
 /// Every word Rust will not accept as an identifier.
@@ -302,6 +328,22 @@ mod tests {
         assert_eq!(RustIdent::field("x-rate-limit").as_str(), "x_rate_limit");
         // Non-ASCII names have no identifier form progeny will guess at.
         assert_eq!(RustIdent::field("日本語").as_str(), "field");
+    }
+
+    /// The stem is frozen as the derivation every existing generated name came from.
+    ///
+    /// Pinned because the obvious "fix" — running the stem through `type_name` — re-cases and
+    /// renames types consumers already spell: `GetXY` would become `GetXy` and `String` would
+    /// become `String_`. Only the digit guard is new, and it turns a panic into a name.
+    #[test]
+    fn the_type_stem_capitalizes_each_word_of_the_method_name_and_nothing_else() {
+        let stem = |id: &str| RustIdent::method(&[id.to_owned()]).type_stem();
+        assert_eq!(stem("listPets"), "ListPets");
+        assert_eq!(stem("get_x_y"), "GetXY");
+        assert_eq!(stem("String"), "String");
+        assert_eq!(stem("2fa_verify"), "_2faVerify");
+        // `self` is `self_` as a method and `Self` as a stem: `SelfParams` is a fine type name.
+        assert_eq!(stem("self"), "Self");
     }
 
     #[test]
