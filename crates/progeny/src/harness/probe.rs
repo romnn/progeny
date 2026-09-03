@@ -29,6 +29,22 @@ use crate::{api, contract, doc, load, normalize, render, resolve, shape};
 pub struct Probe {
     /// One entry per operation the router accepted, probed or skipped.
     pub operations: Vec<ProbeOp>,
+    /// The `HEAD` request the driver sends to a `GET` route, to check that the reflection
+    /// resolves what axum dispatched rather than only what the description declared.
+    ///
+    /// `None` when the document has no driven, parameterless `GET` to send it to, which
+    /// `xtask probe` says out loud rather than passing silently.
+    pub head: Option<ProbeHead>,
+}
+
+/// A `HEAD` request axum serves with a `GET` handler, and the route the reflection must name.
+#[derive(Debug, Clone)]
+pub struct ProbeHead {
+    /// The `operations::Route` variant of the `GET` operation.
+    pub route: String,
+    /// The template, which is the request path as well: the operation takes no parameter, so
+    /// it names no variable.
+    pub path: String,
 }
 
 /// One operation: the trait method the double implements, and the request the driver sends.
@@ -36,6 +52,10 @@ pub struct Probe {
 pub struct ProbeOp {
     /// The generated client method, which is also the trait method's name.
     pub method: String,
+    /// The `operations::Route` variant naming this operation's route: what the reflection has to
+    /// resolve from the method and matched template a layer records when the driver's request
+    /// goes through the generated router.
+    pub route: String,
     /// Whether exercising the operation deliberately calls deprecated API.
     pub deprecated: bool,
     /// The grouped parameter arguments, in trait-signature order.
@@ -171,13 +191,28 @@ pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
     let model = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
 
-    let operations = model
+    let planned: Vec<(&OperationContract, ProbeOp)> = model
         .operations()
         .iter()
         .filter(|operation| operation.registrable.is_some())
-        .map(|operation| plan(operation, &contracts, config))
+        .map(|operation| (operation, plan(operation, &contracts, config)))
         .collect();
-    Ok(Probe { operations })
+    // The first driven `GET` that takes no parameter: the template then names no variable, so
+    // the request path is the template itself, and the double asserts nothing about what
+    // arrived — a hand-built `HEAD` carries none of the optional inputs the driver would set.
+    let head = planned
+        .iter()
+        .find(|(operation, planned)| {
+            planned.skip.is_none()
+                && operation.method == crate::api::Method::Get
+                && operation.params.is_empty()
+        })
+        .map(|(operation, planned)| ProbeHead {
+            route: planned.route.clone(),
+            path: operation.path.to_string(),
+        });
+    let operations = planned.into_iter().map(|(_, planned)| planned).collect();
+    Ok(Probe { operations, head })
 }
 
 /// The plan for one servable operation, with the reason when it cannot be driven.
@@ -264,6 +299,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
 
     ProbeOp {
         method: operation.rust_name.as_str().to_owned(),
+        route: render::operations::variant(operation).to_string(),
         deprecated: operation.docs.deprecated,
         groups,
         body,
