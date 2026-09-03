@@ -60,8 +60,9 @@ pub(super) fn key_of(target: &Target) -> String {
 /// The layers a generated crate can hold, outermost question first.
 ///
 /// `support` is deliberately absent: it is plumbing the other modules call into, not surface a
-/// reader is weighing.
-const LAYERS: [&str; 3] = ["types", "client", "server"];
+/// reader is weighing. `operations` is the reflection beside the types — dependency-free, but a
+/// table row per operation is surface a types-only figure has to say it includes.
+const LAYERS: [&str; 4] = ["types", "operations", "client", "server"];
 
 /// What a crate's emitted modules say it holds.
 ///
@@ -86,7 +87,8 @@ fn scope_of<'a>(modules: impl IntoIterator<Item = &'a str>) -> String {
 /// The scope of a rendering taken before the harness recorded one.
 pub(super) const UNRECORDED: &str = "unrecorded";
 
-/// The module stems of a crate on disk, for the `--crate-dir` path where nothing was rendered.
+/// The module stems of a crate on disk: the `--crate-dir` path where nothing was rendered, and
+/// each Workspace member, whose name says which edge it is but not what it holds.
 fn modules_on_disk(crate_dir: &Utf8Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(crate_dir.join("src")) else {
         return Vec::new();
@@ -212,6 +214,10 @@ fn generated_targets(
                 if !member_directory.join("Cargo.toml").exists() {
                     continue;
                 }
+                // From the modules the member actually holds rather than from its name: the
+                // types member carries the reflection beside the types, and a scope that said
+                // `types-only` about it would let a before/after A/B subtract across shapes.
+                let modules = modules_on_disk(&member_directory);
                 targets.push(Target {
                     subject: name.clone(),
                     variant: format!("{variant}.{member}"),
@@ -219,7 +225,7 @@ fn generated_targets(
                     member: member.to_owned(),
                     package,
                     directory: member_directory,
-                    scope: scope_of([member]),
+                    scope: scope_of(modules.iter().map(String::as_str)),
                 });
             }
         } else {
@@ -451,8 +457,42 @@ mod tests {
             scope_of(["lib", "types", "client", "server", "support"]),
             "types+client+server"
         );
+        // The reflection is surface: a types crate carrying it is not `types-only`, or the
+        // A/B that measures what it costs could not be refused across the two shapes.
+        assert_eq!(
+            scope_of(["lib", "types", "operations", "support"]),
+            "types+operations"
+        );
+        assert_eq!(
+            scope_of(["lib", "types", "operations", "client", "server", "support"]),
+            "types+operations+client+server"
+        );
         // Layer order, not the order the files happened to arrive in.
         assert_eq!(scope_of(["client", "types"]), "types+client");
         assert_eq!(scope_of(["lib"]), super::UNRECORDED);
+    }
+
+    /// A Workspace member's scope comes from what its `src` holds, not from its name.
+    #[test_util::test]
+    fn a_workspace_member_is_scoped_by_the_modules_it_holds() {
+        let path = crate::paths::corpus_root().join("specs/petstore-31.yaml");
+        let bytes = std::fs::read(&path)?;
+        let config = progeny::Config {
+            packaging: progeny::Packaging::Workspace,
+            package: progeny::Package {
+                name: "scoped".to_owned(),
+                version: "0.0.0".to_owned(),
+            },
+            ..progeny::Config::default()
+        };
+        let output = progeny::generate(&bytes, &config)?;
+        let directory = crate::generated::write("bench-scope-fixture", &output)?;
+        let scope = |member: &str| {
+            let modules = super::modules_on_disk(&directory.join(format!("scoped-{member}")));
+            scope_of(modules.iter().map(String::as_str))
+        };
+        assert_eq!(scope("types"), "types+operations");
+        assert_eq!(scope("client"), "client");
+        assert_eq!(scope("server"), "server");
     }
 }
