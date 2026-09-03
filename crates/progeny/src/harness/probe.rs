@@ -200,12 +200,20 @@ pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
     // The first driven `GET` that takes no parameter: the template then names no variable, so
     // the request path is the template itself, and the double asserts nothing about what
     // arrived — a hand-built `HEAD` carries none of the optional inputs the driver would set.
+    // Not one whose template also declares a `HEAD`: axum dispatches to that handler first, and
+    // `from_matched` rightly names that route, so the fallback this request exists to exercise
+    // would never run.
     let head = planned
         .iter()
         .find(|(operation, planned)| {
             planned.skip.is_none()
                 && operation.method == crate::api::Method::Get
                 && operation.params.is_empty()
+                && !model.operations().iter().any(|other| {
+                    other.registrable.is_some()
+                        && other.method == crate::api::Method::Head
+                        && other.path == operation.path
+                })
         })
         .map(|(operation, planned)| ProbeHead {
             route: planned.route.clone(),
@@ -619,6 +627,75 @@ fn synthesize_named(
                 .collect::<Result<_, _>>()?,
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use color_eyre::eyre;
+    use serde_json::json;
+
+    use crate::config::Config;
+
+    fn plan(paths: &serde_json::Value) -> eyre::Result<super::Probe> {
+        let document = json!({"openapi": "3.1.0", "paths": paths});
+        Ok(super::probe(
+            document.to_string().as_bytes(),
+            &Config::default(),
+        )?)
+    }
+
+    /// axum serves `HEAD /a` with the `HEAD` handler `/a` declares and `HEAD /b` with the
+    /// `GET` one, and only the second is the fallback the case exists to exercise.
+    #[test_util::test]
+    fn the_head_case_avoids_a_template_that_declares_its_own_head() {
+        let with_alternative = plan(&json!({
+            "/a": {
+                "get": {"operationId": "getA", "responses": {"200": {"description": "ok"}}},
+                "head": {"operationId": "headA", "responses": {"200": {"description": "ok"}}},
+            },
+            "/b": {"get": {"operationId": "getB", "responses": {"200": {"description": "ok"}}}},
+        }))?;
+        assert_eq!(
+            with_alternative
+                .head
+                .as_ref()
+                .map(|head| (head.route.as_str(), head.path.as_str())),
+            Some(("GetB", "/b"))
+        );
+        let routes: Vec<&str> = with_alternative
+            .operations
+            .iter()
+            .map(|operation| operation.route.as_str())
+            .collect();
+        assert_eq!(routes, ["GetA", "HeadA", "GetB"]);
+
+        // With nothing but the paired template, the case is not driven and the plan says so.
+        let alone = plan(&json!({
+            "/a": {
+                "get": {"operationId": "getA", "responses": {"200": {"description": "ok"}}},
+                "head": {"operationId": "headA", "responses": {"200": {"description": "ok"}}},
+            },
+        }))?;
+        assert!(alone.head.is_none());
+    }
+
+    /// A `GET` that takes any parameter is not the target either: a hand-built `HEAD` carries
+    /// none of the inputs the double would assert arrived.
+    #[test_util::test]
+    fn the_head_case_takes_a_parameterless_get() {
+        let probe = plan(&json!({
+            "/a": {"get": {
+                "operationId": "getA",
+                "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer"}}],
+                "responses": {"200": {"description": "ok"}},
+            }},
+            "/b": {"get": {"operationId": "getB", "responses": {"200": {"description": "ok"}}}},
+        }))?;
+        assert_eq!(
+            probe.head.as_ref().map(|head| head.route.as_str()),
+            Some("GetB")
+        );
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
