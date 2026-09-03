@@ -118,8 +118,9 @@ in a workspace it lives in `<name>-types` and both edge crates re-export it besi
 ```rust
 use api::operations::{Method, Operation, Route};
 
-// Every operation, in document order. Exhaustive on purpose: a table keyed on it stops compiling
-// when the description gains, loses, or renames an operation.
+// Every operation, in the model's order — by path template, then by method — which is stable
+// across runs. Exhaustive on purpose: a table keyed on it stops compiling when the description
+// gains, loses, or renames an operation.
 for operation in Operation::ALL {
     println!("{} {}", operation.method().as_str(), operation.path());
 }
