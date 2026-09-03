@@ -321,18 +321,43 @@ pub(crate) fn wait_for_quiet(max_load: f64, max_wait: u64) -> eyre::Result<()> {
 
 /// The one-minute load average.
 pub(crate) fn load_average() -> eyre::Result<f64> {
-    let text = std::fs::read_to_string("/proc/loadavg")
-        .wrap_err("reading /proc/loadavg; load gating needs it")?;
-    let first = text
-        .split_whitespace()
-        .next()
-        .wrap_err("/proc/loadavg was empty")?;
+    let first = load_average_word()?;
     first
         .parse()
         .wrap_err_with(|| format!("reading a load average from {first:?}"))
 }
 
+/// The first word of what the kernel reports: `/proc/loadavg` where there is a procfs.
+#[cfg(not(target_os = "macos"))]
+fn load_average_word() -> eyre::Result<String> {
+    let text = std::fs::read_to_string("/proc/loadavg")
+        .wrap_err("reading /proc/loadavg; load gating needs it")?;
+    text.split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .wrap_err("/proc/loadavg was empty")
+}
+
+/// The same on macOS, which has no procfs: `sysctl` prints the three averages as
+/// `{ 1.23 4.56 7.89 }`. A child process rather than `getloadavg`, because that is an FFI call
+/// and this workspace forbids unsafe code.
+#[cfg(target_os = "macos")]
+fn load_average_word() -> eyre::Result<String> {
+    let output = Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+        .wrap_err("running `sysctl -n vm.loadavg`; load gating needs it")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .find(|word| *word != "{")
+        .map(str::to_owned)
+        .wrap_err("`vm.loadavg` was empty")
+}
+
 /// Memory the kernel believes is available, in bytes.
+///
+/// `None` where the kernel does not say so in `/proc/meminfo` — macOS among them — which turns
+/// the pressure check off rather than guessing at a figure it would then trust.
 pub(crate) fn available_memory() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = text
