@@ -324,10 +324,15 @@ fn unusable(previous: &BaselineEntry, scope: &str) -> Option<String> {
     }
     // An absent scope predates the field rather than claiming anything, so it is not refused: the
     // entry was recorded when every crate was the same shape.
+    // Said with the remedy, because this is what a renderer gaining a module looks like from
+    // here: every entry of the old shape is refused at once, and a bail that only refuses reads
+    // as the harness being broken rather than the baseline being stale.
     if !previous.scope.is_empty() && previous.scope != scope {
         return Some(format!(
             "the recorded baseline measured {} and this run measured {scope}, which is not a \
-             comparison",
+             comparison; the rendering changed shape, so re-record the baseline on the \
+             reference machine (`--generate-only`, then `--reuse --write-baseline`, as the \
+             README's release steps say)",
             previous.scope
         ));
     }

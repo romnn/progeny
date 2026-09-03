@@ -1668,9 +1668,14 @@ item rustc holds; the client and server members are within noise, because neithe
 and the `Emit::operations` fallback the design held in reserve is not taken.
 
 Two things the run said about the recorder rather than the module. The scope string now includes
-the reflection (`types+operations`), so the checked-in baseline's `types-only` entries are not a
-comparison basis for a types member until the baseline is re-recorded on the reference machine —
-the refusal working as designed. And macOS has no `/proc/loadavg`, which the load gate read, so no
+the reflection (`types+operations`, and `types+operations+client+server` for the one-crate
+control), so the checked-in baseline's entries of the old shape — every types member and every
+crate control, 40 of 72 — are refused as a comparison basis until the baseline is re-recorded on
+the reference machine: `task bench:compile -- --ab --workspace --crate-control --generate-only` at
+the tree under review, then `task bench:compile -- --ab --reuse --reps 6 --max-load 5
+--write-baseline` when it is idle, which is the README's release step. The refusal now names that
+remedy, because a bail that only refuses reads as the harness being broken rather than the
+baseline being stale. And macOS has no `/proc/loadavg`, which the load gate read, so no
 repetition could start there until it asked `sysctl` instead; available memory stays unknown on
 macOS, and a peak taken under pressure there reads low without being flagged, which is what the
 first posthog take showed.
