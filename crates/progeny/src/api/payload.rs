@@ -25,7 +25,7 @@ use crate::diag::JsonPointer;
 use crate::doc::{MaybeRef, MediaType};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Extra, Shape, ShapeRef, Shapes};
+use crate::shape::{Extra, Shape, ShapeRef, Shapes, Tag, TagStyle, Union};
 
 /// One example payload, and what a faithful round trip through the generated type must produce.
 #[derive(Debug, Clone)]
@@ -306,6 +306,11 @@ impl Collect<'_> {
             // branch. Keeping the payload whole instead would report every member the chosen
             // branch does not carry as a loss — which is a finding about the harness, not the code.
             Shape::Union(union) => {
+                // …unless the union dispatches on a tag, where the first branch that accepts the
+                // payload is not the branch serde takes.
+                if let Some(tag) = &union.tag {
+                    return self.tagged(value, union, tag);
+                }
                 for variant in &union.variants {
                     let accepted = match &variant.shape {
                         ShapeRef::Key(key) => self.shapes.get(key).is_some_and(|shape| {
@@ -327,6 +332,39 @@ impl Collect<'_> {
                 Some(value.clone())
             }
         }
+    }
+
+    /// The expectation for a union that names its own variant in a tag property.
+    ///
+    /// Two things the structural walk gets wrong here, and a tagged union is exactly the case
+    /// where it can: progeny only tags a union when the variants' shapes *cannot* tell them
+    /// apart, so "the first branch that accepts the payload" is not the branch serde picks. It
+    /// picks the one the payload names.
+    ///
+    /// And a [`TagStyle::Consumed`] tag is taken off the payload before the variant type reads it
+    /// and written back by the union on the way out, so it survives the round trip even though no
+    /// variant declares it. Pruning under the variant alone would leave it out of the expectation
+    /// and report the union writing its own tag as an invention.
+    fn tagged(&self, value: &Value, union: &Union, tag: &Tag) -> Option<Value> {
+        // A payload that names no variant does not deserialize at all, which the generated test
+        // reports against the document — the same verdict the untagged fallback leaves it.
+        let Some(named) = value.get(&tag.property).and_then(Value::as_str) else {
+            return Some(value.clone());
+        };
+        let Some(variant) = union
+            .variants
+            .iter()
+            .find(|variant| variant.tag.as_deref() == Some(named))
+        else {
+            return Some(value.clone());
+        };
+        let mut pruned = self.through(value, &variant.shape)?;
+        if tag.style == TagStyle::Consumed {
+            pruned
+                .as_object_mut()?
+                .insert(tag.property.clone(), Value::String(named.to_owned()));
+        }
+        Some(pruned)
     }
 
     fn through(&self, value: &Value, reference: &ShapeRef) -> Option<Value> {
@@ -513,6 +551,47 @@ mod tests {
         );
         // And the payload is the vendor's own, not a contradiction: a branch accepts it whole.
         assert!(!found[0].vendor_defect);
+    }
+
+    #[test_util::test]
+    fn a_tagged_union_expects_the_branch_the_payload_names_and_its_tag_back() {
+        // `okta`'s `ResendUserFactor`, reduced to two branches no shape can tell apart — which is
+        // the only reason progeny tags a union at all. Two ways to call correct generated code
+        // wrong follow from walking it structurally: the first branch that *accepts* an `sms`
+        // payload is `call`, whose members are not the ones that survive; and the tag itself is
+        // declared by no variant, so pruning under one leaves it out of the expectation while the
+        // union writes it back on the way out.
+        let found = payloads_of(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Factor"},
+                    "example": {"factorType": "sms", "phone": "+1-555-415-1337"},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Factor": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/Call"},
+                        {"$ref": "#/components/schemas/Sms"},
+                    ],
+                    "discriminator": {
+                        "propertyName": "factorType",
+                        "mapping": {
+                            "call": "#/components/schemas/Call",
+                            "sms": "#/components/schemas/Sms",
+                        },
+                    },
+                },
+                "Call": {"type": "object", "properties": {"number": {"type": "string"}}},
+                "Sms": {"type": "object", "properties": {"phone": {"type": "string"}}},
+            }},
+        }))?;
+        assert_eq!(
+            found[0].expected,
+            json!({"factorType": "sms", "phone": "+1-555-415-1337"})
+        );
     }
 
     #[test_util::test]
