@@ -346,11 +346,12 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
     }
 
     let registrations = by_path.values().filter_map(|group| {
-        // The template is spelled through the reflection rather than as a literal: `Route::X.path()`
+        // The template is spelled through the reflection rather than as a literal, and as an
+        // inline `const` so that it *is* a literal by the time the router runs: `Route::X.path()`
         // is a `const fn` over the same `RegistrableRoute` string, so the router and the
-        // `operations` module cannot register different templates, and removing or renaming a
-        // route there fails this compile. The first operation of the group names it; the rest
-        // share the template by construction.
+        // `operations` module cannot register different templates, removing or renaming a route
+        // there fails this compile, and nothing is interpreted at startup. The first operation of
+        // the group names it; the rest share the template by construction.
         let (first, _) = group.first()?;
         let route = super::operations::variant(first);
         let handlers = group.iter().map(|(operation, route)| {
@@ -362,7 +363,7 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
         // methods in a fixed order to typecheck, and the document supplies whatever order it likes.
         Some(quote! {
             router = router.route(
-                operations::Route::#route.path(),
+                const { operations::Route::#route.path() },
                 ::axum::routing::MethodRouter::new()#(.merge(#handlers))*,
             );
         })
