@@ -566,15 +566,7 @@ pub fn from_header(text: &str, explode: bool, array: bool, object: bool) -> Valu
 #[must_use]
 pub fn from_cookie(text: &str, array: bool, object: bool) -> Value {
     if object {
-        let elements: Vec<String> = text.split(',').map(decode_percent).collect();
-        let mut members = serde_json::Map::new();
-        let mut pairs = elements.chunks_exact(2);
-        for pair in pairs.by_ref() {
-            if let [key, value] = pair {
-                members.insert(key.clone(), Value::String(value.clone()));
-            }
-        }
-        return Value::Object(members);
+        return flat_pairs(text.split(',').map(decode_percent));
     }
     if array {
         return Value::Array(
@@ -606,14 +598,7 @@ fn shaped(text: &str, separator: char, array: bool, object: bool, trim: bool) ->
                 None => (part.clone(), String::new()),
             }));
         }
-        let mut members = serde_json::Map::new();
-        let mut pairs = elements.chunks_exact(2);
-        for pair in pairs.by_ref() {
-            if let [key, value] = pair {
-                members.insert(key.clone(), Value::String(value.clone()));
-            }
-        }
-        return Value::Object(members);
+        return flat_pairs(elements);
     }
     if array {
         return Value::Array(
@@ -623,6 +608,20 @@ fn shaped(text: &str, separator: char, array: bool, object: bool, trim: bool) ->
         );
     }
     Value::String(element(text))
+}
+
+/// The flat spelling's alternating `k,v,k2,v2` as an object.
+///
+/// A trailing key with no value is dropped: the row it would name has nothing to hold, and a
+/// member spelled with only half a pair is not one the description declared.
+fn flat_pairs(elements: impl IntoIterator<Item = String>) -> Value {
+    let mut elements = elements.into_iter();
+    exploded_pairs(std::iter::from_fn(move || {
+        match (elements.next(), elements.next()) {
+            (Some(key), Some(value)) => Some((key, value)),
+            _ => None,
+        }
+    }))
 }
 
 fn exploded_pairs(pairs: impl Iterator<Item = (String, String)>) -> Value {
