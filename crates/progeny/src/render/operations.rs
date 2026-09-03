@@ -52,12 +52,24 @@ pub(super) fn render(model: &ApiModel) -> TokenStream {
     let methods = method_impl();
     let tables = tables(&operations, &route_variants);
     let accessors = accessors(&operation_variants, &route_variants);
+    // `allow` rather than `expect`, and deliberately: whether `enum_variant_names` fires depends
+    // on the consumer's clippy configuration (`enum-variant-name-threshold`) and on the
+    // description's own naming habits — a read-only API whose every operation starts with
+    // `get`, cloudflare's `…CreateRoute` inside `Route` — so an expectation would be unfulfilled
+    // exactly as often as it was needed, and an unfulfilled expectation is itself a warning in
+    // the consumer's build. Inner rather than outer, because `clippy::allow_attributes` lints
+    // only the outer form, and a consumer denying it must still be able to build this module.
     quote! {
         #![doc = " The operations this description declares, as data."]
         #![doc = ""]
         #![doc = " Rendered from the same finalized model as `client` and `server`, so the three cannot"]
         #![doc = " disagree. What is here is what progeny generated: an operation progeny dropped is absent,"]
         #![doc = " and one the router refused is an `Operation` without a `Route`."]
+        #![allow(
+            clippy::enum_variant_names,
+            clippy::upper_case_acronyms,
+            reason = "the variants are the description's operation names as progeny spells them everywhere else, whatever pattern they happen to share"
+        )]
 
         #enums
         #methods
@@ -81,19 +93,6 @@ fn enums(
     operation_variants: &[proc_macro2::Ident],
     route_variants: &[proc_macro2::Ident],
 ) -> TokenStream {
-    // `allow` rather than `expect`, and deliberately: whether `enum_variant_names` fires depends
-    // on the consumer's clippy configuration (`enum-variant-name-threshold`) and on the
-    // description's own naming habits — a read-only API whose every operation starts with
-    // `get`, cloudflare's `…CreateRoute` inside `Route` — so an expectation would be unfulfilled
-    // exactly as often as it was needed, and an unfulfilled expectation is itself a warning in
-    // the consumer's build.
-    let spelled = quote! {
-        #[allow(
-            clippy::enum_variant_names,
-            clippy::upper_case_acronyms,
-            reason = "the variants are the description's operation names as progeny spells them everywhere else, whatever pattern they happen to share"
-        )]
-    };
     let methods = METHODS
         .iter()
         .map(|(variant, _)| format_ident!("{variant}"));
@@ -101,20 +100,19 @@ fn enums(
         /// One operation of the description. Exhaustive on purpose: a per-operation table stops
         /// compiling when the description gains, loses, or renames an operation.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #spelled
         pub enum Operation {
             #(#operation_variants,)*
         }
 
         /// One route `server::router()` registers: the operations a real router accepted.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #spelled
         pub enum Route {
             #(#route_variants,)*
         }
 
-        /// The HTTP method an operation is declared under: the OpenAPI path-item methods progeny
-        /// supports. A method OpenAPI adds later is a new variant, and therefore a deliberate break.
+        /// The HTTP method an operation is declared under: the eight path-item methods progeny
+        /// supports. A method a later specification adds is a new variant, and therefore a
+        /// deliberate break.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub enum Method {
             #(#methods,)*
@@ -135,6 +133,7 @@ fn method_impl() -> TokenStream {
     quote! {
         impl Method {
             /// The token on the request line, `GET`.
+            #[must_use]
             pub const fn as_str(self) -> &'static str {
                 match self {
                     #(#as_str)*
@@ -142,6 +141,7 @@ fn method_impl() -> TokenStream {
             }
 
             /// The method for a request-line token; `None` for any other method.
+            #[must_use]
             pub fn from_token(token: &str) -> ::std::option::Option<Self> {
                 match token {
                     #(#from_token)*
@@ -218,43 +218,50 @@ fn accessors(
     };
     quote! {
         impl Operation {
-            /// Every operation, in document order.
+            /// Every operation, in the model's order: by path template, then by method in the
+            /// order a path item lists them. Stable across runs of the same description.
             pub const ALL: &[Self] = &[#(Self::#operation_variants),*];
 
             /// The Rust name progeny gave the operation: the client method, the server trait
             /// method, the `pagination` configuration key, and the label a server `Rejection`
             /// carries. Derived from `operationId` with collision suffixes, so not stable across
             /// revisions.
+            #[must_use]
             pub const fn rust_name(self) -> &'static str {
                 TABLE[self as usize].rust_name
             }
 
             /// The method the description declares the operation under.
+            #[must_use]
             pub const fn method(self) -> Method {
                 TABLE[self as usize].method
             }
 
             /// The path template as the description writes it, with `{name}` variables.
+            #[must_use]
             pub const fn path(self) -> &'static str {
                 TABLE[self as usize].path
             }
 
             /// The route the server registers for this operation, when the router accepted it.
+            #[must_use]
             pub const fn route(self) -> ::std::option::Option<Route> {
                 TABLE[self as usize].route
             }
         }
 
         impl Route {
-            /// Every registered route, in document order.
+            /// Every registered route, in the order of [`Operation::ALL`].
             pub const ALL: &[Self] = &[#(Self::#route_variants),*];
 
             /// The operation this route serves.
+            #[must_use]
             pub const fn operation(self) -> Operation {
                 #route_operation
             }
 
             /// The declared method. axum also dispatches `HEAD` to a `GET` handler.
+            #[must_use]
             pub const fn method(self) -> Method {
                 self.operation().method()
             }
@@ -262,6 +269,7 @@ fn accessors(
             /// The template `server::router()` registers, which is what axum's `MatchedPath`
             /// reports when the router is mounted at the root; strip any nesting prefix before
             /// matching.
+            #[must_use]
             pub const fn path(self) -> &'static str {
                 self.operation().path()
             }
@@ -269,6 +277,7 @@ fn accessors(
             /// The route that served a request, from its method and matched template: exact
             /// first, then `HEAD` falls back to the `GET` route axum dispatched it to. Linear over
             /// `ALL`; a hot middleware indexes `ALL` once.
+            #[must_use]
             pub fn from_matched(method: Method, path: &str) -> ::std::option::Option<Self> {
                 let declared = |method: Method| {
                     Self::ALL
