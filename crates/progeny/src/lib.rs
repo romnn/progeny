@@ -227,6 +227,7 @@ mod tests {
                 "Cargo.toml",
                 "src/client.rs",
                 "src/lib.rs",
+                "src/operations.rs",
                 "src/server.rs",
                 "src/support.rs",
                 "src/types.rs"
@@ -234,6 +235,9 @@ mod tests {
         );
         let types = &output.files[camino::Utf8Path::new("src/types.rs")];
         assert!(types.contains("pub struct Pet"), "{types}");
+        let operations = &output.files[camino::Utf8Path::new("src/operations.rs")];
+        assert!(operations.contains("pub enum Operation"), "{operations}");
+        assert!(operations.contains("ListPets,"), "{operations}");
         let client = &output.files[camino::Utf8Path::new("src/client.rs")];
         assert!(client.contains("pub struct Client"), "{client}");
         assert!(client.contains("pub fn list_pets"), "{client}");

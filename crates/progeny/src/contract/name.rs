@@ -60,6 +60,20 @@ impl RustIdent {
         stem
     }
 
+    /// A [`type_stem`](Self::type_stem) as an enum variant on its own.
+    ///
+    /// Verbatim, except that a reserved word takes the trailing underscore every other identifier
+    /// here takes: the stem of `self` is `Self`, which `Self_` escapes. Not [`Self::variant`],
+    /// which re-cases through heck and would turn the stem `GetXY` into `GetXy` — a variant that
+    /// no longer matches `GetXYParams`.
+    pub(crate) fn stem_variant(stem: &str) -> Self {
+        let mut variant = stem.to_owned();
+        if RESERVED.contains(&variant.as_str()) {
+            variant.push('_');
+        }
+        Self(variant)
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -342,8 +356,13 @@ mod tests {
         assert_eq!(stem("get_x_y"), "GetXY");
         assert_eq!(stem("String"), "String");
         assert_eq!(stem("2fa_verify"), "_2faVerify");
-        // `self` is `self_` as a method and `Self` as a stem: `SelfParams` is a fine type name.
+        // `self` is `self_` as a method and `Self` as a stem: `SelfParams` is a fine type name,
+        // and only the bare variant needs the escape.
         assert_eq!(stem("self"), "Self");
+        assert_eq!(RustIdent::stem_variant("Self").as_str(), "Self_");
+        assert_eq!(RustIdent::stem_variant("GetXY").as_str(), "GetXY");
+        assert_eq!(RustIdent::stem_variant("_2faVerify").as_str(), "_2faVerify");
+        assert_eq!(RustIdent::stem_variant("String").as_str(), "String");
     }
 
     #[test]

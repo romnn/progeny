@@ -49,6 +49,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
     quote! {
         #![doc = " The serving side."]
 
+        use super::operations;
         use super::support;
 
         #[doc(inline)]
@@ -344,22 +345,40 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
             .push((operation, route));
     }
 
-    let registrations = by_path.iter().map(|(path, operations)| {
-        let handlers = operations.iter().map(|(operation, route)| {
+    let registrations = by_path.values().filter_map(|group| {
+        // The template is spelled through the reflection rather than as a literal: `Route::X.path()`
+        // is a `const fn` over the same `RegistrableRoute` string, so the router and the
+        // `operations` module cannot register different templates, and removing or renaming a
+        // route there fails this compile. The first operation of the group names it; the rest
+        // share the template by construction.
+        let (first, _) = group.first()?;
+        let route = super::operations::variant(first);
+        let handlers = group.iter().map(|(operation, route)| {
             let verb = format_ident!("{}", route.method().slug());
             let handler = handler_name(operation);
             quote! { ::axum::routing::#verb(#handler::<A>) }
         });
         // `MethodRouter::merge` rather than chained builder calls: the chained form needs the
         // methods in a fixed order to typecheck, and the document supplies whatever order it likes.
-        quote! {
-            router = router.route(#path, ::axum::routing::MethodRouter::new()#(.merge(#handlers))*);
-        }
+        Some(quote! {
+            router = router.route(
+                operations::Route::#route.path(),
+                ::axum::routing::MethodRouter::new()#(.merge(#handlers))*,
+            );
+        })
     });
 
     let handlers = servable
         .iter()
         .map(|(operation, _)| handler_fn(operation, config));
+
+    // `http` names its constants by the request-line token, so the reflection's method table is
+    // this table too.
+    let http_methods = super::operations::METHODS.map(|(variant, token)| {
+        let variant = format_ident!("{variant}");
+        let constant = format_ident!("{token}");
+        quote! { operations::Method::#variant => ::axum::http::Method::#constant, }
+    });
 
     quote! {
         /// A router serving every operation this description declares that a router can register.
@@ -371,6 +390,16 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
             let mut router = ::axum::Router::new();
             #(#registrations)*
             router.with_state(api)
+        }
+
+        /// The `http` method for a declared one, for keying axum extractors and middleware.
+        ///
+        /// A free function rather than a `From` impl: under Workspace packaging both types are
+        /// foreign to this crate, and the impl would be an orphan-rule error.
+        pub fn http_method(method: operations::Method) -> ::axum::http::Method {
+            match method {
+                #(#http_methods)*
+            }
         }
 
         #(#handlers)*
