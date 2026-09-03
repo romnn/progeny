@@ -360,7 +360,10 @@ impl Build<'_> {
     fn claim(&mut self, wanted: &RustIdent) -> RustIdent {
         loop {
             let candidate = self.namer.unique(wanted.clone());
-            let stem: String = candidate.as_str().split('_').map(capitalize).collect();
+            // Keyed through `type_name` rather than verbatim, as it always was: the key folds
+            // `GetXY` and `GetXy` together, which is stricter than the stems themselves, and
+            // loosening it would rename operations existing consumers already spell.
+            let stem = candidate.type_stem();
             if self
                 .stems
                 .take(&RustIdent::type_name(std::slice::from_ref(&stem)))
@@ -388,17 +391,6 @@ fn docs_of(operation: &Operation) -> Docs {
     }
 }
 
-/// One word of the renderers' stem derivation, duplicated deliberately: [`crate::render`]
-/// builds per-operation type stems with exactly `split('_').map(capitalize)` over the
-/// snake-case method name, and the stem claim has to speak about the same strings.
-fn capitalize(word: &str) -> String {
-    let mut characters = word.chars();
-    match characters.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-        None => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
@@ -420,9 +412,10 @@ mod tests {
             .iter()
             .map(|operation| operation.rust_name.as_str())
             .collect();
-        let stems: Vec<String> = names
+        let stems: Vec<String> = model
+            .operations()
             .iter()
-            .map(|name| name.split('_').map(super::capitalize).collect())
+            .map(|operation| operation.rust_name.type_stem())
             .collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert_ne!(stems[0], stems[1], "{names:?}");

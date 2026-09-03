@@ -483,15 +483,7 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             declaration: TokenStream::new(),
         },
         several => {
-            let name = format_ident!(
-                "{}Success",
-                operation
-                    .rust_name
-                    .as_str()
-                    .split('_')
-                    .map(capitalize)
-                    .collect::<String>()
-            );
+            let name = format_ident!("{}Success", operation.rust_name.type_stem());
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
                 let ty = response_enum_type_path(&arm.body, contracts, config);
@@ -563,15 +555,7 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             declaration: TokenStream::new(),
         },
         several => {
-            let name = format_ident!(
-                "{}Error",
-                operation
-                    .rust_name
-                    .as_str()
-                    .split('_')
-                    .map(capitalize)
-                    .collect::<String>()
-            );
+            let name = format_ident!("{}Error", operation.rust_name.type_stem());
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
                 let ty = response_enum_type_path(&arm.body, contracts, config);
@@ -1297,29 +1281,12 @@ pub(crate) fn takes_params(operation: &OperationContract) -> bool {
 
 /// `FooParams`: the caller-built struct of every input the operation takes.
 pub(crate) fn params_name(operation: &OperationContract) -> proc_macro2::Ident {
-    format_ident!("{}Params", camel(operation))
+    format_ident!("{}Params", operation.rust_name.type_stem())
 }
 
 /// `FooRequest`: the params bound to a client, ready to send.
 fn request_name(operation: &OperationContract) -> proc_macro2::Ident {
-    format_ident!("{}Request", camel(operation))
-}
-
-fn camel(operation: &OperationContract) -> String {
-    operation
-        .rust_name
-        .as_str()
-        .split('_')
-        .map(capitalize)
-        .collect()
-}
-
-pub(super) fn capitalize(word: &str) -> String {
-    let mut characters = word.chars();
-    match characters.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-        None => String::new(),
-    }
+    format_ident!("{}Request", operation.rust_name.type_stem())
 }
 
 fn ident(name: &RustIdent) -> proc_macro2::Ident {

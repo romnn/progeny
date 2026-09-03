@@ -26,7 +26,6 @@ use crate::api::{
 use crate::config::Config;
 use crate::contract::{Contracts, RustIdent};
 
-use super::client::capitalize;
 use super::types::{docs as docs_of, response_enum_type_path, type_path as type_tokens};
 
 /// Render the server module.
@@ -564,25 +563,15 @@ fn body_extraction(
 }
 
 pub(crate) fn group_name(operation: &OperationContract, suffix: &str) -> proc_macro2::Ident {
-    format_ident!("{}{suffix}", type_stem(operation))
+    format_ident!("{}{suffix}", operation.rust_name.type_stem())
 }
 
 pub(crate) fn response_name(operation: &OperationContract) -> proc_macro2::Ident {
-    format_ident!("{}Response", type_stem(operation))
+    format_ident!("{}Response", operation.rust_name.type_stem())
 }
 
 fn handler_name(operation: &OperationContract) -> proc_macro2::Ident {
     format_ident!("serve_{}", operation.rust_name.as_str())
-}
-
-/// The upper-camel form of an operation's name, which every type it owns is built from.
-fn type_stem(operation: &OperationContract) -> String {
-    operation
-        .rust_name
-        .as_str()
-        .split('_')
-        .map(capitalize)
-        .collect()
 }
 
 fn ident(name: &RustIdent) -> proc_macro2::Ident {
