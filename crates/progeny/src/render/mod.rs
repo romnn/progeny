@@ -713,6 +713,7 @@ mod tests {
             .get(camino::Utf8Path::new("api-types/Cargo.toml"))
             .ok_or_eyre("types manifest")?;
         assert!(types_manifest.contains(r#"name = "api-types""#));
+        assert!(types_manifest.contains(r#"rust-version = "1.87""#));
         assert!(!types_manifest.contains("[features]"), "{types_manifest}");
 
         for half in ["client", "server"] {
@@ -2360,6 +2361,17 @@ mod tests {
                 .contains("pub fn http_method(method: operations::Method) -> ::axum::http::Method"),
             "{server}"
         );
+        // Both edges carry the bridge, one type under two names.
+        let client = &as_crate[camino::Utf8Path::new("src/client.rs")];
+        assert!(
+            client.contains("pub fn http_method(method: operations::Method) -> ::reqwest::Method"),
+            "{client}"
+        );
+        // The accessors read a `static` from a `const fn` (1.83) and the support runtime uses
+        // `is_multiple_of` (1.87); every manifest states the floor rather than leaving an older
+        // toolchain to find out mid-module.
+        let manifest = &as_crate[camino::Utf8Path::new("Cargo.toml")];
+        assert!(manifest.contains("rust-version = \"1.87\""), "{manifest}");
 
         let module = Config {
             packaging: Packaging::Module,

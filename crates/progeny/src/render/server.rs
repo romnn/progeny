@@ -396,7 +396,9 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
         /// The `http` method for a declared one, for keying axum extractors and middleware.
         ///
         /// A free function rather than a `From` impl: under Workspace packaging both types are
-        /// foreign to this crate, and the impl would be an orphan-rule error.
+        /// foreign to this crate, and the impl would be an orphan-rule error. The client module
+        /// carries the same bridge to `reqwest::Method`, which is this type under another name.
+        #[must_use]
         pub fn http_method(method: operations::Method) -> ::axum::http::Method {
             match method {
                 #(#http_methods)*

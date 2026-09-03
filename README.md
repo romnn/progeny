@@ -142,11 +142,15 @@ The variant is the upper-camel stem every other generated item for the operation
 share one stem, and `Operation::rust_name()` is that method name — the `[pagination]` key and the
 label a server `Rejection` carries. Nothing here is promised stable across revisions of the
 description: a renamed `operationId` renames the variant, and every caller fails to compile, which
-is the point. `Method` is progeny's own enum because the types layer has no HTTP dependency;
-`server::http_method` turns one into an `axum::http::Method` for keying extractors and middleware,
-and `reqwest` shares that type. The router registers every template *through* `Route::X.path()`, so
-the reflection and the server cannot drift apart, and the wire probe drives every route through the
-generated router and checks that `Route::from_matched` names the one it drove.
+is the point. `Method` is progeny's own enum because the types layer has no HTTP dependency; each
+edge carries a bridge — `server::http_method` to `axum::http::Method`, `client::http_method` to
+`reqwest::Method`, which is the same type under another name — for keying extractors and
+middleware. The router registers every template *through* `Route::X.path()` as an inline `const`,
+so the reflection and the server cannot drift apart, and the wire probe drives every route through
+the generated router and checks that `Route::from_matched` names the one it drove. The accessors are
+`const fn`s reading a `static` table, a 1.83 compiler; every generated manifest declares the
+floor the emitted source stands on, `rust-version = "1.87"`, which the shipped support runtime
+already needed.
 
 ## Packaging large APIs
 
