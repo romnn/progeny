@@ -129,7 +129,7 @@ fn test_source(krate: &str) -> String {
             use std::sync::{{Arc, Mutex}};
 
             use color_eyre::eyre::{{self, OptionExt as _}};
-            use {krate}::{{client, server, types}};
+            use {krate}::{{client, operations, server, types}};
         "}
     );
     out.push_str(RECORDER);
@@ -529,26 +529,33 @@ async fn a_drifted_response_decodes_as_far_as_it_can_and_says_what_it_tolerated(
 
     // One entry per (site, kind), however many records shared the drift, each naming the
     // pointer an override would use.
-    // Spelled from the type's own constant: nothing copied out of the generated source.
-    let name = types::Site {
-        member: Some("name"),
-        ..types::read::Pet::SITE
-    };
-    assert_eq!(name.origin, "/components/schemas/Pet");
-    let kinds: Vec<types::DegradationKind> = report.at(&name).map(|entry| entry.kind).collect();
+    // Spelled from the type's own constants: nothing copied out of the generated source, and
+    // nothing a consumer could construct wrong.
+    let name = types::read::Pet::SITE_NAME;
+    assert_eq!(name.origin(), "/components/schemas/Pet");
+    assert_eq!(name.member(), Some("name"));
+    let kinds: Vec<types::DegradationKind> = report.at(name).map(|entry| entry.kind).collect();
     assert_eq!(
         kinds,
         [types::DegradationKind::RequiredAbsent, types::DegradationKind::NullNotAllowed]
     );
+    // The member's entries belong to the type; the type's own site holds only what the type
+    // itself tolerated, which here is the member the description never declared.
+    assert!(report.within(types::read::Pet::SITE).count() > kinds.len());
+    assert!(!report.touches(types::read::Pet::SITE_TAG));
     let undeclared = report
         .iter()
         .find(|entry| entry.kind == types::DegradationKind::UndeclaredMember)
         .ok_or_eyre("the undeclared member is reported")?;
-    assert_eq!(undeclared.site.type_name, "Pet");
+    assert_eq!(undeclared.site, types::read::Pet::SITE);
+    assert_eq!(undeclared.site.type_name(), "Pet");
     assert_eq!(undeclared.samples, ["color"]);
     let rendered = report.to_string();
     assert!(rendered.contains("/components/schemas/Pet/properties/name"), "{rendered}");
     assert_eq!(report.len(), 3, "{rendered}");
+    // A client's report is keyed at the operation's response, which is no type's site.
+    assert_eq!(report.root().type_name(), "list_pets");
+    assert_eq!(report.root().origin(), "/paths/~1pets/get/responses/200");
 
     // A payload that is not the declared shape at the root has no value to hand back.
     let error = client
@@ -566,6 +573,18 @@ async fn a_drifted_response_decodes_as_far_as_it_can_and_says_what_it_tolerated(
     assert_eq!(parsed.extra.get("extra"), Some(&serde_json::json!(true)));
     // And written back as it arrived: no invented `null` for what was missing.
     assert_eq!(serde_json::to_string(&parsed)?, "{\"id\":4,\"extra\":true}");
+
+    // And with the report kept, outside a client: keyed at the type the payload is.
+    let decoded = types::Decoded::<types::read::Pet>::from_json("{\"id\": 4, \"extra\": true}")?;
+    assert_eq!(decoded.value.id, Some(4));
+    assert_eq!(decoded.degradations.root(), types::read::Pet::SITE);
+    assert!(decoded.is_degraded(), "an undeclared member is drift");
+    assert!(decoded.degradations.touches(types::read::Pet::SITE));
+    // A list of them is keyed at the element type, and a body that goes on after its value is
+    // not a JSON document whichever way it is read.
+    let page = types::Decoded::<Vec<types::read::Pet>>::from_json("[{\"id\": 4}]")?;
+    assert_eq!(page.degradations.root(), types::read::Pet::SITE);
+    assert!(types::Decoded::<types::read::Pet>::from_json("{} tail").is_err());
 }
 
 /// A stream follows the cursor through read forms, and a page degraded on the path it walks —
@@ -598,10 +617,15 @@ async fn a_stream_walks_read_forms_and_refuses_a_degraded_page() {
         }
     };
     assert_eq!(names, ["Rex", "Tom"]);
-    let client::Error::DegradedPage(report) = error else {
+    assert_eq!(error.status().map(|status| status.as_u16()), Some(200));
+    let client::Error::DegradedPage(page) = error else {
         eyre::bail!("expected a degraded page, got {error:?}");
     };
-    let rendered = report.to_string();
+    // The page comes back whole with its body set aside: the status and headers it arrived
+    // with, and the report that refused it.
+    assert_eq!(page.status(), 200);
+    assert!(page.is_degraded());
+    let rendered = page.degradations().to_string();
     assert!(rendered.contains("PetPage.items"), "{rendered}");
     assert!(rendered.contains("could not be read"), "{rendered}");
 }
@@ -610,13 +634,15 @@ async fn a_stream_walks_read_forms_and_refuses_a_degraded_page() {
 /// report the response carries; a clean response never reaches it.
 #[test_util::test]
 async fn an_observer_is_told_about_every_degraded_response() {
-    let seen: Arc<Mutex<Vec<(String, u16, String)>>> = Arc::default();
+    // The operation is the reflection module's own enum, so an observer keying metrics by
+    // operation matches on a type rather than on a string the client happened to spell.
+    let seen: Arc<Mutex<Vec<(operations::Operation, u16, String)>>> = Arc::default();
     let client = raw_serving().await?.observe({
         let seen = Arc::clone(&seen);
         move |degraded: client::Degraded<'_>| {
             if let Ok(mut seen) = seen.lock() {
                 seen.push((
-                    degraded.operation.to_owned(),
+                    degraded.operation,
                     degraded.status.as_u16(),
                     degraded.degradations.to_string(),
                 ));
@@ -631,7 +657,8 @@ async fn an_observer_is_told_about_every_degraded_response() {
     assert!(!text.is_degraded());
     let seen = seen.lock().map_err(|_| eyre::eyre!("poisoned"))?.clone();
     assert_eq!(seen.len(), 1, "{seen:?}");
-    assert_eq!(seen[0].0, "list_pets");
+    assert_eq!(seen[0].0, operations::Operation::ListPets);
+    assert_eq!(seen[0].0.rust_name(), "list_pets");
     assert_eq!(seen[0].1, 200);
     assert_eq!(seen[0].2, pets.degradations().to_string());
 }

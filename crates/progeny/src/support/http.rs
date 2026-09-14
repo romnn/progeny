@@ -29,8 +29,7 @@ pub struct ResponseValue<T> {
 }
 
 impl<T> ResponseValue<T> {
-    #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         status: ::reqwest::StatusCode,
         headers: ::reqwest::header::HeaderMap,
         value: T,
@@ -43,8 +42,7 @@ impl<T> ResponseValue<T> {
         }
     }
 
-    #[doc(hidden)]
-    pub fn decoded(
+    pub(crate) fn decoded(
         status: ::reqwest::StatusCode,
         headers: ::reqwest::header::HeaderMap,
         decoded: Decoded<T>,
@@ -114,51 +112,6 @@ impl<T> ResponseValue<T> {
     }
 }
 
-/// A response the decoder tolerated something in, as handed to a client's observer.
-///
-/// Borrowed, because the observer sees every degraded response and most observers count or log;
-/// one that keeps a report clones it.
-#[derive(Debug, Clone, Copy)]
-pub struct Degraded<'a> {
-    /// The generated method the response answered.
-    pub operation: &'static str,
-    /// The status the server answered with.
-    pub status: ::reqwest::StatusCode,
-    /// What the decoder tolerated.
-    pub degradations: &'a Degradations,
-}
-
-/// A hook a client calls with every degraded response, before handing the response back.
-///
-/// The one way to see drift across a whole application without threading each response's
-/// report through every call site: counting into a metric, logging at a level the application
-/// chooses, or failing a test. It sees the same report the response carries and can change
-/// nothing about it. `Send + Sync` so a client holding one can be shared across tasks.
-#[derive(Clone)]
-pub struct Observer(
-    ::std::sync::Arc<dyn Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync>,
-);
-
-impl Observer {
-    /// Wrap a function as an observer.
-    pub fn new(
-        observe: impl Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync + 'static,
-    ) -> Self {
-        Self(::std::sync::Arc::new(observe))
-    }
-
-    /// Hand one degraded response to the function.
-    pub fn notify(&self, degraded: Degraded<'_>) {
-        (self.0)(degraded);
-    }
-}
-
-impl ::std::fmt::Debug for Observer {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        formatter.write_str("Observer")
-    }
-}
-
 /// Why a request did not produce a declared successful response.
 ///
 /// `E` is the operation's declared error payload, so a caller matches on a type rather than
@@ -199,10 +152,17 @@ pub enum Error<E> {
     /// Drift inside an item — a member of one record absent or unreadable — is not on the path
     /// and does not stop the stream; the item arrives as its read form says.
     ///
+    /// The page itself is carried whole — its status, its headers and its report — with the body
+    /// set aside, because a stream cannot hand a body back through an error and everything else
+    /// about the response is what a caller needs to decide what happened.
+    ///
     /// Only a leniently decoded client can produce this: a strict decode fails the page as a
     /// [`Error::Decode`] before there is a report to look at.
-    #[error("a page of the stream was degraded on the path to its items or next cursor: {0}")]
-    DegradedPage(::std::boxed::Box<Degradations>),
+    #[error(
+        "a page of the stream was degraded on the path to its items or next cursor: {}",
+        .0.degradations()
+    )]
+    DegradedPage(::std::boxed::Box<ResponseValue<()>>),
     /// A path parameter whose rendered segment is `.` or `..`.
     ///
     /// Every WHATWG URL parser — reqwest's included — folds dot segments away before the
@@ -228,7 +188,9 @@ impl<E> Error<E> {
             Self::Request(error) => error.status(),
             Self::Declared(response) => Some(response.status()),
             Self::UnexpectedStatus(response) => Some(response.status()),
-            Self::Decode(_) | Self::DegradedPage(_) | Self::UnsendablePath { .. } => None,
+            Self::Decode(error) => Some(error.status()),
+            Self::DegradedPage(page) => Some(page.status()),
+            Self::UnsendablePath { .. } => None,
         }
     }
 }
@@ -242,8 +204,7 @@ pub struct DecodeError {
 }
 
 impl DecodeError {
-    #[doc(hidden)]
-    pub fn new(status: ::reqwest::StatusCode, source: ::serde_json::Error) -> Self {
+    pub(crate) fn new(status: ::reqwest::StatusCode, source: ::serde_json::Error) -> Self {
         Self { status, source }
     }
 
@@ -323,7 +284,7 @@ pub async fn decode_json<T: ::serde::de::DeserializeOwned>(
 #[doc(hidden)]
 pub async fn decode_lenient<T: for<'de> Lenient<'de>>(
     response: ::reqwest::Response,
-    root: &'static Site,
+    root: Site,
 ) -> Result<ResponseValue<T>, DecodeError> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -346,10 +307,10 @@ pub async fn decode_lenient<T: for<'de> Lenient<'de>>(
 /// decoder reads with — refuses it too.
 fn decode_lenient_slice<T: for<'de> Lenient<'de>>(
     slice: &[u8],
-    root: &'static Site,
+    root: Site,
 ) -> Result<Decoded<T>, ::serde_json::Error> {
     let mut deserializer = ::serde_json::Deserializer::from_slice(slice);
-    let decoded = T::decode(&mut deserializer, root)?;
+    let decoded = Decoded::from_deserializer_at(root, &mut deserializer)?;
     deserializer.end()?;
     Ok(decoded)
 }
@@ -391,11 +352,7 @@ mod tests {
 
     use super::super::Site;
 
-    const ROOT: &Site = &Site {
-        type_name: "list",
-        origin: "/paths/~1list/get/responses/200",
-        member: None,
-    };
+    const ROOT: Site = Site::new("list", "/paths/~1list/get/responses/200", None);
 
     /// Leniency is about the shape of what was sent, not about what was sent: a body that goes
     /// on after its value is not a JSON document and is refused, the way the strict decoder

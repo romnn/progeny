@@ -138,21 +138,32 @@ for user in page.into_value() {
 
 An application that wants drift in one place rather than at every call site hands the client an
 observer, which sees every degraded response with its operation, status and report, and logs or
-counts it however the application likes — progeny itself logs nothing:
+counts it however the application likes — progeny itself logs nothing. The operation is the
+reflection module's own `Operation`, so an observer keys by a type rather than by a string:
 
 ```rust
 let client = Client::new(base_url).observe(|degraded| {
-    metrics::counter!("vendor_drift", "operation" => degraded.operation).increment(1);
+    metrics::counter!("vendor_drift", "operation" => degraded.operation.rust_name()).increment(1);
 });
 ```
 
-Every type a report can name carries its site — `read::User::SITE`, with a member's wire name
-put in for a member — so asking a report about one place needs nothing copied out of the
-generated source:
+Every type a report can name carries its sites — `read::User::SITE` for the type itself,
+`read::User::SITE_ID` for one of its members — so asking a report about one place needs nothing
+copied out of the generated source, and there is nothing to spell wrong: a `Site` cannot be
+constructed, only read, compared, and asked about.
 
 ```rust
-let id = Site { member: Some("id"), ..read::User::SITE };
-if page.degradations().touches(&id) { … }
+if page.degradations().touches(read::User::SITE_ID) { … }
+for entry in page.degradations().within(read::User::SITE) { … }   // the type and its members
+```
+
+Outside a client, a read type decodes with its report through `Decoded::from_json`, which reads
+any read type and any container of them and keys the report at the type's own site:
+
+```rust
+let decoded = Decoded::<Vec<read::User>>::from_json(body)?;
+if decoded.is_degraded() { … }
+for user in decoded.value { … }
 ```
 
 A response whose root is not what the description declares — an object where a list was

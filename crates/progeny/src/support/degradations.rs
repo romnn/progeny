@@ -26,44 +26,87 @@ use std::fmt;
 /// type, the pointer it was generated from, and the member's wire name.
 /// Equality is by these three, which is what folds every occurrence of one drift across a
 /// payload into one entry.
+///
+/// Only the generated crate spells one. Every type a report can name carries its sites as
+/// associated constants — `read::Pet::SITE` for the type itself, `read::Pet::SITE_NAME` for one
+/// of its members — so a consumer reads a site, compares it, and asks a report about it, and
+/// never restates a pointer the description owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Site {
+    type_name: &'static str,
+    origin: &'static str,
+    member: Option<&'static str>,
+}
+
+impl Site {
+    /// One site, as the generated crate spells it.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        type_name: &'static str,
+        origin: &'static str,
+        member: Option<&'static str>,
+    ) -> Self {
+        Self {
+            type_name,
+            origin,
+            member,
+        }
+    }
+
+    /// The root of a value decoded standalone whose type names no site: a scalar, a tuple.
+    #[doc(hidden)]
+    pub const UNNAMED: Self = Self::new("value", "", None);
+
     /// The generated type — or, for a response body's root, the operation that received it.
-    pub type_name: &'static str,
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        self.type_name
+    }
+
     /// Where the type is written in the description, as a JSON Pointer.
     ///
     /// One generated type has one origin. An inline schema written identically in more than one
     /// place is generated once, so a report about it names the place the type was generated
     /// from, which may be another operation's copy of the same schema.
-    pub origin: &'static str,
-    /// The member, by its wire name, or `None` for the type itself.
-    pub member: Option<&'static str>,
-}
+    #[must_use]
+    pub const fn origin(self) -> &'static str {
+        self.origin
+    }
 
-impl Site {
+    /// The member, by its wire name, or `None` for the type itself.
+    #[must_use]
+    pub const fn member(self) -> Option<&'static str> {
+        self.member
+    }
+
     /// The JSON Pointer of the member's schema, which is what an override would be keyed by.
     #[must_use]
     pub fn pointer(&self) -> String {
-        match self.member {
+        match self.member() {
             Some(member) => {
                 let escaped = member.replace('~', "~0").replace('/', "~1");
-                format!("{}/properties/{escaped}", self.origin)
+                format!("{}/properties/{escaped}", self.origin())
             }
-            None => self.origin.to_owned(),
+            None => self.origin().to_owned(),
         }
     }
 }
 
 impl fmt::Display for Site {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.member {
-            Some(member) => write!(formatter, "{}.{member}", self.type_name),
-            None => formatter.write_str(self.type_name),
+        match self.member() {
+            Some(member) => write!(formatter, "{}.{member}", self.type_name()),
+            None => formatter.write_str(self.type_name()),
         }
     }
 }
 
 /// What a lenient decode tolerated at one site.
+///
+/// Open to growth: a kind the decoder learns to record later must not break a consumer's
+/// match, so a match on it keeps a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DegradationKind {
     /// A member the description requires was not there.
@@ -150,19 +193,21 @@ impl Tally {
 ///
 /// Empty for a payload that matched the description exactly.
 /// Ordered by site, so a report reads in the description's order rather than the payload's.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Degradations {
     entries: BTreeMap<(Site, DegradationKind), Tally>,
     /// Whether a strict decode would have refused the payload: the question an untagged union
     /// asks of each variant when it decides which one a payload is.
     strict_refuses: bool,
+    /// What the payload this report describes was decoded as.
+    root: Site,
 }
 
 /// One line of a report: one kind of degradation at one site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Degradation<'a> {
     /// Where.
-    pub site: &'a Site,
+    pub site: Site,
     /// What.
     pub kind: DegradationKind,
     /// How many times, across the whole payload.
@@ -171,11 +216,32 @@ pub struct Degradation<'a> {
     pub samples: &'a [String],
 }
 
+impl Default for Degradations {
+    /// An empty report of a payload nothing named, which is what [`Degradations::new`] is.
+    ///
+    /// Written out rather than derived because a [`Site`] has no default: one is always the
+    /// generated crate's word about a place in the description.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Degradations {
-    /// An empty report.
+    /// An empty report, keyed at the unnamed root.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::rooted(Site::UNNAMED)
+    }
+
+    /// An empty report of a payload decoded at `root`.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn rooted(root: Site) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            strict_refuses: false,
+            root,
+        }
     }
 
     /// Whether the payload matched the description exactly.
@@ -201,23 +267,40 @@ impl Degradations {
         self.entries
             .iter()
             .map(|((site, kind), tally)| Degradation {
-                site,
+                site: *site,
                 kind: *kind,
                 count: tally.count,
                 samples: &tally.samples,
             })
     }
 
-    /// The entries recorded at one site.
-    pub fn at(&self, site: &Site) -> impl Iterator<Item = Degradation<'_>> {
-        let site = *site;
-        self.iter().filter(move |entry| *entry.site == site)
+    /// The entries recorded at exactly this site: `at(read::Pet::SITE_NAME)` for one member,
+    /// `at(read::Pet::SITE)` for what the type itself tolerated.
+    pub fn at(&self, site: Site) -> impl Iterator<Item = Degradation<'_>> {
+        self.iter().filter(move |entry| entry.site == site)
     }
 
-    /// Whether anything was recorded at a site.
+    /// Whether anything was recorded at exactly this site.
     #[must_use]
-    pub fn touches(&self, site: &Site) -> bool {
+    pub fn touches(&self, site: Site) -> bool {
         self.at(site).next().is_some()
+    }
+
+    /// Every entry of one type, its members included: `within(read::Pet::SITE)`.
+    ///
+    /// The member a site names is ignored, so asking with a member's site answers about the
+    /// type that declares it.
+    pub fn within(&self, site: Site) -> impl Iterator<Item = Degradation<'_>> {
+        self.iter().filter(move |entry| {
+            entry.site.type_name() == site.type_name() && entry.site.origin() == site.origin()
+        })
+    }
+
+    /// The root this report was decoded at: the operation's response in the client, the type's
+    /// own site (or the unnamed root) for [`Decoded::from_json`].
+    #[must_use]
+    pub const fn root(&self) -> Site {
+        self.root
     }
 
     /// Record one occurrence.
@@ -228,18 +311,18 @@ impl Degradations {
     #[doc(hidden)]
     pub fn record(
         &mut self,
-        site: &Site,
+        site: Site,
         kind: DegradationKind,
         sample: Option<String>,
         strict_refuses: bool,
     ) {
-        let tally = self.entries.entry((*site, kind)).or_default();
+        let tally = self.entries.entry((site, kind)).or_default();
         tally.count = tally.count.saturating_add(1);
         tally.note(sample);
         self.strict_refuses |= strict_refuses || kind.strict_refuses();
     }
 
-    /// Fold another report into this one.
+    /// Fold another report into this one, keeping this one's root.
     #[doc(hidden)]
     pub fn merge(&mut self, other: Self) {
         for ((site, kind), tally) in other.entries {
@@ -286,10 +369,23 @@ impl fmt::Display for Degradations {
 }
 
 /// A value read leniently, and what reading it tolerated.
+///
+/// The ways to make one are on the decoder's side of the module wall, in `lenient.rs`:
+/// `Decoded::from_json` and `Decoded::from_deserializer`. Only this accessor is here, so that a
+/// strictly decoded crate — which ships the report and not the decoder — still has it on the
+/// `Decoded` a response hands back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Decoded<T> {
     /// The value, as far as the payload allowed.
     pub value: T,
     /// What did not match the description on the way.
     pub degradations: Degradations,
+}
+
+impl<T> Decoded<T> {
+    /// Whether reading the value tolerated anything.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        !self.degradations.is_empty()
+    }
 }

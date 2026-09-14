@@ -33,7 +33,7 @@ use crate::support::Decoding;
 
 use super::types::{
     Scope, docs as docs_of, docs_prose, response_body_is_boxed, response_enum_type_path,
-    response_type_path, type_path as type_tokens,
+    response_type_path, type_path as type_tokens, type_ref_in,
 };
 
 /// Render the client module.
@@ -83,10 +83,28 @@ pub(super) fn render(
         }
     });
 
-    let interfaces = model
+    // A body variant is its primary's operation under another media type and gets no `Operation`
+    // variant of its own, so it observes under the primary's name — which is the operation the
+    // description declares. The primaries come first in model order, each followed by its
+    // variants.
+    let mut primary: Option<proc_macro2::Ident> = None;
+    let named: Vec<(&OperationContract, proc_macro2::Ident)> = model
         .operations()
         .iter()
-        .map(|operation| interface(operation, contracts, config, decoding));
+        .map(|operation| {
+            let variant = super::operations::variant(operation);
+            if operation.body_variant {
+                let named = primary.clone().unwrap_or(variant);
+                (operation, named)
+            } else {
+                primary = Some(variant.clone());
+                (operation, variant)
+            }
+        })
+        .collect();
+    let interfaces = named
+        .iter()
+        .map(|(operation, variant)| interface(operation, variant, contracts, config, decoding));
 
     let http_methods = super::operations::METHODS.map(|(variant, token)| {
         let variant = format_ident!("{variant}");
@@ -94,7 +112,8 @@ pub(super) fn render(
         quote! { operations::Method::#variant => ::reqwest::Method::#constant, }
     });
 
-    let client = client_struct(methods);
+    let client = client_struct(methods, decoding);
+    let observing = observing(decoding);
     let reading = if decoding.is_lenient() {
         quote! {
             //!
@@ -120,9 +139,9 @@ pub(super) fn render(
         use super::support;
 
         #[doc(inline)]
-        pub use super::support::{
-            DecodeError, Degradations, Degraded, Error, Observer, ResponseValue,
-        };
+        pub use super::support::{DecodeError, Degradations, Error, ResponseValue};
+
+        #observing
 
         #client
 
@@ -145,9 +164,94 @@ pub(super) fn render(
     }
 }
 
+/// The observer hook's two types, rendered here rather than shipped with the runtime.
+///
+/// `Degraded` names the operation as an `operations::Operation`, which is a type this document
+/// generated — so the verbatim runtime, which knows nothing about any one description, cannot
+/// declare either of these. `Observer` is the client's own business: only `Client::observe` makes
+/// one and only `Client::observed` calls it, so it is not part of what the module exports.
+fn observing(decoding: Decoding) -> TokenStream {
+    let unobserved = never_degraded(decoding);
+    quote! {
+        /// A response the decoder tolerated something in, as handed to a client's observer.
+        ///
+        /// Borrowed, because the observer sees every degraded response and most observers count
+        /// or log; one that keeps a report clones it.
+        #[derive(Debug, Clone, Copy)]
+        pub struct Degraded<'a> {
+            /// The operation the response answered.
+            pub operation: operations::Operation,
+            /// The status the server answered with.
+            pub status: ::reqwest::StatusCode,
+            /// What the decoder tolerated.
+            pub degradations: &'a Degradations,
+        }
+
+        /// A hook a client calls with every degraded response, before handing the response back.
+        ///
+        /// The one way to see drift across a whole application without threading each response's
+        /// report through every call site: counting into a metric, logging at a level the
+        /// application chooses, or failing a test. It sees the same report the response carries
+        /// and can change nothing about it. `Send + Sync` so a client holding one can be shared
+        /// across tasks.
+        #[derive(Clone)]
+        #unobserved
+        struct Observer(
+            ::std::sync::Arc<dyn Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync>,
+        );
+
+        impl Observer {
+            /// Wrap a function as an observer.
+            fn new(
+                observe: impl Fn(Degraded<'_>)
+                + ::std::marker::Send
+                + ::std::marker::Sync
+                + 'static,
+            ) -> Self {
+                Self(::std::sync::Arc::new(observe))
+            }
+
+            /// Hand one degraded response to the function.
+            #unobserved
+            fn notify(&self, degraded: Degraded<'_>) {
+                (self.0)(degraded);
+            }
+        }
+
+        impl ::std::fmt::Debug for Observer {
+            fn fmt(
+                &self,
+                formatter: &mut ::std::fmt::Formatter<'_>,
+            ) -> ::std::fmt::Result {
+                formatter.write_str("Observer")
+            }
+        }
+    }
+}
+
+/// An expectation for the observer machinery a strictly decoded client never reaches.
+///
+/// A strict decode tolerates nothing, so no response is ever degraded and nothing calls the
+/// hook — the client still *takes* an observer, because its shape is the same under both
+/// decodings and a consumer moves between them without an API fork. Conditional rather than
+/// unconditional so that it is unfulfilled, and therefore a warning, the moment a lenient
+/// client stops calling it.
+fn never_degraded(decoding: Decoding) -> TokenStream {
+    if decoding.is_lenient() {
+        return TokenStream::new();
+    }
+    quote! {
+        #[expect(
+            dead_code,
+            reason = "a strict decode tolerates nothing, so no response is ever degraded"
+        )]
+    }
+}
+
 /// The `Client` itself: its constructors, its accessors, the observer hook, and one accessor
 /// per operation.
-fn client_struct(methods: impl Iterator<Item = TokenStream>) -> TokenStream {
+fn client_struct(methods: impl Iterator<Item = TokenStream>, decoding: Decoding) -> TokenStream {
+    let unobserved = never_degraded(decoding);
     quote! {
         /// A client for this API.
         ///
@@ -208,10 +312,10 @@ fn client_struct(methods: impl Iterator<Item = TokenStream>) -> TokenStream {
             }
 
             /// A response on its way back to the caller, shown to the observer if degraded.
-            #[doc(hidden)]
-            pub fn observed<T>(
+            #unobserved
+            fn observed<T>(
                 &self,
-                operation: &'static str,
+                operation: operations::Operation,
                 response: ResponseValue<T>,
             ) -> ResponseValue<T> {
                 if let ::std::option::Option::Some(observer) = &self.observer {
@@ -265,6 +369,7 @@ fn default_base_url(model: &ApiModel) -> TokenStream {
 /// One operation's params struct, its request, its response types, and its `send`.
 fn interface(
     operation: &OperationContract,
+    variant: &proc_macro2::Ident,
     contracts: &Contracts,
     config: &Config,
     decoding: Decoding,
@@ -300,6 +405,7 @@ fn interface(
     let failure = error_type(operation, contracts, config);
     let reading = Reading {
         operation: operation_name,
+        variant,
         config,
         decoding,
     };
@@ -515,7 +621,7 @@ fn stream(
         value = quote! { ::std::option::Option::Some(#value) };
     }
     let assign = quote! { page_request.params.#cursor = #value; };
-    let page = page_walk(pagination, contracts, decoding);
+    let page = page_walk(pagination, contracts, config, decoding);
     let docs = format!(
         " Every item of every page, following `{}` until the service stops sending one.",
         pagination.cursor_param
@@ -529,7 +635,8 @@ fn stream(
             /// returns for one page, and [`Error::DegradedPage`] when a page decoded but was
             /// degraded on the path to its items or its next cursor — an element of the items
             /// that could not be read, or the items or cursor member absent or unreadable.
-            /// Drift inside an item does not end the stream. Items already yielded stay
+            /// That error carries the page's status, headers and report with its body set
+            /// aside. Drift inside an item does not end the stream. Items already yielded stay
             /// yielded; a caller who wants what such a page could still give reads it with
             /// `send` on the same request.
         }
@@ -599,6 +706,7 @@ fn stream(
 fn page_walk(
     pagination: &crate::api::PaginationContract,
     contracts: &Contracts,
+    config: &Config,
     decoding: Decoding,
 ) -> TokenStream {
     let next_path = pagination
@@ -613,17 +721,21 @@ fn page_walk(
             let items = page #(.#items_path)*;
         };
     }
+    // Each member's site is the constant the holder's read form carries for it, spelled through
+    // that type's path from here: nothing in the client restates a pointer the types module owns.
     let sites = pagination
         .next_cursor
         .iter()
         .chain(&pagination.items)
-        .filter_map(|step| {
-            let holder = contracts.get(step.holder)?;
-            Some(super::lenient::site(
-                holder,
-                Some(step.wire_name.as_str()),
+        .map(|step| {
+            let holder = type_ref_in(
+                &TypeRef::Named(step.holder),
+                contracts,
+                config,
                 Scope::Edge,
-            ))
+            );
+            let constant = super::lenient::site_const(&step.rust_name);
+            quote! { #holder::#constant }
         });
     let next_steps = next_path.map(|member| quote! { .and_then(|step| step.#member.as_ref()) });
     let items_steps = items_path.map(|member| quote! { .and_then(|step| step.#member) });
@@ -631,8 +743,10 @@ fn page_walk(
         let page = page_request.send().await?;
         let degradations = page.degradations();
         if false #(|| degradations.touches(#sites))* {
+            // The body is what the guard refuses; the status, the headers and the report are
+            // what a caller still needs, so the page goes back whole with its body set aside.
             return ::std::result::Result::Err(Error::DegradedPage(
-                ::std::boxed::Box::new(::std::clone::Clone::clone(degradations)),
+                ::std::boxed::Box::new(page.map(|_| ())),
             ));
         }
         let page = page.into_value();
@@ -764,6 +878,9 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
 #[derive(Clone, Copy)]
 struct Reading<'a> {
     operation: &'a str,
+    /// The operation's `operations::Operation` variant, which is what a degraded response names
+    /// to the observer.
+    variant: &'a proc_macro2::Ident,
     config: &'a Config,
     decoding: Decoding,
 }
@@ -1430,17 +1547,18 @@ fn decode(
         // body has nothing to be lenient about.
         ResponseBody::Json { .. } if reading.decoding.is_lenient() => {
             let operation = reading.operation;
+            let variant = reading.variant;
             let origin = arm.origin.to_string();
             quote! {
                 self.client.observed(
-                    #operation,
+                    operations::Operation::#variant,
                     support::decode_lenient(
                         response,
-                        &support::Site {
-                            type_name: #operation,
-                            origin: #origin,
-                            member: ::std::option::Option::None,
-                        },
+                        support::Site::new(
+                            #operation,
+                            #origin,
+                            ::std::option::Option::None,
+                        ),
                     )
                     .await?,
                 )

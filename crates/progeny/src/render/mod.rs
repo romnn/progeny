@@ -3166,9 +3166,12 @@ mod tests {
         let rendered = files(read_forms_document(), &config)?;
         let client = &rendered[camino::Utf8Path::new("src/client.rs")];
         assert!(client.contains(".touches("), "{client}");
-        assert!(client.contains("member: Some(\"items\"),"), "{client}");
-        assert!(client.contains("member: Some(\"next\"),"), "{client}");
+        // Asked with the constants the holder's read form carries, reached through its path from
+        // the client: the client restates no pointer of its own.
+        assert!(client.contains("read::Page::SITE_ITEMS"), "{client}");
+        assert!(client.contains("read::Page::SITE_NEXT"), "{client}");
         assert!(client.contains("Error::DegradedPage("), "{client}");
+        assert!(client.contains("page.map(|_| ())"), "{client}");
         assert!(client.contains(".and_then(|step| step.items)"), "{client}");
         assert!(
             client.contains(".and_then(|step| step.next.as_ref())"),
@@ -3286,7 +3289,7 @@ mod tests {
             "{support}"
         );
         let nothing = types
-            .find("member: Some(\"nothing\")")
+            .find("Self::SITE_NOTHING")
             .ok_or_eyre("the null member's site")?;
         let after = &types[nothing..];
         let declared = after.find("Declared::").ok_or_eyre("its declaration")?;

@@ -265,28 +265,18 @@ fn an_unknown_variant_is_kept_the_same_way() {
 #[test_util::test]
 fn the_read_form_decodes_and_reports_the_same_way() {
     let payload = r#"{"optional":"seven","clearable":null,"state":"paused","undeclared":[1]}"#;
-    let mut left_deserializer = serde_json::Deserializer::from_str(payload);
-    let left = <derived::types::read::Spike as derived::types::Lenient<'_>>::decode(
-        &mut left_deserializer,
-        &derived::types::Site {
-            type_name: "root",
-            origin: "/paths/~1spike/post/responses/200",
-            member: None,
-        },
-    )?;
-    let mut right_deserializer = serde_json::Deserializer::from_str(payload);
-    let right = <hand::types::read::Spike as hand::types::Lenient<'_>>::decode(
-        &mut right_deserializer,
-        &hand::types::Site {
-            type_name: "root",
-            origin: "/paths/~1spike/post/responses/200",
-            member: None,
-        },
-    )?;
+    let left = derived::types::Decoded::<derived::types::read::Spike>::from_json(payload)?;
+    let right = hand::types::Decoded::<hand::types::read::Spike>::from_json(payload)?;
     assert_eq!(
         left.degradations.to_string(),
         right.degradations.to_string()
     );
+    // Decoded on its own, a read form keys its report at its own site under both strategies.
+    assert_eq!(
+        left.degradations.root(),
+        derived::types::read::Spike::SITE
+    );
+    assert_eq!(right.degradations.root(), hand::types::read::Spike::SITE);
     // A required member absent, a member of the wrong type, an unlisted enum value, and an
     // undeclared member: four sites, four entries.
     assert_eq!(left.degradations.len(), 4, "{}", left.degradations);

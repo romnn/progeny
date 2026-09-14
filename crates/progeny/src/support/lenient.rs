@@ -44,7 +44,7 @@ pub type Problem = de::value::Error;
 /// What the description declares about a member's presence: which of absent and `null` it
 /// allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Declared {
+pub(crate) enum Declared {
     /// Always there, never `null`.
     Required,
     /// May be absent; `null` is not allowed.
@@ -65,11 +65,13 @@ impl Declared {
     }
 }
 
-/// A type a lenient decode can read out of a buffered value.
+/// The bound of [`Decoded::from_json`]: implemented by every type a response can yield and by
+/// the containers of them.
 ///
-/// Implemented by every generated type a response can yield, by the containers and
-/// scalars those types are made of, and by the formats' own types.
-/// The contract:
+/// Nothing here is for a consumer to call or implement. It is public because it is the bound on
+/// the two ways to decode, and because the shipped client runtime names it from the other side of
+/// a crate boundary under workspace packaging.
+/// The contract the generated implementations keep:
 ///
 /// - `Ok` is the value, as far as the payload allowed, with everything tolerated on the way
 ///   recorded in `report` at `site` or below.
@@ -77,6 +79,14 @@ impl Declared {
 ///   and the caller decides what that costs: a member becomes `None`, an element is skipped,
 ///   a root fails the decode.
 pub trait Lenient<'de>: Sized {
+    /// The root a standalone decode of this type is keyed at.
+    ///
+    /// A generated type names its own site; a container forwards its element type's, so a
+    /// skipped element of a `Vec<Pet>` is reported at `Pet`'s site rather than at nothing; a
+    /// scalar or a tuple names no place in the description and keeps the unnamed root.
+    #[doc(hidden)]
+    const ROOT: Site = Site::UNNAMED;
+
     /// Read the value out of buffered content.
     ///
     /// # Errors
@@ -84,30 +94,68 @@ pub trait Lenient<'de>: Sized {
     /// Returns the reason when the content is not the shape this type is; a struct handed
     /// a string, a list handed an object.
     /// Anything less is tolerated and reported.
+    #[doc(hidden)]
     fn lenient(
         content: Content<'de>,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
     ) -> Result<Self, Problem>;
+}
 
-    /// Decode a whole payload from a deserializer, with the report.
+impl<T> Decoded<T> {
+    /// One JSON document read leniently and held to the whole of it: a body that goes on after
+    /// its value is refused, as `serde_json::from_slice` refuses it.
     ///
-    /// `root` names what the payload is — a generated `Deserialize` names its own type, the
-    /// client names the operation and status — so a report about the root itself has a line.
+    /// The report is keyed at the type's own root — `read::Pet::SITE` for a generated type, and
+    /// the element type's site for a container of them — so `report.root()` names something the
+    /// generated crate spells.
     ///
     /// # Errors
     ///
-    /// Returns the format's own error when the input is not well-formed, and a custom
-    /// error when the root is not the shape this type is.
+    /// Returns `serde_json`'s own error when the input is not one well-formed JSON document,
+    /// and a custom error when the root is not the shape `T` is.
     /// Nothing below the root can fail the decode.
-    fn decode<D>(deserializer: D, root: &'static Site) -> Result<Decoded<Self>, D::Error>
+    pub fn from_json(json: impl AsRef<[u8]>) -> serde_json::Result<Self>
+    where
+        T: for<'de> Lenient<'de>,
+    {
+        let mut deserializer = serde_json::Deserializer::from_slice(json.as_ref());
+        let decoded = Self::from_deserializer(&mut deserializer)?;
+        deserializer.end()?;
+        Ok(decoded)
+    }
+
+    /// The same, from a deserializer the caller already has, and without the rule that the input
+    /// ends there.
+    ///
+    /// # Errors
+    ///
+    /// Returns the format's own error when the input is not well-formed, and a custom error when
+    /// the root is not the shape `T` is.
+    pub fn from_deserializer<'de, D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
+        T: Lenient<'de>,
+    {
+        Self::from_deserializer_at(T::ROOT, deserializer)
+    }
+
+    /// The same, keyed at a root the caller names: the operation and status a client's response
+    /// arrived under, which no type in the description is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Decoded::from_deserializer`].
+    #[doc(hidden)]
+    pub fn from_deserializer_at<'de, D>(root: Site, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Lenient<'de>,
     {
         let content = Content::deserialize(deserializer)?;
-        let mut degradations = Degradations::new();
-        let value = Self::lenient(content, root, &mut degradations).map_err(D::Error::custom)?;
-        Ok(Decoded {
+        let mut degradations = Degradations::rooted(root);
+        let value = T::lenient(content, root, &mut degradations).map_err(D::Error::custom)?;
+        Ok(Self {
             value,
             degradations,
         })
@@ -115,17 +163,17 @@ pub trait Lenient<'de>: Sized {
 }
 
 /// The members of one object, for a generated struct's lenient decode to take by name.
-pub struct Members<'de> {
+pub(crate) struct Members<'de> {
     members: Vec<(Content<'de>, Content<'de>)>,
 }
 
 /// What one declared member's slot held: nothing, `null`, or a value.
 ///
-/// Public for the presence-preserving member reader the support module adds beside its
+/// Visible to the presence-preserving member reader the support module adds beside its
 /// `Presence` type, which is the one caller outside the decoder that has to tell all three apart.
 #[doc(hidden)]
 #[derive(Debug)]
-pub enum Slot<'de> {
+pub(crate) enum Slot<'de> {
     Absent,
     Null,
     Value(Content<'de>),
@@ -137,7 +185,7 @@ impl<'de> Members<'de> {
     /// # Errors
     ///
     /// Returns the `invalid type` a strict decode would, naming the struct.
-    pub fn of(content: Content<'de>, name: &'static str) -> Result<Self, Problem> {
+    pub(crate) fn of(content: Content<'de>, name: &'static str) -> Result<Self, Problem> {
         match content {
             Content::Map(members) => Ok(Self { members }),
             other => Err(de::Error::invalid_type(
@@ -185,7 +233,7 @@ impl<'de> Members<'de> {
 
     /// Read one declared member, or `None` with the reason recorded.
     ///
-    /// `site.member` names the member.
+    /// The member's own site names it, and is what the report keys the drift at.
     /// An absent member is `None`, reported when the description requires it; a `null` is
     /// `None`, reported when the description does not allow it; a value that does not
     /// read as `T` is `None`, reported with the reason.
@@ -195,16 +243,16 @@ impl<'de> Members<'de> {
     /// `null` as `None`.
     /// So absence and `null` are drift from the description either way, but they refuse a
     /// strict decode — and disqualify an untagged variant — only for that one declaration.
-    pub fn take<T>(
+    pub(crate) fn take<T>(
         &mut self,
-        site: &'static Site,
+        site: Site,
         declared: Declared,
         report: &mut Degradations,
     ) -> Option<T>
     where
         T: Lenient<'de>,
     {
-        let name = site.member.unwrap_or_default();
+        let name = site.member().unwrap_or_default();
         let strict_refuses = declared == Declared::Required;
         match self.slot(name) {
             Ok(Slot::Absent) => {
@@ -248,8 +296,8 @@ impl<'de> Members<'de> {
     ///
     /// A member written twice is reported and read as absent.
     #[doc(hidden)]
-    pub fn take_raw(&mut self, site: &'static Site, report: &mut Degradations) -> Slot<'de> {
-        match self.slot(site.member.unwrap_or_default()) {
+    pub(crate) fn take_raw(&mut self, site: Site, report: &mut Degradations) -> Slot<'de> {
+        match self.slot(site.member().unwrap_or_default()) {
             Ok(slot) => slot,
             Err(err) => {
                 report.record(
@@ -270,9 +318,9 @@ impl<'de> Members<'de> {
     /// `denied` says whether the strict form refuses them, which is what an untagged
     /// union needs to know when it asks whether a payload fits a variant.
     /// An entry that does not read as `T` is left out and reported as a skipped element.
-    pub fn rest<M, T>(
+    pub(crate) fn rest<M, T>(
         self,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
         declared: bool,
         denied: bool,
@@ -318,7 +366,7 @@ impl<'de> Members<'de> {
     }
 
     /// Report the members no declared name claimed, for a type that keeps none.
-    pub fn report_rest(self, site: &'static Site, report: &mut Degradations, denied: bool) {
+    pub(crate) fn report_rest(self, site: Site, report: &mut Degradations, denied: bool) {
         for (key, _) in self.members {
             report.record(
                 site,
@@ -332,7 +380,7 @@ impl<'de> Members<'de> {
     /// The content with one member removed: a consumed tag, before its variant reads the rest.
     #[doc(hidden)]
     #[must_use]
-    pub fn without(mut self, name: &str) -> Content<'de> {
+    pub(crate) fn without(mut self, name: &str) -> Content<'de> {
         self.members.retain(|(key, _)| key.as_str() != Some(name));
         Content::Map(self.members)
     }
@@ -358,9 +406,9 @@ impl de::Expected for StructName {
 /// so what the accepted variant tolerated — an undeclared member, an unlisted enum
 /// value — is still said.
 #[doc(hidden)]
-pub fn probe<'de, T>(
+pub(crate) fn probe<'de, T>(
     content: &Content<'de>,
-    site: &'static Site,
+    site: Site,
     report: &mut Degradations,
 ) -> Option<T>
 where
@@ -383,9 +431,9 @@ where
 /// Never in practice: arbitrary JSON reads every buffered value.
 /// The type is `Result` so the generated arm reads like its siblings.
 #[doc(hidden)]
-pub fn unknown_union<'de>(
+pub(crate) fn unknown_union<'de>(
     content: Content<'de>,
-    site: &'static Site,
+    site: Site,
     report: &mut Degradations,
     tag: Option<&str>,
 ) -> Result<serde_json::Value, Problem> {
@@ -404,7 +452,7 @@ pub fn unknown_union<'de>(
 ///
 /// Returns the duplicate-member error when the payload writes the tag twice.
 #[doc(hidden)]
-pub fn tag_choice(
+pub(crate) fn tag_choice(
     content: &Content<'_>,
     tag: &'static str,
     variants: &'static [&'static str],
@@ -415,7 +463,7 @@ pub fn tag_choice(
 /// The tag member's text, for the report's sample when it names no variant.
 #[doc(hidden)]
 #[must_use]
-pub fn tag_text<'a>(content: &'a Content<'_>, tag: &str) -> Option<&'a str> {
+pub(crate) fn tag_text<'a>(content: &'a Content<'_>, tag: &str) -> Option<&'a str> {
     let Content::Map(members) = content else {
         return None;
     };
@@ -431,9 +479,9 @@ pub fn tag_text<'a>(content: &'a Content<'_>, tag: &str) -> Option<&'a str> {
 ///
 /// Returns the reason when the content is not a string.
 #[doc(hidden)]
-pub fn open_string<'de, T>(
+pub(crate) fn open_string<'de, T>(
     content: Content<'de>,
-    site: &'static Site,
+    site: Site,
     report: &mut Degradations,
     unlisted: fn(&T) -> Option<&str>,
 ) -> Result<T, Problem>
@@ -456,9 +504,11 @@ impl<'de, T> Lenient<'de> for Option<T>
 where
     T: Lenient<'de>,
 {
+    const ROOT: Site = T::ROOT;
+
     fn lenient(
         content: Content<'de>,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
     ) -> Result<Self, Problem> {
         match content {
@@ -473,9 +523,11 @@ impl<'de, T> Lenient<'de> for Box<T>
 where
     T: Lenient<'de>,
 {
+    const ROOT: Site = T::ROOT;
+
     fn lenient(
         content: Content<'de>,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
     ) -> Result<Self, Problem> {
         T::lenient(content, site, report).map(Box::new)
@@ -497,11 +549,13 @@ impl<'de, T> Lenient<'de> for Vec<T>
 where
     T: Lenient<'de>,
 {
+    const ROOT: Site = T::ROOT;
+
     /// Every element that reads; the rest are left out and reported, so one bad record does
     /// not fail the list that holds it.
     fn lenient(
         content: Content<'de>,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
     ) -> Result<Self, Problem> {
         let items = elements(content, "a sequence")?;
@@ -524,7 +578,7 @@ where
 /// The entries of a buffered map keyed by strings, with the unreadable ones reported.
 fn entries<'de, T>(
     content: Content<'de>,
-    site: &'static Site,
+    site: Site,
     report: &mut Degradations,
 ) -> Result<Vec<(String, T)>, Problem>
 where
@@ -561,9 +615,11 @@ impl<'de, T> Lenient<'de> for BTreeMap<String, T>
 where
     T: Lenient<'de>,
 {
+    const ROOT: Site = T::ROOT;
+
     fn lenient(
         content: Content<'de>,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
     ) -> Result<Self, Problem> {
         entries(content, site, report).map(|pairs| pairs.into_iter().collect())
@@ -574,10 +630,12 @@ impl<'de, T, const N: usize> Lenient<'de> for [T; N]
 where
     T: Lenient<'de>,
 {
+    const ROOT: Site = T::ROOT;
+
     /// All or nothing: a fixed arity has no element to leave out.
     fn lenient(
         content: Content<'de>,
-        site: &'static Site,
+        site: Site,
         report: &mut Degradations,
     ) -> Result<Self, Problem> {
         let items = elements(content, "a sequence")?;
@@ -612,7 +670,7 @@ macro_rules! lenient_tuples {
             {
                 fn lenient(
                     content: Content<'de>,
-                    site: &'static Site,
+                    site: Site,
                     report: &mut Degradations,
                 ) -> Result<Self, Problem> {
                     let items = elements(content, "a sequence")?;
@@ -664,7 +722,7 @@ macro_rules! lenient_via_serde {
             impl<'de> Lenient<'de> for $ty {
                 fn lenient(
                     content: Content<'de>,
-                    _site: &'static Site,
+                    _site: Site,
                     _report: &mut Degradations,
                 ) -> Result<Self, Problem> {
                     Deserialize::deserialize(ContentDeserializer::<'de, Problem>::new(content))
@@ -691,12 +749,12 @@ lenient_via_serde! {
 mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
 
-    use super::super::degradations::Degradation;
+    use super::super::degradations::{Decoded, Degradation};
     use super::{Declared, DegradationKind, Degradations, Lenient, Members, Site, Slot};
     use crate::support::buffered::Content;
 
     /// A struct written the way the renderer writes a read form: two declared members and a
-    /// capture map, each member taken by its site.
+    /// capture map, each member taken by the constant that names its site.
     #[derive(Debug, Default, PartialEq)]
     struct Employment {
         kind: Option<String>,
@@ -704,50 +762,44 @@ mod tests {
         extra: std::collections::BTreeMap<String, serde_json::Value>,
     }
 
-    const EMPLOYMENT: &Site = &Site {
-        type_name: "Employment",
-        origin: "/components/schemas/Employment",
-        member: None,
-    };
-    const KIND: &Site = &Site {
-        type_name: "Employment",
-        origin: "/components/schemas/Employment",
-        member: Some("type"),
-    };
-    const YEARS: &Site = &Site {
-        type_name: "Employment",
-        origin: "/components/schemas/Employment",
-        member: Some("years"),
-    };
+    impl Employment {
+        const SITE: Site = Site::new("Employment", "/components/schemas/Employment", None);
+        const SITE_KIND: Site =
+            Site::new("Employment", "/components/schemas/Employment", Some("type"));
+        const SITE_YEARS: Site = Site::new(
+            "Employment",
+            "/components/schemas/Employment",
+            Some("years"),
+        );
+    }
 
     impl<'de> Lenient<'de> for Employment {
+        const ROOT: Site = Self::SITE;
+
         fn lenient(
             content: Content<'de>,
-            _site: &'static Site,
+            _site: Site,
             report: &mut Degradations,
         ) -> Result<Self, super::Problem> {
             let mut members = Members::of(content, "Employment")?;
             Ok(Self {
-                kind: members.take(KIND, Declared::Required, report),
-                years: members.take(YEARS, Declared::Optional, report),
-                extra: members.rest(EMPLOYMENT, report, false, false),
+                kind: members.take(Self::SITE_KIND, Declared::Required, report),
+                years: members.take(Self::SITE_YEARS, Declared::Optional, report),
+                extra: members.rest(Self::SITE, report, false, false),
             })
         }
     }
 
-    const ROOT: &Site = &Site {
-        type_name: "list",
-        origin: "/paths/~1list/get/responses/200",
-        member: None,
-    };
+    /// The root a client hands its decode: an operation's response, which is no type's site.
+    const ROOT: Site = Site::new("list", "/paths/~1list/get/responses/200", None);
 
     fn decode<'de, T: Lenient<'de>>(json: &'de str) -> eyre::Result<(T, Degradations)> {
         let mut deserializer = serde_json::Deserializer::from_str(json);
-        let decoded = T::decode(&mut deserializer, ROOT)?;
+        let decoded = Decoded::<T>::from_deserializer_at(ROOT, &mut deserializer)?;
         Ok((decoded.value, decoded.degradations))
     }
 
-    fn only<'a>(report: &'a Degradations, site: &Site) -> eyre::Result<Degradation<'a>> {
+    fn only(report: &Degradations, site: Site) -> eyre::Result<Degradation<'_>> {
         let mut at = report.at(site);
         let first = at.next().ok_or_eyre("something was recorded at the site")?;
         assert!(
@@ -772,7 +824,7 @@ mod tests {
     fn a_required_null_becomes_none_and_is_reported_at_its_site() {
         let (value, report) = decode::<Employment>(r#"{"type":null}"#)?;
         assert_eq!(value.kind, None);
-        let entry = only(&report, KIND)?;
+        let entry = only(&report, Employment::SITE_KIND)?;
         assert_eq!(entry.kind, DegradationKind::NullNotAllowed);
         assert_eq!(entry.count, 1);
         assert!(report.strict_refuses());
@@ -781,8 +833,8 @@ mod tests {
     #[test_util::test]
     fn an_absent_required_member_is_reported_and_an_absent_optional_one_is_not() {
         let (_, report) = decode::<Employment>("{}")?;
-        assert_eq!(only(&report, KIND)?.kind, DegradationKind::RequiredAbsent);
-        assert!(!report.touches(YEARS), "{report}");
+        assert_eq!(only(&report, Employment::SITE_KIND)?.kind, DegradationKind::RequiredAbsent);
+        assert!(!report.touches(Employment::SITE_YEARS), "{report}");
     }
 
     /// A member written more than once is refused as one, however many copies there were:
@@ -796,9 +848,9 @@ mod tests {
         assert_eq!(value.kind, None);
         assert!(!value.extra.contains_key("type"), "{:?}", value.extra);
         assert_eq!(value.extra.get("x"), Some(&serde_json::json!(2)));
-        assert_eq!(only(&report, KIND)?.kind, DegradationKind::Undecodable);
+        assert_eq!(only(&report, Employment::SITE_KIND)?.kind, DegradationKind::Undecodable);
         assert_eq!(
-            only(&report, EMPLOYMENT)?.kind,
+            only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember
         );
     }
@@ -810,13 +862,13 @@ mod tests {
     fn only_a_plain_member_refuses_absence_or_null_strictly() {
         let (value, report) = decode::<Employment>(r#"{"type":"a","years":null}"#)?;
         assert_eq!(value.years, None);
-        assert_eq!(only(&report, YEARS)?.kind, DegradationKind::NullNotAllowed);
+        assert_eq!(only(&report, Employment::SITE_YEARS)?.kind, DegradationKind::NullNotAllowed);
         assert!(!report.strict_refuses(), "{report}");
         let (_, report) = decode::<Address>(r#"{"street":"Main"}"#)?;
-        assert_eq!(only(&report, UNIT)?.kind, DegradationKind::RequiredAbsent);
+        assert_eq!(only(&report, Address::SITE_UNIT)?.kind, DegradationKind::RequiredAbsent);
         assert!(!report.strict_refuses(), "{report}");
         let (_, report) = decode::<Address>(r#"{"unit":null}"#)?;
-        assert_eq!(only(&report, STREET)?.kind, DegradationKind::RequiredAbsent);
+        assert_eq!(only(&report, Address::SITE_STREET)?.kind, DegradationKind::RequiredAbsent);
         assert!(report.strict_refuses(), "{report}");
     }
 
@@ -824,7 +876,7 @@ mod tests {
     fn a_member_of_the_wrong_type_becomes_none_with_the_reason_as_a_sample() {
         let (value, report) = decode::<Employment>(r#"{"type":"x","years":"three"}"#)?;
         assert_eq!(value.years, None);
-        let entry = only(&report, YEARS)?;
+        let entry = only(&report, Employment::SITE_YEARS)?;
         assert_eq!(entry.kind, DegradationKind::Undecodable);
         assert!(
             entry.samples[0].contains("invalid type"),
@@ -838,7 +890,7 @@ mod tests {
     fn an_undeclared_member_is_captured_and_reported() {
         let (value, report) = decode::<Employment>(r#"{"type":"x","employer":"ACME"}"#)?;
         assert_eq!(value.extra["employer"], serde_json::json!("ACME"));
-        let entry = only(&report, EMPLOYMENT)?;
+        let entry = only(&report, Employment::SITE)?;
         assert_eq!(entry.kind, DegradationKind::UndeclaredMember);
         assert_eq!(entry.samples, ["employer"]);
         // Not a strict refusal: the type does not deny unknown members.
@@ -857,6 +909,60 @@ mod tests {
         assert_eq!(entry.count, 2);
     }
 
+    /// A payload decoded on its own is keyed at the type it is, and a container forwards its
+    /// element type's root — so an element that could not be read is reported at the element
+    /// type's site rather than at nothing.
+    #[test_util::test]
+    fn a_standalone_decode_is_keyed_at_the_type_the_payload_is() {
+        let decoded = Decoded::<Employment>::from_json(r#"{"type":null}"#)?;
+        assert_eq!(decoded.degradations.root(), Employment::SITE);
+        assert!(decoded.is_degraded());
+
+        let decoded = Decoded::<Vec<Employment>>::from_json(r#"[{"type":"a"},"not an object"]"#)?;
+        assert_eq!(decoded.degradations.root(), Employment::SITE);
+        assert_eq!(decoded.value.len(), 1);
+        assert_eq!(
+            only(&decoded.degradations, Employment::SITE)?.kind,
+            DegradationKind::SkippedElement
+        );
+
+        // A tuple names no place in the description, so it keeps the unnamed root.
+        let decoded = Decoded::<(i64, String)>::from_json(r#"[1,"a"]"#)?;
+        assert_eq!(decoded.degradations.root(), Site::UNNAMED);
+        assert!(!decoded.is_degraded());
+
+        // Held to the whole document, the way `serde_json::from_slice` holds a strict decode.
+        assert!(Decoded::<Vec<Employment>>::from_json("[] garbage").is_err());
+    }
+
+    /// A member's constant is the site the decoder records its drift at, and the type's own
+    /// constant is not: `within` sees the type and its members, `at` sees exactly one place.
+    #[test_util::test]
+    fn a_member_constant_is_the_site_the_decoder_records_at() {
+        let (_, report) = decode::<Employment>(r#"{"type":null,"floor":3}"#)?;
+        assert_eq!(
+            only(&report, Employment::SITE_KIND)?.kind,
+            DegradationKind::NullNotAllowed
+        );
+        // Ordered by site, and a site with no member sorts before one with a member.
+        let within: Vec<DegradationKind> = report
+            .within(Employment::SITE)
+            .map(|entry| entry.kind)
+            .collect();
+        assert_eq!(
+            within,
+            [
+                DegradationKind::UndeclaredMember,
+                DegradationKind::NullNotAllowed
+            ]
+        );
+        // The type's own site holds only what the type itself tolerated.
+        let at: Vec<DegradationKind> = report.at(Employment::SITE).map(|entry| entry.kind).collect();
+        assert_eq!(at, [DegradationKind::UndeclaredMember]);
+        // And asking `within` with a member's site answers about the type that declares it.
+        assert_eq!(report.within(Employment::SITE_KIND).count(), 2);
+    }
+
     /// The aggregation the report exists for: two hundred records with one drift is one line.
     #[test_util::test]
     fn the_same_drift_across_a_page_is_one_entry_with_a_count() {
@@ -865,7 +971,7 @@ mod tests {
         let (value, report) = decode::<Vec<Employment>>(&json)?;
         assert_eq!(value.len(), 200);
         assert_eq!(report.len(), 1);
-        assert_eq!(only(&report, KIND)?.count, 200);
+        assert_eq!(only(&report, Employment::SITE_KIND)?.count, 200);
         assert_eq!(report.total(), 200);
         let rendered = report.to_string();
         assert!(rendered.contains("Employment.type"), "{rendered}");
@@ -891,7 +997,7 @@ mod tests {
     fn a_duplicate_member_is_reported_rather_than_last_write_wins() {
         let (value, report) = decode::<Employment>(r#"{"type":"a","type":"b"}"#)?;
         assert_eq!(value.kind, None);
-        assert_eq!(only(&report, KIND)?.kind, DegradationKind::Undecodable);
+        assert_eq!(only(&report, Employment::SITE_KIND)?.kind, DegradationKind::Undecodable);
     }
 
     /// Samples are capped, counts are not.
@@ -900,13 +1006,13 @@ mod tests {
         let mut report = Degradations::new();
         for value in ["a", "b", "a", "c", "d", "e", "f"] {
             report.record(
-                KIND,
+                Employment::SITE_KIND,
                 DegradationKind::UnknownEnumValue,
                 Some(value.to_owned()),
                 false,
             );
         }
-        let entry = only(&report, KIND)?;
+        let entry = only(&report, Employment::SITE_KIND)?;
         assert_eq!(entry.count, 7);
         assert_eq!(entry.samples, ["a", "b", "c", "d"]);
         assert!(!report.strict_refuses());
@@ -914,13 +1020,17 @@ mod tests {
 
     #[test_util::test]
     fn a_site_pointer_escapes_the_member_name_the_way_json_pointers_do() {
-        let site = Site {
-            type_name: "T",
-            origin: "/components/schemas/T",
-            member: Some("a/b~c"),
-        };
+        let site = Site::new("T", "/components/schemas/T", Some("a/b~c"));
         assert_eq!(site.pointer(), "/components/schemas/T/properties/a~1b~0c");
         assert_eq!(site.to_string(), "T.a/b~c");
+        assert_eq!(site.type_name(), "T");
+        assert_eq!(site.origin(), "/components/schemas/T");
+        assert_eq!(site.member(), Some("a/b~c"));
+        // The type's own site is the origin itself, which is what an override is keyed by.
+        assert_eq!(
+            Site::new("T", "/components/schemas/T", None).pointer(),
+            "/components/schemas/T"
+        );
     }
 
     /// Fixed arities are all or nothing, and a nullable element is a `None` element.
@@ -949,40 +1059,29 @@ mod tests {
         note: Option<String>,
     }
 
-    const ADDRESS: &Site = &Site {
-        type_name: "Address",
-        origin: "/components/schemas/Address",
-        member: None,
-    };
-    const STREET: &Site = &Site {
-        type_name: "Address",
-        origin: "/components/schemas/Address",
-        member: Some("street"),
-    };
-    const UNIT: &Site = &Site {
-        type_name: "Address",
-        origin: "/components/schemas/Address",
-        member: Some("unit"),
-    };
-    const NOTE: &Site = &Site {
-        type_name: "Address",
-        origin: "/components/schemas/Address",
-        member: Some("note"),
-    };
+    impl Address {
+        const SITE: Site = Site::new("Address", "/components/schemas/Address", None);
+        const SITE_STREET: Site =
+            Site::new("Address", "/components/schemas/Address", Some("street"));
+        const SITE_UNIT: Site = Site::new("Address", "/components/schemas/Address", Some("unit"));
+        const SITE_NOTE: Site = Site::new("Address", "/components/schemas/Address", Some("note"));
+    }
 
     impl<'de> Lenient<'de> for Address {
+        const ROOT: Site = Self::SITE;
+
         fn lenient(
             content: Content<'de>,
-            _site: &'static Site,
+            _site: Site,
             report: &mut Degradations,
         ) -> Result<Self, super::Problem> {
             let mut members = Members::of(content, "Address")?;
             let value = Self {
-                street: members.take(STREET, Declared::Required, report),
-                unit: members.take(UNIT, Declared::Nullable, report),
-                note: members.take(NOTE, Declared::OptionalNullable, report),
+                street: members.take(Self::SITE_STREET, Declared::Required, report),
+                unit: members.take(Self::SITE_UNIT, Declared::Nullable, report),
+                note: members.take(Self::SITE_NOTE, Declared::OptionalNullable, report),
             };
-            members.report_rest(ADDRESS, report, true);
+            members.report_rest(Self::SITE, report, true);
             Ok(value)
         }
     }
@@ -996,12 +1095,12 @@ mod tests {
         assert_eq!(value.street.as_deref(), Some("Main"));
         assert_eq!(value.unit, None);
         assert_eq!(value.note, None);
-        let entry = only(&report, ADDRESS)?;
+        let entry = only(&report, Address::SITE)?;
         assert_eq!(entry.kind, DegradationKind::UndeclaredMember);
         assert_eq!(entry.samples, ["floor"]);
         // Denied by the strict form, so a union probing this variant would move on.
         assert!(report.strict_refuses());
-        assert!(!report.touches(UNIT) && !report.touches(NOTE), "{report}");
+        assert!(!report.touches(Address::SITE_UNIT) && !report.touches(Address::SITE_NOTE), "{report}");
     }
 
     /// A string enum with an open arm, read through `open_string` the way the renderer writes
@@ -1015,10 +1114,16 @@ mod tests {
         Unknown(String),
     }
 
+    impl Status {
+        const SITE: Site = Site::new("Status", "/components/schemas/Status", None);
+    }
+
     impl<'de> Lenient<'de> for Status {
+        const ROOT: Site = Self::SITE;
+
         fn lenient(
             content: Content<'de>,
-            site: &'static Site,
+            site: Site,
             report: &mut Degradations,
         ) -> Result<Self, super::Problem> {
             super::open_string(content, site, report, |value| match value {
@@ -1056,7 +1161,7 @@ mod tests {
     impl<'de> Lenient<'de> for Contact {
         fn lenient(
             content: Content<'de>,
-            site: &'static Site,
+            site: Site,
             report: &mut Degradations,
         ) -> Result<Self, super::Problem> {
             if let Some(value) = super::probe::<Employment>(&content, site, report) {
@@ -1089,7 +1194,7 @@ mod tests {
         let (value, report) = decode::<Contact>(r#"{"type":"salaried","floor":3}"#)?;
         assert!(matches!(value, Contact::Employment(_)), "{value:?}");
         assert_eq!(
-            only(&report, EMPLOYMENT)?.kind,
+            only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember
         );
         // Nothing fits: the payload is kept whole in the open arm and the union's site says so.
@@ -1111,9 +1216,9 @@ mod tests {
         let (value, report) =
             decode::<Contact>(r#"{"type":"salaried","years":null,"street":"Main"}"#)?;
         assert!(matches!(value, Contact::Employment(_)), "{value:?}");
-        assert_eq!(only(&report, YEARS)?.kind, DegradationKind::NullNotAllowed);
+        assert_eq!(only(&report, Employment::SITE_YEARS)?.kind, DegradationKind::NullNotAllowed);
         assert_eq!(
-            only(&report, EMPLOYMENT)?.kind,
+            only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember
         );
     }
@@ -1129,7 +1234,7 @@ mod tests {
     impl<'de> Lenient<'de> for Event {
         fn lenient(
             content: Content<'de>,
-            site: &'static Site,
+            site: Site,
             report: &mut Degradations,
         ) -> Result<Self, super::Problem> {
             const TAG: &str = "kind";
@@ -1178,16 +1283,16 @@ mod tests {
         let mut report = Degradations::new();
         let content: Content<'_> = serde_json::from_str(r#"{"years":null,"type":"x"}"#)?;
         let mut members = Members::of(content, "Employment")?;
-        assert!(matches!(members.take_raw(YEARS, &mut report), Slot::Null));
+        assert!(matches!(members.take_raw(Employment::SITE_YEARS, &mut report), Slot::Null));
         assert!(matches!(
-            members.take_raw(KIND, &mut report),
+            members.take_raw(Employment::SITE_KIND, &mut report),
             Slot::Value(_)
         ));
-        assert!(matches!(members.take_raw(KIND, &mut report), Slot::Absent));
+        assert!(matches!(members.take_raw(Employment::SITE_KIND, &mut report), Slot::Absent));
         assert!(report.is_empty());
         let content: Content<'_> = serde_json::from_str(r#"{"years":1,"years":2}"#)?;
         let mut members = Members::of(content, "Employment")?;
-        assert!(matches!(members.take_raw(YEARS, &mut report), Slot::Absent));
-        assert_eq!(only(&report, YEARS)?.kind, DegradationKind::Undecodable);
+        assert!(matches!(members.take_raw(Employment::SITE_YEARS, &mut report), Slot::Absent));
+        assert_eq!(only(&report, Employment::SITE_YEARS)?.kind, DegradationKind::Undecodable);
     }
 }

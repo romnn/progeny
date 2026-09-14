@@ -347,9 +347,11 @@ fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
             where
                 T: Lenient<'de>,
             {
+                const ROOT: Site = T::ROOT;
+
                 fn lenient(
                     content: Content<'de>,
-                    site: &'static Site,
+                    site: Site,
                     report: &mut Degradations,
                 ) -> Result<Self, Problem> {
                     entries(content, site, report).map(|pairs| pairs.into_iter().collect())
@@ -357,16 +359,19 @@ fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
             }
         }
     });
+    // `Lenient` and `Problem` are the decoder's public face — the trait is the bound on
+    // `Decoded::from_json` and names `Problem` in its method signature, and under workspace
+    // packaging the client crate reaches both across the crate wall — so they are re-exported
+    // at the support root beside the report's vocabulary. The rest is `pub(crate)` machinery a
+    // generated impl reaches through `lenient::`, the way it reaches `style::` and `multipart::`:
+    // re-exporting it here would be an import a document that has no union leaves unused.
     quote::quote! {
         pub mod lenient {
             #lenient
             #extra_leaves
             #indexmap
         }
-        pub use lenient::{
-            Declared, Lenient, Members, Problem, Slot, open_string, probe, tag_choice, tag_text,
-            unknown_union,
-        };
+        pub use lenient::{Lenient, Problem};
     }
 }
 
@@ -406,11 +411,13 @@ fn presence_lenient_tokens() -> proc_macro2::TokenStream {
         where
             T: Lenient<'de>,
         {
+            const ROOT: Site = T::ROOT;
+
             /// `null` is `Null`; the caller decides what absence is, because only it saw the
             /// member missing.
             fn lenient(
                 content: Content<'de>,
-                site: &'static Site,
+                site: Site,
                 report: &mut Degradations,
             ) -> Result<Self, lenient::Problem> {
                 match content {
@@ -421,21 +428,21 @@ fn presence_lenient_tokens() -> proc_macro2::TokenStream {
             }
         }
 
-        impl<'de> Members<'de> {
+        impl<'de> lenient::Members<'de> {
             /// Read a presence-preserving member: absent is `Omitted`, `null` is `Null`, and a
             /// value that does not read as `T` is `Omitted` with the reason recorded.
-            pub fn take_presence<T>(
+            pub(crate) fn take_presence<T>(
                 &mut self,
-                site: &'static Site,
+                site: Site,
                 report: &mut Degradations,
             ) -> Presence<T>
             where
                 T: Lenient<'de>,
             {
                 match self.take_raw(site, report) {
-                    Slot::Absent => Presence::Omitted,
-                    Slot::Null => Presence::Null,
-                    Slot::Value(content) => match T::lenient(content, site, report) {
+                    lenient::Slot::Absent => Presence::Omitted,
+                    lenient::Slot::Null => Presence::Null,
+                    lenient::Slot::Value(content) => match T::lenient(content, site, report) {
                         Ok(value) => Presence::Value(value),
                         Err(err) => {
                             report.record(

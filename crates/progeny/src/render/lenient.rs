@@ -33,46 +33,76 @@ pub(super) fn impls(
     match contract.form() {
         Form::Strict { .. } => TokenStream::new(),
         Form::Shared => {
-            let own_site = own_site(contract, scope);
+            let sites = site_constants(contract, scope);
             let decoder = decoder(contract, contracts, config, scope);
-            quote! { #own_site #decoder }
+            quote! { #sites #decoder }
         }
         Form::Lenient { strict } => {
-            let own_site = own_site(contract, scope);
+            let sites = site_constants(contract, scope);
             let decoder = decoder(contract, contracts, config, scope);
             let deserialize = deserialize(contract, scope);
             let from = strict
                 .map(|strict| from_strict(contract, strict, contracts, config, scope))
                 .unwrap_or_default();
-            quote! { #own_site #decoder #deserialize #from }
+            quote! { #sites #decoder #deserialize #from }
         }
     }
 }
 
-/// The type's own site as an associated constant, so a caller can ask a report about it.
+/// Every site the type can be reported at, as associated constants: its own, and one per member
+/// it declares.
 ///
-/// The decoder's own literals name the same site; this is the spelling a consumer reaches,
-/// because the origin pointer in a site is the description's and nothing else in the
-/// generated crate says it.
-/// An alias has no impls to hang it on.
-fn own_site(contract: &TypeContract, scope: Scope) -> TokenStream {
+/// The only spelling of a site anywhere — the decoder below references these constants rather
+/// than restating the literals — because the origin pointer in a site is the description's and
+/// nothing else in the generated crate says it. A consumer reads a site, compares it, and asks a
+/// report about it; nobody constructs one.
+/// The capture member gets none: what the description never declared is recorded at the type's
+/// own site. An alias has no impls to hang any of it on.
+fn site_constants(contract: &TypeContract, scope: Scope) -> TokenStream {
     if matches!(contract.kind(), ContractKind::Alias { .. }) {
         return TokenStream::new();
     }
     let support = scope.support();
     let name = implementation_type(contract);
-    let literal = site_literal(contract, None, scope);
+    let own = site_literal(contract, None, scope);
+    let members = declared_fields(contract).map(|field| {
+        let constant = site_const(&field.rust_name);
+        let literal = site_literal(contract, Some(field.wire_name.as_str()), scope);
+        let docs = format!(" The member `{}`.", field.wire_name);
+        quote! {
+            #[doc = #docs]
+            pub const #constant: #support::Site = #literal;
+        }
+    });
     quote! {
         impl #name {
-            /// Where a report records what this type itself tolerated.
+            /// Where a report records what this type itself tolerated: a member the description
+            /// does not declare, or the root when a payload decoded standalone is this type.
             ///
-            /// A member's site is this with the member's wire name:
-            /// `Site { member: Some("name"), ..Self::SITE }`.
-            /// What `Degradations::at` and `Degradations::touches` are asked with, and the
-            /// root `Lenient::decode` takes when a payload is this type.
-            pub const SITE: #support::Site = #literal;
+            /// What `Degradations::at`, `touches` and `within` are asked with; a member has its
+            /// own `SITE_…` constant beside this one.
+            pub const SITE: #support::Site = #own;
+            #(#members)*
         }
     }
+}
+
+/// The members a struct declares, which are the ones with a site of their own.
+fn declared_fields(contract: &TypeContract) -> impl Iterator<Item = &FieldContract> {
+    let fields = match contract.kind() {
+        ContractKind::Struct { fields } => fields.as_slice(),
+        _ => &[],
+    };
+    fields.iter().filter(|field| !field.is_capture())
+}
+
+/// The constant naming one member's site: `SITE_` and the member's Rust name in upper snake.
+///
+/// Built from the Rust name rather than the wire one because that name is already unique within
+/// the struct, so the constants cannot collide with each other or with `SITE`.
+pub(super) fn site_const(field: &RustIdent) -> proc_macro2::Ident {
+    let stem = field.as_str().trim_start_matches("r#").to_uppercase();
+    format_ident!("SITE_{stem}")
 }
 
 /// The `Lenient` impl: how the type reads itself out of buffered content.
@@ -135,9 +165,11 @@ fn decoder(
     };
     quote! {
         impl<'de> #support::Lenient<'de> for #name {
+            const ROOT: #support::Site = Self::SITE;
+
             fn lenient(
                 content: #support::Content<'de>,
-                #site: &'static #support::Site,
+                #site: #support::Site,
                 report: &mut #support::Degradations,
             ) -> Result<Self, #support::Problem> {
                 #body
@@ -150,7 +182,6 @@ fn decoder(
 fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) -> TokenStream {
     let support = scope.support();
     let literal_name = contract.rust_name().as_str();
-    let own = site(contract, None, scope);
     let denied = contract.unknown_fields() == UnknownFields::Deny;
     let reads = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
@@ -159,10 +190,11 @@ fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) 
             let declared = capture == Capture::Declared;
             return quote! {
                 #deprecated
-                #member: members.rest(#own, report, #declared, #denied),
+                #member: members.rest(Self::SITE, report, #declared, #denied),
             };
         }
-        let at = site(contract, Some(field.wire_name.as_str()), scope);
+        let at = site_const(&field.rust_name);
+        let at = quote! { Self::#at };
         if field.skip_serializing_if == SkipRule::WhenOmitted {
             return quote! { #deprecated #member: members.take_presence(#at, report), };
         }
@@ -181,12 +213,12 @@ fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) 
         };
         quote! {
             #deprecated
-            #member: members.take(#at, #support::Declared::#declared, report),
+            #member: members.take(#at, #support::lenient::Declared::#declared, report),
         }
     });
     // A type without a capture member still says what it left out.
     let leftovers = (!fields.iter().any(FieldContract::is_capture))
-        .then(|| quote! { members.report_rest(#own, report, #denied); });
+        .then(|| quote! { members.report_rest(Self::SITE, report, #denied); });
     // `mut` only when a declared member is taken out: the capture map and the leftovers report
     // consume the reader, and an unneeded `mut` is a warning in the consumer's build.
     let binding = if fields.iter().any(|field| !field.is_capture()) {
@@ -195,7 +227,7 @@ fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) 
         quote! { let members }
     };
     quote! {
-        #binding = #support::Members::of(content, #literal_name)?;
+        #binding = #support::lenient::Members::of(content, #literal_name)?;
         let value = Self { #(#reads)* };
         #leftovers
         Ok(value)
@@ -218,7 +250,7 @@ fn string_enum_body(contract: &TypeContract, fallback: &RustIdent, scope: Scope)
         quote! { Self::#fallback(raw) => Some(raw.as_str()), }
     };
     quote! {
-        #support::open_string(content, site, report, |value| match value {
+        #support::lenient::open_string(content, site, report, |value| match value {
             #arm
             _ => None,
         })
@@ -240,7 +272,7 @@ fn untagged_body(
         let ty = type_ref_in(&variant.ty, contracts, config, scope);
         let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
         quote! {
-            if let Some(value) = #support::probe::<#ty>(&content, site, report) {
+            if let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
                 return Ok(#wrap);
             }
         }
@@ -248,7 +280,7 @@ fn untagged_body(
     let unknown = unknown_arm(contract, fallback);
     quote! {
         #(#probes)*
-        #support::unknown_union(content, site, report, None).map(#unknown)
+        #support::lenient::unknown_union(content, site, report, None).map(#unknown)
     }
 }
 
@@ -277,7 +309,7 @@ fn tagged_body(
     // A consumed tag is the union's member, not the variant's: taken off before the variant
     // reads the rest, or it would be reported as a member the variant never declared.
     let payload = if consumed {
-        quote! { #support::Members::of(content, #literal_name)?.without(TAG) }
+        quote! { #support::lenient::Members::of(content, #literal_name)?.without(TAG) }
     } else {
         quote! { content }
     };
@@ -294,11 +326,11 @@ fn tagged_body(
     quote! {
         const TAG: &str = #tag;
         const VARIANTS: &[&str] = &[#(#wire_names),*];
-        match #support::tag_choice(&content, TAG, VARIANTS)? {
+        match #support::lenient::tag_choice(&content, TAG, VARIANTS)? {
             #(#arms)*
             _ => {
-                let tag = #support::tag_text(&content, TAG).map(str::to_owned);
-                #support::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
+                let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);
+                #support::lenient::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
             }
         }
     }
@@ -350,7 +382,7 @@ pub(super) fn unknown_arm(contract: &TypeContract, fallback: &RustIdent) -> Toke
 ///
 /// What a caller who reaches for `serde_json::from_str` on a read type gets: the value
 /// the generated client would have produced, minus the report the client returns beside it.
-/// The report is reachable through `Lenient::decode` for a caller who wants it.
+/// The report is reachable through `Decoded::from_json` for a caller who wants it.
 /// A string enum's own `Deserialize` is already open and already what a lenient read
 /// produces, so it keeps it; an alias has no impls.
 fn deserialize(contract: &TypeContract, scope: Scope) -> TokenStream {
@@ -362,16 +394,15 @@ fn deserialize(contract: &TypeContract, scope: Scope) -> TokenStream {
     }
     let support = scope.support();
     let name = implementation_type(contract);
-    let root = site(contract, None, scope);
     quote! {
         impl<'de> serde::Deserialize<'de> for #name {
             /// The lenient decode, with the degradation report discarded; decode through
-            /// `Lenient::decode` to keep it.
+            /// `Decoded::from_json` to keep it.
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
                 D: serde::Deserializer<'de>,
             {
-                <Self as #support::Lenient<'de>>::decode(deserializer, #root)
+                #support::Decoded::<Self>::from_deserializer(deserializer)
                     .map(|decoded| decoded.value)
             }
         }
@@ -635,28 +666,13 @@ fn mapper(element: &TypeRef, contracts: &Contracts) -> TokenStream {
     }
 }
 
-/// A reference to the site literal for a contract, or one of its members.
-///
-/// A struct literal rather than a constructor call, because a reference to a constant struct
-/// literal is promoted to `'static` and a reference to a call is not.
-pub(super) fn site(contract: &TypeContract, member: Option<&str>, scope: Scope) -> TokenStream {
-    let literal = site_literal(contract, member, scope);
-    quote! { &#literal }
-}
-
-/// The site literal itself.
+/// The site itself, as the constructor call the constants above are initialized from.
 fn site_literal(contract: &TypeContract, member: Option<&str>, scope: Scope) -> TokenStream {
     let support = scope.support();
     let type_name = contract.rust_name().as_str();
     let origin = contract.origin().to_string();
     let member = member.map_or_else(|| quote! { None }, |member| quote! { Some(#member) });
-    quote! {
-        #support::Site {
-            type_name: #type_name,
-            origin: #origin,
-            member: #member,
-        }
-    }
+    quote! { #support::Site::new(#type_name, #origin, #member) }
 }
 
 /// An expectation on the exact statement that touches a deprecated contract member.
