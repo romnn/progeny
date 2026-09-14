@@ -885,8 +885,12 @@ mod tests {
         assert_eq!(names, ["shared"]);
     }
 
+    /// Branches that each bind one property to a string constant of their own name themselves,
+    /// and the union reads that property as its tag — with or without a `discriminator`. It
+    /// cannot read them by shape: a generated string enum is open, so under it every branch
+    /// would fit every payload and the first would win.
     #[test_util::test]
-    fn a_constant_tag_beats_the_discriminator_because_it_costs_the_variants_nothing() {
+    fn a_constant_shared_by_every_branch_is_the_tag_whether_or_not_it_is_declared() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Cat": {
                 "type": "object",
@@ -896,7 +900,7 @@ mod tests {
             "Dog": {
                 "type": "object",
                 "required": ["kind"],
-                "properties": {"kind": {"const": "dog"}, "shared": {"type": "string"}},
+                "properties": {"kind": {"enum": ["dog"]}, "shared": {"type": "string"}},
             },
             "Animal": {
                 "oneOf": [
@@ -905,19 +909,48 @@ mod tests {
                 ],
                 "discriminator": {"propertyName": "kind"},
             },
+            "Fish": {
+                "type": "object",
+                "properties": {"kind": {"const": "fish"}, "fins": {"type": "integer"}},
+            },
+            "Bird": {
+                "type": "object",
+                "properties": {"kind": {"const": "bird"}, "fins": {"type": "integer"}},
+            },
+            "Undeclared": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/Fish"},
+                    {"$ref": "#/components/schemas/Bird"},
+                ],
+            },
         })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let Shape::Union(animal) = shape_of(&shapes, "Animal")? else {
-            panic!("expected a union");
-        };
-        // The constants already tell a payload apart, so nothing is tagged and nothing is taken
-        // away: `Cat` keeps `kind`, and is still usable outside the union.
-        assert_eq!(animal.tag, None);
+        for (name, expected) in [
+            ("Animal", [Some("cat"), Some("dog")]),
+            ("Undeclared", [Some("fish"), Some("bird")]),
+        ] {
+            let Shape::Union(union) = shape_of(&shapes, name)? else {
+                panic!("expected a union");
+            };
+            assert_eq!(
+                union.tag.as_ref().map(|tag| tag.property.as_str()),
+                Some("kind"),
+                "{name}"
+            );
+            let tags: Vec<Option<&str>> = union
+                .variants
+                .iter()
+                .map(|variant| variant.tag.as_deref())
+                .collect();
+            // The tag values are the constants the document wrote, not the component names.
+            assert_eq!(tags, expected, "{name}");
+        }
+        // A variant used nowhere else gives the property up to the union that writes it.
         let Shape::Struct(cat) = shape_of(&shapes, "Cat")? else {
             panic!("expected a struct");
         };
         let names: Vec<&str> = cat.fields.iter().map(|field| field.wire.as_str()).collect();
-        assert_eq!(names, ["kind", "shared"]);
+        assert_eq!(names, ["shared"]);
     }
 
     #[test_util::test]

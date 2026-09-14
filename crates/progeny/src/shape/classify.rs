@@ -425,6 +425,23 @@ fn union(
         _ => {
             if let Some(values) = branch_constants(resolved, &rest) {
                 Shape::StringEnum(values)
+            } else if let Some((property, tags)) = constant_discriminator(resolved, &rest) {
+                // The branches name themselves: read the tag, the way a declared discriminator
+                // is read, rather than match by shape — which would rest on the constants, and a
+                // generated string enum reads any string.
+                Shape::Union(Union {
+                    variants: tags
+                        .into_iter()
+                        .map(|(key, tag)| Variant {
+                            shape: ShapeRef::Key(key),
+                            tag: Some(tag),
+                        })
+                        .collect(),
+                    tag: Some(Tag {
+                        property,
+                        style: TagStyle::Consumed,
+                    }),
+                })
             } else {
                 match ambiguity(resolved, &rest) {
                     // Shape decides it: an untagged enum is exact, and every variant keeps every
@@ -507,6 +524,67 @@ fn tagged(
             style: TagStyle::Consumed,
         }),
     })
+}
+
+/// The property every branch declares as one string constant of its own, with each branch's
+/// constant, when there is such a property.
+///
+/// `type: {enum: [creation]}` in one branch, `type: {enum: [update]}` in the next: a union of
+/// objects that name themselves this way is discriminated by that property whether or not the
+/// description spells `discriminator`, and is read the same way, by the tag's text. It cannot
+/// be read by shape: the separation would rest on the constants, and a generated string enum is
+/// open — it reads any string, so under it every branch fits every payload and the first one
+/// wins. The first qualifying property in wire order is the tag, so the answer is the same
+/// whichever branch is listed first.
+fn constant_discriminator(
+    resolved: &ResolvedDocument,
+    branches: &[ShapeKey],
+) -> Option<(String, Vec<(ShapeKey, String)>)> {
+    let views: Vec<(&ShapeKey, View)> = branches
+        .iter()
+        .map(|branch| (branch, merge::view(resolved, branch)))
+        .collect();
+    if views.len() < 2
+        || views
+            .iter()
+            .any(|(_, view)| kind_of(view) != Some(Kind::Object))
+    {
+        return None;
+    }
+    let (_, first) = views.first()?;
+    'candidates: for name in first.properties.keys() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut tags = Vec::new();
+        for (key, view) in &views {
+            let Some(property) = view.properties.get(name) else {
+                continue 'candidates;
+            };
+            let Some(constant) = single_string_constant(resolved, property) else {
+                continue 'candidates;
+            };
+            if !seen.insert(constant.clone()) {
+                continue 'candidates;
+            }
+            tags.push(((*key).clone(), constant));
+        }
+        return Some((name.clone(), tags));
+    }
+    None
+}
+
+/// The one string a property is bound to, when `const` or a one-value `enum` binds it to one.
+fn single_string_constant(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<String> {
+    let view = merge::view(resolved, key);
+    let values = match (&view.enumeration, &view.constant) {
+        (Some(listed), _) => listed.clone(),
+        (None, Some(value)) => vec![value.clone()],
+        (None, None) => return None,
+    };
+    let values: Vec<&Value> = values.iter().filter(|value| !value.is_null()).collect();
+    match values.as_slice() {
+        [one] => one.as_str().map(ToOwned::to_owned),
+        _ => None,
+    }
 }
 
 /// The discriminator every branch of this union inherits from one base schema.

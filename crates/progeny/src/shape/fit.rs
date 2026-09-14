@@ -19,7 +19,7 @@
 
 use serde_json::Value;
 
-use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Struct, Union};
+use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Struct, Tag, TagStyle, Union};
 
 /// The checker: the shape table, and the word the reasons call the value being judged.
 pub(crate) struct Fit<'a> {
@@ -203,6 +203,9 @@ impl<'a> Fit<'a> {
     /// branches nothing tells apart — so "no branch accepts this" is the only sound finding, and it
     /// needs every branch checked rather than any one of them.
     fn union(&self, value: &Value, union: &Union) -> Option<String> {
+        if let Some(tag) = &union.tag {
+            return self.tagged(value, union, tag);
+        }
         let mut reasons = Vec::new();
         for variant in &union.variants {
             let reason = self.through(value, &variant.shape)?;
@@ -210,6 +213,39 @@ impl<'a> Fit<'a> {
         }
         (!reasons.is_empty())
             .then(|| format!("no branch of the union accepts it ({})", reasons.join("; ")))
+    }
+
+    /// A union read by its tag is checked the way it is read: the tag names the branch, and a
+    /// consumed tag is taken off the value before the branch sees it — the branch's own shape no
+    /// longer declares it, and a closed branch would otherwise refuse its own tag as undeclared.
+    fn tagged(&self, value: &Value, union: &Union, tag: &Tag) -> Option<String> {
+        let Value::Object(members) = value else {
+            return Some(self.not_an_object(value));
+        };
+        let Some(named) = members.get(&tag.property).and_then(Value::as_str) else {
+            return Some(format!(
+                "{} carries no `{}` naming which branch of the union it is",
+                self.subject, tag.property
+            ));
+        };
+        let Some(variant) = union
+            .variants
+            .iter()
+            .find(|variant| variant.tag.as_deref() == Some(named))
+        else {
+            return Some(format!(
+                "{} names `{named}` in `{}`, which no branch of the union is tagged",
+                self.subject, tag.property
+            ));
+        };
+        match tag.style {
+            TagStyle::Consumed => {
+                let mut rest = members.clone();
+                rest.remove(&tag.property);
+                self.through(&Value::Object(rest), &variant.shape)
+            }
+            TagStyle::Carried => self.through(value, &variant.shape),
+        }
     }
 
     /// Why one of these elements is not what the element shape describes, if one is not.

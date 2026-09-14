@@ -318,7 +318,9 @@ mod tests {
             )?
             .ok_or_eyre("test fixture should contain this value")?;
             assert!(found.contains("at `0`"), "{found}");
-            assert!(found.contains("no branch"), "{found}");
+            // The branches name themselves in `actor_type`, so the element is held to the branch
+            // it names rather than to all of them.
+            assert!(found.contains("leaves out `type`"), "{found}");
         }
 
         #[test_util::test]
@@ -412,6 +414,35 @@ mod tests {
         assert_eq!(
             complaint(json!({"type": "array"}), json!([1, "two", null]))?,
             None
+        );
+    }
+
+    /// A union read by its tag is checked by its tag: an example naming a branch is held to that
+    /// branch with the tag taken off first, so a closed branch does not refuse its own tag as
+    /// undeclared; an example naming no branch contradicts the schema.
+    #[test_util::test]
+    fn an_example_of_a_tagged_union_is_checked_against_the_branch_it_names() {
+        let schema = json!({"oneOf": [
+            {"type": "object", "additionalProperties": false, "required": ["status", "output"],
+             "properties": {"status": {"const": "SUCCEEDED"}, "output": {"type": "string"}}},
+            {"type": "object", "additionalProperties": false, "required": ["status", "failure"],
+             "properties": {"status": {"const": "FAILED"}, "failure": {"type": "string"}}},
+        ]});
+        assert_eq!(
+            complaint(
+                schema.clone(),
+                json!({"status": "FAILED", "failure": "flagged by moderation"}),
+            )?,
+            None
+        );
+        let found = complaint(schema.clone(), json!({"status": "FAILED", "output": "x"}))?
+            .ok_or_eyre("test fixture should contain this value")?;
+        assert!(found.contains("leaves out `failure`"), "{found}");
+        let found = complaint(schema, json!({"status": "THROTTLED"}))?
+            .ok_or_eyre("test fixture should contain this value")?;
+        assert!(
+            found.contains("no branch of the union is tagged"),
+            "{found}"
         );
     }
 
