@@ -78,7 +78,7 @@ camino = { version = "1", features = ["serde1"] }
 heck = "0.5"
 # Rendering: tokens to a `syn::File` to formatted source, with no rustfmt at generation time.
 quote = "1"
-prettyplease = "0.2"
+prettyplease = "0.3.0"
 # The router the generated server registers into, used at *generation* time to ask whether a set of
 # templates can be registered at all. Asked rather than modelled: matchit rejects `/{a}x{b}` beside
 # `/{c}y{d}` and accepts `/a/{x}.jpg` beside `/a/{y}.png`, and guessing at rules like those means
@@ -98,7 +98,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 color-eyre = "0.6"
 indoc = "2"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3.0.4", features = ["full", "visit"] }
 test-util = { path = "crates/test-util" }
 thiserror = "2"
 # `span-locations` is what turns a parsed span into a line number, which is what makes a

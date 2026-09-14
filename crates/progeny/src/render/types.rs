@@ -597,7 +597,7 @@ impl<'ast> syn::visit::Visit<'ast> for TypeComplexity {
             | syn::Type::Slice(_)
             | syn::Type::Tuple(_)
             | syn::Type::Array(_) => (10 * self.nest, 1),
-            syn::Type::BareFn(_) => (50 * self.nest, 1),
+            syn::Type::FnPtr(_) => (50 * self.nest, 1),
             syn::Type::TraitObject(_) => (20 * self.nest, 0),
             _ => (0, 0),
         };
