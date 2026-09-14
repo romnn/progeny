@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use super::name::{self, Namer, RustIdent};
 use super::{
-    ContractKind, FieldContract, Presence, SkipRule, StringVariant, TaggedVariant, TypeIndex,
-    TypeRef, VariantContract,
+    Capture, ContractKind, FieldContract, Form, Presence, SkipRule, StringVariant, TaggedVariant,
+    TypeIndex, TypeRef, VariantContract,
 };
 use crate::config::{Config, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
@@ -70,6 +70,8 @@ pub(super) struct Provisional {
     /// The `components.schemas` name, when the document gave one — the key a caller uses to talk
     /// about this type in the configuration.
     pub(super) component: Option<String>,
+    /// Which form this contract is; strict until [`super::twin`] has ruled.
+    pub(super) form: Form,
 }
 
 /// Lower every shape, and say which type each one became.
@@ -329,6 +331,7 @@ impl Lower<'_> {
             declared: component.is_some(),
             explicit,
             component,
+            form: Form::Strict { twin: None },
         });
         self.done
             .insert(key.clone(), wrap(wraps, TypeRef::Named(index)));
@@ -389,9 +392,10 @@ impl Lower<'_> {
                 }
                 ContractKind::Struct { fields }
             }
-            Shape::StringEnum(values) => ContractKind::StringEnum {
-                variants: string_variants(values),
-            },
+            Shape::StringEnum(values) => {
+                let (variants, fallback) = string_variants(values);
+                ContractKind::StringEnum { variants, fallback }
+            }
             Shape::Union(union) => {
                 let variants = union
                     .variants
@@ -404,19 +408,23 @@ impl Lower<'_> {
                     })
                     .collect::<Vec<_>>();
                 match &union.tag {
-                    None => ContractKind::Enum {
-                        variants: self.variants(variants.into_iter().map(|(ty, _)| ty).collect()),
-                    },
+                    None => {
+                        let (variants, fallback) =
+                            self.variants(variants.into_iter().map(|(ty, _)| ty).collect());
+                        ContractKind::Enum { variants, fallback }
+                    }
                     Some(tag) => {
-                        if let Some(variants) = tagged_variants(variants) {
+                        if let Some((variants, fallback)) = tagged_variants(variants) {
                             match tag.style {
                                 TagStyle::Consumed => ContractKind::TaggedEnum {
                                     tag: tag.property.clone(),
                                     variants,
+                                    fallback,
                                 },
                                 TagStyle::Carried => ContractKind::CarriedTagEnum {
                                     tag: tag.property.clone(),
                                     variants,
+                                    fallback,
                                 },
                             }
                         } else {
@@ -582,7 +590,7 @@ impl Lower<'_> {
                 presence,
                 default,
                 skip_serializing_if: skip,
-                flatten: false,
+                capture: None,
                 docs: field.docs.clone(),
             });
         }
@@ -593,18 +601,24 @@ impl Lower<'_> {
             .map_or(UnknownFields::Ignore, |contract| contract.unknown_fields);
         let (captured, policy) = match &structure.extra {
             // The document says what an undeclared member may be, which is a statement the
-            // caller's policy does not get to override: capturing them is the faithful reading.
+            // caller's policy does not get to override: capturing them is the faithful reading,
+            // and what arrives there arrives by contract.
             Extra::Typed(value) => {
                 let element = self.reference(value, key, ctx);
-                (Some(element), UnknownFields::Capture)
+                (Some((element, Capture::Declared)), UnknownFields::Capture)
             }
             Extra::Denied => (None, UnknownFields::Deny),
+            // The caller asked to keep what the document never mentioned: kept, but still drift
+            // when a lenient decode reports what it saw.
             Extra::Open => match policy {
-                UnknownFields::Capture => (Some(TypeRef::Value), UnknownFields::Capture),
+                UnknownFields::Capture => (
+                    Some((TypeRef::Value, Capture::Undeclared)),
+                    UnknownFields::Capture,
+                ),
                 other => (None, other),
             },
         };
-        if let Some(element) = captured {
+        if let Some((element, capture)) = captured {
             fields.push(FieldContract {
                 rust_name: unique_field(&mut used, "extra"),
                 // A flattened member has no wire name of its own: it *is* the leftovers.
@@ -613,7 +627,7 @@ impl Lower<'_> {
                 presence: Presence::Required,
                 default: None,
                 skip_serializing_if: SkipRule::Never,
-                flatten: true,
+                capture: Some(capture),
                 docs: Docs {
                     title: None,
                     description: Some(
@@ -718,19 +732,20 @@ impl Lower<'_> {
         None
     }
 
-    /// Give every variant of an untagged union a distinct name.
+    /// Give every variant of an untagged union a distinct name, and name its fallback.
     ///
     /// An untagged union has no wire name to use — nothing on the wire says which variant a
     /// payload is — so the name falls back to the type each variant holds.
-    fn variants(&self, types: Vec<TypeRef>) -> Vec<VariantContract> {
+    fn variants(&self, types: Vec<TypeRef>) -> (Vec<VariantContract>, RustIdent) {
         let mut used = Namer::default();
-        types
+        let variants = types
             .into_iter()
             .map(|ty| VariantContract {
                 rust_name: used.unique(RustIdent::variant(&self.variant_name(&ty))),
                 ty,
             })
-            .collect()
+            .collect();
+        (variants, fallback_variant(&mut used))
     }
 
     /// What to call a variant holding this type.
@@ -769,9 +784,11 @@ impl Lower<'_> {
 /// but [`crate::shape::discriminate`] demotes every union where one stayed unknown, so a settled
 /// tagged union always has all of them — and the caller treats `None` as that guarantee having
 /// broken.
-fn tagged_variants(types: Vec<(TypeRef, Option<String>)>) -> Option<Vec<TaggedVariant>> {
+fn tagged_variants(
+    types: Vec<(TypeRef, Option<String>)>,
+) -> Option<(Vec<TaggedVariant>, RustIdent)> {
     let mut used = Namer::default();
-    types
+    let variants = types
         .into_iter()
         .map(|(ty, tag)| {
             let tag_value = tag?;
@@ -781,7 +798,16 @@ fn tagged_variants(types: Vec<(TypeRef, Option<String>)>) -> Option<Vec<TaggedVa
                 tag_value,
             })
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    Some((variants, fallback_variant(&mut used)))
+}
+
+/// The name of an enum's fallback variant, claimed after every declared variant.
+///
+/// Claimed last so that a document enumerating `unknown` keeps the plain spelling for its own
+/// value, which is API, and the fallback takes the suffixed one.
+fn fallback_variant(used: &mut Namer) -> RustIdent {
+    used.unique(RustIdent::variant("Unknown"))
 }
 
 fn format_name(format: Format) -> &'static str {
@@ -832,15 +858,16 @@ fn nameable(shape: &Shape) -> bool {
     )
 }
 
-fn string_variants(values: &[String]) -> Vec<StringVariant> {
+fn string_variants(values: &[String]) -> (Vec<StringVariant>, RustIdent) {
     let mut used = Namer::default();
-    values
+    let variants = values
         .iter()
         .map(|value| StringVariant {
             rust_name: used.unique(RustIdent::variant(value)),
             wire_name: value.clone(),
         })
-        .collect()
+        .collect();
+    (variants, fallback_variant(&mut used))
 }
 
 /// One `multipart/form-data` request-body position: the body schema's key, and where the

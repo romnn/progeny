@@ -40,6 +40,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /pets/paged:
+    get:
+      operationId: listPetsPaged
+      summary: List pets one page at a time
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of pets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PetPage"
   /pets/{petId}:
     get:
       operationId: showPetById
@@ -205,6 +222,17 @@ components:
       type: array
       items:
         $ref: "#/components/schemas/Pet"
+    PetPage:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Pet"
+        next:
+          type: string
     Error:
       type: object
       required:

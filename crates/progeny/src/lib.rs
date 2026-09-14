@@ -38,6 +38,17 @@
 //! [`SerdeImpl::DeriveAlways`], which puts every type back on the derive. Fieldless enums are
 //! unaffected either way: that path resolves a variant from its identifier and never buffers.
 //!
+//! # Reading responses
+//!
+//! A generated client reads responses **leniently** by default ([`Decoding::Lenient`]): a member
+//! that is absent, `null` or not what the description declared is `None`, an unreadable list
+//! element is left out, an enum value or union payload the description does not list lands in
+//! the type's open `Unknown` arm, and an undeclared member is kept where the type has a read
+//! form of its own — with every deviation recorded by its place in the description and returned
+//! beside the value. Responses decode into *read forms* in `types::read`; a type a request sends
+//! keeps its strict form, and gains a read twin only where the shapes differ. Every generated
+//! enum is open under either setting.
+//!
 //! # Pagination
 //!
 //! Declared per operation with [`Pagination`], and **never detected**. 62 of the 78 corpus
@@ -76,8 +87,8 @@ use std::collections::BTreeMap;
 use camino::Utf8PathBuf;
 
 pub use crate::config::{
-    BodyLimit, BytesRepr, Config, DateTimeCrate, Deny, Derive, Emit, Formats, MapKind, Package,
-    Packaging, Pagination, SchemaType, SerdeImpl, UnknownFields, UuidCrate,
+    BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit, Formats, MapKind,
+    Package, Packaging, Pagination, SchemaType, SerdeImpl, UnknownFields, UuidCrate,
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 

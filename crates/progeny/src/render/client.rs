@@ -29,14 +29,20 @@ use crate::api::{
 };
 use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent, TypeRef};
+use crate::support::Decoding;
 
 use super::types::{
-    docs as docs_of, docs_prose, response_body_is_boxed, response_enum_type_path,
+    Scope, docs as docs_of, docs_prose, response_body_is_boxed, response_enum_type_path,
     response_type_path, type_path as type_tokens,
 };
 
 /// Render the client module.
-pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -> TokenStream {
+pub(super) fn render(
+    model: &ApiModel,
+    contracts: &Contracts,
+    config: &Config,
+    decoding: Decoding,
+) -> TokenStream {
     let base = default_base_url(model);
     let methods = model.operations().iter().map(|operation| {
         let name = ident(&operation.rust_name);
@@ -80,7 +86,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
     let interfaces = model
         .operations()
         .iter()
-        .map(|operation| interface(operation, contracts, config));
+        .map(|operation| interface(operation, contracts, config, decoding));
 
     let http_methods = super::operations::METHODS.map(|(variant, token)| {
         let variant = format_ident!("{variant}");
@@ -88,24 +94,75 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         quote! { operations::Method::#variant => ::reqwest::Method::#constant, }
     });
 
+    let client = client_struct(methods);
+    let reading = if decoding.is_lenient() {
+        quote! {
+            //!
+            //! A response body is read leniently, into its *read form* (`types::read`): a
+            //! member that is absent, `null` or unreadable is `None`, an element that cannot be
+            //! read is left out, and an undeclared member is kept. None of it is silent — the
+            //! [`ResponseValue`] carries a [`Degradations`] report of everything tolerated, and
+            //! [`Client::observe`] hands every degraded response to one function for an
+            //! application that wants to see drift in one place.
+        }
+    } else {
+        quote! {
+            //!
+            //! A response body is read strictly: it matches the description or the response
+            //! fails with [`Error::Decode`].
+        }
+    };
     quote! {
         //! The calling side.
+        #reading
 
         use super::operations;
         use super::support;
 
         #[doc(inline)]
-        pub use super::support::{DecodeError, Error, ResponseValue};
+        pub use super::support::{
+            DecodeError, Degradations, Degraded, Error, Observer, ResponseValue,
+        };
 
+        #client
+
+        #base
+
+        /// The `reqwest` method for a declared one, for a caller that builds its own request or
+        /// keys middleware by operation.
+        ///
+        /// A free function rather than a `From` impl: under Workspace packaging both types are
+        /// foreign to this crate, and the impl would be an orphan-rule error. `reqwest::Method`
+        /// is `http::Method`, so this and the server's `http_method` yield one type.
+        #[must_use]
+        pub fn http_method(method: operations::Method) -> ::reqwest::Method {
+            match method {
+                #(#http_methods)*
+            }
+        }
+
+        #(#interfaces)*
+    }
+}
+
+/// The `Client` itself: its constructors, its accessors, the observer hook, and one accessor
+/// per operation.
+fn client_struct(methods: impl Iterator<Item = TokenStream>) -> TokenStream {
+    quote! {
         /// A client for this API.
         ///
         /// Authentication and middleware are the host application's business: hand in a
         /// `reqwest::Client` configured however the service needs, and every request goes through
         /// it. progeny generates no hook system, because a preconfigured client already is one.
+        ///
+        /// The one hook it does have is [`Client::observe`]: a function called with every
+        /// response the decoder tolerated something in, for an application that wants to see
+        /// drift in one place rather than at every call site.
         #[derive(Debug, Clone)]
         pub struct Client {
             base_url: ::std::string::String,
             inner: ::reqwest::Client,
+            observer: ::std::option::Option<Observer>,
         }
 
         impl Client {
@@ -127,7 +184,46 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
                 while base_url.ends_with('/') {
                     base_url.pop();
                 }
-                Self { base_url, inner }
+                Self {
+                    base_url,
+                    inner,
+                    observer: ::std::option::Option::None,
+                }
+            }
+
+            /// The same client, calling `observe` with every response the decoder tolerated
+            /// something in.
+            ///
+            /// Called after the body was decoded and before the response is handed back, with
+            /// the operation, the status and the same report the response carries. Nothing is
+            /// logged or counted unless the application does it here. A crate generated with
+            /// strict decoding tolerates nothing, so its observer is never called.
+            #[must_use]
+            pub fn observe(
+                mut self,
+                observe: impl Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync + 'static,
+            ) -> Self {
+                self.observer = ::std::option::Option::Some(Observer::new(observe));
+                self
+            }
+
+            /// A response on its way back to the caller, shown to the observer if degraded.
+            #[doc(hidden)]
+            pub fn observed<T>(
+                &self,
+                operation: &'static str,
+                response: ResponseValue<T>,
+            ) -> ResponseValue<T> {
+                if let ::std::option::Option::Some(observer) = &self.observer {
+                    if response.is_degraded() {
+                        observer.notify(Degraded {
+                            operation,
+                            status: response.status(),
+                            degradations: response.degradations(),
+                        });
+                    }
+                }
+                response
             }
 
             /// The base URL every request is built against.
@@ -144,23 +240,6 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
 
             #(#methods)*
         }
-
-        #base
-
-        /// The `reqwest` method for a declared one, for a caller that builds its own request or
-        /// keys middleware by operation.
-        ///
-        /// A free function rather than a `From` impl: under Workspace packaging both types are
-        /// foreign to this crate, and the impl would be an orphan-rule error. `reqwest::Method`
-        /// is `http::Method`, so this and the server's `http_method` yield one type.
-        #[must_use]
-        pub fn http_method(method: operations::Method) -> ::reqwest::Method {
-            match method {
-                #(#http_methods)*
-            }
-        }
-
-        #(#interfaces)*
     }
 }
 
@@ -184,7 +263,12 @@ fn default_base_url(model: &ApiModel) -> TokenStream {
 }
 
 /// One operation's params struct, its request, its response types, and its `send`.
-fn interface(operation: &OperationContract, contracts: &Contracts, config: &Config) -> TokenStream {
+fn interface(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+    decoding: Decoding,
+) -> TokenStream {
     let request = request_name(operation);
     let docs = docs_of(&operation.docs);
     let operation_name = operation.rust_name.as_str();
@@ -214,14 +298,13 @@ fn interface(operation: &OperationContract, contracts: &Contracts, config: &Conf
 
     let success = success_type(operation, contracts, config);
     let failure = error_type(operation, contracts, config);
-    let send = send(
-        operation,
-        &success.name,
-        &failure.name,
-        operation_name,
+    let reading = Reading {
+        operation: operation_name,
         config,
-    );
-    let stream = stream(operation, contracts, config);
+        decoding,
+    };
+    let send = send(operation, &success.name, &failure.name, &reading);
+    let stream = stream(operation, contracts, config, decoding);
 
     let success_decl = &success.declaration;
     let failure_decl = &failure.declaration;
@@ -404,7 +487,12 @@ fn requirement_note(param: &ParamContract) -> String {
 ///
 /// The plain `send` stays. A stream is an additional way to call the operation and never the only
 /// one: a caller who wants one page asks for one page.
-fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config) -> TokenStream {
+fn stream(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+    decoding: Decoding,
+) -> TokenStream {
     let Some(pagination) = &operation.pagination else {
         return TokenStream::new();
     };
@@ -427,15 +515,37 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
         value = quote! { ::std::option::Option::Some(#value) };
     }
     let assign = quote! { page_request.params.#cursor = #value; };
-    let items_path = pagination.items.iter().map(ident);
-    let next_path = pagination.next_cursor.iter().map(ident);
+    let page = page_walk(pagination, contracts, decoding);
     let docs = format!(
         " Every item of every page, following `{}` until the service stops sending one.",
         pagination.cursor_param
     );
+    let errors = if decoding.is_lenient() {
+        quote! {
+            ///
+            /// # Errors
+            ///
+            /// The stream ends with the error of the page that failed: what [`Self::send`]
+            /// returns for one page, and [`Error::DegradedPage`] when a page decoded but was
+            /// degraded on the path to its items or its next cursor — an element of the items
+            /// that could not be read, or the items or cursor member absent or unreadable.
+            /// Drift inside an item does not end the stream. Items already yielded stay
+            /// yielded; a caller who wants what such a page could still give reads it with
+            /// `send` on the same request.
+        }
+    } else {
+        quote! {
+            ///
+            /// # Errors
+            ///
+            /// The stream ends with the error of the page that failed: what [`Self::send`]
+            /// returns for one page.
+        }
+    };
 
     quote! {
         #[doc = #docs]
+        #errors
         pub fn stream(
             self,
         ) -> impl ::futures_core::Stream<
@@ -457,11 +567,7 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
                     if let ::std::option::Option::Some(cursor) = cursor {
                         #assign
                     }
-                    let page = page_request.send().await?.into_value();
-                    // Cloned before the items are moved out of the same value, and in this order
-                    // so that a next cursor living beside the items still reads.
-                    let next = ::std::clone::Clone::clone(&page #(.#next_path)*);
-                    let items = page #(.#items_path)*;
+                    #page
                     // The end of the stream is the service declining to send a next cursor, which
                     // is the only signal the declaration gives and the only one this trusts. A page
                     // that came back empty is not the same statement and does not stop it.
@@ -478,6 +584,60 @@ fn stream(operation: &OperationContract, contracts: &Contracts, config: &Config)
                 }),
             )
         }
+    }
+}
+
+/// The statements that take one page apart into `next` and `items`.
+///
+/// Strict: two field walks, the next cursor cloned first so one living beside the items still
+/// reads after they are moved out. Lenient: every member on either path is an `Option`, so the
+/// page's report is asked first whether any of those members was degraded — absent, unreadable,
+/// or a list with an element skipped — and the page is refused if so, because a walk that
+/// stopped at a `None` could not tell the last page from a drifted one. After that check a
+/// `None` on the way to the items cannot happen, and the walk defaults to an empty page rather
+/// than pretending otherwise.
+fn page_walk(
+    pagination: &crate::api::PaginationContract,
+    contracts: &Contracts,
+    decoding: Decoding,
+) -> TokenStream {
+    let next_path = pagination
+        .next_cursor
+        .iter()
+        .map(|step| ident(&step.rust_name));
+    let items_path = pagination.items.iter().map(|step| ident(&step.rust_name));
+    if !decoding.is_lenient() {
+        return quote! {
+            let page = page_request.send().await?.into_value();
+            let next = ::std::clone::Clone::clone(&page #(.#next_path)*);
+            let items = page #(.#items_path)*;
+        };
+    }
+    let sites = pagination
+        .next_cursor
+        .iter()
+        .chain(&pagination.items)
+        .filter_map(|step| {
+            let holder = contracts.get(step.holder)?;
+            Some(super::lenient::site(
+                holder,
+                Some(step.wire_name.as_str()),
+                Scope::Edge,
+            ))
+        });
+    let next_steps = next_path.map(|member| quote! { .and_then(|step| step.#member.as_ref()) });
+    let items_steps = items_path.map(|member| quote! { .and_then(|step| step.#member) });
+    quote! {
+        let page = page_request.send().await?;
+        let degradations = page.degradations();
+        if false #(|| degradations.touches(#sites))* {
+            return ::std::result::Result::Err(Error::DegradedPage(
+                ::std::boxed::Box::new(::std::clone::Clone::clone(degradations)),
+            ));
+        }
+        let page = page.into_value();
+        let next = ::std::option::Option::Some(&page) #(#next_steps)* .cloned();
+        let items = ::std::option::Option::Some(page) #(#items_steps)* .unwrap_or_default();
     }
 }
 
@@ -599,13 +759,22 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
 }
 
 /// The `send` method: build the URL, add the parameters, dispatch on the status.
+/// What every response body is read with: the operation it answers, how, and the byte
+/// representation.
+#[derive(Clone, Copy)]
+struct Reading<'a> {
+    operation: &'a str,
+    config: &'a Config,
+    decoding: Decoding,
+}
+
 fn send(
     operation: &OperationContract,
     success: &TokenStream,
     failure: &TokenStream,
-    operation_name: &str,
-    config: &Config,
+    reading: &Reading<'_>,
 ) -> TokenStream {
+    let operation_name = reading.operation;
     let method = format_ident!("{}", operation.method.wire());
     let path = path_expression(operation);
     let query = query(operation);
@@ -614,10 +783,21 @@ fn send(
         .then(|| quote! { let mut declared_content_type = false; });
     let accept = accept_header(operation);
     let body = request_body(operation, operation_name);
-    let dispatch = dispatch(operation, success, failure, config);
+    let dispatch = dispatch(operation, success, failure, reading);
+    let body_note = if reading.decoding.is_lenient() {
+        quote! {
+            ///
+            /// The body is read leniently into its read form: `Ok` can be partial, with a
+            /// member the description requires absent or unreadable — `None` — and the
+            /// response's [`ResponseValue::degradations`] says what was tolerated.
+        }
+    } else {
+        TokenStream::new()
+    };
 
     quote! {
         /// Perform the request.
+        #body_note
         ///
         /// # Errors
         ///
@@ -1102,7 +1282,7 @@ fn dispatch(
     operation: &OperationContract,
     success: &TokenStream,
     failure: &TokenStream,
-    config: &Config,
+    reading: &Reading<'_>,
 ) -> TokenStream {
     let successes: Vec<&ResponseArm> = operation
         .responses
@@ -1127,8 +1307,8 @@ fn dispatch(
     // claiming success as well does not stop `_ =>` from decoding through it.
     let wrapped_failure = failures.len() + usize::from(operation.responses.default.is_some()) > 1;
 
-    let success_arms = arm_matches(&successes, success, successes.len() > 1, false, config);
-    let failure_arms = arm_matches(&failures, failure, wrapped_failure, true, config);
+    let success_arms = arm_matches(&successes, success, successes.len() > 1, false, reading);
+    let failure_arms = arm_matches(&failures, failure, wrapped_failure, true, reading);
     let ranges: BTreeSet<u8> = operation
         .responses
         .arms
@@ -1164,7 +1344,7 @@ fn dispatch(
         },
         // A `default` beside declared successes catches what they do not, which is a failure.
         (Some(arm), false) => {
-            let decoded = decode(arm, failure, wrapped_failure, config);
+            let decoded = decode(arm, failure, wrapped_failure, reading);
             quote! {
                 _ => ::std::result::Result::Err(
                     Error::Declared(::std::boxed::Box::new(#decoded)),
@@ -1173,8 +1353,8 @@ fn dispatch(
         }
         // A `default` and nothing else: it is the whole contract, so a 2xx through it succeeded.
         (Some(arm), true) => {
-            let ok = decode(arm, success, false, config);
-            let err = decode(arm, failure, wrapped_failure, config);
+            let ok = decode(arm, success, false, reading);
+            let err = decode(arm, failure, wrapped_failure, reading);
             quote! {
                 200..=299 => ::std::result::Result::Ok(#ok),
                 _ => ::std::result::Result::Err(
@@ -1202,7 +1382,7 @@ fn arm_matches(
     ty: &TokenStream,
     wrapped: bool,
     is_error: bool,
-    config: &Config,
+    reading: &Reading<'_>,
 ) -> Vec<TokenStream> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -1220,7 +1400,7 @@ fn arm_matches(
                 quote! { #low..=#high }
             }
         };
-        let decoded = decode(arm, ty, wrapped, config);
+        let decoded = decode(arm, ty, wrapped, reading);
         out.push(if is_error {
             quote! {
                 #pattern => ::std::result::Result::Err(
@@ -1238,13 +1418,39 @@ fn arm_matches(
 ///
 /// Written as a `map` over the response rather than as a `let` and a rebuild, so the body is never
 /// bound to a name: a `204` arm's body is `()`, and binding a unit is a lint the consumer sees.
-fn decode(arm: &ResponseArm, ty: &TokenStream, wrapped: bool, config: &Config) -> TokenStream {
+fn decode(
+    arm: &ResponseArm,
+    ty: &TokenStream,
+    wrapped: bool,
+    reading: &Reading<'_>,
+) -> TokenStream {
     let decoded = match &arm.body {
+        // A JSON body is read leniently where the configuration says so, with the response's
+        // own position as the root site and the client's observer shown the result; an empty
+        // body has nothing to be lenient about.
+        ResponseBody::Json { .. } if reading.decoding.is_lenient() => {
+            let operation = reading.operation;
+            let origin = arm.origin.to_string();
+            quote! {
+                self.client.observed(
+                    #operation,
+                    support::decode_lenient(
+                        response,
+                        &support::Site {
+                            type_name: #operation,
+                            origin: #origin,
+                            member: ::std::option::Option::None,
+                        },
+                    )
+                    .await?,
+                )
+            }
+        }
         ResponseBody::Json { .. } | ResponseBody::Empty => {
             quote! { support::decode_json(response).await? }
         }
         ResponseBody::Text { .. } => quote! { support::decode_text(response).await? },
-        ResponseBody::Bytes { .. } => match config.formats.bytes {
+        ResponseBody::Bytes { .. } => match reading.config.formats.bytes {
             BytesRepr::Vec => quote! { support::decode_bytes(response).await? },
             BytesRepr::Bytes => {
                 quote! {

@@ -31,12 +31,19 @@ use serde::de::{
     SeqAccess, VariantAccess, Visitor,
 };
 
+// Carried-tag unions hold an unrecognized payload as arbitrary JSON, and this file is shipped
+// into crates that always depend on `serde_json`.
+use serde_json::Value;
+
 /// One buffered value, in whatever form the format handed it over.
 ///
 /// Borrowed where the format allows it (`Str`, `Bytes`) so that reading a member out of the buffer
 /// does not copy a string that the input already holds.
+///
+/// `pub` rather than crate-visible because the lenient decoder's trait takes one, and that trait
+/// is implemented on a generated crate's public types; the support module itself is hidden.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Content<'de> {
+pub enum Content<'de> {
     Bool(bool),
     I64(i64),
     U64(u64),
@@ -55,7 +62,7 @@ pub(crate) enum Content<'de> {
 
 impl Content<'_> {
     /// What this value is, for an `invalid type` message.
-    fn unexpected(&self) -> de::Unexpected<'_> {
+    pub(crate) fn unexpected(&self) -> de::Unexpected<'_> {
         match self {
             Content::Bool(value) => de::Unexpected::Bool(*value),
             Content::I64(value) => de::Unexpected::Signed(*value),
@@ -74,7 +81,7 @@ impl Content<'_> {
     }
 
     /// The text of a member name, when the value is one.
-    fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Content::Str(value) => Some(value),
             Content::String(value) => Some(value),
@@ -484,14 +491,32 @@ where
 pub(crate) enum Unknown {
     Ignore,
     Deny,
+    /// Keep it, for the type's capture member to take with [`Buffer::take_rest`].
+    Capture,
 }
 
 /// The members of one object, buffered by name.
 pub(crate) struct Buffer<'de> {
     members: Vec<(&'static str, Content<'de>)>,
+    /// The members no declared name claimed, in arrival order, under [`Unknown::Capture`].
+    rest: Vec<(Content<'de>, Content<'de>)>,
 }
 
 impl<'de> Buffer<'de> {
+    /// The members no declared name claimed, replayed into the type's capture member.
+    ///
+    /// A map keyed by `String`, typed as the schema's `additionalProperties` says or as arbitrary
+    /// JSON when it says nothing: the capture member has no wire name of its own, so it is read
+    /// last, from whatever the declared members left.
+    pub(crate) fn take_rest<T, E>(&mut self) -> Result<T, E>
+    where
+        T: Deserialize<'de>,
+        E: de::Error,
+    {
+        let rest = std::mem::take(&mut self.rest);
+        T::deserialize(ContentDeserializer::new(Content::Map(rest)))
+    }
+
     /// Read a declared member out of the buffer.
     ///
     /// The scan is linear over a field list that is known and short at compile time, which is both
@@ -575,6 +600,7 @@ where
         let fields = T::FIELDS;
         let mut buffer = Buffer {
             members: Vec::with_capacity(fields.len()),
+            rest: Vec::new(),
         };
         while let Some(key) = access.next_key::<Content<'de>>()? {
             let declared = key
@@ -595,6 +621,9 @@ where
                         let name = key.as_str().unwrap_or_default().to_owned();
                         return Err(de::Error::unknown_field(&name, fields));
                     }
+                    Unknown::Capture => {
+                        buffer.rest.push((key, access.next_value()?));
+                    }
                 },
             }
         }
@@ -612,6 +641,7 @@ where
         let fields = T::FIELDS;
         let mut buffer = Buffer {
             members: Vec::with_capacity(fields.len()),
+            rest: Vec::new(),
         };
         for (index, field) in fields.iter().enumerate() {
             match access.next_element::<Content<'de>>()? {
@@ -659,149 +689,108 @@ impl de::Expected for Elements {
 /// taken out of the payload before the replay: the type keeps the member and writes it back when
 /// serialized, so a value round-trips with its tag where the wire had it.
 ///
-/// The resolver receives the position of the matched name in `variants`, always in range: an
-/// unmatched name has already been refused as an unknown variant. The generated match binds its
-/// last variant with a `_` arm on the strength of that guarantee, which is what keeps the match
-/// total without a dead error arm.
-pub(crate) fn dispatch<'de, T, E, F>(
-    name: &'static str,
+/// The resolver receives the position of the matched name in `variants`, always in range. A
+/// payload that names no variant — no tag, a tag that is not a string, a tag the description
+/// does not list, or no object at all — goes to `unknown` as arbitrary JSON instead: the union
+/// is open, and the value was already on the wire. The generated match binds its last variant
+/// with a `_` arm on the strength of the range guarantee, which is what keeps the match total
+/// without a dead error arm.
+pub(crate) fn dispatch<'de, T, E, F, U>(
     tag: &'static str,
     variants: &'static [&'static str],
     payload: Content<'de>,
     resolve: F,
+    unknown: U,
 ) -> Result<T, E>
 where
     E: de::Error,
     F: FnOnce(usize, ContentDeserializer<'de, E>) -> Result<T, E>,
+    U: FnOnce(Value) -> T,
 {
-    let choice = choice(&payload, name, tag, variants)?;
-    resolve(choice, ContentDeserializer::new(payload))
+    match choice(&payload, tag, variants)? {
+        Some(choice) => resolve(choice, ContentDeserializer::new(payload)),
+        None => Deserialize::deserialize(ContentDeserializer::<'de, E>::new(payload)).map(unknown),
+    }
 }
 
-/// Which variant a payload names in its tag member.
-fn choice<E>(
+/// Which variant a payload names in its tag member, or `None` when it names none.
+///
+/// Only a payload that writes the tag twice is refused: it has said two things, and neither
+/// reading is the open arm.
+pub(crate) fn choice<E>(
     payload: &Content<'_>,
-    name: &'static str,
     tag: &'static str,
     variants: &'static [&'static str],
-) -> Result<usize, E>
+) -> Result<Option<usize>, E>
 where
     E: de::Error,
 {
     let Content::Map(members) = payload else {
-        return Err(de::Error::invalid_type(
-            payload.unexpected(),
-            &TaggedPayload { name },
-        ));
+        return Ok(None);
     };
-    let mut found: Option<&str> = None;
+    let mut seen = false;
+    let mut text: Option<&str> = None;
     for (key, value) in members {
         if key.as_str() != Some(tag) {
             continue;
         }
         // Refused here rather than left to the replay so that a payload writing two tags fails
-        // the same way whichever variant implementation would have read it second.
-        if found.is_some() {
+        // the same way whichever variant implementation would have read it second — and
+        // whether or not the first one was a string, so the order of the two cannot decide it.
+        if seen {
             return Err(de::Error::duplicate_field(tag));
         }
-        let Some(text) = value.as_str() else {
-            return Err(de::Error::invalid_type(value.unexpected(), &"a string"));
-        };
-        found = Some(text);
+        seen = true;
+        text = value.as_str();
     }
-    let Some(text) = found else {
-        return Err(de::Error::missing_field(tag));
-    };
-    variants
-        .iter()
-        .position(|variant| *variant == text)
-        .ok_or_else(|| de::Error::unknown_variant(text, variants))
+    Ok(text.and_then(|text| variants.iter().position(|variant| *variant == text)))
 }
 
-/// What a carried-tag enum expected, for an `invalid type` message.
-struct TaggedPayload {
-    name: &'static str,
-}
-
-impl de::Expected for TaggedPayload {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "tagged enum {}", self.name)
-    }
-}
-
-/// Resolves a fieldless enum from the variant name alone.
+/// Resolves an open string enum from the string alone.
 ///
-/// No buffering: the variant is decided by the identifier, so this keeps working with formats that
-/// are not self-describing and reports the format's own error positions.
-pub(crate) struct UnitVariants<T> {
+/// Read with `deserialize_str` rather than `deserialize_enum`: the wire carries a string, the
+/// description says so, and a string the description does not list is the fallback variant
+/// rather than an error. No buffering, so this keeps working with formats that are not
+/// self-describing and reports the format's own error positions.
+pub(crate) struct OpenVariants<T> {
     name: &'static str,
-    variants: &'static [&'static str],
     resolve: fn(&str) -> Option<T>,
+    fallback: fn(String) -> T,
 }
 
-impl<T> UnitVariants<T> {
+impl<T> OpenVariants<T> {
     pub(crate) fn new(
         name: &'static str,
-        variants: &'static [&'static str],
         resolve: fn(&str) -> Option<T>,
+        fallback: fn(String) -> T,
     ) -> Self {
         Self {
             name,
-            variants,
             resolve,
+            fallback,
         }
     }
 }
 
-impl<'de, T> Visitor<'de> for UnitVariants<T> {
+impl<T> Visitor<'_> for OpenVariants<T> {
     type Value = T;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "enum {}", self.name)
-    }
-
-    fn visit_enum<A>(self, access: A) -> Result<Self::Value, A::Error>
-    where
-        A: EnumAccess<'de>,
-    {
-        let (value, variant) = access.variant_seed(NameSeed {
-            variants: self.variants,
-            resolve: self.resolve,
-        })?;
-        variant.unit_variant()?;
-        Ok(value)
-    }
-}
-
-/// Reads a variant identifier and resolves it, or says which names were expected.
-struct NameSeed<T> {
-    variants: &'static [&'static str],
-    resolve: fn(&str) -> Option<T>,
-}
-
-impl<'de, T> DeserializeSeed<'de> for NameSeed<T> {
-    type Value = T;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_identifier(self)
-    }
-}
-
-impl<T> Visitor<'_> for NameSeed<T> {
-    type Value = T;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("variant identifier")
+        write!(formatter, "a string, for enum {}", self.name)
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        (self.resolve)(value).ok_or_else(|| de::Error::unknown_variant(value, self.variants))
+        Ok((self.resolve)(value).unwrap_or_else(|| (self.fallback)(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok((self.resolve)(&value).unwrap_or_else(|| (self.fallback)(value)))
     }
 
     fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
@@ -811,25 +800,6 @@ impl<T> Visitor<'_> for NameSeed<T> {
         match std::str::from_utf8(value) {
             Ok(text) => self.visit_str(text),
             Err(_) => Err(de::Error::invalid_type(de::Unexpected::Bytes(value), &self)),
-        }
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        // The derive accepts a variant index too, so this does as well.
-        match usize::try_from(value)
-            .ok()
-            .and_then(|index| self.variants.get(index))
-        {
-            Some(name) => {
-                (self.resolve)(name).ok_or_else(|| de::Error::unknown_variant(name, self.variants))
-            }
-            None => Err(de::Error::invalid_value(
-                de::Unexpected::Unsigned(value),
-                &"variant index",
-            )),
         }
     }
 }
@@ -1456,6 +1426,7 @@ mod tests {
         enum Payment {
             Card(Card),
             Cash(Cash),
+            Unknown(Box<serde_json::Value>),
         }
 
         impl<'de> Deserialize<'de> for Payment {
@@ -1463,12 +1434,10 @@ mod tests {
             where
                 D: Deserializer<'de>,
             {
-                const NAME: &str = "Payment";
                 const TAG: &str = "kind";
                 const VARIANTS: &[&str] = &["card", "cash"];
                 let payload: Content<'de> = Deserialize::deserialize(deserializer)?;
                 dispatch(
-                    NAME,
                     TAG,
                     VARIANTS,
                     payload,
@@ -1476,6 +1445,7 @@ mod tests {
                         0usize => Deserialize::deserialize(replay).map(Self::Card),
                         _ => Deserialize::deserialize(replay).map(Self::Cash),
                     },
+                    |value| Self::Unknown(Box::new(value)),
                 )
             }
         }
@@ -1488,6 +1458,7 @@ mod tests {
                 match self {
                     Self::Card(value) => serde::Serialize::serialize(value, serializer),
                     Self::Cash(value) => serde::Serialize::serialize(value, serializer),
+                    Self::Unknown(value) => serde::Serialize::serialize(value, serializer),
                 }
             }
         }
@@ -1538,38 +1509,48 @@ mod tests {
             );
         }
 
+        /// The union is open: every payload that names no variant is kept as arbitrary JSON
+        /// and written back exactly as it arrived.
         #[test]
-        fn a_payload_without_the_tag_reports_the_member_as_missing() {
-            let message = refusal(r#"{"number":"4"}"#);
-            assert!(message.contains("kind"), "{message}");
-        }
-
-        #[test]
-        fn a_tag_naming_no_variant_reports_the_expected_names() {
-            let message = refusal(r#"{"kind":"cheque"}"#);
-            assert!(
-                message.contains("cheque") && message.contains("card") && message.contains("cash"),
-                "{message}"
-            );
-        }
-
-        #[test]
-        fn a_payload_that_is_not_a_map_reports_the_enum_it_expected() {
-            let message = refusal(r#""card""#);
-            assert!(message.contains("tagged enum Payment"), "{message}");
+        fn a_payload_naming_no_variant_is_kept_whole_and_round_trips() {
+            for wire in [
+                r#"{"number":"4"}"#,
+                r#"{"kind":"cheque"}"#,
+                r#""card""#,
+                r#"{"kind":4}"#,
+            ] {
+                let payment = read(wire);
+                assert!(
+                    matches!(payment, Payment::Unknown(_)),
+                    "{wire} read as {payment:?}"
+                );
+                let written = match serde_json::to_string(&payment) {
+                    Ok(written) => written,
+                    Err(err) => panic!("{payment:?} did not serialize: {err}"),
+                };
+                assert_eq!(written, wire);
+            }
         }
 
         #[test]
         fn a_payload_writing_the_tag_twice_is_refused() {
             // `serde_json` itself keeps the last of two duplicate members, so the duplicate has
-            // to be refused from the buffer, where both survive.
+            // to be refused from the buffer, where both survive — and two tags is a payload that
+            // said two things, which the open arm must not paper over.
             let message = refusal(r#"{"kind":"card","kind":"cash"}"#);
+            assert!(message.contains("duplicate"), "{message}");
+            // Whichever of the two is not a string: the order of the copies cannot decide it.
+            let message = refusal(r#"{"kind":7,"kind":"cash"}"#);
+            assert!(message.contains("duplicate"), "{message}");
+            let message = refusal(r#"{"kind":"cash","kind":7}"#);
             assert!(message.contains("duplicate"), "{message}");
         }
 
+        /// A tag that names a variant whose body then does not read is still an error: the
+        /// payload said what it is, and the open arm is for payloads that did not.
         #[test]
-        fn a_tag_that_is_not_a_string_is_refused_before_any_variant_reads_it() {
-            let message = refusal(r#"{"kind":4}"#);
+        fn a_named_variant_that_cannot_read_its_payload_is_refused() {
+            let message = refusal(r#"{"kind":"card","number":4}"#);
             assert!(message.contains("invalid type"), "{message}");
         }
     }

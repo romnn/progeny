@@ -984,6 +984,10 @@ fn report_stats(totals: &Stats, documents: usize) {
         totals.empty_response_arms
     );
     println!(
+        "  type forms                  {} strict, {} shared, {} read-only, {} twinned",
+        totals.forms.strict, totals.forms.shared, totals.forms.read_only, totals.forms.twinned
+    );
+    println!(
         "  connection upgrades         {} operations declare status 101",
         totals.upgrade_operations
     );

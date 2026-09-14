@@ -111,6 +111,10 @@ pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
 ///
 /// A body names one type, and that type names others; the collapse can be any distance down. The
 /// walk is over `TypeRef::Named` edges, which is exactly the reachability a payload has.
+///
+/// Counted on the description's own graph: a response position names a type's read twin, and
+/// the twin is folded back onto the type the document declared, so a member is judged once by
+/// every direction that reaches it rather than once per form.
 fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, Reach> {
     let mut requests = BTreeSet::new();
     let mut responses = BTreeSet::new();
@@ -120,11 +124,11 @@ fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, 
         // alone once reported form-reached types as "no operation's body" — a false statement
         // about the wire.
         if let Some(ty) = operation.body.as_ref().and_then(BodyContract::ty) {
-            seed(ty, &mut requests);
+            seed(ty, contracts, &mut requests);
         }
         // A parameter is a request position too: its type travels out with the call.
         for param in &operation.params {
-            seed(&param.ty, &mut requests);
+            seed(&param.ty, contracts, &mut requests);
         }
         for arm in operation
             .responses
@@ -133,7 +137,7 @@ fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, 
             .chain(&operation.responses.default)
         {
             if let Some(ty) = arm.body.json_type() {
-                seed(ty, &mut responses);
+                seed(ty, contracts, &mut responses);
             }
         }
     }
@@ -150,10 +154,14 @@ fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, 
     out
 }
 
-fn seed(ty: &TypeRef, out: &mut BTreeSet<TypeIndex>) {
+fn seed(ty: &TypeRef, contracts: &Contracts, out: &mut BTreeSet<TypeIndex>) {
     let mut reached = Vec::new();
     ty.named(&mut reached);
-    out.extend(reached);
+    out.extend(
+        reached
+            .into_iter()
+            .map(|index| contracts.strict_form(index)),
+    );
 }
 
 /// Everything reachable from a starting set, following the types those types name.
@@ -171,7 +179,11 @@ fn close(contracts: &Contracts, start: BTreeSet<TypeIndex>) -> BTreeSet<TypeInde
         for ty in contract.kind().references() {
             ty.named(&mut reached);
         }
-        queue.extend(reached);
+        queue.extend(
+            reached
+                .into_iter()
+                .map(|index| contracts.strict_form(index)),
+        );
     }
     seen
 }
@@ -345,6 +357,41 @@ mod tests {
             },
             "components": {"schemas": {
                 "Pet": {"type": "object", "properties": {"owner": {"type": ["string", "null"]}}},
+            }},
+        }))?;
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(
+            found[0].contains("a request body and a response body"),
+            "{found:#?}"
+        );
+    }
+
+    /// A type that twins — a required member beside the collapsing one — is still one type to
+    /// the description, reached from both directions and reported once; the response position
+    /// naming its read twin must not split it into a request-only type and a response-only one.
+    #[test_util::test]
+    fn a_twinned_type_is_still_reached_from_both_directions() {
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "operationId": "createPet",
+                        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}}},
+                        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Page"}}}}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                "Page": {"type": "object", "properties": {"pet": {"$ref": "#/components/schemas/Pet"}}},
+                "Pet": {"type": "object", "required": ["name"],
+                        "properties": {"name": {"type": "string"},
+                                       "owner": {"type": ["string", "null"]}}},
             }},
         }))?;
         let found: Vec<&str> = diagnostics

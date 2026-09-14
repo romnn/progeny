@@ -14,6 +14,7 @@
 // probe harness reuses their naming — type paths, group, response and route names — instead of
 // growing a second copy that could drift from what is actually rendered.
 pub(crate) mod client;
+mod lenient;
 mod manifest;
 pub(crate) mod operations;
 mod serde_impl;
@@ -27,7 +28,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::api::ApiModel;
-use crate::config::{Config, Packaging};
+use crate::config::{Config, Decoding, Packaging};
 use crate::contract::Contracts;
 
 /// Render the contracts and the API model into the files a caller writes out.
@@ -60,13 +61,24 @@ pub(crate) fn run(
             .iter()
             .any(|operation| operation.registrable.is_some());
     let external_api_modules = config.packaging == Packaging::Workspace;
-    let mut types_body =
+    let decoding = decoding(contracts, api, config);
+    let types::Rendered { root, read } =
         types::render(contracts, api, http || serves, external_api_modules, config);
-    types_body.extend(serde_impl::render(contracts));
+    let mut types_body = root;
+    types_body.extend(read);
+    if decoding.is_lenient() {
+        // The report vocabulary beside the types it describes, so a consumer of the types crate
+        // alone can name what a read form's decoder hands back.
+        types_body.extend(quote! {
+            pub use super::support::{
+                Decoded, Degradation, DegradationKind, Degradations, Lenient, Site,
+            };
+        });
+    }
     // Under the same gate as the client and regardless of `Emit`: the module has no dependency,
     // so a flag would be a knob nothing needs, and nothing to call is nothing to reflect.
     let operations_body = has_operations.then(|| operations::render(api));
-    let client_body = http.then(|| client::render(api, contracts, config));
+    let client_body = http.then(|| client::render(api, contracts, config, decoding));
     let server_body = serves.then(|| server::render(api, contracts, config));
     let mut modules = vec![("types", types_body.clone())];
     for (name, body) in [
@@ -86,6 +98,7 @@ pub(crate) fn run(
         || serde_impl::needed(contracts)
         || contracts.uses_upload()
         || contracts.uses_presence()
+        || decoding.is_lenient()
     {
         modules.push((
             "support",
@@ -95,6 +108,7 @@ pub(crate) fn run(
                 config.packaging == Packaging::Crate,
                 config.body_limit,
                 contracts.uses_presence().into(),
+                decoding,
             ),
         ));
     }
@@ -133,6 +147,7 @@ pub(crate) fn run(
                 contracts,
                 api,
                 config,
+                decoding,
                 streams,
                 &types_body,
                 operations_body.as_ref(),
@@ -175,6 +190,7 @@ fn workspace_files(
     contracts: &Contracts,
     api: &ApiModel,
     config: &Config,
+    decoding: crate::support::Decoding,
     streams: bool,
     types_body: &TokenStream,
     operations_body: Option<&TokenStream>,
@@ -190,7 +206,14 @@ fn workspace_files(
         Utf8PathBuf::from("README.md"),
         manifest::workspace_readme(config, client_body.is_some(), server_body.is_some()),
     );
-    insert_types_crate(&mut files, contracts, config, types_body, operations_body);
+    insert_types_crate(
+        &mut files,
+        contracts,
+        config,
+        decoding,
+        types_body,
+        operations_body,
+    );
     let types_name = format!("{}-types", config.package.name);
     let types_crate = quote::format_ident!("{}", types_name.replace('-', "_"));
     // Both edge crates re-export the reflection beside `types`, so `super::operations::…`
@@ -203,31 +226,64 @@ fn workspace_files(
     if let Some(body) = client_body {
         insert_client_crate(
             &mut files,
-            api,
-            config,
+            &EdgeCrate {
+                api,
+                config,
+                types_crate: &types_crate,
+                reflection: reflection.as_ref(),
+                body,
+            },
+            decoding,
             streams,
-            &types_crate,
-            reflection.as_ref(),
-            body,
         );
     }
     if let Some(body) = server_body {
         insert_server_crate(
             &mut files,
-            api,
-            config,
-            &types_crate,
-            reflection.as_ref(),
-            body,
+            &EdgeCrate {
+                api,
+                config,
+                types_crate: &types_crate,
+                reflection: reflection.as_ref(),
+                body,
+            },
         );
     }
     files
+}
+
+/// How the generated support decodes responses.
+///
+/// The configuration's choice, narrowed by what there is to decode: lenient decoding with no
+/// JSON response anywhere and no read form has nothing to run, and the decoder is left out of
+/// the support module rather than shipped for nobody. A JSON arm with no schema counts — it
+/// decodes as arbitrary JSON, leniently like everything else.
+fn decoding(contracts: &Contracts, api: &ApiModel, config: &Config) -> crate::support::Decoding {
+    let json_arms = api.operations().iter().any(|operation| {
+        operation
+            .responses
+            .arms
+            .iter()
+            .chain(&operation.responses.default)
+            .any(|arm| arm.body.json_type().is_some())
+    });
+    match config.decoding {
+        Decoding::Lenient if contracts.has_read_forms() || json_arms => {
+            crate::support::Decoding::Lenient(manifest::crates_named(
+                Some(contracts),
+                Some(api),
+                config,
+            ))
+        }
+        Decoding::Lenient | Decoding::Strict => crate::support::Decoding::Strict,
+    }
 }
 
 fn insert_types_crate(
     files: &mut BTreeMap<Utf8PathBuf, String>,
     contracts: &Contracts,
     config: &Config,
+    decoding: crate::support::Decoding,
     body: &TokenStream,
     operations_body: Option<&TokenStream>,
 ) {
@@ -239,8 +295,10 @@ fn insert_types_crate(
     // `pub` for the same reason the one-crate packaging makes it public: an upload body field is
     // `support::Upload`, and a consumer who has to fill that field has to be able to name the
     // type — a private module would make the field itself a `private_interfaces` defect.
-    let needed =
-        serde_impl::needed(contracts) || contracts.uses_upload() || contracts.uses_presence();
+    let needed = serde_impl::needed(contracts)
+        || contracts.uses_upload()
+        || contracts.uses_presence()
+        || decoding.is_lenient();
     let support = needed.then(|| {
         quote! {
             #[doc(hidden)]
@@ -268,20 +326,39 @@ fn insert_types_crate(
     if needed {
         files.insert(
             directory.join("src/support.rs"),
-            source(&crate::support::types_tokens(contracts.uses_presence())),
+            source(&crate::support::types_tokens(
+                contracts.uses_presence(),
+                decoding,
+            )),
         );
     }
 }
 
+/// What an edge crate of a workspace is assembled from.
+struct EdgeCrate<'a> {
+    api: &'a ApiModel,
+    config: &'a Config,
+    /// The types crate's name as a path segment, for the re-export in the edge's root.
+    types_crate: &'a syn::Ident,
+    /// The operations re-export, when the types crate carries an operations module.
+    reflection: Option<&'a TokenStream>,
+    /// The edge module itself.
+    body: &'a TokenStream,
+}
+
 fn insert_client_crate(
     files: &mut BTreeMap<Utf8PathBuf, String>,
-    api: &ApiModel,
-    config: &Config,
+    edge: &EdgeCrate<'_>,
+    decoding: crate::support::Decoding,
     streams: bool,
-    types_crate: &syn::Ident,
-    reflection: Option<&TokenStream>,
-    body: &TokenStream,
 ) {
+    let EdgeCrate {
+        api,
+        config,
+        types_crate,
+        reflection,
+        body,
+    } = *edge;
     let directory = Utf8PathBuf::from(format!("{}-client", config.package.name));
     files.insert(
         directory.join("Cargo.toml"),
@@ -301,18 +378,18 @@ fn insert_client_crate(
     files.insert(directory.join("src/client.rs"), source(body));
     files.insert(
         directory.join("src/support.rs"),
-        source(&crate::support::client_tokens(client_use(api))),
+        source(&crate::support::client_tokens(client_use(api), decoding)),
     );
 }
 
-fn insert_server_crate(
-    files: &mut BTreeMap<Utf8PathBuf, String>,
-    api: &ApiModel,
-    config: &Config,
-    types_crate: &syn::Ident,
-    reflection: Option<&TokenStream>,
-    body: &TokenStream,
-) {
+fn insert_server_crate(files: &mut BTreeMap<Utf8PathBuf, String>, edge: &EdgeCrate<'_>) {
+    let EdgeCrate {
+        api,
+        config,
+        types_crate,
+        reflection,
+        body,
+    } = *edge;
     let directory = Utf8PathBuf::from(format!("{}-server", config.package.name));
     files.insert(
         directory.join("Cargo.toml"),
@@ -771,21 +848,48 @@ mod tests {
         );
     }
 
+    /// A string enum is open under both serde strategies: the wire bytes of every listed
+    /// value live in the hand-written impls, and an unlisted value has a variant of its own.
     #[test_util::test]
-    fn a_fieldless_enum_keeps_the_bytes_it_had() {
+    fn a_fieldless_enum_keeps_the_bytes_it_had_and_is_open() {
+        let document = with_schemas(json!({
+            "State": {"type": "string", "enum": ["in-progress", "done", "2fa"]},
+        }));
+        for config in [Config::default(), derive_mode()] {
+            let rendered = types(document.clone(), &config)?;
+            assert!(rendered.contains("pub enum State"), "{rendered}");
+            assert!(rendered.contains("InProgress,"), "{rendered}");
+            assert!(rendered.contains("_2fa,"), "{rendered}");
+            assert!(rendered.contains("Unknown(String),"), "{rendered}");
+            // Never a serde attribute or derive: the open form has no derive encoding.
+            assert!(!rendered.contains("#[serde("), "{rendered}");
+            assert!(
+                rendered.contains(r#""in-progress" => Some(Self::InProgress)"#),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("serializer.serialize_str(self.as_str())"),
+                "{rendered}"
+            );
+        }
+    }
+
+    /// A document that enumerates `unknown` itself keeps that spelling; the fallback steps
+    /// aside with the suffix every other collision takes, so the document's value stays API.
+    #[test_util::test]
+    fn a_documents_own_unknown_value_keeps_its_name_and_the_fallback_steps_aside() {
         let rendered = types(
             with_schemas(json!({
-                "State": {"type": "string", "enum": ["in-progress", "done", "2fa"]},
+                "Kind": {"type": "string", "enum": ["known", "unknown"]},
             })),
-            &derive_mode(),
+            &Config::default(),
         )?;
-        assert!(rendered.contains("pub enum State"), "{rendered}");
+        assert!(rendered.contains("Unknown,"), "{rendered}");
+        assert!(rendered.contains("Unknown2(String),"), "{rendered}");
         assert!(
-            rendered.contains(r#"#[serde(rename = "in-progress")]"#),
+            rendered.contains(r#""unknown" => Some(Self::Unknown)"#),
             "{rendered}"
         );
-        assert!(rendered.contains("InProgress,"), "{rendered}");
-        assert!(rendered.contains("_2fa,"), "{rendered}");
     }
 
     #[test_util::test]
@@ -844,8 +948,9 @@ mod tests {
         }));
         for config in [Config::default(), derive_mode()] {
             let rendered = types(document.clone(), &config)?;
+            // Borrowed rather than `'static`: the fallback's string lives in the value.
             assert!(
-                rendered.contains("pub fn as_str(&self) -> &'static str"),
+                rendered.contains("pub fn as_str(&self) -> &str"),
                 "{rendered}"
             );
             assert!(
@@ -854,6 +959,10 @@ mod tests {
             );
             assert!(
                 rendered.contains(r#"Self::InConsultation => "IN_CONSULTATION""#),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("Self::Unknown(value) => value"),
                 "{rendered}"
             );
         }
@@ -1780,12 +1889,13 @@ mod tests {
                 "Error": {"type": "object", "properties": {"message": {"type": "string"}}},
             }},
         }))?;
+        // Both are response-only, so both are read forms and live in `read`.
         assert!(
-            rendered.contains("ResponseValue<super::types::Pet>"),
+            rendered.contains("ResponseValue<super::types::read::Pet>"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("Error<super::types::Error>"),
+            rendered.contains("Error<super::types::read::Error>"),
             "{rendered}"
         );
     }
@@ -2166,8 +2276,11 @@ mod tests {
             rendered.contains("ResponseValue<String>, Error<String>"),
             "{rendered}"
         );
+        let (_, arm) = rendered
+            .split_once("200..=299 => {")
+            .ok_or_eyre("the default arm answers every 2xx")?;
         assert!(
-            rendered.contains("200..=299 => ::std::result::Result::Ok"),
+            arm.trim_start().starts_with("::std::result::Result::Ok"),
             "{rendered}"
         );
 
@@ -2182,10 +2295,7 @@ mod tests {
                 },
             }}},
         }))?;
-        assert!(
-            !with_success.contains("200..=299 => ::std::result::Result::Ok"),
-            "{with_success}"
-        );
+        assert!(!with_success.contains("200..=299 =>"), "{with_success}");
         assert!(
             with_success.contains("ResponseValue<()>, Error<String>"),
             "{with_success}"
@@ -2452,21 +2562,10 @@ mod tests {
         assert_eq!(once, twice);
     }
 
-    /// Every `support::…` path a renderer spells resolves to an item the shipped module holds.
-    ///
-    /// The renderers write these paths as *strings into somebody else's crate*: progeny compiles
-    /// the support items, but nothing in progeny's own build calls them by the emitted spelling,
-    /// so renaming `support::style::cookie_pair` would build green here and break every
-    /// generated crate with a cookie parameter. This resolves each spelled path against the
-    /// emitted support module's actual items — the check the compiler cannot do across the
-    /// generation boundary.
-    #[test_util::test]
-    fn every_support_path_the_renderers_spell_exists() {
-        use std::collections::BTreeSet;
-
-        // One document exercising every wire feature: path styles, query styles, header and
-        // cookie parameters, all five body kinds, and a server half.
-        let document = json!({
+    /// A description that exercises the wire from every direction: a body of each kind, a
+    /// response of each kind, and types whose read forms spell every decoder helper.
+    fn wire_fixture() -> serde_json::Value {
+        json!({
             "openapi": "3.1.0",
             "paths": {
                 "/pets/{id}": {"get": {
@@ -2519,9 +2618,46 @@ mod tests {
             },
             "components": {"schemas": {
                 "Pet": {"type": "object", "required": ["name"],
-                        "properties": {"name": {"type": "string"}}},
+                        "properties": {"name": {"type": "string"},
+                                       "mood": {"$ref": "#/components/schemas/Mood"},
+                                       "owner": {"$ref": "#/components/schemas/Owner"},
+                                       "event": {"$ref": "#/components/schemas/Event"}}},
+                // A string enum, an untagged union and a tagged one: each read form's decoder
+                // spells its own support helpers.
+                "Mood": {"type": "string", "enum": ["calm", "wild"]},
+                "Owner": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "Event": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/Fed"},
+                        {"$ref": "#/components/schemas/Walked"},
+                    ],
+                    "discriminator": {"propertyName": "kind",
+                                      "mapping": {"fed": "#/components/schemas/Fed",
+                                                  "walked": "#/components/schemas/Walked"}},
+                },
+                "Fed": {"type": "object", "required": ["kind"],
+                        "properties": {"kind": {"type": "string"}, "grams": {"type": "integer"}}},
+                "Walked": {"type": "object", "required": ["kind"],
+                           "properties": {"kind": {"type": "string"}, "km": {"type": "number"}}},
             }},
-        });
+        })
+    }
+
+    /// Every `support::…` path a renderer spells resolves to an item the shipped module holds.
+    ///
+    /// The renderers write these paths as *strings into somebody else's crate*: progeny compiles
+    /// the support items, but nothing in progeny's own build calls them by the emitted spelling,
+    /// so renaming `support::style::cookie_pair` would build green here and break every
+    /// generated crate with a cookie parameter. This resolves each spelled path against the
+    /// emitted support module's actual items — the check the compiler cannot do across the
+    /// generation boundary.
+    #[test_util::test]
+    fn every_support_path_the_renderers_spell_exists() {
+        use std::collections::BTreeSet;
+
+        // One document exercising every wire feature: path styles, query styles, header and
+        // cookie parameters, all five body kinds, and a server half.
+        let document = wire_fixture();
         let rendered = files(document, &Config::default())?;
 
         // Every item the emitted support module defines, as `module::item` relative paths —
@@ -2596,12 +2732,24 @@ mod tests {
                 }
                 syn::Item::Use(it) => {
                     // `pub use wire::*;` at the root: remember the module whose items become
-                    // root-level names.
+                    // root-level names. `pub use degradations::{Site, …};` names them outright.
                     if prefix.is_empty()
                         && let syn::UseTree::Path(path) = &it.tree
-                        && matches!(*path.tree, syn::UseTree::Glob(_))
                     {
-                        globs.push(path.ident.to_string());
+                        match &*path.tree {
+                            syn::UseTree::Glob(_) => globs.push(path.ident.to_string()),
+                            syn::UseTree::Group(group) => {
+                                for tree in &group.items {
+                                    if let syn::UseTree::Name(name) = tree {
+                                        defined.insert(name.ident.to_string());
+                                    }
+                                }
+                            }
+                            syn::UseTree::Name(name) => {
+                                defined.insert(name.ident.to_string());
+                            }
+                            syn::UseTree::Path(_) | syn::UseTree::Rename(_) => {}
+                        }
                     }
                     None
                 }
@@ -2839,5 +2987,358 @@ mod tests {
         assert!(types.contains("::std::net::IpAddr"), "{types}");
         assert!(types.contains("::std::net::Ipv4Addr"), "{types}");
         assert!(types.contains("::std::net::Ipv6Addr"), "{types}");
+    }
+
+    /// A description whose one type travels both ways, holds a shared enum, and answers a page.
+    fn read_forms_document() -> Value {
+        json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "operationId": "listPets",
+                        "parameters": [
+                            {"name": "cursor", "in": "query", "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "ok", "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/Page"},
+                        }}}},
+                    },
+                    "post": {
+                        "operationId": "createPet",
+                        "requestBody": {"content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/Pet"},
+                        }}},
+                        "responses": {"201": {"description": "made", "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/Pet"},
+                        }}}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                "Page": {"type": "object", "required": ["items"],
+                         "properties": {"items": {"type": "array",
+                                                  "items": {"$ref": "#/components/schemas/Pet"}},
+                                        "next": {"type": "string"}}},
+                "Pet": {"type": "object", "required": ["name"],
+                        "properties": {"name": {"type": "string"},
+                                       "mood": {"$ref": "#/components/schemas/Mood"}}},
+                "Mood": {"type": "string", "enum": ["calm", "wild"]},
+            }},
+        })
+    }
+
+    /// The type layer splits by form: the strict `Pet` in the root, its read twin and the
+    /// response-only `Page` in `read`, the shared `Mood` defined once and re-exported there, and
+    /// the client and server spelling response positions through `read`.
+    #[test_util::test]
+    fn read_forms_live_in_a_read_module_beside_re_exported_shared_types() {
+        let config = Config {
+            emit: crate::config::Emit {
+                types: true,
+                client: true,
+                server: true,
+            },
+            ..Config::default()
+        };
+        let rendered = files(read_forms_document(), &config)?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(types.contains("pub name: String,"), "{types}");
+        assert!(types.contains("pub name: Option<String>,"), "{types}");
+        assert!(types.contains("pub mod read {"), "{types}");
+        assert!(types.contains("pub use super::Mood;"), "{types}");
+        assert!(types.contains("impl From<super::Pet> for Pet {"), "{types}");
+        assert!(types.contains("name: Some(value.name),"), "{types}");
+        assert!(types.contains("pub struct Page {"), "{types}");
+        assert!(types.contains("pub items: Option<Vec<Pet>>,"), "{types}");
+        assert!(
+            types.contains("pub extra: std::collections::BTreeMap<String, serde_json::Value>,"),
+            "{types}"
+        );
+        // Every enum is open, in the one place it is defined.
+        assert_eq!(types.matches("pub enum Mood {").count(), 1, "{types}");
+        assert!(types.contains("Unknown(String),"), "{types}");
+        // The read forms decode leniently and derive `Default`; the strict form does neither.
+        assert!(
+            types.contains("impl<'de> super::super::support::Lenient<'de> for Page {"),
+            "{types}"
+        );
+        assert!(
+            types.contains("#[derive(Clone, Debug, Default)]\n    pub struct Page {"),
+            "{types}"
+        );
+        assert!(
+            !types.contains("#[derive(Clone, Debug, Default)]\npub struct Pet {"),
+            "{types}"
+        );
+        assert!(types.contains("pub use super::support::{"), "{types}");
+        assert!(types.contains("Degradations,"), "{types}");
+
+        let client = &rendered[camino::Utf8Path::new("src/client.rs")];
+        assert!(
+            client.contains("ResponseValue<super::types::read::Page>"),
+            "{client}"
+        );
+        assert!(
+            client.contains("ResponseValue<super::types::read::Pet>"),
+            "{client}"
+        );
+        // The body the request sends is the strict form, and it stays in the root.
+        assert!(
+            client.contains("pub body: ::std::option::Option<super::types::Pet>,"),
+            "{client}"
+        );
+        assert!(client.contains("support::decode_lenient("), "{client}");
+        assert!(client.contains("pub fn observe("), "{client}");
+        assert!(client.contains(".observed("), "{client}");
+        assert!(!client.contains("support::decode_json("), "{client}");
+
+        let server = &rendered[camino::Utf8Path::new("src/server.rs")];
+        assert!(
+            server.contains("Ok(Box<super::types::read::Page>)"),
+            "{server}"
+        );
+        assert!(
+            server.contains("Created(Box<super::types::read::Pet>)"),
+            "{server}"
+        );
+        assert!(
+            server.contains("::std::option::Option<super::types::Pet>"),
+            "{server}"
+        );
+
+        let support = &rendered[camino::Utf8Path::new("src/support.rs")];
+        assert!(support.contains("pub mod lenient {"), "{support}");
+        assert!(support.contains("pub mod degradations {"), "{support}");
+        assert!(support.contains("DegradedPage("), "{support}");
+    }
+
+    /// Strict decoding is the one-type world with an empty report: no read module, no lenient
+    /// decoder, the client decoding through serde, and `ResponseValue` still carrying its
+    /// (empty) degradations so a caller's code reads the same either way.
+    #[test_util::test]
+    fn strict_decoding_leaves_out_the_read_module_and_the_decoder() {
+        let config = Config {
+            decoding: crate::config::Decoding::Strict,
+            emit: crate::config::Emit {
+                types: true,
+                client: true,
+                server: true,
+            },
+            ..Config::default()
+        };
+        let rendered = files(read_forms_document(), &config)?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(!types.contains("pub mod read"), "{types}");
+        assert!(!types.contains("Lenient"), "{types}");
+        assert!(types.contains("Unknown(String),"), "still open: {types}");
+        let client = &rendered[camino::Utf8Path::new("src/client.rs")];
+        assert!(
+            client.contains("ResponseValue<super::types::Page>"),
+            "{client}"
+        );
+        assert!(client.contains("support::decode_json("), "{client}");
+        assert!(!client.contains("decode_lenient"), "{client}");
+        let support = &rendered[camino::Utf8Path::new("src/support.rs")];
+        assert!(!support.contains("pub mod lenient"), "{support}");
+        assert!(support.contains("pub mod degradations {"), "{support}");
+        assert!(!support.contains("fn decode_lenient"), "{support}");
+        assert!(support.contains("degradations: Degradations,"), "{support}");
+    }
+
+    /// A stream over read forms asks the page's report about every member on its two paths
+    /// before walking them, and walks them as the `Option`s they are.
+    #[test_util::test]
+    fn a_lenient_stream_checks_the_report_along_its_path() {
+        let config = Config {
+            pagination: [(
+                "list_pets".to_owned(),
+                crate::config::Pagination {
+                    cursor_param: "cursor".to_owned(),
+                    next_cursor: "next".to_owned(),
+                    items: "items".to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let rendered = files(read_forms_document(), &config)?;
+        let client = &rendered[camino::Utf8Path::new("src/client.rs")];
+        assert!(client.contains(".touches("), "{client}");
+        assert!(client.contains("member: Some(\"items\"),"), "{client}");
+        assert!(client.contains("member: Some(\"next\"),"), "{client}");
+        assert!(client.contains("Error::DegradedPage("), "{client}");
+        assert!(client.contains(".and_then(|step| step.items)"), "{client}");
+        assert!(
+            client.contains(".and_then(|step| step.next.as_ref())"),
+            "{client}"
+        );
+        assert!(client.contains(".unwrap_or_default()"), "{client}");
+    }
+
+    /// Under strict decoding the stream is two field walks, as it always was.
+    #[test_util::test]
+    fn a_strict_stream_walks_the_fields_directly() {
+        let config = Config {
+            decoding: crate::config::Decoding::Strict,
+            pagination: [(
+                "list_pets".to_owned(),
+                crate::config::Pagination {
+                    cursor_param: "cursor".to_owned(),
+                    next_cursor: "next".to_owned(),
+                    items: "items".to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let rendered = files(read_forms_document(), &config)?;
+        let client = &rendered[camino::Utf8Path::new("src/client.rs")];
+        assert!(client.contains("let items = page.items;"), "{client}");
+        assert!(
+            client.contains("::std::clone::Clone::clone(&page.next)"),
+            "{client}"
+        );
+        assert!(!client.contains("DegradedPage"), "{client}");
+    }
+
+    /// A twinned type reached through an alias and a boxed union payload converts through the
+    /// alias's target and derefs the box before the method chain, or the conversion does not
+    /// compile — which `posthog` showed.
+    #[test_util::test]
+    fn a_conversion_goes_through_aliases_and_derefs_boxes_first() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/things": {"post": {
+                "operationId": "postThing",
+                "requestBody": {"required": true, "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Thing": {"type": "object", "required": ["name", "parts", "either"],
+                          "properties": {"name": {"type": "string"},
+                                         "parts": {"$ref": "#/components/schemas/Parts"},
+                                         "either": {"$ref": "#/components/schemas/Either"}}},
+                "Parts": {"type": "array", "items": {"$ref": "#/components/schemas/Part"}},
+                "Part": {"type": "object", "required": ["id"],
+                         "properties": {"id": {"type": "integer"}}},
+                "Either": {"oneOf": [{"$ref": "#/components/schemas/Parts"},
+                                     {"$ref": "#/components/schemas/Part"}]},
+            }},
+        });
+        let rendered = files(document, &Config::default())?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(
+            types.contains("impl From<super::Thing> for Thing {"),
+            "{types}"
+        );
+        // The alias `Parts` converts element by element rather than through an `Into` it lacks.
+        assert!(
+            types.contains(".map(::std::convert::Into::into)"),
+            "{types}"
+        );
+        assert!(!types.contains("Into::into(value.parts)"), "{types}");
+        // The boxed union payload is unboxed into a binding before the chain.
+        assert!(types.contains("let unboxed = *value;"), "{types}");
+        assert!(!types.contains("*value\n"), "{types}");
+    }
+
+    /// A twinned type inside a presence-preserving member converts through `Presence::map`,
+    /// which the shipped support module defines beside `Option`'s, and a member declared
+    /// `type: null` is read as one that allows `null` whatever else it declares.
+    #[test_util::test]
+    fn a_presence_member_converts_and_a_null_member_allows_null() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/things": {"post": {
+                "operationId": "postThing",
+                "requestBody": {"required": true, "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Thing": {"type": "object", "required": ["name", "nothing"],
+                          "properties": {"name": {"type": "string"},
+                                         "nothing": {"type": "null"},
+                                         "part": {"type": ["object", "null"], "required": ["id"],
+                                                  "properties": {"id": {"type": "integer"}}}}},
+            }},
+        });
+        let config = Config {
+            preserve_optional_nullable: true,
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        let support = &rendered[camino::Utf8Path::new("src/support.rs")];
+        assert!(types.contains("part: value.part.map("), "{types}");
+        assert!(
+            support.contains("pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Presence<U>"),
+            "{support}"
+        );
+        let nothing = types
+            .find("member: Some(\"nothing\")")
+            .ok_or_eyre("the null member's site")?;
+        let after = &types[nothing..];
+        let declared = after.find("Declared::").ok_or_eyre("its declaration")?;
+        assert!(
+            after[declared..].starts_with("Declared::Nullable"),
+            "{after}"
+        );
+    }
+
+    /// A deprecated type that twins converts through the non-deprecated aliases, so neither the
+    /// conversion nor the decoder carries an expectation that nothing would fulfil — which the
+    /// consumer's build denies as loudly as a real warning.
+    #[test_util::test]
+    fn a_deprecated_twin_carries_no_unfulfilled_expectation() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/things": {"post": {
+                "operationId": "postThing",
+                "requestBody": {"required": true, "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Thing": {"type": "object", "deprecated": true, "required": ["name"],
+                          "properties": {"name": {"type": "string"},
+                                         "old": {"type": "string", "deprecated": true}}},
+            }},
+        });
+        let rendered = files(document, &Config::default())?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(
+            types.contains("for __progeny_deprecated::Thing {"),
+            "{types}"
+        );
+        // The one place the impl names a deprecated item is a member, and that statement carries
+        // the expectation.
+        let (_, conversion) = types
+            .split_once("impl From<super::__progeny_deprecated::Thing>")
+            .ok_or_eyre("the conversion is rendered")?;
+        let (before, _) = types
+            .split_once("impl From<super::__progeny_deprecated::Thing>")
+            .ok_or_eyre("the conversion is rendered")?;
+        assert!(
+            !before.trim_end().ends_with(")]"),
+            "no expectation on the impl: {types}"
+        );
+        assert!(
+            conversion.contains("must fill this deprecated contract member"),
+            "{conversion}"
+        );
     }
 }

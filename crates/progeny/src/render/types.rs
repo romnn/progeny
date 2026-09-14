@@ -15,25 +15,128 @@ use quote::{format_ident, quote};
 use crate::api::{ApiModel, BodyContract, ResponseBody};
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{
-    ContractKind, Contracts, DeserStrategy, FieldContract, RustIdent, SkipRule, TypeContract,
+    ContractKind, Contracts, DeserStrategy, FieldContract, Form, RustIdent, SkipRule, TypeContract,
     TypeRef,
 };
 use crate::shape::{Docs, Format};
 
-/// Render every type in the contract set.
+/// Where a type is being spelled from, which decides how a named type and the support module are
+/// reached.
+///
+/// The type layer is two modules: the root, holding strict and shared types, and `read`, holding
+/// the read forms beside re-exports of every shared type a response can yield. From inside
+/// `read` every type is a bare name; from the root a read form is `read::Name`; from an edge
+/// module both go through `super::types`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// The root of the types module.
+    Types,
+    /// Inside `types::read`.
+    Read,
+    /// A sibling module of `types`: the client or the server.
+    Edge,
+}
+
+impl Scope {
+    /// The module a contract's own items are rendered in.
+    pub(super) fn of(contract: &TypeContract) -> Self {
+        if contract.form().is_lenient() {
+            Self::Read
+        } else {
+            Self::Types
+        }
+    }
+
+    /// The path to the support module from here.
+    pub(super) fn support(self) -> TokenStream {
+        match self {
+            Self::Types | Self::Edge => quote! { super::support },
+            Self::Read => quote! { super::super::support },
+        }
+    }
+}
+
+/// The rendered type layer: the root module's items and, when a response yields anything, the
+/// `read` module's.
+pub(super) struct Rendered {
+    pub(super) root: TokenStream,
+    pub(super) read: Option<TokenStream>,
+}
+
+/// Render every type in the contract set, with every impl each one carries.
 pub(super) fn render(
     contracts: &Contracts,
     api: &ApiModel,
     api_modules: bool,
     external_api_modules: bool,
     config: &Config,
-) -> TokenStream {
-    let deprecated = deprecated_aliases(contracts, api, api_modules, external_api_modules);
-    let items = contracts
-        .types()
-        .iter()
-        .map(|contract| one(contract, contracts, config));
-    quote! { #deprecated #(#items)* }
+) -> Rendered {
+    let (root_needed, read_needed) = deprecated_alias_names(contracts, api, api_modules);
+    let deprecated =
+        deprecated_aliases(contracts, &root_needed, Scope::Types, external_api_modules);
+    let mut root = Vec::new();
+    let mut read = Vec::new();
+    for contract in contracts.types() {
+        let item = one(contract, contracts, config);
+        let serde = super::serde_impl::one(contract);
+        let lenient = super::lenient::impls(contract, contracts, config);
+        let tokens = quote! { #item #serde #lenient };
+        if contract.form().is_lenient() {
+            read.push(tokens);
+        } else {
+            root.push(tokens);
+        }
+    }
+    let read = contracts.has_read_forms().then(|| {
+        let deprecated =
+            deprecated_aliases(contracts, &read_needed, Scope::Read, external_api_modules);
+        let shared = contracts
+            .types()
+            .iter()
+            .filter(|contract| contract.form() == Form::Shared)
+            .map(|contract| {
+                let name = ident(contract.rust_name());
+                if contract.docs().deprecated {
+                    quote! {
+                        #[expect(
+                            deprecated,
+                            reason = "the read module re-exports every type a response yields"
+                        )]
+                        pub use super::#name;
+                    }
+                } else {
+                    quote! { pub use super::#name; }
+                }
+            });
+        quote! {
+            /// What a response decodes into.
+            ///
+            /// Every type here is the *read form* of a type in the description. A struct the
+            /// description requires members of has every member optional here, and keeps the
+            /// members the description does not declare in `extra`. A type the description
+            /// reaches from a request as well has its strict form in the parent module and its
+            /// read twin here, and converts into it with `From`; a type both forms agree on —
+            /// nothing required anywhere inside — is defined in the parent module and
+            /// re-exported here, so everything a response yields can be named as `read::…`.
+            /// Such a shared type has no `extra`: an undeclared member it reads is reported and
+            /// not kept, because the same type is what a request sends.
+            ///
+            /// Reading through the generated client tolerates a member that is absent, `null`
+            /// or unreadable and reports it, and leaves out a list element it cannot read.
+            /// `serde_json::from_str` on a read struct does the same and drops the report; on a
+            /// read alias of a list it is serde's own list reading, which refuses the whole
+            /// list over one element.
+            pub mod read {
+                #deprecated
+                #(#shared)*
+                #(#read)*
+            }
+        }
+    });
+    Rendered {
+        root: quote! { #deprecated #(#root)* },
+        read,
+    }
 }
 
 /// Non-deprecated paths the generated implementation uses to name deprecated public contracts.
@@ -41,14 +144,14 @@ pub(super) fn render(
 /// The public declaration keeps its `#[deprecated]` marker, so callers still get the intended
 /// warning. Generated derives and support code use these transparent aliases instead: procedural
 /// macro expansions cannot inherit a field's `#[expect]`, so aliases are the only way to keep those
-/// internal uses clean without a broad `#[allow(deprecated)]`.
+/// internal uses clean without a broad `#[allow(deprecated)]`. Each module of the type layer
+/// carries its own, aliasing what that module's items name.
 fn deprecated_aliases(
     contracts: &Contracts,
-    api: &ApiModel,
-    api_modules: bool,
+    needed: &BTreeSet<String>,
+    scope: Scope,
     external_api_modules: bool,
 ) -> TokenStream {
-    let needed = deprecated_alias_names(contracts, api, api_modules);
     let visibility = if external_api_modules {
         quote! { pub }
     } else {
@@ -58,7 +161,10 @@ fn deprecated_aliases(
         .types()
         .iter()
         .filter(|contract| {
-            contract.docs().deprecated && needed.contains(contract.rust_name().as_str())
+            contract.docs().deprecated
+                && needed.contains(contract.rust_name().as_str())
+                && (Scope::of(contract) == scope
+                    || (scope == Scope::Read && contract.form() == Form::Shared))
         })
         .map(|contract| {
             let name = ident(contract.rust_name());
@@ -82,32 +188,51 @@ fn deprecated_aliases(
     }
 }
 
+/// The deprecated names each module's items reach: the root's, then `read`'s.
 fn deprecated_alias_names(
     contracts: &Contracts,
     api: &ApiModel,
     api_modules: bool,
-) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut root = BTreeSet::new();
+    let mut read = BTreeSet::new();
     for contract in contracts.types() {
+        let names = if contract.form().is_lenient() {
+            &mut read
+        } else {
+            &mut root
+        };
         for reference in contract.kind().references() {
-            note_deprecated(reference, contracts, &mut names);
+            note_deprecated(reference, contracts, names);
         }
+        // Its own impls name it: the hand-written serde ones, and the lenient decoder every
+        // read-reachable type carries.
         if contract.docs().deprecated
             && (contract.deser() != DeserStrategy::Derive
-                || matches!(contract.kind(), ContractKind::StringEnum { .. }))
+                || matches!(contract.kind(), ContractKind::StringEnum { .. })
+                || contract.form().is_read())
         {
             names.insert(contract.rust_name().as_str().to_owned());
         }
+        // A twin's `From` impl names its strict half from inside `read`.
+        if let Form::Lenient {
+            strict: Some(strict),
+        } = contract.form()
+            && let Some(strict) = contracts.get(strict)
+            && strict.docs().deprecated
+        {
+            root.insert(strict.rust_name().as_str().to_owned());
+        }
     }
     if !api_modules {
-        return names;
+        return (root, read);
     }
     for operation in api.operations() {
         for param in &operation.params {
-            note_deprecated(&param.ty, contracts, &mut names);
+            note_deprecated(&param.ty, contracts, &mut root);
         }
         if let Some(ty) = operation.body.as_ref().and_then(BodyContract::ty) {
-            note_deprecated(ty, contracts, &mut names);
+            note_deprecated(ty, contracts, &mut root);
         }
         for arm in operation
             .responses
@@ -116,11 +241,26 @@ fn deprecated_alias_names(
             .chain(&operation.responses.default)
         {
             if let Some(ty) = arm.body.json_type() {
-                note_deprecated(ty, contracts, &mut names);
+                // A response position names read forms, spelled through `read`'s aliases; a
+                // shared type it names is re-exported there and aliased there too.
+                let mut reached = Vec::new();
+                ty.named(&mut reached);
+                for index in reached {
+                    if let Some(contract) = contracts.get(index)
+                        && contract.docs().deprecated
+                    {
+                        let names = if contract.form().is_lenient() {
+                            &mut read
+                        } else {
+                            &mut root
+                        };
+                        names.insert(contract.rust_name().as_str().to_owned());
+                    }
+                }
             }
         }
     }
-    names
+    (root, read)
 }
 
 fn note_deprecated(ty: &TypeRef, contracts: &Contracts, names: &mut BTreeSet<String>) {
@@ -136,87 +276,78 @@ fn note_deprecated(ty: &TypeRef, contracts: &Contracts, names: &mut BTreeSet<Str
 }
 
 fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> TokenStream {
+    let scope = Scope::of(contract);
     let name = ident(contract.rust_name());
-    // A type the document documented says what it is; one it did not says where it came from, which
-    // is the next most useful thing for someone reading checked-in generated source.
-    let docs = if contract.docs().is_empty() {
-        let origin = format!(" Generated from `{}`.", contract.origin());
-        quote! { #[doc = #origin] }
-    } else {
-        docs(contract.docs())
-    };
+    let docs = type_docs(contract);
     // The serde derives join the typed derive set in one attribute: which of them appears is the
     // serde strategy's business, and the strategy was decided by the eligibility function.
     let derives = derives(contract);
 
     match contract.kind() {
         ContractKind::Struct { fields } => {
-            let deny = match (contract.deser(), contract.unknown_fields()) {
-                (DeserStrategy::Derive, crate::config::UnknownFields::Deny) => {
-                    quote! { #[serde(deny_unknown_fields)] }
-                }
-                _ => quote! {},
-            };
-            let members = fields
-                .iter()
-                .map(|field| member(field, contract, contracts, config));
-            quote! {
-                #docs
-                #derives
-                #deny
-                pub struct #name {
-                    #(#members)*
-                }
-            }
-        }
-        ContractKind::Enum { variants } => {
-            let body = data_enum(variants, contract, contracts, config);
+            let body = struct_item(fields, contract, contracts, config, scope);
             quote! {
                 #docs
                 #derives
                 #body
             }
         }
-        ContractKind::TaggedEnum { tag, variants } => {
-            let body = tagged_enum(tag, variants, contract, contracts, config);
+        ContractKind::Enum { variants, fallback } => {
+            let body = data_enum(variants, fallback, contract, contracts, config, scope);
             quote! {
                 #docs
                 #derives
                 #body
             }
         }
-        ContractKind::CarriedTagEnum { variants, .. } => {
-            let body = carried_tag_enum(variants, contract, contracts, config);
+        ContractKind::TaggedEnum {
+            tag,
+            variants,
+            fallback,
+        } => {
+            let body = tagged_enum(tag, variants, fallback, contract, contracts, config, scope);
             quote! {
                 #docs
                 #derives
                 #body
             }
         }
-        ContractKind::StringEnum { variants } => {
-            let with_serde = contract.deser() == DeserStrategy::Derive;
+        ContractKind::CarriedTagEnum {
+            variants, fallback, ..
+        } => {
+            let body = carried_tag_enum(variants, fallback, contract, contracts, config, scope);
+            quote! {
+                #docs
+                #derives
+                #body
+            }
+        }
+        ContractKind::StringEnum { variants, fallback } => {
+            // Never a serde attribute here: an open string enum is hand-written under both
+            // strategies, because no derive encoding keeps an unlisted string verbatim.
             let arms = variants.iter().map(|variant| {
                 let variant_ident = ident(&variant.rust_name);
-                let wire = &variant.wire_name;
-                // Only under the derive: with no serde derive on the item, a `#[serde(...)]` helper
-                // attribute does not even resolve, and the crate fails to compile. Stripping them is
-                // mandatory rather than tidy.
-                let rename = (with_serde && variant_ident != *wire)
-                    .then(|| quote! { #[serde(rename = #wire)] });
-                quote! { #rename #variant_ident, }
+                quote! { #variant_ident, }
             });
-            let accessor = string_enum_accessor(contract, variants);
+            let fallback_ident = ident(fallback);
+            let accessor = string_enum_accessor(contract, variants, fallback);
             quote! {
                 #docs
                 #derives
                 pub enum #name {
                     #(#arms)*
+                    /// A value the description does not list, kept exactly as it arrived.
+                    ///
+                    /// Written back unchanged, so a value round-trips whether or not the
+                    /// description knows it, and a request can carry one the description has
+                    /// not caught up with.
+                    #fallback_ident(String),
                 }
                 #accessor
             }
         }
         ContractKind::Newtype { inner } => {
-            let ty = type_ref(inner, contracts, config);
+            let ty = type_ref_in(inner, contracts, config, scope);
             quote! {
                 #docs
                 #derives
@@ -225,7 +356,7 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
         }
         ContractKind::Tuple { items } => {
             let members = items.iter().map(|item| {
-                let ty = type_ref(item, contracts, config);
+                let ty = type_ref_in(item, contracts, config, scope);
                 quote! { pub #ty, }
             });
             quote! {
@@ -235,7 +366,7 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
             }
         }
         ContractKind::Alias { target } => {
-            let ty = type_ref(target, contracts, config);
+            let ty = type_ref_in(target, contracts, config, scope);
             quote! {
                 #docs
                 pub type #name = #ty;
@@ -244,16 +375,18 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
     }
 }
 
-/// The `as_str` accessor of a string enum: each variant's wire value, as a static string.
+/// The `as_str` accessor of a string enum: each variant's wire value.
 ///
 /// The mapping already exists inside the type's `Serialize`, but reaching it there costs a
 /// serializer round trip and a caller-side helper that accepts anything `Serialize` — the shape of
 /// workaround this method exists to make unnecessary. A Rust variant name is progeny's spelling
 /// and the wire value is the document's; this hands back the second one, which is the only one
-/// that belongs in a payload or a lookup a caller assembles.
+/// that belongs in a payload or a lookup a caller assembles. Borrowed from `self` rather than
+/// `'static`, because the fallback variant's string lives in the value.
 fn string_enum_accessor(
     contract: &TypeContract,
     variants: &[crate::contract::StringVariant],
+    fallback: &RustIdent,
 ) -> TokenStream {
     let name = super::serde_impl::implementation_type(contract);
     let arms = variants.iter().map(|variant| {
@@ -271,16 +404,27 @@ fn string_enum_accessor(
             quote! { Self::#member => #wire, }
         }
     });
+    let fallback = ident(fallback);
+    let unlisted = if contract.docs().deprecated {
+        quote! {
+            #[expect(
+                deprecated,
+                reason = "the generated accessor must match this deprecated variant"
+            )]
+            Self::#fallback(value) => value,
+        }
+    } else {
+        quote! { Self::#fallback(value) => value, }
+    };
     quote! {
         impl #name {
             /// The string this value puts on the wire: the `enum` value the document declares,
-            /// not the Rust variant name.
+            /// not the Rust variant name — or the unlisted value itself.
             #[must_use]
-            pub fn as_str(&self) -> &'static str {
-                // Through the deref, so that an enum a document declares with no values still has
-                // an exhaustive match: emptiness is only visible on the place itself.
-                match *self {
+            pub fn as_str(&self) -> &str {
+                match self {
                     #(#arms)*
+                    #unlisted
                 }
             }
         }
@@ -291,9 +435,11 @@ fn string_enum_accessor(
 /// there is nothing to rename.
 fn data_enum(
     variants: &[crate::contract::VariantContract],
+    fallback: &RustIdent,
     contract: &TypeContract,
     contracts: &Contracts,
     config: &Config,
+    scope: Scope,
 ) -> TokenStream {
     let name = ident(contract.rust_name());
     let tagging = match contract.deser() {
@@ -308,14 +454,30 @@ fn data_enum(
     };
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = enum_type_ref(&variant.ty, contracts, config);
+        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
+    // Last, because an untagged enum takes the first variant that reads the payload and
+    // arbitrary JSON reads every payload.
+    let fallback = fallback_variant(fallback, "fits no variant's shape");
     quote! {
         #tagging
         pub enum #name {
             #(#arms)*
+            #fallback
         }
+    }
+}
+
+/// The open arm of a union: the payload as arbitrary JSON, boxed like every other variant.
+fn fallback_variant(fallback: &RustIdent, when: &str) -> TokenStream {
+    let fallback = ident(fallback);
+    let summary = format!(" A payload that {when}, kept exactly as it arrived.");
+    quote! {
+        #[doc = #summary]
+        #[doc = ""]
+        #[doc = " Written back unchanged, so a value round-trips whether or not the description knows its shape."]
+        #fallback(Box<serde_json::Value>),
     }
 }
 
@@ -326,19 +488,23 @@ fn data_enum(
 /// else — the tag and the wire names are the impls' business.
 fn carried_tag_enum(
     variants: &[crate::contract::TaggedVariant],
+    fallback: &RustIdent,
     contract: &TypeContract,
     contracts: &Contracts,
     config: &Config,
+    scope: Scope,
 ) -> TokenStream {
     let name = ident(contract.rust_name());
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = enum_type_ref(&variant.ty, contracts, config);
+        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
+    let fallback = fallback_variant(fallback, "names no variant in its tag");
     quote! {
         pub enum #name {
             #(#arms)*
+            #fallback
         }
     }
 }
@@ -352,9 +518,11 @@ fn carried_tag_enum(
 fn tagged_enum(
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    fallback: &RustIdent,
     contract: &TypeContract,
     contracts: &Contracts,
     config: &Config,
+    scope: Scope,
 ) -> TokenStream {
     let name = ident(contract.rust_name());
     let tagging = match contract.deser() {
@@ -370,16 +538,23 @@ fn tagged_enum(
     let with_serde = contract.deser() == DeserStrategy::Derive;
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = enum_type_ref(&variant.ty, contracts, config);
+        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         let wire = &variant.tag_value;
         let rename =
             (with_serde && variant_ident != *wire).then(|| quote! { #[serde(rename = #wire)] });
         quote! { #rename #variant_ident(#ty), }
     });
+    // serde tries every tagged variant first and falls through to an untagged one only when
+    // none read the payload, which is exactly the open arm: a tag the description does not
+    // list, or a payload the named variant cannot read.
+    let untagged = with_serde.then(|| quote! { #[serde(untagged)] });
+    let fallback = fallback_variant(fallback, "names no variant in its tag");
     quote! {
         #tagging
         pub enum #name {
             #(#arms)*
+            #untagged
+            #fallback
         }
     }
 }
@@ -433,14 +608,86 @@ impl<'ast> syn::visit::Visit<'ast> for TypeComplexity {
     }
 }
 
+/// A type's doc comment.
+///
+/// A type the document documented says what it is; one it did not says where it came from, which
+/// is the next most useful thing for someone reading checked-in generated source. A read form
+/// says so first, because its members are not the description's members.
+fn type_docs(contract: &TypeContract) -> TokenStream {
+    let described = if contract.docs().is_empty() {
+        let origin = format!(" Generated from `{}`.", contract.origin());
+        quote! { #[doc = #origin] }
+    } else {
+        docs(contract.docs())
+    };
+    // What the read form changed depends on the kind: a struct loosened its members and grew a
+    // capture map, everything else only names the read forms of what it holds.
+    let shape = if matches!(contract.kind(), ContractKind::Struct { .. }) {
+        quote! {
+            /// The read form: what a response decodes into. Every member is optional and
+            /// undeclared members are kept in `extra`.
+        }
+    } else {
+        quote! {
+            /// The read form: what a response decodes into, naming the read forms of what it
+            /// holds.
+        }
+    };
+    match contract.form() {
+        Form::Lenient { strict: Some(_) } => quote! {
+            #shape
+            /// The strict form in the parent module is what a request sends, and converts into
+            /// this with `From`.
+            ///
+            #described
+        },
+        Form::Lenient { strict: None } => quote! {
+            #shape
+            ///
+            #described
+        },
+        Form::Strict { .. } | Form::Shared => described,
+    }
+}
+
+/// A struct's declaration: its serde attribute, if any, and one member per field.
+fn struct_item(
+    fields: &[FieldContract],
+    contract: &TypeContract,
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> TokenStream {
+    let name = ident(contract.rust_name());
+    // A read form has no derived `Deserialize` to deny anything on.
+    let deny = match (contract.deser(), contract.unknown_fields()) {
+        (DeserStrategy::Derive, crate::config::UnknownFields::Deny)
+            if !contract.form().is_lenient() =>
+        {
+            quote! { #[serde(deny_unknown_fields)] }
+        }
+        _ => quote! {},
+    };
+    let members = fields
+        .iter()
+        .map(|field| member(field, contract, contracts, config, scope));
+    quote! {
+        #deny
+        pub struct #name {
+            #(#members)*
+        }
+    }
+}
+
 fn member(
     field: &FieldContract,
     contract: &TypeContract,
     contracts: &Contracts,
     config: &Config,
+    scope: Scope,
 ) -> TokenStream {
     let name = ident(&field.rust_name);
-    let ty = type_ref(&field.ty, contracts, config);
+    let ty = type_ref_in(&field.ty, contracts, config, scope);
     let nesting = type_complexity(&ty);
     let docs = with_default(docs(&field.docs), field);
     if contract.deser() != DeserStrategy::Derive {
@@ -448,21 +695,23 @@ fn member(
         // does not consult attributes, so leaving them on would be a second source of truth.
         return quote! { #docs #nesting pub #name: #ty, };
     }
+    let support = scope.support();
 
     let mut attributes = Vec::new();
-    if field.flatten {
+    if field.is_capture() {
         attributes.push(quote! { flatten });
     } else if name != field.wire_name {
         let wire = &field.wire_name;
         attributes.push(quote! { rename = #wire });
     }
-    if field.skip_serializing_if == SkipRule::WhenNone && !field.flatten {
+    if field.skip_serializing_if == SkipRule::WhenNone && !field.is_capture() {
         attributes.push(quote! { skip_serializing_if = "Option::is_none" });
     }
-    if field.skip_serializing_if == SkipRule::WhenOmitted && !field.flatten {
+    if field.skip_serializing_if == SkipRule::WhenOmitted && !field.is_capture() {
+        let is_omitted = format!("{support}::Presence::is_omitted");
         attributes.push(quote! {
             default,
-            skip_serializing_if = "super::support::Presence::is_omitted"
+            skip_serializing_if = #is_omitted
         });
     }
     let serde = (!attributes.is_empty()).then(|| quote! { #[serde(#(#attributes),*)] });
@@ -498,21 +747,31 @@ fn derives(contract: &TypeContract) -> TokenStream {
         .iter()
         .map(|derive| format_ident!("{}", derive.name()));
     // The serde derives are only present under the derive strategy; the hand-written path carries
-    // no serde attributes at all, so it must carry no serde derive either.
-    let serde = match contract.deser() {
-        DeserStrategy::Derive => quote! { , serde::Serialize, serde::Deserialize },
-        DeserStrategy::HandWrittenBuffered { .. }
-        | DeserStrategy::HandWrittenFieldless
-        | DeserStrategy::HandWrittenCarriedTag => {
+    // no serde attributes at all, so it must carry no serde derive either. A read form's
+    // `Deserialize` goes through the lenient decoder and is written by hand under both.
+    let serde = match (contract.deser(), contract.form().is_lenient()) {
+        (DeserStrategy::Derive, false) => quote! { , serde::Serialize, serde::Deserialize },
+        (DeserStrategy::Derive, true) => quote! { , serde::Serialize },
+        (
+            DeserStrategy::HandWrittenBuffered { .. }
+            | DeserStrategy::HandWrittenFieldless
+            | DeserStrategy::HandWrittenCarriedTag,
+            _,
+        ) => {
             quote! {}
         }
     };
     quote! { #[derive(#(#names),* #serde)] }
 }
 
-/// A type reference, spelled out.
-pub(super) fn type_ref(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
-    reference(ty, contracts, config, false)
+/// A type reference, spelled out from the given scope.
+pub(crate) fn type_ref_in(
+    ty: &TypeRef,
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> TokenStream {
+    reference(ty, contracts, config, scope)
 }
 
 /// The same type, named from outside the `types` module.
@@ -522,7 +781,7 @@ pub(super) fn type_ref(ty: &TypeRef, contracts: &Contracts, config: &Config) -> 
 /// `Error` — the petstore has one — would otherwise produce `Error<Error>` whose two `Error`s are
 /// different types. The bug is silent, because it still compiles.
 pub(crate) fn type_path(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
-    reference(ty, contracts, config, true)
+    reference(ty, contracts, config, Scope::Edge)
 }
 
 /// A response payload named from outside the `types` module.
@@ -567,17 +826,13 @@ pub(crate) fn enum_type_is_boxed(ty: &TypeRef) -> bool {
     !matches!(ty, TypeRef::Unit)
 }
 
-fn enum_type_ref(ty: &TypeRef, contracts: &Contracts, config: &Config) -> TokenStream {
-    enum_reference(ty, contracts, config, false)
-}
-
-fn enum_reference(
+fn enum_type_ref(
     ty: &TypeRef,
     contracts: &Contracts,
     config: &Config,
-    qualified: bool,
+    scope: Scope,
 ) -> TokenStream {
-    let rendered = reference(ty, contracts, config, qualified);
+    let rendered = reference(ty, contracts, config, scope);
     if enum_type_is_boxed(ty) {
         quote! { Box<#rendered> }
     } else {
@@ -585,20 +840,29 @@ fn enum_reference(
     }
 }
 
-fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, qualified: bool) -> TokenStream {
-    let type_ref = |inner: &TypeRef| reference(inner, contracts, config, qualified);
+fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope) -> TokenStream {
+    let type_ref = |inner: &TypeRef| reference(inner, contracts, config, scope);
+    let support = scope.support();
     match ty {
         TypeRef::Named(index) => {
             if let Some(contract) = contracts.get(*index) {
                 let name = ident(contract.rust_name());
-                if contract.docs().deprecated && qualified {
-                    quote! { super::types::__progeny_deprecated::#name }
-                } else if contract.docs().deprecated {
-                    quote! { __progeny_deprecated::#name }
-                } else if qualified {
-                    quote! { super::types::#name }
+                // A read form lives in `read`; everything else in the root. A shared type is
+                // re-exported into `read`, so from inside it every type a response can yield is
+                // a bare name; a strict type is not — its twin holds that name there — and is
+                // reached in the root, which only a twin's conversion from it ever does.
+                let module = match (scope, contract.form()) {
+                    (Scope::Read, Form::Lenient { .. } | Form::Shared)
+                    | (Scope::Types, Form::Strict { .. } | Form::Shared) => quote! {},
+                    (Scope::Read, Form::Strict { .. }) => quote! { super:: },
+                    (Scope::Types, Form::Lenient { .. }) => quote! { read:: },
+                    (Scope::Edge, Form::Strict { .. } | Form::Shared) => quote! { super::types:: },
+                    (Scope::Edge, Form::Lenient { .. }) => quote! { super::types::read:: },
+                };
+                if contract.docs().deprecated {
+                    quote! { #module __progeny_deprecated::#name }
                 } else {
-                    quote! { #name }
+                    quote! { #module #name }
                 }
             } else {
                 // Unreachable: every index comes from the contract set it is rendered against.
@@ -612,9 +876,9 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, qualified: bo
         TypeRef::F64 => quote! { f64 },
         TypeRef::String => quote! { String },
         TypeRef::Format(format) => format_type(*format, config),
-        // One level up in every emission mode: the types module and the support module are
-        // siblings, whether they live in one crate or the types crate carries both.
-        TypeRef::Upload => quote! { super::support::Upload },
+        // The types module and the support module are siblings in every packaging, whether
+        // they live in one crate or the types crate carries both; `read` is one level further in.
+        TypeRef::Upload => quote! { #support::Upload },
         TypeRef::Value => quote! { serde_json::Value },
         TypeRef::Option(inner) => {
             let inner = type_ref(inner);
@@ -622,7 +886,7 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, qualified: bo
         }
         TypeRef::Presence(inner) => {
             let inner = type_ref(inner);
-            quote! { super::support::Presence<#inner> }
+            quote! { #support::Presence<#inner> }
         }
         TypeRef::Vec(inner) => {
             let inner = type_ref(inner);

@@ -125,6 +125,7 @@ impl Build<'_> {
                 },
                 docs: Docs::default(),
                 rust_name: used.unique(name),
+                origin: at.clone(),
             };
         };
 
@@ -134,12 +135,14 @@ impl Build<'_> {
             None => ResponseBody::Empty,
             Some(content) => match self.select(content, at, accept, ctx) {
                 None => ResponseBody::Empty,
+                // A response decodes into the read form of its type: the same type where the
+                // strict and lenient shapes agree, the `read::` twin where they do not, and the
+                // type itself under strict decoding.
                 Some((media_type, entry)) if is_json(&media_type_stem(media_type)) => {
                     ResponseBody::Json {
-                        ty: entry
-                            .schema
-                            .map_or(TypeRef::Value, |id| self.type_at(id))
-                            .clone(),
+                        ty: self
+                            .contracts
+                            .read_form(&entry.schema.map_or(TypeRef::Value, |id| self.type_at(id))),
                         content_type: media_type.to_owned(),
                     }
                 }
@@ -161,6 +164,7 @@ impl Build<'_> {
                 ..Docs::default()
             },
             rust_name: used.unique(name),
+            origin: at.clone(),
         }
     }
 }

@@ -61,6 +61,13 @@ pub struct Args {
     #[arg(long, conflicts_with = "ab")]
     hand_written: bool,
 
+    /// Generate with strict response decoding rather than the lenient default.
+    ///
+    /// The decoding A/B: lenient decoding adds read forms and their decoders to the type layer,
+    /// and this is how their compile cost is measured against the same document without them.
+    #[arg(long, conflicts_with = "crate_dir")]
+    strict: bool,
+
     /// Generate the opt-in three-crate workspace and measure every member separately.
     #[arg(long, conflicts_with = "crate_dir")]
     workspace: bool,

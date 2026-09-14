@@ -365,8 +365,12 @@ fn test_path(rendered: &proc_macro2::TokenStream) -> String {
 
 fn test_type(rendered: &proc_macro2::TokenStream) -> (String, bool) {
     let rendered = rendered.to_string();
-    let deprecated = rendered.contains("super :: types :: __progeny_deprecated :: ");
+    let deprecated = rendered.contains(":: __progeny_deprecated :: ");
     let path = rendered
+        .replace(
+            "super :: types :: read :: __progeny_deprecated :: ",
+            "types::read::",
+        )
         .replace("super :: types :: __progeny_deprecated :: ", "types::")
         .replace("super :: types :: ", "types::")
         .replace(' ', "");
@@ -566,7 +570,7 @@ fn synthesize_named(
             for field in fields {
                 // The capture member is the landing place for undeclared members, and the probe
                 // sends none.
-                if field.flatten {
+                if field.is_capture() {
                     continue;
                 }
                 match synthesize(&field.ty, contracts, visiting) {
@@ -585,7 +589,7 @@ fn synthesize_named(
             }
             Value::Object(members)
         }
-        ContractKind::StringEnum { variants } => match variants.first() {
+        ContractKind::StringEnum { variants, .. } => match variants.first() {
             Some(variant) => json!(variant.wire_name),
             None => {
                 return Err(SynthesisError::EmptyStringEnum {
@@ -593,7 +597,7 @@ fn synthesize_named(
                 });
             }
         },
-        ContractKind::Enum { variants } => {
+        ContractKind::Enum { variants, .. } => {
             let Some(variant) = variants.first() else {
                 return Err(SynthesisError::EmptyUnion {
                     name: contract.rust_name().as_str().to_owned(),
@@ -604,8 +608,8 @@ fn synthesize_named(
         // One synthesis for both tag styles. A consumed union's variant lacks the member, so the
         // insert adds it; a carried union's variant declares it, so the insert overwrites whatever
         // placeholder the member synthesized as — either way the payload names the variant it is.
-        ContractKind::TaggedEnum { tag, variants }
-        | ContractKind::CarriedTagEnum { tag, variants } => {
+        ContractKind::TaggedEnum { tag, variants, .. }
+        | ContractKind::CarriedTagEnum { tag, variants, .. } => {
             let Some(variant) = variants.first() else {
                 return Err(SynthesisError::EmptyUnion {
                     name: contract.rust_name().as_str().to_owned(),

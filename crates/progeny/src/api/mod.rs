@@ -275,6 +275,10 @@ pub(crate) struct ResponseArm {
     pub(crate) docs: Docs,
     /// The variant name this arm contributes to the response enum.
     pub(crate) rust_name: RustIdent,
+    /// The response's position in the document, which is what a degradation at the body's root
+    /// — a skipped element of a top-level list, an unrecognized top-level union — is reported
+    /// under.
+    pub(crate) origin: JsonPointer,
 }
 
 /// What one response arm carries on the wire.

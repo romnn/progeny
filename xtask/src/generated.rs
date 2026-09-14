@@ -106,6 +106,7 @@ pub fn write_wire_test(directory: &Utf8Path, file_name: &str, source: &str) -> e
             {existing}
             [dev-dependencies]
             color-eyre = "0.6"
+            futures-util = "0.3"
             test-util = {{ path = "../../../crates/test-util" }}
             tokio = {{ version = "1", features = ["rt-multi-thread", "macros", "net"] }}
         "#},

@@ -99,6 +99,77 @@ longer exists, its declared type or shape changes, or the specification makes it
 the entry must then be reviewed and removed or updated. Globally preserving presence also enriches
 response fields because request and response bodies intentionally share one generated type graph.
 
+## Reading responses leniently
+
+A vendor's description is a promise the vendor does not always keep, and a client that refuses a
+whole response over one `null` in one record turns a description defect into an outage. So the
+generated client reads responses **leniently** by default: a member that is absent, `null`, or
+not what the description declared becomes `None`; a list element that cannot be read is left out;
+an enum value or a union payload the description does not list lands in the type's `Unknown`
+arm with its bytes intact; a member the description never declared is kept in `extra`. Nothing
+is invented and nothing is silent — every deviation is recorded, keyed by its place in the
+*description* rather than in the payload, so a page of two hundred records with the same drift is
+one entry naming the pointer an override would use:
+
+```text
+EmploymentPartnerApi.type: null where the description does not allow it ×14 (/components/schemas/EmploymentPartnerApi/properties/type)
+```
+
+The types a response decodes into are its **read forms**, in `types::read`. A type only a
+response yields is written in that form; one a request sends as well keeps its strict form in
+`types` — every required member present, enforced at compile time — and gains a read twin in
+`read` only where the two shapes differ, with an infallible `From<Strict>` between them. A type
+the two shapes agree on (nothing required anywhere inside) is one type, re-exported into `read`;
+it reports an undeclared member and does not keep it, because the same type is what a request
+sends. Every generated enum is open in both forms. A read struct's `Deserialize` is the lenient
+decode with the report discarded (a read alias of a list is serde's own list reading, which
+refuses the whole list over one element); the generated client keeps the report:
+
+```rust
+let page = client.list_users().send().await?;
+if page.is_degraded() {
+    tracing::warn!(drift = %page.degradations(), "the vendor's response drifted from its description");
+}
+for user in page.into_value() {
+    let Some(id) = user.id else { continue };   // what the business logic needs, it checks
+    …
+}
+```
+
+An application that wants drift in one place rather than at every call site hands the client an
+observer, which sees every degraded response with its operation, status and report, and logs or
+counts it however the application likes — progeny itself logs nothing:
+
+```rust
+let client = Client::new(base_url).observe(|degraded| {
+    metrics::counter!("vendor_drift", "operation" => degraded.operation).increment(1);
+});
+```
+
+Every type a report can name carries its site — `read::User::SITE`, with a member's wire name
+put in for a member — so asking a report about one place needs nothing copied out of the
+generated source:
+
+```rust
+let id = Site { member: Some("id"), ..read::User::SITE };
+if page.degradations().touches(&id) { … }
+```
+
+A response whose root is not what the description declares — an object where a list was
+promised, or a body that goes on after its value — is still an error: there is no value to hand
+back. A stream over a paginated listing refuses a page degraded anywhere on the path to its items
+or its next cursor rather than ending early or dropping items quietly; drift inside an item does
+not stop it. The generated server takes read forms at its response positions, so a mock of a
+drifting vendor can answer the way the vendor does. Strict decoding, which refuses every
+deviation the way the derive would, stays one setting away:
+
+```toml
+decoding = "strict"
+```
+
+or `--decoding strict` on the command line. It is a choice made when the crate is generated,
+not a switch on a client: strict leaves out `types::read`, so the response types change with it.
+
 ## Client middleware
 
 The generated client has no callback or hook system. Supply a preconfigured `reqwest::Client` for

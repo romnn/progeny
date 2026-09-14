@@ -46,6 +46,15 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     if let Some(choice) = args.serde {
         config.serde_impl = choice.into();
     }
+    // The paged listing, declared the way a consumer would declare it.
+    config.pagination.insert(
+        "list_pets_paged".to_owned(),
+        progeny::Pagination {
+            cursor_param: "cursor".to_owned(),
+            next_cursor: "next".to_owned(),
+            items: "items".to_owned(),
+        },
+    );
     let output = progeny::generate(bytes, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
@@ -179,24 +188,52 @@ const IMPLEMENTATION: &str = indoc::indoc! {r#"
 impl server::Api for Double {
     async fn list_pets(&self, query: server::ListPetsQuery) -> server::ListPetsResponse {
         self.record(|seen| seen.limit = query.limit);
+        // A response position takes the read form of its type. A strict value converts into
+        // it, which is how a server built on the strict types answers.
         server::ListPetsResponse::Ok(Box::new(vec![types::Pet {
             id: 1,
             name: "Rex".to_owned(),
             tag: Some("dog".to_owned()),
-        }]))
+        }
+        .into()]))
     }
 
     async fn create_pets(&self) -> server::CreatePetsResponse {
         server::CreatePetsResponse::Created(())
     }
 
+    async fn list_pets_paged(
+        &self,
+        query: server::ListPetsPagedQuery,
+    ) -> server::ListPetsPagedResponse {
+        // Two pages: the first names a cursor, the second does not.
+        let (items, next) = match query.cursor.as_deref() {
+            None => (vec![(1, "Rex"), (2, "Tom")], Some("page-2".to_owned())),
+            Some(_) => (vec![(3, "Kit")], None),
+        };
+        server::ListPetsPagedResponse::Ok(Box::new(types::read::PetPage {
+            items: Some(
+                items
+                    .into_iter()
+                    .map(|(id, name)| types::read::Pet {
+                        id: Some(id),
+                        name: Some(name.to_owned()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            next,
+            ..Default::default()
+        }))
+    }
+
     async fn show_pet_by_id(&self, path: server::ShowPetByIdPath) -> server::ShowPetByIdResponse {
         self.record(|seen| seen.pet_id = Some(path.pet_id.clone()));
-        server::ShowPetByIdResponse::Ok(Box::new(types::Pet {
+        server::ShowPetByIdResponse::Ok(Box::new(types::read::Pet::from(types::Pet {
             id: 7,
             name: path.pet_id,
             tag: None,
-        }))
+        })))
     }
 
     async fn upload_pet_photo(
@@ -208,25 +245,30 @@ impl server::Api for Double {
             seen.photo_note = body.note.clone();
             seen.photo_file = Some(body.file.clone());
         });
-        server::UploadPetPhotoResponse::Created(Box::new(types::PhotoUpload {
-            pet_id: path.pet_id,
-            filename: "photo".to_owned(),
-            content_type: "image/png".to_owned(),
-            file_size: body.file.len() as i64,
-            note: body.note.unwrap_or_default(),
+        // A type only a response yields has no strict form; its read form is written out, and
+        // `Default` fills whatever the answer leaves unsaid.
+        server::UploadPetPhotoResponse::Created(Box::new(types::read::PhotoUpload {
+            pet_id: Some(path.pet_id),
+            filename: Some("photo".to_owned()),
+            content_type: Some("image/png".to_owned()),
+            file_size: Some(body.file.len() as i64),
+            note: body.note,
             rating: body.rating,
+            ..Default::default()
         }))
     }
 
     async fn typed_errors(&self, path: server::TypedErrorsPath) -> server::TypedErrorsResponse {
         match path.kind.as_str() {
-            "missing" => server::TypedErrorsResponse::NotFound(Box::new(types::Error {
-                code: 404,
-                message: "missing".to_owned(),
+            "missing" => server::TypedErrorsResponse::NotFound(Box::new(types::read::Error {
+                code: Some(404),
+                message: Some("missing".to_owned()),
+                ..Default::default()
             })),
-            "conflict" => server::TypedErrorsResponse::Conflict(Box::new(types::Error {
-                code: 409,
-                message: "conflict".to_owned(),
+            "conflict" => server::TypedErrorsResponse::Conflict(Box::new(types::read::Error {
+                code: Some(409),
+                message: Some("conflict".to_owned()),
+                ..Default::default()
             })),
             _ => server::TypedErrorsResponse::NoContent(()),
         }
@@ -300,6 +342,38 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                     "plain text\nthat is not JSON",
                 )
             }),
+        )
+        // A vendor that drifted: a required member sent as `null`, a member the description
+        // never declared, and a required member missing from one record of the page.
+        .route(
+            "/pets",
+            get(|| async {
+                axum::Json(serde_json::json!([
+                    {"id": 1, "name": null, "tag": "dog", "color": "brown"},
+                    {"id": 2, "tag": "cat"},
+                    {"id": 3, "name": "Rex"},
+                ]))
+            }),
+        )
+        // A paged listing whose second page has an item that cannot be read: the stream must
+        // not skip it quietly.
+        .route(
+            "/pets/paged",
+            get(|query: axum::extract::Query<std::collections::BTreeMap<String, String>>| async move {
+                if query.contains_key("cursor") {
+                    axum::Json(serde_json::json!({"items": [{"id": 3, "name": "Kit"}, "??"]}))
+                } else {
+                    axum::Json(serde_json::json!({
+                        "items": [{"id": 1, "name": "Rex"}, {"id": 2, "name": "Tom"}],
+                        "next": "page-2",
+                    }))
+                }
+            }),
+        )
+        // A root that is not what the description declares at all.
+        .route(
+            "/pets/{pet_id}",
+            get(|| async { axum::Json(serde_json::json!(["not", "an", "object"])) }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -317,7 +391,8 @@ async fn a_query_parameter_survives_the_round_trip() {
         .send()
         .await?;
     assert_eq!(double.seen().limit, Some(3));
-    assert_eq!(pets.into_value()[0].name, "Rex");
+    assert!(!pets.is_degraded(), "{}", pets.degradations());
+    assert_eq!(pets.into_value()[0].name.as_deref(), Some("Rex"));
 
     // And an unset optional parameter arrives unset, rather than as a default the caller never
     // chose — the same rule the client's params and the server's extractor have to agree on.
@@ -341,7 +416,7 @@ async fn a_path_parameter_survives_the_round_trip() {
     // Percent-encoded on the way out and decoded on the way in, which is the pair of rules a
     // template variable actually depends on.
     assert_eq!(double.seen().pet_id.as_deref(), Some("a pet/with slashes"));
-    assert_eq!(pet.into_value().name, "a pet/with slashes");
+    assert_eq!(pet.into_value().name.as_deref(), Some("a pet/with slashes"));
 }
 
 #[test_util::test]
@@ -393,7 +468,7 @@ async fn a_multipart_body_survives_the_round_trip() {
     let seen = double.seen();
     assert_eq!(seen.photo_file.as_deref(), Some("not really a png"));
     assert_eq!(seen.photo_note.as_deref(), Some("a note"));
-    assert_eq!(reply.into_value().pet_id, 5);
+    assert_eq!(reply.into_value().pet_id, Some(5));
 }
 
 #[test_util::test]
@@ -431,6 +506,134 @@ async fn the_client_reads_non_json_response_bodies_from_the_raw_wire() {
 
     let text = client.download_text().send().await?.into_value();
     assert_eq!(text, "plain text\nthat is not JSON");
+}
+
+/// The Hypofy case: a payload the description no longer matches decodes as far as it allows,
+/// with every deviation reported by its place in the description rather than failing the call.
+#[test_util::test]
+async fn a_drifted_response_decodes_as_far_as_it_can_and_says_what_it_tolerated() {
+    let client = raw_serving().await?;
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await?;
+    assert!(pets.is_degraded());
+    let report = pets.degradations().clone();
+    let pets = pets.into_value();
+    assert_eq!(pets.len(), 3);
+    assert_eq!(pets[0].name, None);
+    assert_eq!(pets[0].tag.as_deref(), Some("dog"));
+    assert_eq!(pets[0].extra.get("color"), Some(&serde_json::json!("brown")));
+    assert_eq!(pets[1].name, None);
+    assert_eq!(pets[2].name.as_deref(), Some("Rex"));
+
+    // One entry per (site, kind), however many records shared the drift, each naming the
+    // pointer an override would use.
+    // Spelled from the type's own constant: nothing copied out of the generated source.
+    let name = types::Site {
+        member: Some("name"),
+        ..types::read::Pet::SITE
+    };
+    assert_eq!(name.origin, "/components/schemas/Pet");
+    let kinds: Vec<types::DegradationKind> = report.at(&name).map(|entry| entry.kind).collect();
+    assert_eq!(
+        kinds,
+        [types::DegradationKind::RequiredAbsent, types::DegradationKind::NullNotAllowed]
+    );
+    let undeclared = report
+        .iter()
+        .find(|entry| entry.kind == types::DegradationKind::UndeclaredMember)
+        .ok_or_eyre("the undeclared member is reported")?;
+    assert_eq!(undeclared.site.type_name, "Pet");
+    assert_eq!(undeclared.samples, ["color"]);
+    let rendered = report.to_string();
+    assert!(rendered.contains("/components/schemas/Pet/properties/name"), "{rendered}");
+    assert_eq!(report.len(), 3, "{rendered}");
+
+    // A payload that is not the declared shape at the root has no value to hand back.
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "1".to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a root of the wrong shape is refused")?;
+    assert!(matches!(error, client::Error::Decode(_)), "{error:?}");
+
+    // The same read type through plain serde: the same value, without the report.
+    let parsed: types::read::Pet = serde_json::from_str("{\"id\": 4, \"extra\": true}")?;
+    assert_eq!(parsed.id, Some(4));
+    assert_eq!(parsed.name, None);
+    assert_eq!(parsed.extra.get("extra"), Some(&serde_json::json!(true)));
+    // And written back as it arrived: no invented `null` for what was missing.
+    assert_eq!(serde_json::to_string(&parsed)?, "{\"id\":4,\"extra\":true}");
+}
+
+/// A stream follows the cursor through read forms, and a page degraded on the path it walks —
+/// here an item that cannot be read — ends the stream with an error rather than skipping.
+#[test_util::test]
+async fn a_stream_walks_read_forms_and_refuses_a_degraded_page() {
+    use futures_util::TryStreamExt as _;
+
+    let (_, client) = serving().await?;
+    let names: Vec<String> = client
+        .list_pets_paged(client::ListPetsPagedParams { cursor: None })
+        .stream()
+        .map_ok(|pet| pet.name.unwrap_or_default())
+        .try_collect()
+        .await?;
+    assert_eq!(names, ["Rex", "Tom", "Kit"]);
+
+    let client = raw_serving().await?;
+    let mut stream = std::pin::pin!(
+        client
+            .list_pets_paged(client::ListPetsPagedParams { cursor: None })
+            .stream()
+    );
+    let mut names = Vec::new();
+    let error = loop {
+        match stream.try_next().await {
+            Ok(Some(pet)) => names.push(pet.name.unwrap_or_default()),
+            Ok(None) => eyre::bail!("the degraded page should have ended the stream"),
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(names, ["Rex", "Tom"]);
+    let client::Error::DegradedPage(report) = error else {
+        eyre::bail!("expected a degraded page, got {error:?}");
+    };
+    let rendered = report.to_string();
+    assert!(rendered.contains("PetPage.items"), "{rendered}");
+    assert!(rendered.contains("could not be read"), "{rendered}");
+}
+
+/// The observer sees every degraded response once, with the operation it answered and the same
+/// report the response carries; a clean response never reaches it.
+#[test_util::test]
+async fn an_observer_is_told_about_every_degraded_response() {
+    let seen: Arc<Mutex<Vec<(String, u16, String)>>> = Arc::default();
+    let client = raw_serving().await?.observe({
+        let seen = Arc::clone(&seen);
+        move |degraded: client::Degraded<'_>| {
+            if let Ok(mut seen) = seen.lock() {
+                seen.push((
+                    degraded.operation.to_owned(),
+                    degraded.status.as_u16(),
+                    degraded.degradations.to_string(),
+                ));
+            }
+        }
+    });
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await?;
+    let text = client.download_text().send().await?;
+    assert!(!text.is_degraded());
+    let seen = seen.lock().map_err(|_| eyre::eyre!("poisoned"))?.clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].0, "list_pets");
+    assert_eq!(seen[0].1, 200);
+    assert_eq!(seen[0].2, pets.degradations().to_string());
 }
 
 #[test_util::test]

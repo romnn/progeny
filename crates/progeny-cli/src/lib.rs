@@ -16,7 +16,7 @@
 
 use std::process::ExitCode;
 
-use progeny::{Action, Config, Output};
+use progeny::{Action, Config, Decoding, Output};
 
 /// How the front end was reached, which is the only thing the two shipped binaries disagree about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +45,16 @@ impl Invocation {
 
             usage:
               {name} <description> [--config <progeny.toml>] [--out-dir <directory>]
+                     [--decoding <lenient|strict>]
 
             arguments:
               <description>        the OpenAPI document, JSON or YAML
               --config <path>      a progeny.toml
               --out-dir <path>     where to write the generated files
+              --decoding <mode>    how the client reads responses: `lenient` (the default)
+                                   tolerates and reports drift, `strict` refuses it; `strict`
+                                   also leaves out the `types::read` module, so the generated
+                                   response types change with it
               -h, --help           this message
               -V, --version        the version that would generate the output
 
@@ -103,7 +108,7 @@ fn run(invocation: Invocation, argv: impl Iterator<Item = String>) -> Result<Exi
     let input =
         std::fs::read(spec).map_err(|error| format!("reading the description {spec}: {error}"))?;
 
-    let config = match &arguments.config {
+    let mut config = match &arguments.config {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|error| format!("reading the configuration {path}: {error}"))?;
@@ -112,6 +117,12 @@ fn run(invocation: Invocation, argv: impl Iterator<Item = String>) -> Result<Exi
         }
         None => Config::default(),
     };
+    // The one configuration knob with a flag of its own: switching a client between the two
+    // decoding modes is what a consumer does while chasing a drift report, and a flag beats
+    // editing a file for that.
+    if let Some(decoding) = arguments.decoding {
+        config.decoding = decoding;
+    }
 
     let output = progeny::generate(&input, &config).map_err(|error| error.to_string())?;
     report(&output);
@@ -185,6 +196,8 @@ pub struct Arguments {
     pub config: Option<String>,
     /// Where to write the generated files.
     pub out_dir: Option<String>,
+    /// How the generated client reads responses, overriding the configuration.
+    pub decoding: Option<Decoding>,
     /// Print the usage text and stop.
     pub help: bool,
     /// Print the generator's version and stop.
@@ -231,6 +244,20 @@ impl Arguments {
                             .ok_or_else(|| "--out-dir needs a path".to_owned())?,
                     );
                 }
+                "--decoding" => {
+                    let mode = arguments
+                        .next()
+                        .ok_or_else(|| "--decoding needs `lenient` or `strict`".to_owned())?;
+                    parsed.decoding = Some(match mode.as_str() {
+                        "lenient" => Decoding::Lenient,
+                        "strict" => Decoding::Strict,
+                        other => {
+                            return Err(format!(
+                                "--decoding takes `lenient` or `strict`, not `{other}`"
+                            ));
+                        }
+                    });
+                }
                 other if other.starts_with('-') => {
                     return Err(indoc::formatdoc! {"
                         unknown option {other}
@@ -256,8 +283,8 @@ impl Arguments {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arguments, Invocation};
-    use color_eyre::eyre;
+    use super::{Arguments, Decoding, Invocation};
+    use color_eyre::eyre::{self, OptionExt as _};
 
     fn parse(arguments: &[&str]) -> Result<Arguments, String> {
         Arguments::parse(
@@ -289,6 +316,27 @@ mod tests {
     fn an_option_missing_its_value_is_an_error_rather_than_a_default() {
         assert!(parse(&["api.yaml", "--config"]).is_err());
         assert!(parse(&["api.yaml", "--out-dir"]).is_err());
+        assert!(parse(&["api.yaml", "--decoding"]).is_err());
+    }
+
+    /// The decoding flag names one of the two modes and nothing else; left out, the
+    /// configuration file decides.
+    #[test_util::test]
+    fn the_decoding_flag_takes_one_of_two_modes() {
+        let strict = parse(&["api.yaml", "--decoding", "strict"]).map_err(eyre::Report::msg)?;
+        assert_eq!(strict.decoding, Some(Decoding::Strict));
+        let lenient = parse(&["api.yaml", "--decoding", "lenient"]).map_err(eyre::Report::msg)?;
+        assert_eq!(lenient.decoding, Some(Decoding::Lenient));
+        assert!(
+            parse(&["api.yaml"])
+                .map_err(eyre::Report::msg)?
+                .decoding
+                .is_none()
+        );
+        let error = parse(&["api.yaml", "--decoding", "sloppy"])
+            .err()
+            .ok_or_eyre("an unknown mode is refused")?;
+        assert!(error.contains("sloppy"), "{error}");
     }
 
     #[test_util::test]

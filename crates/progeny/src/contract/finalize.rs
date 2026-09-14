@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::dedup::references_mut;
 use super::lower::Provisional;
-use super::{ContractKind, Contracts, DeserStrategy, Format, TypeContract, TypeIndex, TypeRef};
+use super::{
+    ContractKind, Contracts, DeserStrategy, Form, Format, TypeContract, TypeIndex, TypeRef,
+};
 use crate::config::{Config, Derive, MapKind, SerdeImpl, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, RejectError, RejectKind};
 use crate::schema::cycles::Sccs;
@@ -46,6 +48,17 @@ pub(super) fn run(
         let explicit = config.type_derives.keys().any(|key| matches(contract, key));
 
         let mut derives: Vec<Derive> = BASE.to_vec();
+        // A struct a response decodes into always has a `Default`: every member of a read form
+        // is optional, and a shared struct is shared because nothing in it is required, so there
+        // is always one, and it is what lets a server or a test build a response value out of
+        // only the members it means to set. Always derivable — an `Option` defaults whatever it
+        // holds — so no configuration can ask for something this cannot honour.
+        if matches!(contract.form, Form::Lenient { .. } | Form::Shared)
+            && matches!(contract.kind, ContractKind::Struct { .. })
+            && available.contains(&Derive::Default)
+        {
+            derives.push(Derive::Default);
+        }
         for &derive in requested {
             if available.contains(&derive) {
                 if !derives.contains(&derive) {
@@ -85,6 +98,7 @@ pub(super) fn run(
             kind: contract.kind.clone(),
             unknown_fields: contract.unknown_fields,
             derives,
+            form: contract.form,
             origin: contract.origin.clone(),
         });
     }
@@ -92,6 +106,7 @@ pub(super) fn run(
         types: frozen,
         by_shape: BTreeMap::new(),
         collapses: Vec::new(),
+        twins: BTreeMap::new(),
     })
 }
 
@@ -119,32 +134,26 @@ fn decide(kind: &ContractKind, unknown_fields: UnknownFields, config: &Config) -
         // renderings that are identical there by construction.
         SerdeImpl::DeriveAlways => match kind {
             ContractKind::CarriedTagEnum { .. } => DeserStrategy::HandWrittenCarriedTag,
+            // The second exemption. A string enum is open: a string the description does not
+            // list is kept verbatim in the fallback variant and written back unchanged. serde's
+            // enum repertoire has no encoding for that — `#[serde(other)]` drops the value and
+            // `untagged` needs a second type — and reading and writing the enum *as a string*
+            // needs no self-describing format, so the hatch concedes nothing by taking it.
+            ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
             ContractKind::Struct { .. }
             | ContractKind::Enum { .. }
             | ContractKind::TaggedEnum { .. }
-            | ContractKind::StringEnum { .. }
             | ContractKind::Newtype { .. }
             | ContractKind::Tuple { .. }
             | ContractKind::Alias { .. } => DeserStrategy::Derive,
         },
         SerdeImpl::HandWrittenWhereEligible => match kind {
             ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
-            ContractKind::Struct { fields } => match unknown_fields {
-                // `flatten` and the buffered implementation are not reconciled: the buffered
-                // deserializer assigns members by name, and a flattened member claims whatever is
-                // left, which is a second pass it does not have. Ruled to the derive rather than
-                // left to chance — and note that `flatten` with `Deny` cannot even be asked for,
-                // because capturing and denying are two arms of one enum.
-                UnknownFields::Capture => DeserStrategy::Derive,
-                UnknownFields::Ignore | UnknownFields::Deny => {
-                    if fields.iter().any(|field| field.flatten) {
-                        DeserStrategy::Derive
-                    } else {
-                        DeserStrategy::HandWrittenBuffered {
-                            deny_unknown: unknown_fields == UnknownFields::Deny,
-                        }
-                    }
-                }
+            // The one flattened member a struct can have is its capture map, and the buffer is
+            // the natural place to fill it from: once the declared names are taken, what is left
+            // is exactly what the map holds.
+            ContractKind::Struct { .. } => DeserStrategy::HandWrittenBuffered {
+                unknown: unknown_fields,
             },
             // Data-carrying enums, wrappers, tuples and aliases: all derived in v1. A tagged
             // union could not take the buffered path even if the measurement changed: consuming
@@ -282,7 +291,7 @@ fn box_target(ty: &mut TypeRef, target: TypeIndex) -> bool {
 pub(crate) fn references(kind: &ContractKind) -> Vec<&TypeRef> {
     match kind {
         ContractKind::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
-        ContractKind::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
+        ContractKind::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
         ContractKind::TaggedEnum { variants, .. }
         | ContractKind::CarriedTagEnum { variants, .. } => {
             variants.iter().map(|variant| &variant.ty).collect()
@@ -347,8 +356,21 @@ fn holds(
     if derive == Derive::Default {
         return defaults(contract, supported, config);
     }
+    // The fallback variants hold what no reference lists: a `String` in a string enum, a
+    // `serde_json::Value` in a union. Both are judged as the types they are.
+    let fallback = match &contract.kind {
+        ContractKind::StringEnum { .. } => Some(TypeRef::String),
+        ContractKind::Enum { .. }
+        | ContractKind::TaggedEnum { .. }
+        | ContractKind::CarriedTagEnum { .. } => Some(TypeRef::Value),
+        ContractKind::Struct { .. }
+        | ContractKind::Newtype { .. }
+        | ContractKind::Tuple { .. }
+        | ContractKind::Alias { .. } => None,
+    };
     references(&contract.kind)
         .into_iter()
+        .chain(fallback.as_ref())
         .all(|ty| carries(derive, ty, supported, config))
 }
 
@@ -358,13 +380,21 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
         TypeRef::Named(index) => supported
             .get(index.index())
             .is_some_and(|set| set.contains(&derive)),
-        // `serde_json::Value` holds a float and orders nothing.
-        TypeRef::Value => derive == Derive::PartialEq || derive == Derive::Default,
+        // `serde_json::Value` orders nothing, but it is `Eq` and `Hash`: its number type
+        // compares floats by their bits, which is what the crate promises.
+        TypeRef::Value => matches!(
+            derive,
+            Derive::PartialEq | Derive::Eq | Derive::Hash | Derive::Default
+        ),
         TypeRef::F64 => !matches!(derive, Derive::Eq | Derive::Ord | Derive::Hash),
         // A `String`, and `support::Upload` (a `Vec<u8>` plus options): everything but `Copy`.
         TypeRef::String | TypeRef::Upload => derive != Derive::Copy,
         TypeRef::Format(format) => format_carries(derive, *format, config),
-        TypeRef::Vec(inner) => derive != Derive::Copy && carries(derive, inner, supported, config),
+        // A `Vec`, a map and an `Option` have a `Default` whatever they hold: the empty one.
+        TypeRef::Vec(inner) => {
+            derive != Derive::Copy
+                && (derive == Derive::Default || carries(derive, inner, supported, config))
+        }
         TypeRef::Map(inner) => {
             if derive == Derive::Copy {
                 return false;
@@ -376,14 +406,13 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
             {
                 return false;
             }
-            carries(derive, inner, supported, config)
-        }
-        TypeRef::Option(inner) | TypeRef::Array(inner, _) => {
-            carries(derive, inner, supported, config)
-        }
-        TypeRef::Presence(inner) => {
             derive == Derive::Default || carries(derive, inner, supported, config)
         }
+        // An `Option` and a `Presence` default to their absent state whatever they hold.
+        TypeRef::Option(inner) | TypeRef::Presence(inner) => {
+            derive == Derive::Default || carries(derive, inner, supported, config)
+        }
+        TypeRef::Array(inner, _) => carries(derive, inner, supported, config),
         TypeRef::Boxed(inner) => {
             derive != Derive::Copy && carries(derive, inner, supported, config)
         }
@@ -451,23 +480,32 @@ mod tests {
     /// became the hand-written path — correctly, but for the wrong reason. A caller reaching for
     /// the hatch names it, so this does too.
     #[test]
-    fn the_escape_hatch_derives_everything() {
+    fn the_escape_hatch_derives_everything_that_has_a_derive_encoding() {
         let escape = Config {
             serde_impl: SerdeImpl::DeriveAlways,
             ..Config::default()
         };
-        for kind in [
-            ContractKind::Struct { fields: Vec::new() },
-            ContractKind::StringEnum {
-                variants: Vec::new(),
-            },
-        ] {
-            assert_eq!(
-                decide(&kind, UnknownFields::Ignore, &escape),
-                DeserStrategy::Derive,
-                "{kind:?} took a hand-written path under the escape hatch"
-            );
-        }
+        assert_eq!(
+            decide(
+                &ContractKind::Struct { fields: Vec::new() },
+                UnknownFields::Ignore,
+                &escape
+            ),
+            DeserStrategy::Derive,
+        );
+        // An open string enum has no derive encoding, so it stays hand-written under the hatch
+        // — and reads and writes a plain string, which every format has.
+        assert_eq!(
+            decide(
+                &ContractKind::StringEnum {
+                    variants: Vec::new(),
+                    fallback: RustIdent::variant("Unknown"),
+                },
+                UnknownFields::Ignore,
+                &escape
+            ),
+            DeserStrategy::HandWrittenFieldless,
+        );
     }
 
     /// And the default is the fast one, which is the whole point of stage 8.
@@ -484,7 +522,7 @@ mod tests {
                 &Config::default()
             ),
             DeserStrategy::HandWrittenBuffered {
-                deny_unknown: false
+                unknown: UnknownFields::Ignore
             }
         );
     }
@@ -495,7 +533,7 @@ mod tests {
         assert_eq!(
             decide(&plain, UnknownFields::Ignore, &hand_written()),
             DeserStrategy::HandWrittenBuffered {
-                deny_unknown: false
+                unknown: UnknownFields::Ignore
             }
         );
         let strings = ContractKind::StringEnum {
@@ -503,6 +541,7 @@ mod tests {
                 rust_name: RustIdent::variant("a"),
                 wire_name: "a".to_owned(),
             }],
+            fallback: RustIdent::variant("Unknown"),
         };
         assert_eq!(
             decide(&strings, UnknownFields::Ignore, &hand_written()),
@@ -510,12 +549,16 @@ mod tests {
         );
     }
 
+    /// Capturing is a buffered-path policy like the other two: the leftovers the buffer holds
+    /// once the declared names are taken are the capture map.
     #[test]
-    fn capturing_unknown_members_is_ruled_to_the_derive() {
+    fn capturing_unknown_members_stays_on_the_buffered_path() {
         let kind = ContractKind::Struct { fields: Vec::new() };
         assert_eq!(
             decide(&kind, UnknownFields::Capture, &hand_written()),
-            DeserStrategy::Derive
+            DeserStrategy::HandWrittenBuffered {
+                unknown: UnknownFields::Capture
+            }
         );
     }
 
@@ -524,10 +567,12 @@ mod tests {
         for kind in [
             ContractKind::Enum {
                 variants: Vec::new(),
+                fallback: RustIdent::variant("Unknown"),
             },
             ContractKind::TaggedEnum {
                 tag: "kind".to_owned(),
                 variants: Vec::new(),
+                fallback: RustIdent::variant("Unknown"),
             },
         ] {
             assert_eq!(

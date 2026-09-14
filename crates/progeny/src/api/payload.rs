@@ -81,13 +81,20 @@ pub(crate) fn collect(
             collector.position(
                 &at.child("requestBody"),
                 request_content(resolved, operation),
+                false,
                 &mut found,
                 &mut skipped,
             );
         }
         let responses = at.child("responses");
         for (status, content) in response_content(resolved, operation) {
-            collector.position(&responses.child(status), content, &mut found, &mut skipped);
+            collector.position(
+                &responses.child(status),
+                content,
+                true,
+                &mut found,
+                &mut skipped,
+            );
         }
     }
     (found, skipped)
@@ -157,11 +164,25 @@ struct Collect<'a> {
     contracts: &'a Contracts,
 }
 
+/// The type a position decodes into, as a test spells it.
+struct Named {
+    type_name: String,
+    shape: Shape,
+    /// Whether it is a read form, which keeps every member the payload carried.
+    lenient: bool,
+}
+
 impl Collect<'_> {
+    /// The payloads at one position: a request body's, or — `response` — a response arm's.
+    ///
+    /// A response decodes into the read form of its type, and a read form keeps every member
+    /// the payload carried and writes it back, so what it must reproduce is the payload exactly
+    /// as written rather than pruned to the declaration.
     fn position(
         &self,
         at: &JsonPointer,
         content: Vec<(&String, &MediaType)>,
+        response: bool,
         found: &mut Vec<Payload>,
         skipped: &mut Vec<Skipped>,
     ) {
@@ -173,15 +194,19 @@ impl Collect<'_> {
             if examples.is_empty() {
                 continue;
             }
-            let (type_name, shape) = match self.named(id) {
-                Ok(pair) => pair,
+            let Named {
+                type_name,
+                shape,
+                lenient,
+            } = match self.named(id, response) {
+                Ok(named) => named,
                 Err(reason) => {
                     skipped.extend(std::iter::repeat_n(reason, examples.len()));
                     continue;
                 }
             };
             for (location, original) in examples {
-                let Some(expected) = self.prune(&original, &shape) else {
+                let Some(expected) = self.prune(&original, &shape, lenient) else {
                     skipped.push(Skipped::Captures);
                     continue;
                 };
@@ -205,31 +230,54 @@ impl Collect<'_> {
     }
 
     /// The generated type a schema became, when it is one a test can name.
-    fn named(&self, id: SchemaId) -> Result<(String, Shape), Skipped> {
+    ///
+    /// At a response position that is the type's read form, spelled through `read` when it
+    /// lives there.
+    fn named(&self, id: SchemaId, response: bool) -> Result<Named, Skipped> {
         let key = crate::shape::key_of(self.resolved, id);
         let shape = self.shapes.get(&key).cloned().ok_or(Skipped::Unnamed)?;
-        match self.contracts.type_of(&key) {
-            Some(TypeRef::Named(index)) => {
-                let contract = self.contracts.get(*index).ok_or(Skipped::Unnamed)?;
-                Ok((contract.rust_name().as_str().to_owned(), shape))
+        let ty = self.contracts.type_of(&key).ok_or(Skipped::Opaque)?;
+        let ty = if response {
+            self.contracts.read_form(ty)
+        } else {
+            ty.clone()
+        };
+        match ty {
+            TypeRef::Named(index) => {
+                let contract = self.contracts.get(index).ok_or(Skipped::Unnamed)?;
+                let lenient = contract.form().is_lenient();
+                let name = contract.rust_name().as_str();
+                Ok(Named {
+                    type_name: if lenient {
+                        format!("read::{name}")
+                    } else {
+                        name.to_owned()
+                    },
+                    shape,
+                    lenient,
+                })
             }
-            Some(TypeRef::Value) | None => Err(Skipped::Opaque),
-            Some(_) => Err(Skipped::Unnamed),
+            TypeRef::Value => Err(Skipped::Opaque),
+            _ => Err(Skipped::Unnamed),
         }
     }
 
     /// The payload restricted to what the shape declares, or nothing when the type keeps more.
     ///
+    /// `lenient` says the payload decodes into a read form, which keeps what the description
+    /// does not declare and makes every member optional; the rules differ at exactly those two
+    /// points and nowhere else.
+    ///
     /// One arm per shape, and deliberately not collapsed where two happen to agree: adding a shape
     /// should not compile until somebody has said what pruning a payload against it means, and a
     /// merged arm would quietly absorb the next one.
-    fn prune(&self, value: &Value, shape: &Shape) -> Option<Value> {
+    fn prune(&self, value: &Value, shape: &Shape, lenient: bool) -> Option<Value> {
         match shape {
             // Arbitrary JSON is carried whole, so nothing is pruned from it.
             Shape::Any => Some(value.clone()),
             Shape::Struct(structure) => {
                 let members = value.as_object()?;
-                if structure.extra != Extra::Denied && !matches!(structure.extra, Extra::Open) {
+                if matches!(structure.extra, Extra::Typed(_)) {
                     // A typed catch-all keeps undeclared members in a map, so the pruned payload is
                     // not what a round trip produces and this cannot say what is.
                     return None;
@@ -243,11 +291,24 @@ impl Collect<'_> {
                     // explicit `null` comes back *absent*. That is the presence collapse, already
                     // reported as a `Degrade` against the position it costs — expecting the null
                     // back would make this gate red for a documented policy rather than for a
-                    // defect, which is how a gate stops being read.
-                    if !field.required && present.is_null() {
+                    // defect, which is how a gate stops being read. A read form collapses one
+                    // step further: a required member that is not nullable is an `Option` too,
+                    // and a `null` in it is a tolerated deviation written back as absent.
+                    if present.is_null() && !self.keeps_null(field, lenient) {
                         continue;
                     }
-                    out.insert(field.wire.clone(), self.through(present, &field.shape)?);
+                    out.insert(
+                        field.wire.clone(),
+                        self.through(present, &field.shape, lenient)?,
+                    );
+                }
+                if lenient {
+                    // The read form keeps every member the description did not declare, verbatim.
+                    for (key, member) in members {
+                        if !structure.fields.iter().any(|field| field.wire == *key) {
+                            out.insert(key.clone(), member.clone());
+                        }
+                    }
                 }
                 Some(Value::Object(out))
             }
@@ -256,7 +317,7 @@ impl Collect<'_> {
                 let mut out = Map::new();
                 for (key, member) in members {
                     let pruned = match element {
-                        Some(element) => self.through(member, element)?,
+                        Some(element) => self.through(member, element, lenient)?,
                         None => member.clone(),
                     };
                     out.insert(key.clone(), pruned);
@@ -268,7 +329,7 @@ impl Collect<'_> {
                 let mut out = Vec::with_capacity(items.len());
                 for element in items {
                     out.push(match item {
-                        Some(item) => self.through(element, item)?,
+                        Some(item) => self.through(element, item, lenient)?,
                         None => element.clone(),
                     });
                 }
@@ -278,7 +339,7 @@ impl Collect<'_> {
                 let items = value.as_array()?;
                 let mut out = Vec::with_capacity(items.len());
                 for element in items {
-                    out.push(self.through(element, item)?);
+                    out.push(self.through(element, item, lenient)?);
                 }
                 Some(Value::Array(out))
             }
@@ -291,7 +352,7 @@ impl Collect<'_> {
                 }
                 let mut out = Vec::with_capacity(given.len());
                 for (element, item) in given.iter().zip(items) {
-                    out.push(self.through(element, item)?);
+                    out.push(self.through(element, item, lenient)?);
                 }
                 Some(Value::Array(out))
             }
@@ -299,7 +360,7 @@ impl Collect<'_> {
                 if value.is_null() {
                     return Some(Value::Null);
                 }
-                self.through(value, inner)
+                self.through(value, inner, lenient)
             }
             // Serde tries an untagged enum's variants in declaration order and takes the first
             // that deserializes, so the expectation is the payload pruned under that same first
@@ -309,7 +370,7 @@ impl Collect<'_> {
                 // …unless the union dispatches on a tag, where the first branch that accepts the
                 // payload is not the branch serde takes.
                 if let Some(tag) = &union.tag {
-                    return self.tagged(value, union, tag);
+                    return self.tagged(value, union, tag, lenient);
                 }
                 for variant in &union.variants {
                     let accepted = match &variant.shape {
@@ -321,7 +382,7 @@ impl Collect<'_> {
                         }
                     };
                     if accepted {
-                        return self.through(value, &variant.shape);
+                        return self.through(value, &variant.shape, lenient);
                     }
                 }
                 // No branch accepts it. Deserializing will fail and say so, which is the finding —
@@ -345,7 +406,7 @@ impl Collect<'_> {
     /// and written back by the union on the way out, so it survives the round trip even though no
     /// variant declares it. Pruning under the variant alone would leave it out of the expectation
     /// and report the union writing its own tag as an invention.
-    fn tagged(&self, value: &Value, union: &Union, tag: &Tag) -> Option<Value> {
+    fn tagged(&self, value: &Value, union: &Union, tag: &Tag, lenient: bool) -> Option<Value> {
         // A payload that names no variant does not deserialize at all, which the generated test
         // reports against the document — the same verdict the untagged fallback leaves it.
         let Some(named) = value.get(&tag.property).and_then(Value::as_str) else {
@@ -358,7 +419,7 @@ impl Collect<'_> {
         else {
             return Some(value.clone());
         };
-        let mut pruned = self.through(value, &variant.shape)?;
+        let mut pruned = self.through(value, &variant.shape, lenient)?;
         if tag.style == TagStyle::Consumed {
             pruned
                 .as_object_mut()?
@@ -367,13 +428,33 @@ impl Collect<'_> {
         Some(pruned)
     }
 
-    fn through(&self, value: &Value, reference: &ShapeRef) -> Option<Value> {
+    fn through(&self, value: &Value, reference: &ShapeRef, lenient: bool) -> Option<Value> {
         match reference {
             ShapeRef::Key(key) => {
                 let shape = self.shapes.get(key)?.clone();
-                self.prune(value, &shape)
+                self.prune(value, &shape, lenient)
             }
-            ShapeRef::Inline(shape) => self.prune(value, shape),
+            ShapeRef::Inline(shape) => self.prune(value, shape, lenient),
+        }
+    }
+
+    /// Whether a `null` in this member survives the round trip.
+    ///
+    /// Strictly, a required member is always written; leniently, only a required member the
+    /// description lets be `null` — everything else is an `Option` left out when `None`.
+    fn keeps_null(&self, field: &crate::shape::Field, lenient: bool) -> bool {
+        if !field.required {
+            return false;
+        }
+        if !lenient {
+            return true;
+        }
+        match &field.shape {
+            ShapeRef::Key(key) => self
+                .shapes
+                .get(key)
+                .is_some_and(|shape| matches!(shape, Shape::Optional(_))),
+            ShapeRef::Inline(shape) => matches!(**shape, Shape::Optional(_)),
         }
     }
 }
@@ -422,38 +503,46 @@ mod tests {
     }
 
     /// A document whose `200` response carries `schema` and `example`.
-    fn responding(schema: Value, example: Value) -> Value {
-        let mut media = serde_json::Map::new();
-        media.insert("schema".to_owned(), schema);
-        media.insert("example".to_owned(), example);
-        let mut content = serde_json::Map::new();
-        content.insert("application/json".to_owned(), Value::Object(media));
-        let mut response = serde_json::Map::new();
-        response.insert("description".to_owned(), json!("ok"));
-        response.insert("content".to_owned(), Value::Object(content));
-        let mut responses = serde_json::Map::new();
-        responses.insert("200".to_owned(), Value::Object(response));
-        let mut operation = serde_json::Map::new();
-        operation.insert("operationId".to_owned(), json!("listPets"));
-        operation.insert("responses".to_owned(), Value::Object(responses));
-        let mut item = serde_json::Map::new();
-        item.insert("get".to_owned(), Value::Object(operation));
-        let mut paths = serde_json::Map::new();
-        paths.insert("/pets".to_owned(), Value::Object(item));
-        let mut root = serde_json::Map::new();
-        root.insert("openapi".to_owned(), Value::String("3.1.0".to_owned()));
-        root.insert("paths".to_owned(), Value::Object(paths));
-        Value::Object(root)
+    /// A document whose one operation answers with `schema`, and writes `example` for it.
+    fn responding(schema: &Value, example: &Value) -> Value {
+        json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": schema,
+                    "example": example,
+                }}}},
+            }}},
+        })
+    }
+
+    /// A document whose one operation takes `schema` as its body, and writes `example` for it.
+    ///
+    /// A request body is decoded strictly, so this is where the pruning rules — what a strict
+    /// type drops on the way through — are stated.
+    fn requesting(schema: &Value, example: &Value) -> Value {
+        json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"post": {
+                "operationId": "createPet",
+                "requestBody": {"content": {"application/json": {
+                    "schema": schema,
+                    "example": example,
+                }}},
+                "responses": {"201": {"description": "created"}},
+            }}},
+        })
     }
 
     #[test_util::test]
     fn an_example_is_paired_with_the_type_generated_for_its_position() {
         let found = payloads_of(responding(
-            json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            json!({"name": "Rex"}),
+            &json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            &json!({"name": "Rex"}),
         ))?;
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].type_name, "ListPetsResponse200");
+        assert_eq!(found[0].type_name, "read::ListPetsResponse200");
         assert_eq!(
             found[0].location,
             "/paths/~1pets/get/responses/200/content/application~1json/example"
@@ -463,34 +552,54 @@ mod tests {
 
     #[test_util::test]
     fn a_member_the_schema_never_named_is_not_expected_back() {
-        // The generated type ignores what it does not declare, so its absence afterwards is
-        // correct. Expecting it back would fail every payload richer than its schema.
-        let found = payloads_of(responding(
-            json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            json!({"name": "Rex", "undeclared": 7}),
+        // A strict type ignores what it does not declare, so its absence afterwards is correct.
+        // Expecting it back would fail every payload richer than its schema.
+        let found = payloads_of(requesting(
+            &json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            &json!({"name": "Rex", "undeclared": 7}),
         ))?;
+        assert_eq!(found[0].type_name, "CreatePetBody");
         assert_eq!(found[0].original, json!({"name": "Rex", "undeclared": 7}));
         assert_eq!(found[0].expected, json!({"name": "Rex"}));
+    }
+
+    /// A response decodes into its read form, which keeps every member the payload carried —
+    /// declared or not — and writes it back; only a `null` the read form cannot hold collapses,
+    /// exactly as the decoder reports it.
+    #[test_util::test]
+    fn a_response_is_expected_back_with_its_undeclared_members() {
+        let found = payloads_of(responding(
+            &json!({"type": "object", "required": ["name", "owner"],
+                   "properties": {"name": {"type": "string"},
+                                  "owner": {"type": ["string", "null"]},
+                                  "tag": {"type": "string"}}}),
+            &json!({"name": null, "owner": null, "undeclared": 7, "tag": null}),
+        ))?;
+        assert_eq!(found[0].type_name, "read::ListPetsResponse200");
+        // `name` is required and not nullable, so its `null` is a tolerated deviation that comes
+        // back absent; `owner` may be `null` and stays; `tag` is optional and collapses; the
+        // undeclared member is kept.
+        assert_eq!(found[0].expected, json!({"owner": null, "undeclared": 7}));
     }
 
     #[test_util::test]
     fn an_explicit_null_in_an_optional_member_is_expected_to_come_back_absent() {
         // The presence collapse, stated as an expectation rather than discovered as a failure: an
         // optional member is an `Option` that is skipped when it is `None`.
-        let found = payloads_of(responding(
-            json!({"type": "object", "properties": {"name": {"type": ["string", "null"]}}}),
-            json!({"name": null}),
+        let found = payloads_of(requesting(
+            &json!({"type": "object", "properties": {"name": {"type": ["string", "null"]}}}),
+            &json!({"name": null}),
         ))?;
         assert_eq!(found[0].expected, json!({}));
 
         // A *required* nullable member is always written, `null` included.
-        let found = payloads_of(responding(
-            json!({
+        let found = payloads_of(requesting(
+            &json!({
                 "type": "object",
                 "required": ["name"],
                 "properties": {"name": {"type": ["string", "null"]}},
             }),
-            json!({"name": null}),
+            &json!({"name": null}),
         ))?;
         assert_eq!(found[0].expected, json!({"name": null}));
     }
@@ -499,12 +608,13 @@ mod tests {
     fn pruning_reaches_through_lists_and_named_references() {
         let found = payloads_of(json!({
             "openapi": "3.1.0",
-            "paths": {"/pets": {"get": {
-                "operationId": "listPets",
-                "responses": {"200": {"description": "ok", "content": {"application/json": {
+            "paths": {"/pets": {"post": {
+                "operationId": "createPets",
+                "requestBody": {"content": {"application/json": {
                     "schema": {"$ref": "#/components/schemas/Page"},
                     "example": {"items": [{"name": "Rex", "undeclared": 1}], "extra": 2},
-                }}}},
+                }}},
+                "responses": {"201": {"description": "created"}},
             }}},
             "components": {"schemas": {
                 "Page": {"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/Pet"}}}},
@@ -532,7 +642,7 @@ mod tests {
             })
         };
         let found = payloads_of(responding(
-            json!({
+            &json!({
                 "type": "object",
                 "required": ["details"],
                 "properties": {"details": {"oneOf": [
@@ -543,7 +653,7 @@ mod tests {
                     ),
                 ]}},
             }),
-            json!({"details": {"message": "already merged", "sha": "6dcb09b"}}),
+            &json!({"details": {"message": "already merged", "sha": "6dcb09b"}}),
         ))?;
         assert_eq!(
             found[0].expected,
@@ -598,7 +708,7 @@ mod tests {
     fn a_position_typed_as_arbitrary_json_contributes_nothing_to_check() {
         // `true` accepts everything, so it types as arbitrary JSON: a round trip through it is
         // `Value` in and `Value` out, which asserts nothing about the generated code.
-        let document = responding(json!(true), json!({"anything": 1}));
+        let document = responding(&json!(true), &json!({"anything": 1}));
         let config = Config::default();
         let mut ctx = Ctx::new();
         let normalized = normalize::normalize(document, &mut ctx)?;
@@ -620,19 +730,19 @@ mod tests {
             "required": ["name"],
             "properties": {"name": {"type": "string"}},
         });
-        let found = payloads_of(responding(schema.clone(), json!({"other": 1})))?;
+        let found = payloads_of(responding(&schema, &json!({"other": 1})))?;
         assert!(found[0].vendor_defect);
         // And the same schema with an example that agrees carries none, so the verdict is a
         // judgement about the example rather than a property of the position.
-        let found = payloads_of(responding(schema, json!({"name": "Rex"})))?;
+        let found = payloads_of(responding(&schema, &json!({"name": "Rex"})))?;
         assert!(!found[0].vendor_defect);
 
         // The verdict is asked per example, so it survives past the fifth: the class aggregates
         // and caps its related locations, and reading it back from there would be right about the
         // first few examples of a document and quietly wrong about the rest.
         let (_, diagnostics) = model_of(responding(
-            json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}),
-            json!({"other": 1}),
+            &json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}),
+            &json!({"other": 1}),
         ))?;
         assert!(
             diagnostics

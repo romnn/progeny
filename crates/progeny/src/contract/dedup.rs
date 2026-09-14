@@ -150,7 +150,7 @@ fn apply(
 pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
     match kind {
         ContractKind::Struct { fields } => fields.iter_mut().map(|field| &mut field.ty).collect(),
-        ContractKind::Enum { variants } => {
+        ContractKind::Enum { variants, .. } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
         ContractKind::TaggedEnum { variants, .. }
@@ -179,17 +179,22 @@ fn fingerprint(contract: &Provisional) -> String {
                 field_print(&mut out, field);
             }
         }
-        ContractKind::Enum { variants } => {
+        ContractKind::Enum { variants, fallback } => {
             out.push_str("enum");
             for variant in variants {
                 let _ = write!(out, "|{}:{:?}", variant.rust_name, variant.ty);
             }
+            let _ = write!(out, "|?{fallback}");
         }
         // The tag values are part of the identity on purpose: a Rust variant name is a
         // normalization of the value (`foo-bar` and `fooBar` both name a `FooBar`), so two unions
         // whose names and types agree can still put different bytes on the wire, and merging them
         // would give one of them the other's tags.
-        ContractKind::TaggedEnum { tag, variants } => {
+        ContractKind::TaggedEnum {
+            tag,
+            variants,
+            fallback,
+        } => {
             let _ = write!(out, "tagged({tag})");
             for variant in variants {
                 let _ = write!(
@@ -198,11 +203,16 @@ fn fingerprint(contract: &Provisional) -> String {
                     variant.rust_name, variant.tag_value, variant.ty
                 );
             }
+            let _ = write!(out, "|?{fallback}");
         }
         // Distinct from `tagged(…)` on purpose: the two kinds put different bytes on the wire —
         // a consumed union writes the tag itself while a carried one relies on the variant to —
         // so merging one into the other would change what a payload serializes to.
-        ContractKind::CarriedTagEnum { tag, variants } => {
+        ContractKind::CarriedTagEnum {
+            tag,
+            variants,
+            fallback,
+        } => {
             let _ = write!(out, "carried({tag})");
             for variant in variants {
                 let _ = write!(
@@ -211,12 +221,14 @@ fn fingerprint(contract: &Provisional) -> String {
                     variant.rust_name, variant.tag_value, variant.ty
                 );
             }
+            let _ = write!(out, "|?{fallback}");
         }
-        ContractKind::StringEnum { variants } => {
+        ContractKind::StringEnum { variants, fallback } => {
             out.push_str("strings");
             for variant in variants {
                 let _ = write!(out, "|{}={}", variant.rust_name, variant.wire_name);
             }
+            let _ = write!(out, "|?{fallback}");
         }
         ContractKind::Newtype { inner } => {
             let _ = write!(out, "newtype|{inner:?}");
@@ -234,13 +246,13 @@ fn fingerprint(contract: &Provisional) -> String {
 fn field_print(out: &mut String, field: &FieldContract) {
     let _ = write!(
         out,
-        "|{}={}:{:?}:{:?}:{:?}:{}:{:?}",
+        "|{}={}:{:?}:{:?}:{:?}:{:?}:{:?}",
         field.rust_name,
         field.wire_name,
         field.ty,
         field.presence,
         field.skip_serializing_if,
-        field.flatten,
+        field.capture,
         field.default,
     );
 }

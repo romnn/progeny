@@ -278,6 +278,17 @@ pub(crate) struct RequestBody {
     pub(crate) extensions: BTreeMap<String, Value>,
 }
 
+/// Whether a media type is one progeny reads and writes as JSON: `application/json` and the
+/// `+json` structured-syntax suffix.
+///
+/// Defined beside the document model because two layers ask the question — the API model, to
+/// pick a body's encoding, and the type layer, to know which response positions a lenient
+/// client decodes — and one answer keeps them from disagreeing about what JSON is.
+pub(crate) fn is_json_media_type(media_type: &str) -> bool {
+    let base = media_type.split(';').next().unwrap_or(media_type).trim();
+    base.eq_ignore_ascii_case("application/json") || base.to_ascii_lowercase().ends_with("+json")
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct MediaType {
     pub(crate) schema: Option<SchemaId>,

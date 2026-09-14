@@ -141,7 +141,7 @@ pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
     };
     let variants = super::selected_strategies(args.ab, args.hand_written);
     println!(
-        "bench-compile: {} documents × {} × {} reps, {} packaging, generated into {}",
+        "bench-compile: {} documents × {} × {} reps, {} packaging, {} decoding, generated into {}",
         wanted.len(),
         variants.join(" and "),
         args.reps,
@@ -150,6 +150,7 @@ pub(super) fn plan(args: &Args) -> eyre::Result<Vec<(String, Vec<Target>)>> {
             (true, false) => "workspace",
             (false, _) => "crate",
         },
+        if args.strict { "strict" } else { "lenient" },
         crate::generated::scratch_root()
     );
 
@@ -179,6 +180,9 @@ fn generated_targets(
         } else {
             progeny::SerdeImpl::DeriveAlways
         };
+        if args.strict {
+            config.decoding = progeny::Decoding::Strict;
+        }
         if args.workspace && args.crate_control {
             let output = progeny::generate(bytes, &config)
                 .wrap_err_with(|| format!("generating {name} ({variant}, crate control)"))?;

@@ -47,7 +47,18 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
     let routes = router(&servable, config);
 
     quote! {
-        #![doc = " The serving side."]
+        //! The serving side.
+        //!
+        //! A request is decoded strictly: a handler receives exactly what the description
+        //! declares, or the request is rejected before it arrives. A response is answered in
+        //! its *read form* (`types::read`), the shape a client decodes into, so a server can
+        //! answer with exactly what a vendor would — a required member left out, or an
+        //! undeclared one added through `extra` where the type has one — and a test double can
+        //! reproduce the drift a client is written to survive. A twinned type converts from
+        //! its strict form with `From`, and a struct whose members are all optional derives
+        //! `Default`, so a handler fills in what it means to and `..Default::default()` the
+        //! rest. That puts what a response carries in the handler's hands rather than the
+        //! compiler's.
 
         use super::operations;
         use super::support;

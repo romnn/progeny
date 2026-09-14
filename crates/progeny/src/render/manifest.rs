@@ -12,6 +12,7 @@ use crate::api::{ApiModel, BodyContract, ResponseBody};
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{Contracts, TypeRef};
 use crate::shape::Format;
+use crate::support::LeafUse;
 
 /// The `reqwest` features a generated client forwards, and whether it turns each on by default.
 ///
@@ -96,7 +97,7 @@ pub(super) fn workspace_readme(config: &Config, client: bool, server: bool) -> S
 pub(super) fn types_crate(contracts: &Contracts, config: &Config) -> String {
     let mut out = package(&package_name(config, "types"), &config.package.version);
     out.push_str("[dependencies]\n");
-    out.push_str("serde = { version = \"1\", features = [\"derive\"] }\n");
+    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
     for line in dependency_lines(Some(contracts), None, config) {
         let _ = writeln!(out, "{line}");
@@ -123,7 +124,7 @@ pub(super) fn client_crate(api: &ApiModel, config: &Config, streams: bool) -> St
         "{types} = {{ path = \"../{types}\", version = \"={}\" }}",
         config.package.version
     );
-    out.push_str("serde = { version = \"1\", features = [\"derive\"] }\n");
+    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
     out.push_str("indoc = \"2\"\n");
     out.push_str("thiserror = \"2\"\n");
@@ -153,7 +154,7 @@ pub(super) fn server_crate(api: &ApiModel, config: &Config) -> String {
         "{types} = {{ path = \"../{types}\", version = \"={}\" }}",
         config.package.version
     );
-    out.push_str("serde = { version = \"1\", features = [\"derive\"] }\n");
+    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
     out.push_str("indoc = \"2\"\n");
     out.push_str("thiserror = \"2\"\n");
@@ -306,7 +307,7 @@ pub(super) fn render(
     }
 
     out.push_str("[dependencies]\n");
-    out.push_str("serde = { version = \"1\", features = [\"derive\"] }\n");
+    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
     if client || server {
         out.push_str("indoc = \"2\"\n");
@@ -356,11 +357,14 @@ fn extra_dependencies(contracts: &Contracts, api: &ApiModel, config: &Config) ->
     dependency_lines(Some(contracts), Some(api), config)
 }
 
-fn dependency_lines(
+/// The crates the rendered surface names beyond serde, which is one question asked twice: the
+/// manifest declares them, and the support module's lenient decoder needs a leaf impl for each
+/// type they contribute. One answer keeps the two from disagreeing.
+pub(super) fn crates_named(
     contracts: Option<&Contracts>,
     api: Option<&ApiModel>,
     config: &Config,
-) -> Vec<String> {
+) -> LeafUse {
     let mut formats = BTreeSet::new();
     let mut maps = false;
     if let Some(contracts) = contracts {
@@ -390,34 +394,38 @@ fn dependency_lines(
             }
         }
     }
-
-    let mut lines = Vec::new();
     let dates = formats.contains(&Format::DateTime)
         || formats.contains(&Format::Date)
         || formats.contains(&Format::Time);
-    if dates {
-        match config.formats.date_time {
-            DateTimeCrate::String => {}
-            DateTimeCrate::Chrono => {
-                lines.push("chrono = { version = \"0.4\", features = [\"serde\"] }".to_owned());
-            }
-            DateTimeCrate::Time => {
-                lines.push("time = { version = \"0.3\", features = [\"serde\"] }".to_owned());
-            }
-            DateTimeCrate::Jiff => {
-                lines.push("jiff = { version = \"0.2\", features = [\"serde\"] }".to_owned());
-            }
-        }
+    LeafUse {
+        chrono: dates && config.formats.date_time == DateTimeCrate::Chrono,
+        time: dates && config.formats.date_time == DateTimeCrate::Time,
+        jiff: dates && config.formats.date_time == DateTimeCrate::Jiff,
+        uuid: formats.contains(&Format::Uuid) && config.formats.uuid == UuidCrate::Uuid,
+        indexmap: maps && config.map == MapKind::IndexMap,
     }
-    if formats.contains(&Format::Uuid) {
-        match config.formats.uuid {
-            UuidCrate::String => {}
-            UuidCrate::Uuid => {
-                lines.push("uuid = { version = \"1\", features = [\"serde\"] }".to_owned());
-            }
-        }
+}
+
+fn dependency_lines(
+    contracts: Option<&Contracts>,
+    api: Option<&ApiModel>,
+    config: &Config,
+) -> Vec<String> {
+    let named = crates_named(contracts, api, config);
+    let mut lines = Vec::new();
+    if named.chrono {
+        lines.push("chrono = { version = \"0.4\", features = [\"serde\"] }".to_owned());
     }
-    if config.map == MapKind::IndexMap && maps {
+    if named.time {
+        lines.push("time = { version = \"0.3\", features = [\"serde\"] }".to_owned());
+    }
+    if named.jiff {
+        lines.push("jiff = { version = \"0.2\", features = [\"serde\"] }".to_owned());
+    }
+    if named.uuid {
+        lines.push("uuid = { version = \"1\", features = [\"serde\"] }".to_owned());
+    }
+    if named.indexmap {
         lines.push("indexmap = { version = \"2\", features = [\"serde\"] }".to_owned());
     }
     lines

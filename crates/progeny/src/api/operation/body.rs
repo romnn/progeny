@@ -502,8 +502,7 @@ fn part_of(ty: &TypeRef) -> (PartKind, bool) {
 
 /// The JSON family: `application/json` and the `+json` structured suffix.
 pub(super) fn is_json(media_type: &str) -> bool {
-    let base = media_type.split(';').next().unwrap_or(media_type).trim();
-    base == "application/json" || base.ends_with("+json")
+    crate::doc::is_json_media_type(media_type)
 }
 
 #[cfg(test)]

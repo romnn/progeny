@@ -13,6 +13,8 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
+use super::types::Scope;
+use crate::config::UnknownFields;
 use crate::contract::{ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TypeContract};
 
 /// Whether any type takes a hand-written path, and therefore whether the support module is needed.
@@ -23,22 +25,29 @@ pub(super) fn needed(contracts: &Contracts) -> bool {
         .any(|contract| contract.deser() != DeserStrategy::Derive)
 }
 
-pub(super) fn render(contracts: &Contracts) -> TokenStream {
-    let items = contracts.types().iter().map(one);
-    quote! { #(#items)* }
-}
-
-fn one(contract: &TypeContract) -> TokenStream {
+/// The hand-written serde impls of one type.
+///
+/// A read form's `Deserialize` is the lenient decoder's, rendered by [`super::lenient`], so a
+/// read form on a hand-written path gets its `Serialize` half from here and nothing else. The
+/// string enum is the exception: its one open implementation is already what a lenient read
+/// produces, so it keeps both halves in every form.
+pub(super) fn one(contract: &TypeContract) -> TokenStream {
+    let serialize_only = contract.form().is_lenient();
     match (contract.deser(), contract.kind()) {
-        (DeserStrategy::HandWrittenBuffered { deny_unknown }, ContractKind::Struct { fields }) => {
-            buffered(contract, fields, deny_unknown)
+        (DeserStrategy::HandWrittenBuffered { unknown }, ContractKind::Struct { fields }) => {
+            buffered(contract, fields, unknown, serialize_only)
         }
-        (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants }) => {
-            fieldless(contract, variants)
+        (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants, fallback }) => {
+            fieldless(contract, variants, fallback)
         }
-        (DeserStrategy::HandWrittenCarriedTag, ContractKind::CarriedTagEnum { tag, variants }) => {
-            carried(contract, tag, variants)
-        }
+        (
+            DeserStrategy::HandWrittenCarriedTag,
+            ContractKind::CarriedTagEnum {
+                tag,
+                variants,
+                fallback,
+            },
+        ) => carried(contract, tag, variants, fallback, serialize_only),
         // Every other pairing is the derive's, and the eligibility function is what guarantees
         // that: a hand-written strategy on a kind with no implementation here would be a ruling
         // this module never saw.
@@ -59,10 +68,11 @@ pub(super) fn implementation_type(contract: &TypeContract) -> TokenStream {
 fn buffered(
     contract: &TypeContract,
     fields: &[crate::contract::FieldContract],
-    deny_unknown: bool,
+    unknown: UnknownFields,
+    serialize_only: bool,
 ) -> TokenStream {
     let name = implementation_type(contract);
-    let reading = reading(contract, fields, deny_unknown);
+    let reading = (!serialize_only).then(|| reading(contract, fields, unknown));
     let writing = writing(contract, fields);
     quote! {
         #reading
@@ -72,7 +82,6 @@ fn buffered(
             where
                 S: serde::Serializer,
             {
-                use serde::ser::SerializeStruct as _;
                 #writing
             }
         }
@@ -83,24 +92,28 @@ fn buffered(
 fn reading(
     contract: &TypeContract,
     fields: &[crate::contract::FieldContract],
-    deny_unknown: bool,
+    unknown: UnknownFields,
 ) -> TokenStream {
     let name = implementation_type(contract);
+    let support = Scope::of(contract).support();
     let literal_name = contract.rust_name().as_str();
-    let wire_names: Vec<&str> = fields
+    // The capture member has no wire name: it is the leftovers, read after the declared names
+    // and never looked for among them.
+    let declared: Vec<&crate::contract::FieldContract> =
+        fields.iter().filter(|field| !field.is_capture()).collect();
+    let wire_names: Vec<&str> = declared
         .iter()
         .map(|field| field.wire_name.as_str())
         .collect();
     // Resolved by the eligibility ruling and carried in the strategy, so this module has no
-    // policy to decide — and no arm in which "cannot arrive here" could quietly become a fold
-    // that discards members.
-    let unknown = if deny_unknown {
-        quote! { Deny }
-    } else {
-        quote! { Ignore }
+    // policy to decide.
+    let unknown = match unknown {
+        UnknownFields::Ignore => quote! { Ignore },
+        UnknownFields::Deny => quote! { Deny },
+        UnknownFields::Capture => quote! { Capture },
     };
 
-    let defaulted = fields
+    let defaulted = declared
         .iter()
         // A presence-preserving field uses its own `Default` only to represent an absent member.
         // OpenAPI's declared `default` remains documentation about the server and never enters
@@ -110,10 +123,12 @@ fn reading(
         let member = ident(&field.rust_name);
         let wire = field.wire_name.as_str();
         let deprecated = deprecated_field(field, contract.docs().deprecated);
-        if field.skip_serializing_if == SkipRule::WhenOmitted {
+        if field.is_capture() {
+            quote! { #deprecated #member: buffer.take_rest()?, }
+        } else if field.skip_serializing_if == SkipRule::WhenOmitted {
             quote! {
                 #deprecated
-                #member: super::support::take_presence_or_default(buffer, #wire)?,
+                #member: #support::take_presence_or_default(buffer, #wire)?,
             }
         } else {
             quote! { #deprecated #member: buffer.take(#wire)?, }
@@ -129,12 +144,12 @@ fn reading(
     };
 
     quote! {
-        impl<'de> super::support::Assemble<'de> for #name {
+        impl<'de> #support::Assemble<'de> for #name {
             const NAME: &'static str = #literal_name;
             const FIELDS: &'static [&'static str] = &[#(#wire_names),*];
             const DEFAULTED: &'static [bool] = &[#(#defaulted),*];
 
-            fn assemble<E>(#buffer_binding: &mut super::support::Buffer<'de>) -> Result<Self, E>
+            fn assemble<E>(#buffer_binding: &mut #support::Buffer<'de>) -> Result<Self, E>
             where
                 E: serde::de::Error,
             {
@@ -147,13 +162,13 @@ fn reading(
             where
                 D: serde::Deserializer<'de>,
             {
-                use super::support::Assemble as _;
+                use #support::Assemble as _;
                 serde::Deserializer::deserialize_struct(
                     deserializer,
                     Self::NAME,
                     Self::FIELDS,
-                    super::support::BufferVisitor::<Self>::new(
-                        super::support::Unknown::#unknown,
+                    #support::BufferVisitor::<Self>::new(
+                        #support::Unknown::#unknown,
                     ),
                 )
             }
@@ -162,7 +177,14 @@ fn reading(
 }
 
 /// The `Serialize` body: the member count, then one write per member.
+///
+/// A struct with a capture member writes as a map instead — its keys are only known at run time,
+/// and `serialize_struct` takes static names — which is the same wire the derive's `flatten`
+/// produces.
 fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -> TokenStream {
+    if let Some(capture) = fields.iter().find(|field| field.is_capture()) {
+        return writing_map(contract, fields, capture);
+    }
     let literal_name = contract.rust_name().as_str();
     // The count a struct is serialized with has to match what is actually written, so a skipped
     // member is subtracted from it rather than assumed away.
@@ -230,10 +252,66 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
     });
 
     quote! {
+        use serde::ser::SerializeStruct as _;
         #binding
         #(#conditional)*
         #state = serializer.serialize_struct(#literal_name, count)?;
         #(#writes)*
+        state.end()
+    }
+}
+
+/// The `Serialize` body of a struct with a capture member: every declared member as an entry,
+/// then every captured one.
+///
+/// A captured entry whose key names a declared member is left out: the declared member is the
+/// type's statement about that key, and writing both would put the same key on the wire twice.
+fn writing_map(
+    contract: &TypeContract,
+    fields: &[crate::contract::FieldContract],
+    capture: &crate::contract::FieldContract,
+) -> TokenStream {
+    let declared: Vec<&crate::contract::FieldContract> =
+        fields.iter().filter(|field| !field.is_capture()).collect();
+    let wire_names: Vec<&str> = declared
+        .iter()
+        .map(|field| field.wire_name.as_str())
+        .collect();
+    let writes = declared.iter().map(|field| {
+        let member = ident(&field.rust_name);
+        let wire = field.wire_name.as_str();
+        let deprecated = deprecated_field(field, contract.docs().deprecated);
+        match field.skip_serializing_if {
+            SkipRule::Never => {
+                quote! { #deprecated state.serialize_entry(#wire, &self.#member)?; }
+            }
+            SkipRule::WhenNone => quote! {
+                #deprecated
+                if self.#member.is_some() {
+                    state.serialize_entry(#wire, &self.#member)?;
+                }
+            },
+            SkipRule::WhenOmitted => quote! {
+                #deprecated
+                if !self.#member.is_omitted() {
+                    state.serialize_entry(#wire, &self.#member)?;
+                }
+            },
+        }
+    });
+    let captured = ident(&capture.rust_name);
+    let deprecated = deprecated_field(capture, contract.docs().deprecated);
+    quote! {
+        use serde::ser::SerializeMap as _;
+        const DECLARED: &[&str] = &[#(#wire_names),*];
+        let mut state = serializer.serialize_map(None)?;
+        #(#writes)*
+        #deprecated
+        for (key, value) in &self.#captured {
+            if !DECLARED.contains(&key.as_str()) {
+                state.serialize_entry(key, value)?;
+            }
+        }
         state.end()
     }
 }
@@ -255,13 +333,22 @@ fn deprecated_field(
     }
 }
 
-fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant]) -> TokenStream {
+/// The impls of an open string enum: a string in, the same string out.
+///
+/// Read with `deserialize_str` and written with `serialize_str`, never through serde's enum
+/// repertoire: the description says the wire carries a string, and a string it does not list is
+/// the fallback variant holding that string — which serializes back to the exact bytes it was
+/// read from. No buffering, so this works with formats that are not self-describing, and it is
+/// the one implementation under both serde strategies.
+fn fieldless(
+    contract: &TypeContract,
+    variants: &[crate::contract::StringVariant],
+    fallback: &RustIdent,
+) -> TokenStream {
     let name = implementation_type(contract);
+    let support = Scope::of(contract).support();
     let literal_name = contract.rust_name().as_str();
-    let wire_names: Vec<&str> = variants
-        .iter()
-        .map(|variant| variant.wire_name.as_str())
-        .collect();
+    let fallback = ident(fallback);
 
     let resolve = variants.iter().map(|variant| {
         let member = ident(&variant.rust_name);
@@ -281,24 +368,20 @@ fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant
             quote! { #wire => Some(Self::#member), }
         }
     });
-    let write = variants.iter().enumerate().map(|(index, variant)| {
-        let member = ident(&variant.rust_name);
-        let wire = variant.wire_name.as_str();
-        let index = u32::try_from(index).unwrap_or(u32::MAX);
-        if contract.docs().deprecated {
-            quote! {
+    let unlisted = if contract.docs().deprecated {
+        quote! {
+            |value| {
                 #[expect(
                     deprecated,
-                    reason = "the generated serializer must match this deprecated variant"
+                    reason = "the generated deserializer must construct this deprecated variant"
                 )]
-                Self::#member => serializer.serialize_unit_variant(#literal_name, #index, #wire),
-            }
-        } else {
-            quote! {
-                Self::#member => serializer.serialize_unit_variant(#literal_name, #index, #wire),
+                let resolved = Self::#fallback(value);
+                resolved
             }
         }
-    });
+    } else {
+        quote! { Self::#fallback }
+    };
 
     quote! {
         impl<'de> serde::Deserialize<'de> for #name {
@@ -306,18 +389,16 @@ fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant
             where
                 D: serde::Deserializer<'de>,
             {
-                const NAME: &str = #literal_name;
-                const VARIANTS: &[&str] = &[#(#wire_names),*];
-                serde::Deserializer::deserialize_enum(
+                serde::Deserializer::deserialize_str(
                     deserializer,
-                    NAME,
-                    VARIANTS,
-                    // Resolved from the identifier alone: no buffering, so this keeps working with
-                    // formats that are not self-describing.
-                    super::support::UnitVariants::new(NAME, VARIANTS, |name| match name {
-                        #(#resolve)*
-                        _ => None,
-                    }),
+                    #support::OpenVariants::new(
+                        #literal_name,
+                        |name| match name {
+                            #(#resolve)*
+                            _ => None,
+                        },
+                        #unlisted,
+                    ),
                 )
             }
         }
@@ -327,9 +408,7 @@ fn fieldless(contract: &TypeContract, variants: &[crate::contract::StringVariant
             where
                 S: serde::Serializer,
             {
-                match self {
-                    #(#write)*
-                }
+                serializer.serialize_str(self.as_str())
             }
         }
     }
@@ -347,9 +426,13 @@ fn carried(
     contract: &TypeContract,
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    fallback: &RustIdent,
+    serialize_only: bool,
 ) -> TokenStream {
     let name = implementation_type(contract);
-    let literal_name = contract.rust_name().as_str();
+    let support = Scope::of(contract).support();
+    let fallback_name = fallback;
+    let fallback = ident(fallback);
     let wire_names: Vec<&str> = variants
         .iter()
         .map(|variant| variant.tag_value.as_str())
@@ -392,7 +475,61 @@ fn carried(
             }
         }
     };
-    let write = variants.iter().map(|variant| {
+    let write = carried_writes(contract, tag, variants, &support);
+    let deprecated = contract.docs().deprecated.then(|| {
+        quote! {
+            #[expect(
+                deprecated,
+                reason = "the generated serializer must match this deprecated variant"
+            )]
+        }
+    });
+    let unknown = super::lenient::unknown_arm(contract, fallback_name);
+
+    let reading = (!serialize_only).then(|| {
+        quote! {
+            impl<'de> serde::Deserialize<'de> for #name {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    const TAG: &str = #tag;
+                    const VARIANTS: &[&str] = &[#(#wire_names),*];
+                    let payload: #support::Content<'de> =
+                        serde::Deserialize::deserialize(deserializer)?;
+                    #support::dispatch(TAG, VARIANTS, payload, #resolver, #unknown)
+                }
+            }
+        }
+    });
+
+    quote! {
+        #reading
+
+        impl serde::Serialize for #name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                match self {
+                    #(#write)*
+                    // The unrecognized payload, exactly as it arrived.
+                    #deprecated
+                    Self::#fallback(value) => serde::Serialize::serialize(value, serializer),
+                }
+            }
+        }
+    }
+}
+
+/// One `Serialize` arm per named variant of a carried-tag union.
+fn carried_writes<'a>(
+    contract: &'a TypeContract,
+    tag: &'a str,
+    variants: &'a [crate::contract::TaggedVariant],
+    support: &'a TokenStream,
+) -> impl Iterator<Item = TokenStream> + 'a {
+    variants.iter().map(move |variant| {
         let member = ident(&variant.rust_name);
         let value = variant.tag_value.as_str();
         // Through the support injector rather than a bare delegation: the payload's own tag
@@ -400,7 +537,7 @@ fn carried(
         // the caller chose.
         let write = quote! {
             Self::#member(value) => {
-                super::support::serialize_carried(value, #tag, #value, serializer)
+                #support::serialize_carried(value, #tag, #value, serializer)
             }
         };
         if contract.docs().deprecated {
@@ -414,34 +551,7 @@ fn carried(
         } else {
             write
         }
-    });
-
-    quote! {
-        impl<'de> serde::Deserialize<'de> for #name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                const NAME: &str = #literal_name;
-                const TAG: &str = #tag;
-                const VARIANTS: &[&str] = &[#(#wire_names),*];
-                let payload: super::support::Content<'de> =
-                    serde::Deserialize::deserialize(deserializer)?;
-                super::support::dispatch(NAME, TAG, VARIANTS, payload, #resolver)
-            }
-        }
-
-        impl serde::Serialize for #name {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                match self {
-                    #(#write)*
-                }
-            }
-        }
-    }
+    })
 }
 
 fn ident(name: &RustIdent) -> proc_macro2::Ident {

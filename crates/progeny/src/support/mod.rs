@@ -7,15 +7,24 @@
 //! In a generated crate it is `#[doc(hidden)]` and never part of that crate's public API.
 
 mod buffered;
+mod degradations;
+mod lenient;
 mod multipart;
 #[cfg(test)]
 mod presence;
 mod serve;
 mod upload;
-// The names `multipart.rs` reaches with `super::`: in a generated crate the upload file is
-// spliced flat into the support root, so this import makes progeny's own module tree answer the
-// same paths.
+// The names `multipart.rs` and `lenient.rs` reach with `super::`: in a generated crate the
+// buffered and upload files are spliced flat into the support root, so these imports make
+// progeny's own module tree answer the same paths.
+use buffered::{Content, ContentDeserializer, choice};
 use upload::{base64_decode, base64_encode};
+// What the client runtime reaches as `super::…`; here only the `cfg(test)` copy of that
+// runtime does, so the imports are gated the same way.
+#[cfg(test)]
+use degradations::{Decoded, Degradations, Site};
+#[cfg(test)]
+use lenient::Lenient;
 // Crate-visible for one reason: the bridge test beside the client renderer holds this file's
 // `Style` and the API layer's to the same variant list through an exhaustive match, which a
 // private module would put out of the test's reach.
@@ -42,6 +51,11 @@ mod router;
 
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
 const BUFFERED: &str = include_str!("buffered.rs");
+
+/// The degradation report: what a lenient decode tolerated, by place in the description.
+const DEGRADATIONS: &str = include_str!("degradations.rs");
+/// The lenient decoder.
+const LENIENT: &str = include_str!("lenient.rs");
 
 /// Three-state optional and nullable property presence.
 const PRESENCE: &str = include_str!("presence.rs");
@@ -212,9 +226,14 @@ pub(crate) fn tokens(
     gated: bool,
     body_limit: crate::config::BodyLimit,
     presence: PresenceUse,
+    decoding: Decoding,
 ) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
-    let presence = (presence == PresenceUse::Preserved).then(presence_tokens);
+    // The report travels with every client response, however the response was decoded; the
+    // decoder itself is only compiled where responses are read leniently.
+    let degradations = (client || decoding.is_lenient()).then(degradations_tokens);
+    let lenient = decoding.lenient().map(lenient_tokens);
+    let presence = (presence == PresenceUse::Preserved).then(|| presence_tokens(decoding));
     let upload = source_items(UPLOAD);
     let edges = edge_tokens(
         Edge {
@@ -226,9 +245,12 @@ pub(crate) fn tokens(
         body_limit,
         ClientUse::default(),
         ServerUse::ALL,
+        decoding,
     );
     quote::quote! {
         #buffered
+        #degradations
+        #lenient
         #presence
         #upload
         #edges
@@ -236,21 +258,124 @@ pub(crate) fn tokens(
 }
 
 /// Support owned by a generated types crate.
-pub(crate) fn types_tokens(presence: bool) -> proc_macro2::TokenStream {
+pub(crate) fn types_tokens(presence: bool, decoding: Decoding) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
-    let presence = presence.then(presence_tokens);
+    let degradations = decoding.is_lenient().then(degradations_tokens);
+    let lenient = decoding.lenient().map(lenient_tokens);
+    let presence = presence.then(|| presence_tokens(decoding));
     let upload = source_items(UPLOAD);
     quote::quote! {
         #buffered
+        #degradations
+        #lenient
         #presence
         #upload
     }
 }
 
-fn presence_tokens() -> proc_macro2::TokenStream {
+/// How the support module reads responses: strictly, or leniently against the given leaves.
+///
+/// The configuration's choice, joined with the one fact the lenient decoder needs from the
+/// rest of the generator — which leaf types beyond `std` it has to be able to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decoding {
+    Strict,
+    Lenient(LeafUse),
+}
+
+impl Decoding {
+    pub(crate) fn is_lenient(self) -> bool {
+        matches!(self, Self::Lenient(_))
+    }
+
+    fn lenient(self) -> Option<LeafUse> {
+        match self {
+            Self::Strict => None,
+            Self::Lenient(leaves) => Some(leaves),
+        }
+    }
+}
+
+/// The report vocabulary as a submodule, re-exported at the support root — where the client
+/// runtime reaches it as `super::…` and the types module as `super::support::…`.
+fn degradations_tokens() -> proc_macro2::TokenStream {
+    let degradations = source_without_file_expectation(DEGRADATIONS);
+    quote::quote! {
+        pub mod degradations {
+            #degradations
+        }
+        pub use degradations::{Decoded, Degradation, DegradationKind, Degradations, Site};
+    }
+}
+
+/// The leaf types the lenient decoder has to read that the shipped file cannot name itself:
+/// the format crates a configuration chose, and the one map type outside `std`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LeafUse {
+    pub(crate) chrono: bool,
+    pub(crate) time: bool,
+    pub(crate) jiff: bool,
+    pub(crate) uuid: bool,
+    pub(crate) indexmap: bool,
+}
+
+/// The lenient decoder as a submodule, with the leaf impls the configuration needs and its
+/// vocabulary re-exported at the support root beside the report's.
+fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
+    let lenient = source_without_file_expectation(LENIENT);
+    let mut leaf_types: Vec<proc_macro2::TokenStream> = Vec::new();
+    if leaves.chrono {
+        leaf_types.push(quote::quote! {
+            chrono::DateTime<chrono::Utc>, chrono::NaiveDate, chrono::NaiveTime
+        });
+    }
+    if leaves.time {
+        leaf_types.push(quote::quote! { time::OffsetDateTime, time::Date, time::Time });
+    }
+    if leaves.jiff {
+        leaf_types.push(quote::quote! { jiff::Timestamp, jiff::civil::Date, jiff::civil::Time });
+    }
+    if leaves.uuid {
+        leaf_types.push(quote::quote! { uuid::Uuid });
+    }
+    let extra_leaves = (!leaf_types.is_empty()).then(|| {
+        quote::quote! { lenient_via_serde! { #(#leaf_types),* } }
+    });
+    let indexmap = leaves.indexmap.then(|| {
+        quote::quote! {
+            impl<'de, T> Lenient<'de> for indexmap::IndexMap<String, T>
+            where
+                T: Lenient<'de>,
+            {
+                fn lenient(
+                    content: Content<'de>,
+                    site: &'static Site,
+                    report: &mut Degradations,
+                ) -> Result<Self, Problem> {
+                    entries(content, site, report).map(|pairs| pairs.into_iter().collect())
+                }
+            }
+        }
+    });
+    quote::quote! {
+        pub mod lenient {
+            #lenient
+            #extra_leaves
+            #indexmap
+        }
+        pub use lenient::{
+            Declared, Lenient, Members, Problem, Slot, open_string, probe, tag_choice, tag_text,
+            unknown_union,
+        };
+    }
+}
+
+fn presence_tokens(decoding: Decoding) -> proc_macro2::TokenStream {
     let presence = source_items(PRESENCE);
+    let lenient = decoding.is_lenient().then(presence_lenient_tokens);
     quote::quote! {
         #presence
+        #lenient
 
         /// Reads a presence-preserving field, defaulting only when the member is absent.
         pub(crate) fn take_presence_or_default<'de, T, E>(
@@ -271,8 +396,69 @@ fn presence_tokens() -> proc_macro2::TokenStream {
     }
 }
 
+/// The presence-preserving field's half of the lenient decoder: the impl, and the member reader
+/// a struct's decoder calls for one.
+fn presence_lenient_tokens() -> proc_macro2::TokenStream {
+    quote::quote! {
+
+
+        impl<'de, T> Lenient<'de> for Presence<T>
+        where
+            T: Lenient<'de>,
+        {
+            /// `null` is `Null`; the caller decides what absence is, because only it saw the
+            /// member missing.
+            fn lenient(
+                content: Content<'de>,
+                site: &'static Site,
+                report: &mut Degradations,
+            ) -> Result<Self, lenient::Problem> {
+                match content {
+                    Content::None | Content::Unit => Ok(Presence::Null),
+                    Content::Some(inner) => T::lenient(*inner, site, report).map(Presence::Value),
+                    other => T::lenient(other, site, report).map(Presence::Value),
+                }
+            }
+        }
+
+        impl<'de> Members<'de> {
+            /// Read a presence-preserving member: absent is `Omitted`, `null` is `Null`, and a
+            /// value that does not read as `T` is `Omitted` with the reason recorded.
+            pub fn take_presence<T>(
+                &mut self,
+                site: &'static Site,
+                report: &mut Degradations,
+            ) -> Presence<T>
+            where
+                T: Lenient<'de>,
+            {
+                match self.take_raw(site, report) {
+                    Slot::Absent => Presence::Omitted,
+                    Slot::Null => Presence::Null,
+                    Slot::Value(content) => match T::lenient(content, site, report) {
+                        Ok(value) => Presence::Value(value),
+                        Err(err) => {
+                            report.record(
+                                site,
+                                DegradationKind::Undecodable,
+                                Some(err.to_string()),
+                                true,
+                            );
+                            Presence::Omitted
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
 /// Support owned by a generated client crate.
-pub(crate) fn client_tokens(used: ClientUse) -> proc_macro2::TokenStream {
+///
+/// The decoding vocabulary is the types crate's — one `Degradations` type, shared by the
+/// `Lenient` impls there and the client runtime here — so it is re-exported from the crate root's
+/// `types`, which is where the client runtime's `super::…` paths look.
+pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2::TokenStream {
     // Shipped only where the multipart writer's `super::base64_decode` needs resolving; with no
     // multipart body in the description nothing here would be live at all.
     let upload = used.multipart.then(|| upload_source(UPLOAD, true));
@@ -281,8 +467,17 @@ pub(crate) fn client_tokens(used: ClientUse) -> proc_macro2::TokenStream {
         crate::config::BodyLimit::default(),
         used,
         ServerUse::default(),
+        decoding,
     );
+    // Lenient: the report is the types crate's, because the `Lenient` impls there record into
+    // it. Strict: nothing in the types crate names a report, so the client carries its own.
+    let vocabulary = if decoding.is_lenient() {
+        quote::quote! { pub use super::types::{Decoded, Degradations, Lenient, Site}; }
+    } else {
+        degradations_tokens()
+    };
     quote::quote! {
+        #vocabulary
         #upload
         #edges
     }
@@ -294,7 +489,13 @@ pub(crate) fn server_tokens(
     used: ServerUse,
 ) -> proc_macro2::TokenStream {
     let upload = upload_source(UPLOAD, false);
-    let edges = edge_tokens(Edge::SERVER, body_limit, ClientUse::default(), used);
+    let edges = edge_tokens(
+        Edge::SERVER,
+        body_limit,
+        ClientUse::default(),
+        used,
+        Decoding::Strict,
+    );
     quote::quote! {
         #upload
         #edges
@@ -377,6 +578,7 @@ fn edge_tokens(
     body_limit: crate::config::BodyLimit,
     client_use: ClientUse,
     server_use: ServerUse,
+    decoding: Decoding,
 ) -> proc_macro2::TokenStream {
     let Edge {
         client,
@@ -420,11 +622,7 @@ fn edge_tokens(
     // items that name one — putting each in its own module is what lets one attribute cover all of
     // them rather than one per item.
     let wire = client.then(|| {
-        let wire = if precise {
-            client_source(HTTP, client_use)
-        } else {
-            source_items(HTTP)
-        };
+        let wire = client_source(HTTP, precise.then_some(client_use), decoding);
         quote::quote! {
             #calling
             pub mod wire { #wire }
@@ -582,6 +780,17 @@ fn source(text: &str) -> proc_macro2::TokenStream {
     quote::quote! { #file }
 }
 
+/// One shipped file as tokens with its `cfg_attr` dead-code expectation removed: every item is
+/// live in a generated crate, so the expectation progeny needs would go unfulfilled there.
+fn source_without_file_expectation(text: &str) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    remove_dead_code_file_expectation(&mut file);
+    file.items.retain(|item| !is_test_module(item));
+    quote::quote! { #file }
+}
+
 fn source_items(text: &str) -> proc_macro2::TokenStream {
     let Ok(file) = syn::parse_file(text) else {
         return text.parse().unwrap_or_default();
@@ -590,11 +799,33 @@ fn source_items(text: &str) -> proc_macro2::TokenStream {
     quote::quote! { #(#items)* }
 }
 
-fn client_source(text: &str, used: ClientUse) -> proc_macro2::TokenStream {
+/// The client runtime, with the items this description cannot reach expected dead when `used`
+/// says what it reaches, and the lenient decoder left out when nothing is decoded leniently —
+/// it names a trait that only exists then.
+fn client_source(
+    text: &str,
+    used: Option<ClientUse>,
+    decoding: Decoding,
+) -> proc_macro2::TokenStream {
     let Ok(mut file) = syn::parse_file(text) else {
         return text.parse().unwrap_or_default();
     };
-    file.items.retain(|item| !is_test_module(item));
+    // The report and its vocabulary stay: `ResponseValue` carries a report whichever way its
+    // body was decoded. Only the decoder goes — the two functions, and the one `use` that names
+    // what only they name, which `http.rs` keeps on a line of its own for exactly this.
+    let lenient_decoder = |item: &syn::Item| match item {
+        syn::Item::Fn(function) => function.sig.ident.to_string().starts_with("decode_lenient"),
+        syn::Item::Use(import) => {
+            let spelled = quote::quote! { #import }.to_string();
+            spelled == quote::quote! { use super::{Lenient, Site}; }.to_string()
+        }
+        _ => false,
+    };
+    file.items
+        .retain(|item| !is_test_module(item) && (decoding.is_lenient() || !lenient_decoder(item)));
+    let Some(used) = used else {
+        return quote::quote! { #file };
+    };
     for item in &mut file.items {
         match item {
             syn::Item::Struct(structure) if structure.ident == "NotAForm" && !used.multipart => {
@@ -868,8 +1099,14 @@ mod tests {
         for client in [false, true] {
             for server in [false, true] {
                 for gated in [false, true] {
-                    let tokens =
-                        super::tokens(client, server, gated, BodyLimit::default(), false.into());
+                    let tokens = super::tokens(
+                        client,
+                        server,
+                        gated,
+                        BodyLimit::default(),
+                        false.into(),
+                        super::Decoding::Strict,
+                    );
                     syn::parse2::<syn::File>(tokens.clone()).map_err(|error| {
                         eyre::eyre!(
                             "{}",
@@ -885,19 +1122,41 @@ mod tests {
         }
         // And each half is really there when it was asked for, so the check above is not passing
         // because there was nothing to compose.
-        let both = super::tokens(true, true, true, BodyLimit::default(), false.into()).to_string();
+        let both = super::tokens(
+            true,
+            true,
+            true,
+            BodyLimit::default(),
+            false.into(),
+            super::Decoding::Strict,
+        )
+        .to_string();
         assert!(both.contains("ResponseValue"), "{both}");
         assert!(both.contains("Rejection"), "{both}");
         assert!(both.contains("cfg (feature = \"client\")"), "{both}");
         assert!(both.contains("cfg (feature = \"server\")"), "{both}");
 
-        let calling =
-            super::tokens(true, false, true, BodyLimit::default(), false.into()).to_string();
+        let calling = super::tokens(
+            true,
+            false,
+            true,
+            BodyLimit::default(),
+            false.into(),
+            super::Decoding::Strict,
+        )
+        .to_string();
         assert!(calling.contains("ResponseValue"), "{calling}");
         assert!(!calling.contains("Rejection"), "{calling}");
 
-        let serving =
-            super::tokens(false, true, true, BodyLimit::default(), false.into()).to_string();
+        let serving = super::tokens(
+            false,
+            true,
+            true,
+            BodyLimit::default(),
+            false.into(),
+            super::Decoding::Strict,
+        )
+        .to_string();
         assert!(!serving.contains("ResponseValue"), "{serving}");
         assert!(serving.contains("Rejection"), "{serving}");
 
@@ -907,9 +1166,16 @@ mod tests {
 
         // In module mode nothing is gated: there is no crate whose feature could turn it on.
         assert!(
-            !super::tokens(true, true, false, BodyLimit::default(), false.into())
-                .to_string()
-                .contains("cfg (feature"),
+            !super::tokens(
+                true,
+                true,
+                false,
+                BodyLimit::default(),
+                false.into(),
+                super::Decoding::Strict
+            )
+            .to_string()
+            .contains("cfg (feature"),
         );
     }
 
@@ -921,14 +1187,29 @@ mod tests {
     /// Saying so in a comment was not enough, so it became configuration.
     #[test_util::test]
     fn the_body_ceiling_is_the_configured_one() {
-        let rendered = super::tokens(false, true, false, BodyLimit(4096), false.into()).to_string();
+        let rendered = super::tokens(
+            false,
+            true,
+            false,
+            BodyLimit(4096),
+            false.into(),
+            super::Decoding::Strict,
+        )
+        .to_string();
         assert!(
             rendered.contains("BODY_LIMIT : usize = 4096"),
             "the configured ceiling did not reach the shipped constant"
         );
         // And the default is still the default rather than something a caller has to know to set.
-        let fallback =
-            super::tokens(false, true, false, BodyLimit::default(), false.into()).to_string();
+        let fallback = super::tokens(
+            false,
+            true,
+            false,
+            BodyLimit::default(),
+            false.into(),
+            super::Decoding::Strict,
+        )
+        .to_string();
         assert!(
             fallback.contains("BODY_LIMIT : usize = 2097152"),
             "{fallback}"

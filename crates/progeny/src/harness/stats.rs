@@ -64,6 +64,8 @@ pub struct Stats {
     pub byte_response_arms: usize,
     /// Selected response arms carrying no body.
     pub empty_response_arms: usize,
+    /// The form each generated type takes under lenient decoding.
+    pub forms: Forms,
     /// Operations declaring an exact `101 Switching Protocols` response.
     pub upgrade_operations: usize,
     /// Selected request bodies carrying raw bytes.
@@ -141,6 +143,10 @@ impl Stats {
         self.text_response_arms += other.text_response_arms;
         self.byte_response_arms += other.byte_response_arms;
         self.empty_response_arms += other.empty_response_arms;
+        self.forms.strict += other.forms.strict;
+        self.forms.shared += other.forms.shared;
+        self.forms.read_only += other.forms.read_only;
+        self.forms.twinned += other.forms.twinned;
         self.upgrade_operations += other.upgrade_operations;
         self.byte_request_bodies += other.byte_request_bodies;
         self.multipart_file_request_bodies += other.multipart_file_request_bodies;
@@ -177,6 +183,16 @@ pub fn stats(input: &[u8]) -> Result<Stats, RejectError> {
         .count();
     let config = crate::Config::default();
     let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
+    for contract in contracts.types() {
+        match contract.form() {
+            contract::Form::Strict { twin: Some(_) } => stats.forms.twinned += 1,
+            contract::Form::Strict { twin: None } => stats.forms.strict += 1,
+            contract::Form::Shared => stats.forms.shared += 1,
+            contract::Form::Lenient { strict: None } => stats.forms.read_only += 1,
+            // The twin itself, counted once with its strict half.
+            contract::Form::Lenient { strict: Some(_) } => {}
+        }
+    }
     let api = api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
     for body in api
         .operations()
@@ -320,6 +336,20 @@ fn count_value_constraints(object: &SchemaObject, stats: &mut Stats) {
                 .or_default() += 1;
         }
     }
+}
+
+/// How many types take each form: the cost of lenient decoding in types, which is what decides
+/// whether a read twin per differing type was the right price.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Forms {
+    /// Types no response yields: the strict form only.
+    pub strict: usize,
+    /// Types both directions reach whose two forms agree: one type serves both.
+    pub shared: usize,
+    /// Types only a response yields, written in the read form.
+    pub read_only: usize,
+    /// Types both directions reach whose forms differ: a strict type and its read twin.
+    pub twinned: usize,
 }
 
 fn merge_counts(into: &mut BTreeMap<String, usize>, from: &BTreeMap<String, usize>) {

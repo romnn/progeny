@@ -160,7 +160,9 @@ fn a_missing_required_member_is_refused_the_same_way() {
 fn a_member_of_the_wrong_type_is_refused_the_same_way() {
     refuse_modulo_offset(r#"{"required":7}"#)?;
     refuse_modulo_offset(r#"{"required":"a","optional":"seven"}"#)?;
-    refuse_modulo_offset(r#"{"required":"a","state":"unknown"}"#)?;
+    // A string the enum does not list is *accepted* by both — every enum is open — so the wrong
+    // type for it is a number.
+    refuse_modulo_offset(r#"{"required":"a","state":5}"#)?;
 }
 
 #[test_util::test]
@@ -243,18 +245,66 @@ fn a_fieldless_enum_reads_and_writes_the_same_bytes() {
     }
 }
 
+/// Every string enum is open: a value the description does not list lands in the fallback
+/// variant, keeps its bytes, and writes back exactly as it arrived — under both strategies,
+/// because the string enum takes the one hand-written path under both.
 #[test_util::test]
-fn an_unknown_variant_is_refused_the_same_way() {
+fn an_unknown_variant_is_kept_the_same_way() {
     let payload = r#""nonsense""#;
-    let left = serde_json::from_str::<derived::types::State>(payload)
-        .err()
-        .ok_or_eyre("the derive should refuse it")?
-        .to_string();
-    let right = serde_json::from_str::<hand::types::State>(payload)
-        .err()
-        .ok_or_eyre("the hand-written impl should refuse it")?
-        .to_string();
-    assert_eq!(left, right);
+    let left = serde_json::from_str::<derived::types::State>(payload)?;
+    let right = serde_json::from_str::<hand::types::State>(payload)?;
+    assert!(matches!(left, derived::types::State::Unknown(ref raw) if raw == "nonsense"));
+    assert!(matches!(right, hand::types::State::Unknown(ref raw) if raw == "nonsense"));
+    assert_eq!(left.as_str(), "nonsense");
+    assert_eq!(serde_json::to_string(&left)?, payload);
+    assert_eq!(serde_json::to_string(&right)?, payload);
+}
+
+/// The read form under both strategies: the same value out of a drifted payload, the same
+/// report, and the same bytes written back.
+#[test_util::test]
+fn the_read_form_decodes_and_reports_the_same_way() {
+    let payload = r#"{"optional":"seven","clearable":null,"state":"paused","undeclared":[1]}"#;
+    let mut left_deserializer = serde_json::Deserializer::from_str(payload);
+    let left = <derived::types::read::Spike as derived::types::Lenient<'_>>::decode(
+        &mut left_deserializer,
+        &derived::types::Site {
+            type_name: "root",
+            origin: "/paths/~1spike/post/responses/200",
+            member: None,
+        },
+    )?;
+    let mut right_deserializer = serde_json::Deserializer::from_str(payload);
+    let right = <hand::types::read::Spike as hand::types::Lenient<'_>>::decode(
+        &mut right_deserializer,
+        &hand::types::Site {
+            type_name: "root",
+            origin: "/paths/~1spike/post/responses/200",
+            member: None,
+        },
+    )?;
+    assert_eq!(
+        left.degradations.to_string(),
+        right.degradations.to_string()
+    );
+    // A required member absent, a member of the wrong type, an unlisted enum value, and an
+    // undeclared member: four sites, four entries.
+    assert_eq!(left.degradations.len(), 4, "{}", left.degradations);
+    assert_eq!(left.value.required, None);
+    assert_eq!(left.value.optional, None);
+    assert_eq!(right.value.optional, None);
+    assert!(matches!(
+        left.value.state,
+        Some(derived::types::State::Unknown(ref raw)) if raw == "paused"
+    ));
+    assert_eq!(
+        serde_json::to_string(&left.value)?,
+        serde_json::to_string(&right.value)?
+    );
+    assert_eq!(
+        serde_json::to_string(&right.value)?,
+        r#"{"clearable":null,"state":"paused","undeclared":[1]}"#
+    );
 }
 
 /// Payloads generated from the contract itself: every subset of the optional members, with each

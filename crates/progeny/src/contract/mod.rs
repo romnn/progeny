@@ -19,6 +19,8 @@ mod dedup;
 mod finalize;
 mod lower;
 mod name;
+mod reach;
+mod twin;
 
 use std::collections::BTreeMap;
 
@@ -34,6 +36,42 @@ use crate::shape::{Docs, ShapeKey, Shapes};
 pub(crate) use finalize::BASE as BASE_DERIVES;
 pub(crate) use lower::{Collapse, CollapseKind};
 pub(crate) use name::{Namer, RustIdent};
+
+/// Which of a type's two possible forms a contract is, and where its other half lives.
+///
+/// A response is decoded leniently and a request is built strictly, and where the two shapes
+/// differ a type has one contract per form. See [`twin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Form {
+    /// The description's shape, required members and all: what a caller builds and sends.
+    Strict {
+        /// The read twin, when a response reaches this type and its read form differs.
+        twin: Option<TypeIndex>,
+    },
+    /// One contract for both directions: nothing in it differs between the two forms.
+    Shared,
+    /// The read form: every member optional, undeclared members kept.
+    ///
+    /// What a response decodes into. Placed in the `read` module of the type layer, beside
+    /// re-exports of every shared type a response can yield.
+    Lenient {
+        /// The strict twin, when a request reaches this type too; `None` for a type only
+        /// responses reach, which has no other form.
+        strict: Option<TypeIndex>,
+    },
+}
+
+impl Form {
+    /// Whether a response decodes into this contract, so it needs the lenient decoder.
+    pub(crate) fn is_read(self) -> bool {
+        matches!(self, Self::Shared | Self::Lenient { .. })
+    }
+
+    /// Whether the contract has the lenient shape and lives in the `read` module.
+    pub(crate) fn is_lenient(self) -> bool {
+        matches!(self, Self::Lenient { .. })
+    }
+}
 
 /// Which generated type, by position in [`Contracts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -250,15 +288,12 @@ pub(crate) enum DeserStrategy {
     Derive,
     /// Hand-written, buffering the members before assigning them: the compile-speed path.
     HandWrittenBuffered {
-        /// Whether the emitted implementation refuses an undeclared member.
+        /// What the emitted implementation does with an undeclared member.
         ///
-        /// Resolved here by the eligibility ruling, which sends `Capture` to the derive — so by
-        /// the time this strategy exists, capturing is impossible and the two remaining policies
-        /// are one bit. Carried in the strategy so the renderer receives the answer instead of
-        /// re-deriving it: a renderer-side `Capture → Ignore` arm once encoded "cannot arrive
-        /// here" as a silent fold, which would have discarded members without a diagnostic the
-        /// day the eligibility rule loosened.
-        deny_unknown: bool,
+        /// Carried in the strategy so the renderer receives the answer instead of re-deriving
+        /// it. `Capture` lands the leftovers in the type's flattened capture member, which the
+        /// buffer already holds once the declared names are taken.
+        unknown: UnknownFields,
     },
     /// Hand-written with no buffering, for a fieldless enum.
     HandWrittenFieldless,
@@ -273,6 +308,14 @@ pub(crate) enum DeserStrategy {
 }
 
 /// What kind of Rust item a type is.
+///
+/// **Every enum kind is open.** Each carries a `fallback` variant that holds a value the
+/// description does not list: the raw string for a string enum, the raw JSON for a union whose
+/// tag names no variant or whose payload fits no variant's shape. A closed enum turns one
+/// unexpected value into the failure of the whole payload that holds it, and the value was
+/// already on the wire; keeping it and writing it back unchanged is the only reading that loses
+/// nothing. The fallback is named through the same namer as the declared variants, so a
+/// document that enumerates `unknown` itself keeps that spelling and the fallback steps aside.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContractKind {
     Struct {
@@ -282,6 +325,8 @@ pub(crate) enum ContractKind {
     /// payload shows, so nothing on the wire names them.
     Enum {
         variants: Vec<VariantContract>,
+        /// The variant holding a payload no declared variant accepts, as `serde_json::Value`.
+        fallback: RustIdent,
     },
     /// A data-carrying enum whose payload names its own variant in a member, which the union
     /// consumes.
@@ -298,6 +343,8 @@ pub(crate) enum ContractKind {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
+        /// The variant holding a payload whose tag names no variant, as `serde_json::Value`.
+        fallback: RustIdent,
     },
     /// A data-carrying enum whose payload names its own variant in a member that the variant
     /// types keep: the union reads the member to pick a variant and replays the whole payload —
@@ -314,10 +361,14 @@ pub(crate) enum ContractKind {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
+        /// The variant holding a payload whose tag names no variant, as `serde_json::Value`.
+        fallback: RustIdent,
     },
-    /// An enum with no data: the fast serde path.
+    /// An enum of strings: the serde path that never buffers.
     StringEnum {
         variants: Vec<StringVariant>,
+        /// The variant holding a string the description does not list, verbatim.
+        fallback: RustIdent,
     },
     /// A wrapper with an identity of its own.
     Newtype {
@@ -340,7 +391,7 @@ impl ContractKind {
     pub(crate) fn references(&self) -> Vec<&TypeRef> {
         match self {
             Self::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
-            Self::Enum { variants } => variants.iter().map(|variant| &variant.ty).collect(),
+            Self::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
             Self::TaggedEnum { variants, .. } | Self::CarriedTagEnum { variants, .. } => {
                 variants.iter().map(|variant| &variant.ty).collect()
             }
@@ -363,9 +414,27 @@ pub(crate) struct FieldContract {
     pub(crate) default: Option<Value>,
     /// Derived from `presence`, never free-form.
     pub(crate) skip_serializing_if: SkipRule,
-    /// Set only for the member that captures unknown fields.
-    pub(crate) flatten: bool,
+    /// Set only for the member that holds the members no other field claims.
+    pub(crate) capture: Option<Capture>,
     pub(crate) docs: Docs,
+}
+
+impl FieldContract {
+    /// Whether this is the capture member: flattened into the object rather than keyed by name.
+    pub(crate) fn is_capture(&self) -> bool {
+        self.capture.is_some()
+    }
+}
+
+/// Why a struct holds the members its declared fields do not claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Capture {
+    /// The schema's own `additionalProperties` says such members may appear and what they are:
+    /// they arrive by contract and a lenient decode does not report them.
+    Declared,
+    /// The read form keeps what the description never mentioned, so drift toward members the
+    /// description does not declare is visible; a lenient decode reports each one.
+    Undeclared,
 }
 
 /// One variant of an untagged union: a name for the reader, a type for the payload, and nothing
@@ -402,12 +471,17 @@ pub(crate) struct TypeContract {
     unknown_fields: UnknownFields,
     derives: Vec<Derive>,
     deser: DeserStrategy,
+    form: Form,
     origin: JsonPointer,
 }
 
 impl TypeContract {
     pub(crate) fn rust_name(&self) -> &RustIdent {
         &self.rust_name
+    }
+
+    pub(crate) fn form(&self) -> Form {
+        self.form
     }
 
     pub(crate) fn docs(&self) -> &Docs {
@@ -449,11 +523,43 @@ pub(crate) struct Contracts {
     by_shape: BTreeMap<ShapeKey, TypeRef>,
     /// Optional-and-nullable collapses, still waiting for the position that says what each cost.
     collapses: Vec<Collapse>,
+    /// Each twinned strict type's read twin.
+    twins: BTreeMap<TypeIndex, TypeIndex>,
 }
 
 impl Contracts {
     pub(crate) fn types(&self) -> &[TypeContract] {
         &self.types
+    }
+
+    /// The read form of a type reference: every twinned type replaced by its twin.
+    ///
+    /// What a response position names. A type without a twin is its own read form — shared, or
+    /// only ever reached by responses — so the reference comes back unchanged.
+    pub(crate) fn read_form(&self, ty: &TypeRef) -> TypeRef {
+        let mut read = ty.clone();
+        read.remap(&self.twins);
+        read
+    }
+
+    /// The strict half of a read twin, or the index itself for every other type.
+    ///
+    /// What a question about the description's own graph — which direction reaches a member —
+    /// asks, so that a response position naming a twin still counts as reaching the type the
+    /// document declared.
+    pub(crate) fn strict_form(&self, index: TypeIndex) -> TypeIndex {
+        match self.get(index).map(TypeContract::form) {
+            Some(Form::Lenient {
+                strict: Some(strict),
+            }) => strict,
+            _ => index,
+        }
+    }
+
+    /// Whether any type has a read form of its own, and therefore whether the type layer carries
+    /// a `read` module.
+    pub(crate) fn has_read_forms(&self) -> bool {
+        self.types.iter().any(|contract| contract.form().is_read())
     }
 
     /// Whether any type holds an upload, and therefore whether the types module names
@@ -536,10 +642,33 @@ pub(crate) fn build(
             ),
         ));
     }
-    let deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
+    let mut deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
+    // Which direction each type travels is a fact about the document, read here so the forms
+    // exist before anything is frozen; under strict decoding every type keeps its one form.
+    let twinned = match config.decoding {
+        crate::config::Decoding::Lenient => {
+            let reach = reach::run(
+                resolved,
+                &lowered.by_shape,
+                |index| {
+                    let mut reached = Vec::new();
+                    if let Some(contract) = deduped.get(index.index()) {
+                        for ty in contract.kind.references() {
+                            ty.named(&mut reached);
+                        }
+                    }
+                    reached
+                },
+                deduped.len(),
+            );
+            twin::run(&mut deduped, &reach)
+        }
+        crate::config::Decoding::Strict => twin::Twinned::default(),
+    };
     let mut contracts = finalize::run(deduped, config, ctx)?;
     contracts.by_shape = lowered.by_shape;
     contracts.collapses = lowered.collapses;
+    contracts.twins = twinned.twins;
     Ok(contracts)
 }
 
@@ -1053,6 +1182,32 @@ mod tests {
         );
     }
 
+    /// A capture the configuration asks for keeps what the document never mentioned, but does
+    /// not turn it into something the document declared: a lenient decode still reports it.
+    #[test_util::test]
+    fn a_configured_capture_keeps_undeclared_members_as_undeclared() {
+        let config = Config {
+            unknown_fields: crate::config::UnknownFields::Capture,
+            ..Config::default()
+        };
+        let (contracts, _) = contracts_of(
+            with_schemas(json!({
+                "Thing": {"type": "object", "properties": {"a": {"type": "string"}}},
+            })),
+            &config,
+        )?;
+        let contract = named(&contracts, "Thing")?;
+        let ContractKind::Struct { fields } = contract.kind() else {
+            panic!("expected a struct");
+        };
+        let extra = fields
+            .iter()
+            .find(|field| field.is_capture())
+            .ok_or_eyre("the configured capture member")?;
+        assert_eq!(extra.capture, Some(super::Capture::Undeclared));
+        assert_eq!(extra.ty, TypeRef::Map(Box::new(TypeRef::Value)));
+    }
+
     #[test_util::test]
     fn a_typed_catch_all_becomes_a_flattened_member_and_captures() {
         let (contracts, _) = contracts_of(
@@ -1076,7 +1231,7 @@ mod tests {
         let extra = fields
             .last()
             .ok_or_eyre("test fixture should contain this value")?;
-        assert!(extra.flatten);
+        assert_eq!(extra.capture, Some(super::Capture::Declared));
         assert_eq!(extra.ty, TypeRef::Map(Box::new(TypeRef::I64)));
     }
 
@@ -1203,18 +1358,24 @@ mod tests {
                 "Good": {"type": "object", "properties": {
                     "leaf": {"$ref": "#/components/schemas/Leaf"}
                 }},
-                "Blocked": {"type": "object", "properties": {
+                // Required, because an optional member is an `Option`, and an `Option` has a
+                // default whatever it holds.
+                "Blocked": {"type": "object", "required": ["choice"], "properties": {
                     "choice": {"$ref": "#/components/schemas/Choice"}
                 }},
                 "Address": {"type": "string", "format": "ip"},
-                "BlockedAddress": {"type": "object", "properties": {
+                "BlockedAddress": {"type": "object", "required": ["address"], "properties": {
                     "address": {"$ref": "#/components/schemas/Address"}
+                }},
+                "Lenient": {"type": "object", "properties": {
+                    "choice": {"$ref": "#/components/schemas/Choice"},
+                    "addresses": {"type": "array", "items": {"$ref": "#/components/schemas/Address"}}
                 }},
             })),
             &config,
         )?;
 
-        for name in ["Leaf", "Good"] {
+        for name in ["Leaf", "Good", "Lenient"] {
             assert!(
                 named(&contracts, name)?
                     .derives()

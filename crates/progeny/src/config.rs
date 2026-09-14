@@ -37,6 +37,10 @@ pub struct Config {
     #[serde(default)]
     pub type_derives: BTreeMap<String, BTreeSet<Derive>>,
     /// What to do with members a payload has and the document did not declare.
+    ///
+    /// A rule for *strict* decoding: the request bodies a generated server reads, and the strict
+    /// form of every type. The read forms a lenient client decodes into always keep undeclared
+    /// members, whatever this says — see [`Decoding`].
     #[serde(default)]
     pub unknown_fields: UnknownFields,
     /// The same, for named types.
@@ -85,6 +89,9 @@ pub struct Config {
     /// Which `Deserialize`/`Serialize` implementation strategy to use.
     #[serde(default)]
     pub serde_impl: SerdeImpl,
+    /// How a generated client decodes what it receives. See [`Decoding`].
+    #[serde(default)]
+    pub decoding: Decoding,
     /// Whether to emit a crate, a workspace, or a module tree.
     #[serde(default)]
     pub packaging: Packaging,
@@ -301,7 +308,7 @@ impl Derive {
 }
 
 /// What to do with members a payload has and the document did not declare.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnknownFields {
     /// Accept and discard them. What a client wants: a vendor adding a field must not break it.
@@ -367,6 +374,46 @@ pub enum SerdeImpl {
     /// self-describing one.
     #[default]
     HandWrittenWhereEligible,
+}
+
+/// How a generated client decodes a response body, and which types a response yields.
+///
+/// A description is a statement about a vendor's API, and the vendor's *responses* are where it
+/// is wrong first: a member the description marks required arrives `null` for one record out of
+/// ten thousand, an enum gains a value, a list holds one element of another shape. A closed
+/// decode fails the whole response over that one record. A request, by contrast, is data the
+/// caller builds, and a mistake there is answered `400` immediately, to input the caller
+/// controls — so the two directions get different rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Decoding {
+    /// Decode as far as the payload allows, and report what did not match.
+    ///
+    /// The default. A response decodes into a *read form* of its type — every member optional,
+    /// undeclared members kept — where a member that is absent, `null`, or unreadable becomes
+    /// `None` and a list element that cannot be read is skipped. Every tolerated deviation is
+    /// counted by its place in the description and returned beside the value, so a consumer can
+    /// tell an incomplete list from a complete one and a vendor's drift shows up as a report
+    /// rather than an outage. A type reached from both a request and a response gets a strict
+    /// form for the request and a read twin in `types::read` for the response; the client's
+    /// signatures say which is which, and the caller never picks.
+    ///
+    /// Only a body whose root is unusable — not JSON, or not the root shape the description
+    /// declares — is still an error: leniency cannot conjure a value from nothing.
+    #[default]
+    Lenient,
+    /// Decode exactly what the description declares, and fail the response on the first
+    /// deviation.
+    ///
+    /// One type per schema, required members as plain fields in both directions, and no read
+    /// forms: switching a generated crate between the two modes changes its response types, so
+    /// this is a choice made when the crate is generated, not a switch on a client. The client's
+    /// shape stays the same — a response still carries a degradation report and the client still
+    /// takes an observer — but the report is always empty and the observer never called. The
+    /// string enums and unions stay open in this mode too: a value the description does not
+    /// list is kept in the fallback variant rather than refused, because keeping it loses
+    /// nothing and writing it back is exact.
+    Strict,
 }
 
 /// How to package the generated source.

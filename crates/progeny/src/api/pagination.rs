@@ -14,7 +14,7 @@
 //! that cannot work, or quietly skipping it, would both be worse than refusing.
 
 use crate::config::{Config, Pagination};
-use crate::contract::{ContractKind, Contracts, RustIdent, TypeRef};
+use crate::contract::{ContractKind, Contracts, Presence, RustIdent, TypeIndex, TypeRef};
 use crate::diag::{JsonPointer, RejectError, RejectKind};
 
 use super::{Location, OperationContract};
@@ -24,14 +24,28 @@ use super::{Location, OperationContract};
 pub(crate) struct PaginationContract {
     /// The cursor parameter's Rust name, for the builder setter the stream drives.
     pub(crate) cursor_param: RustIdent,
-    /// Member path to the next cursor, resolved to Rust names.
-    pub(crate) next_cursor: Vec<RustIdent>,
-    /// Member path to the page's items, resolved to Rust names.
-    pub(crate) items: Vec<RustIdent>,
+    /// Member path to the next cursor, one step per member.
+    pub(crate) next_cursor: Vec<Step>,
+    /// Member path to the page's items, one step per member.
+    pub(crate) items: Vec<Step>,
     /// The element type of `items`, which is what the stream yields.
     pub(crate) item: TypeRef,
     /// The variant of the response enum the stream reads, and its type.
     pub(crate) success: RustIdent,
+}
+
+/// One member on a path through the page.
+///
+/// The holder and the wire name are what a degradation at this member is reported under, so a
+/// stream can ask a page's report whether the path it is about to walk was read intact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Step {
+    /// The Rust name of the member.
+    pub(crate) rust_name: RustIdent,
+    /// The member's wire name.
+    pub(crate) wire_name: String,
+    /// The struct the member belongs to, in the form the response decodes into.
+    pub(crate) holder: TypeIndex,
 }
 
 /// Attach every declaration to its operation, or refuse to generate.
@@ -71,29 +85,7 @@ fn resolve(
     contracts: &Contracts,
 ) -> Result<PaginationContract, RejectError> {
     let at = operation.origin.clone();
-    let cursor = operation
-        .params_at(Location::Query)
-        .find(|param| param.wire_name == declared.cursor_param)
-        .ok_or_else(|| {
-            let had: Vec<&str> = operation
-                .params_at(Location::Query)
-                .map(|param| param.wire_name.as_str())
-                .collect();
-            reject(
-                &at,
-                format!(
-                    "`{}` declares its cursor as the query parameter `{}`, which it does not have; \
-                     it has {}",
-                    operation.rust_name,
-                    declared.cursor_param,
-                    if had.is_empty() {
-                        "no query parameters".to_owned()
-                    } else {
-                        format!("`{}`", had.join("`, `"))
-                    }
-                ),
-            )
-        })?;
+    let cursor = cursor_param(operation, declared, &at)?;
 
     let (success, response) = success_arm(operation).ok_or_else(|| {
         reject(
@@ -105,7 +97,11 @@ fn resolve(
         )
     })?;
 
-    let (items, item_ty) = walk(
+    let Walked {
+        steps: items,
+        ty: item_ty,
+        ..
+    } = walk(
         &response,
         &declared.items,
         contracts,
@@ -129,7 +125,11 @@ fn resolve(
         }
     };
 
-    let (next_cursor, cursor_ty) = walk(
+    let Walked {
+        steps: next_cursor,
+        ty: cursor_ty,
+        presence: cursor_presence,
+    } = walk(
         &response,
         &declared.next_cursor,
         contracts,
@@ -140,8 +140,10 @@ fn resolve(
     // An absent next cursor is the only thing that ends the stream, so a member that is always
     // present would loop forever. Required rather than worked around: the alternatives — stopping
     // on an empty string, on an empty page — are conventions the declaration did not state and this
-    // has no business assuming.
-    if !matches!(cursor_ty, TypeRef::Option(_)) {
+    // has no business assuming. Judged by what the description declares rather than by the
+    // member's type: in a read form every member is an `Option`, and the one the service always
+    // sends is no less always sent for it.
+    if cursor_presence == Presence::Required {
         return Err(reject(
             &at,
             format!(
@@ -178,6 +180,37 @@ fn resolve(
     })
 }
 
+/// The query parameter the declaration names as the cursor, or the refusal naming what it had.
+fn cursor_param<'a>(
+    operation: &'a OperationContract,
+    declared: &Pagination,
+    at: &JsonPointer,
+) -> Result<&'a super::ParamContract, RejectError> {
+    operation
+        .params_at(Location::Query)
+        .find(|param| param.wire_name == declared.cursor_param)
+        .ok_or_else(|| {
+            let had: Vec<&str> = operation
+                .params_at(Location::Query)
+                .map(|param| param.wire_name.as_str())
+                .collect();
+            reject(
+                at,
+                format!(
+                    "`{}` declares its cursor as the query parameter `{}`, which it does not have; \
+                     it has {}",
+                    operation.rust_name,
+                    declared.cursor_param,
+                    if had.is_empty() {
+                        "no query parameters".to_owned()
+                    } else {
+                        format!("`{}`", had.join("`, `"))
+                    }
+                ),
+            )
+        })
+}
+
 /// The one arm answering a 2xx, which is the page the stream reads.
 ///
 /// Exactly one, not the first of several. When a document declares two success statuses the client
@@ -209,6 +242,13 @@ fn success_arm(operation: &OperationContract) -> Option<(RustIdent, TypeRef)> {
     Some((only.rust_name.clone(), only.body.json_type()?.clone()))
 }
 
+/// Where a walk ended: the steps it took, and the type and declared presence of the last member.
+struct Walked {
+    steps: Vec<Step>,
+    ty: TypeRef,
+    presence: Presence,
+}
+
 /// Follow a dotted path of wire names through named struct types.
 fn walk(
     from: &TypeRef,
@@ -217,15 +257,18 @@ fn walk(
     at: &JsonPointer,
     operation: &OperationContract,
     what: &str,
-) -> Result<(Vec<RustIdent>, TypeRef), RejectError> {
+) -> Result<Walked, RejectError> {
     let mut current = from.clone();
-    let mut resolved = Vec::new();
+    let mut presence = Presence::Required;
+    let mut steps = Vec::new();
     for (depth, segment) in path.split('.').enumerate() {
         // An optional member *inside* a path would make the generated access a question rather than
         // a field read, and the answer — skip the page, end the stream, treat it as empty — is not
         // one the declaration states. The last member may be optional: a next cursor that is absent
-        // is exactly how a service says "this was the last page".
-        if depth > 0 && matches!(current, TypeRef::Option(_)) {
+        // is exactly how a service says "this was the last page". Declared presence, not the
+        // member's type: a read form makes every member an `Option`, and the question is what the
+        // description promises.
+        if depth > 0 && presence != Presence::Required {
             return Err(reject(
                 at,
                 format!(
@@ -246,9 +289,9 @@ fn walk(
                 ),
             ));
         };
-        let Some(ContractKind::Struct { fields }) = contracts
+        let Some((holder, ContractKind::Struct { fields })) = contracts
             .get(index)
-            .map(crate::contract::TypeContract::kind)
+            .map(|contract| (index, contract.kind()))
         else {
             return Err(reject(
                 at,
@@ -274,10 +317,19 @@ fn walk(
                 ),
             ));
         };
-        resolved.push(field.rust_name.clone());
+        steps.push(Step {
+            rust_name: field.rust_name.clone(),
+            wire_name: field.wire_name.clone(),
+            holder,
+        });
+        presence = field.presence;
         current = field.ty.clone();
     }
-    Ok((resolved, current))
+    Ok(Walked {
+        steps,
+        ty: current,
+        presence,
+    })
 }
 
 /// See through the wrappers that do not change what a value *is*.

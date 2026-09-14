@@ -18,6 +18,19 @@ impl<T> Presence<T> {
     pub const fn is_omitted(&self) -> bool {
         matches!(self, Self::Omitted)
     }
+
+    /// The same presence with a carried value put through `f`.
+    ///
+    /// `Omitted` and `Null` carry nothing and pass through unchanged, so a value's read form
+    /// converts from its strict form without deciding anything about presence.
+    #[must_use]
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Presence<U> {
+        match self {
+            Self::Omitted => Presence::Omitted,
+            Self::Null => Presence::Null,
+            Self::Value(value) => Presence::Value(f(value)),
+        }
+    }
 }
 
 impl<T> serde::Serialize for Presence<T>
@@ -83,6 +96,15 @@ mod tests {
     use color_eyre::eyre;
 
     use super::Presence;
+
+    /// `map` touches only a carried value: the two presence states that carry none pass
+    /// through, which is what lets a read form convert from a strict one member by member.
+    #[test]
+    fn map_leaves_absence_and_null_alone() {
+        assert_eq!(Presence::<i64>::Omitted.map(|n| n + 1), Presence::Omitted);
+        assert_eq!(Presence::<i64>::Null.map(|n| n + 1), Presence::Null);
+        assert_eq!(Presence::Value(1).map(|n| n + 1), Presence::Value(2));
+    }
 
     #[test_util::test]
     fn null_and_value_round_trip_without_conflating_the_variants() {
