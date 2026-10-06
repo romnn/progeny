@@ -181,6 +181,73 @@ decoding = "strict"
 or `--decoding strict` on the command line. It is a choice made when the crate is generated,
 not a switch on a client: strict leaves out `types::read`, so the response types change with it.
 
+## Bounding and keeping response bodies
+
+A client reads a whole body by default, however long it is. `response_body_limit` bounds it, on
+the client for every request or on one request, which wins: a declared `Content-Length` past the
+limit is refused unread, and a body of unknown length is read only until it passes the limit. The
+refusal is `Error::BodyTooLarge`, carrying the status and the limit. It applies to every body the
+client reads, a declared error's included; an undeclared status is handed back unread as
+`Error::UnexpectedStatus`, so that body is the caller's to bound.
+
+The setter takes a byte count or an `Option<usize>`, and `None` means **no limit**, not "unset". A
+request that never calls it inherits the client's limit; a request that passes `None` lifts it, for
+an operation known to answer with more than the client otherwise allows. On the client, `None` sets
+no limit, which is also what a client that never calls it has.
+
+```rust
+let client = Client::new(base_url).response_body_limit(5 * 1024 * 1024);
+let export = client.export_all().response_body_limit(None).send().await?;   // read whole
+```
+
+A read form keeps what the description never declared in `extra`, but it is still a typed value:
+a `null` the decoder read as absent, a member it could not read, a number's spelling and the order
+of members do not survive it. A caller that has to store or forward exactly what the server sent
+asks for the bytes with `keep_raw_body`, and finds them beside the value — on a success, and on a
+declared error:
+
+```rust
+let client = Client::new(base_url).response_body_limit(5 * 1024 * 1024);
+let customer = client
+    .get_customer(GetCustomerParams { id })
+    .keep_raw_body()
+    .send()
+    .await?;
+store_snapshot(customer.raw_body().unwrap_or_default());   // what the server sent, byte for byte
+let customer = customer.into_value();                      // and what the description makes of it
+```
+
+Both settings are values every request carries into the shared decoders, so what they add per
+operation is the two setters and a field, and a request that sets neither reads its body whole,
+keeping only the value.
+
+## API keys
+
+An `apiKey` security scheme sent in a header becomes a setter on the client, named after the scheme
+and taking a `reqwest::header::HeaderValue`, so a value that is not a valid header fails where the
+caller builds it rather than at send time:
+
+```rust
+let client = Client::new(base_url).with_api_key(HeaderValue::from_str(&key)?);
+```
+
+The client stores the value marked sensitive and sends it only on the requests whose operation
+requires the scheme: the operation's own `security`, or the document's when the operation declares
+none; `security: []` requires nothing. Requirements are alternatives, each a set of schemes sent
+together, and a request carries the first alternative whose every key the client holds. A request
+whose requirement the client cannot meet is sent without a key for the server to answer, because a
+caller may supply the header another way — as a default header on its `reqwest::Client`, which is
+how every other kind of scheme is supplied. A header parameter of the same name, or a header set
+with `.header(...)`, wins over the stored key.
+
+A header that carries a credential is marked sensitive wherever the client sends one, so it prints
+as `Sensitive` in `Debug` output and logs: the stored keys, declared `Authorization`,
+`Proxy-Authorization` and `Cookie` header parameters, a parameter named like a scheme's header, and
+the cookie header cookie parameters are sent in.
+
+A key `in: query` or `in: cookie`, and the `http`, `oauth2` and `openIdConnect` schemes, are left to
+the `reqwest::Client` the generated one is built on.
+
 ## Client middleware
 
 The generated client has no callback or hook system. Supply a preconfigured `reqwest::Client` for

@@ -30,9 +30,9 @@ use lenient::Lenient;
 // private module would put out of the test's reach.
 pub(crate) mod style;
 
-// The two files that name an HTTP crate, compiled under `cfg(test)` against dev-dependencies so
+// The files that name an HTTP crate, compiled under `cfg(test)` against dev-dependencies so
 // that the property this module is arranged around — the file progeny tests is the file it ships —
-// holds for all six shipped files rather than four. Before this they were type-checked only by the
+// holds for every shipped file. Before this they were type-checked only by the
 // corpus compile gate: minutes-later feedback, on the two files most coupled to external crates.
 // `dead_code` is expected rather than fixed because nothing in progeny calls into them; existing is
 // their whole job here.
@@ -48,6 +48,13 @@ mod http;
     reason = "compiled to be type-checked and linted, not called"
 )]
 mod router;
+// Its tests call into it, but sending a request needs a server they do not have.
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "compiled to be type-checked and linted; `send` needs a server to be called"
+)]
+mod credentials;
 
 /// The buffering machinery the hand-written `Deserialize` implementations call into.
 const BUFFERED: &str = include_str!("buffered.rs");
@@ -80,6 +87,10 @@ const HTTP: &str = include_str!("http.rs");
 
 /// The serving runtime, compiled the same two ways: it names `axum`.
 const ROUTER: &str = include_str!("router.rs");
+
+/// The held credentials of a client whose description sends an `apiKey` scheme in a header,
+/// compiled the same two ways as the client runtime it joins.
+const CREDENTIALS: &str = include_str!("credentials.rs");
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ServerUse {
@@ -134,6 +145,11 @@ pub(crate) struct ClientUse {
     /// Any query parameter with `allowReserved: true` — the one caller of the
     /// reserved-expansion encoder.
     pub(crate) reserved: bool,
+    /// Any header the client marks sensitive: a declared credential header parameter, or the
+    /// cookie header its cookie parameters are sent in.
+    pub(crate) sensitive_header: bool,
+    /// Any `apiKey` security scheme sent in a header, which ships the held credentials.
+    pub(crate) credentials: bool,
     pub(crate) styles: StyleUse,
     pub(crate) parts: PartUse,
 }
@@ -187,6 +203,19 @@ pub(crate) enum PresenceUse {
     Preserved,
 }
 
+/// Whether a client holds credentials, which ships `credentials.rs` beside the client runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialUse {
+    None,
+    Held,
+}
+
+impl From<bool> for CredentialUse {
+    fn from(held: bool) -> Self {
+        if held { Self::Held } else { Self::None }
+    }
+}
+
 impl From<bool> for PresenceUse {
     fn from(preserved: bool) -> Self {
         if preserved {
@@ -227,6 +256,7 @@ pub(crate) fn tokens(
     body_limit: crate::config::BodyLimit,
     presence: PresenceUse,
     decoding: Decoding,
+    credentials: CredentialUse,
 ) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
     // The report travels with every client response, however the response was decoded; the
@@ -243,7 +273,10 @@ pub(crate) fn tokens(
             precise: false,
         },
         body_limit,
-        ClientUse::default(),
+        ClientUse {
+            credentials: credentials == CredentialUse::Held,
+            ..ClientUse::default()
+        },
         ServerUse::ALL,
         decoding,
     );
@@ -630,9 +663,15 @@ fn edge_tokens(
     // them rather than one per item.
     let wire = client.then(|| {
         let wire = client_source(HTTP, precise.then_some(client_use), decoding);
+        // Only a description with a header `apiKey` scheme holds credentials, so only its client
+        // pays for them, under either packaging.
+        let credentials = client_use.credentials.then(|| source_items(CREDENTIALS));
         quote::quote! {
             #calling
-            pub mod wire { #wire }
+            pub mod wire {
+                #wire
+                #credentials
+            }
             #calling
             pub use wire::*;
         }
@@ -853,6 +892,10 @@ fn client_source(
                 "decode_bytes" if !used.byte_response => expect_dead_code(
                     &mut function.attrs,
                     "this description declares no raw-byte response body",
+                ),
+                "sensitive_header" if !used.sensitive_header => expect_dead_code(
+                    &mut function.attrs,
+                    "this description declares no credential header or cookie parameter",
                 ),
                 _ => {}
             },
@@ -1106,24 +1149,27 @@ mod tests {
         for client in [false, true] {
             for server in [false, true] {
                 for gated in [false, true] {
-                    let tokens = super::tokens(
-                        client,
-                        server,
-                        gated,
-                        BodyLimit::default(),
-                        false.into(),
-                        super::Decoding::Strict,
-                    );
-                    syn::parse2::<syn::File>(tokens.clone()).map_err(|error| {
-                        eyre::eyre!(
-                            "{}",
-                            indoc::formatdoc! {"
-                                support(client = {client}, server = {server}, gated = {gated}) does \
-                                not parse: {error}
-                                {tokens}"
-                            }
-                        )
-                    })?;
+                    for credentials in [false, true] {
+                        let tokens = super::tokens(
+                            client,
+                            server,
+                            gated,
+                            BodyLimit::default(),
+                            false.into(),
+                            super::Decoding::Strict,
+                            credentials.into(),
+                        );
+                        syn::parse2::<syn::File>(tokens.clone()).map_err(|error| {
+                            eyre::eyre!(
+                                "{}",
+                                indoc::formatdoc! {"
+                                    support(client = {client}, server = {server}, gated = \
+                                    {gated}, credentials = {credentials}) does not parse: {error}
+                                    {tokens}"
+                                }
+                            )
+                        })?;
+                    }
                 }
             }
         }
@@ -1136,6 +1182,7 @@ mod tests {
             BodyLimit::default(),
             false.into(),
             super::Decoding::Strict,
+            false.into(),
         )
         .to_string();
         assert!(both.contains("ResponseValue"), "{both}");
@@ -1150,10 +1197,24 @@ mod tests {
             BodyLimit::default(),
             false.into(),
             super::Decoding::Strict,
+            false.into(),
         )
         .to_string();
         assert!(calling.contains("ResponseValue"), "{calling}");
         assert!(!calling.contains("Rejection"), "{calling}");
+        // Held credentials ship only to a client whose description has a scheme to hold.
+        assert!(!calling.contains("Credentials"), "{calling}");
+        let holding = super::tokens(
+            true,
+            false,
+            true,
+            BodyLimit::default(),
+            false.into(),
+            super::Decoding::Strict,
+            true.into(),
+        )
+        .to_string();
+        assert!(holding.contains("pub struct Credentials"), "{holding}");
 
         let serving = super::tokens(
             false,
@@ -1162,6 +1223,7 @@ mod tests {
             BodyLimit::default(),
             false.into(),
             super::Decoding::Strict,
+            false.into(),
         )
         .to_string();
         assert!(!serving.contains("ResponseValue"), "{serving}");
@@ -1179,7 +1241,8 @@ mod tests {
                 false,
                 BodyLimit::default(),
                 false.into(),
-                super::Decoding::Strict
+                super::Decoding::Strict,
+                false.into(),
             )
             .to_string()
             .contains("cfg (feature"),
@@ -1201,6 +1264,7 @@ mod tests {
             BodyLimit(4096),
             false.into(),
             super::Decoding::Strict,
+            false.into(),
         )
         .to_string();
         assert!(
@@ -1215,6 +1279,7 @@ mod tests {
             BodyLimit::default(),
             false.into(),
             super::Decoding::Strict,
+            false.into(),
         )
         .to_string();
         assert!(

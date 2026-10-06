@@ -26,7 +26,7 @@ use serde_json::Value;
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{
     Callback, Components, Document, Example, Header, MaybeRef, MediaType, Operation, Parameter,
-    ParsedDocument, PathItem, Reference, RequestBody, Response,
+    ParsedDocument, PathItem, Reference, RequestBody, Response, SecurityScheme,
 };
 use crate::schema::{Schema, SchemaId, SchemaStore, cycles::Sccs};
 
@@ -179,6 +179,12 @@ component_reader!(parameter, Parameter, parameters, Parameters);
 component_reader!(header, Header, headers, Headers);
 component_reader!(request_body, RequestBody, request_bodies, RequestBodies);
 component_reader!(path_item, PathItem, path_items, PathItems);
+component_reader!(
+    security_scheme,
+    SecurityScheme,
+    security_schemes,
+    SecuritySchemes
+);
 
 /// Resolve every reference in the document.
 pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument {

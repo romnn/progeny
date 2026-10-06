@@ -55,7 +55,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let output = progeny::generate(bytes, &config).wrap_err("generating the example crate")?;
+    let keyed = with_key_scheme(bytes)?;
+    let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
     crate::generated::write_wire_test(
@@ -100,6 +101,36 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     println!();
     println!("example: the generated client and the generated server agree on the request line");
     Ok(())
+}
+
+/// The subject with a header `apiKey` scheme that one operation requires.
+///
+/// Spliced in here rather than written into the committed document, which every other gate
+/// fingerprints: the scheme is this harness's question alone.
+/// `showPetById` requires the key and `listPets` requires nothing, so one client shows the header
+/// sent where it is required and nowhere else.
+fn with_key_scheme(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).wrap_err("the subject is UTF-8")?;
+    let mut keyed = text.to_owned();
+    // Flow style keeps each insertion on one line, where `indoc` cannot strip the indentation
+    // its position in the document needs.
+    for (anchor, insertion) in [
+        (
+            "components:\n",
+            "  securitySchemes: {petKey: {type: apiKey, in: header, name: X-Pet-Key}}\n",
+        ),
+        (
+            "      operationId: showPetById\n",
+            "      security: [{petKey: []}]\n",
+        ),
+    ] {
+        let at = keyed
+            .find(anchor)
+            .wrap_err_with(|| format!("the subject no longer has `{}`", anchor.trim()))?
+            + anchor.len();
+        keyed.insert_str(at, insertion);
+    }
+    Ok(keyed.into_bytes())
 }
 
 /// The test that goes into the example crate.
@@ -319,6 +350,15 @@ async fn serving() -> eyre::Result<(Double, client::Client)> {
     Ok((double, client::Client::new(format!("http://{address}"))))
 }
 
+/// The pet key a request carried, or `none`.
+fn saw_pet_key(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-pet-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none")
+        .to_owned()
+}
+
 /// Start a hand-written raw server so the generated client cannot agree with its own renderer.
 async fn raw_serving() -> eyre::Result<client::Client> {
     use axum::http::header::CONTENT_TYPE;
@@ -345,14 +385,18 @@ async fn raw_serving() -> eyre::Result<client::Client> {
         )
         // A vendor that drifted: a required member sent as `null`, a member the description
         // never declared, and a required member missing from one record of the page.
+        // It also says whether the request carried the pet key, which `listPets` never requires.
         .route(
             "/pets",
-            get(|| async {
-                axum::Json(serde_json::json!([
-                    {"id": 1, "name": null, "tag": "dog", "color": "brown"},
-                    {"id": 2, "tag": "cat"},
-                    {"id": 3, "name": "Rex"},
-                ]))
+            get(|headers: axum::http::HeaderMap| async move {
+                (
+                    [("x-saw-pet-key", saw_pet_key(&headers))],
+                    axum::Json(serde_json::json!([
+                        {"id": 1, "name": null, "tag": "dog", "color": "brown"},
+                        {"id": 2, "tag": "cat"},
+                        {"id": 3, "name": "Rex"},
+                    ])),
+                )
             }),
         )
         // A paged listing whose second page has an item that cannot be read: the stream must
@@ -370,10 +414,31 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                 }
             }),
         )
-        // A root that is not what the description declares at all.
+        // `keyed` answers with the pet key the request carried, `chunked` with a body of no
+        // declared length, and anything else with a root that is not what the description
+        // declares at all.
         .route(
             "/pets/{pet_id}",
-            get(|| async { axum::Json(serde_json::json!(["not", "an", "object"])) }),
+            get(
+                |axum::extract::Path(pet_id): axum::extract::Path<String>,
+                 headers: axum::http::HeaderMap| async move {
+                    use axum::response::IntoResponse as _;
+                    match pet_id.as_str() {
+                        "keyed" => axum::Json(serde_json::json!({
+                            "id": 7,
+                            "name": saw_pet_key(&headers),
+                        }))
+                        .into_response(),
+                        "chunked" => axum::body::Body::from_stream(futures_util::stream::iter([
+                            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(
+                                vec![b' '; 64],
+                            )),
+                        ]))
+                        .into_response(),
+                        _ => axum::Json(serde_json::json!(["not", "an", "object"])).into_response(),
+                    }
+                },
+            ),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -709,5 +774,159 @@ async fn a_request_the_description_does_not_describe_is_rejected_in_one_place() 
     let message = body["message"].as_str().unwrap_or_default();
     assert!(message.contains("session"), "{body}");
     assert!(message.contains("rejection_probe"), "{body}");
+}
+
+/// A body past the limit is refused, whether its length was declared up front or only found
+/// while reading; the request's own limit overrides the client's.
+#[test_util::test]
+async fn a_body_past_the_limit_is_refused_before_it_is_held_whole() {
+    let client = raw_serving().await?.response_body_limit(16);
+
+    // Declared: the drifted listing is longer than sixteen bytes and says so in its length.
+    let error = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a declared length past the limit is refused")?;
+    let client::Error::BodyTooLarge(refused) = &error else {
+        eyre::bail!("expected BodyTooLarge, got {error:?}");
+    };
+    assert_eq!(refused.limit(), 16);
+    assert_eq!(error.status().map(|status| status.as_u16()), Some(200));
+
+    // Chunked: no length is declared, so the limit is found while reading.
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "chunked".to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a chunked body past the limit is refused")?;
+    assert!(matches!(error, client::Error::BodyTooLarge(_)), "{error:?}");
+
+    // The request's own limit wins over the client's.
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .response_body_limit(1 << 20)
+        .send()
+        .await?;
+    assert_eq!(pets.into_value().len(), 3);
+}
+
+/// A request's `None` lifts the client's limit: the body the client would refuse is read whole.
+#[test_util::test]
+async fn a_request_can_lift_the_client_limit() {
+    let client = raw_serving().await?.response_body_limit(16);
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .response_body_limit(None)
+        .keep_raw_body()
+        .send()
+        .await?;
+    // Longer than the client's sixteen bytes, and every byte of it read.
+    let raw = pets.raw_body().ok_or_eyre("the body was kept")?;
+    assert!(raw.len() > 16, "{}", raw.len());
+    assert_eq!(pets.into_value().len(), 3);
+
+    // A client's `None` sets no limit, as never calling it does.
+    let unlimited = raw_serving().await?.response_body_limit(None);
+    let pets = unlimited
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await?;
+    assert_eq!(pets.into_value().len(), 3);
+}
+
+/// A kept body is the bytes the server sent, with what the read form cannot hold: the member
+/// the description never declared and the `null` the decoder read as absent.
+#[test_util::test]
+async fn a_kept_raw_body_is_what_the_server_sent() {
+    let client = raw_serving().await?;
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .keep_raw_body()
+        .send()
+        .await?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(pets.raw_body().ok_or_eyre("the body was kept")?)?;
+    assert_eq!(raw[0]["color"], serde_json::json!("brown"));
+    assert_eq!(raw[0].get("name"), Some(&serde_json::Value::Null));
+    // The value is decoded as ever beside it.
+    assert_eq!(pets.value().len(), 3);
+    assert!(pets.is_degraded());
+
+    // Without asking, nothing is kept.
+    let plain = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await?;
+    assert!(plain.raw_body().is_none());
+
+    // A declared error keeps its body too.
+    let (_, client) = serving().await?;
+    let error = client
+        .typed_errors(client::TypedErrorsParams { kind: "conflict".to_owned() })
+        .keep_raw_body()
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a declared failure")?;
+    let client::Error::Declared(response) = error else {
+        eyre::bail!("expected a declared error, got {error:?}");
+    };
+    let raw = String::from_utf8(response.into_raw_body().ok_or_eyre("the body was kept")?)?;
+    assert!(raw.contains("conflict"), "{raw}");
+}
+
+/// An empty path value would address the collection rather than one pet, so it is refused
+/// before anything is sent.
+#[test_util::test]
+async fn an_empty_path_value_is_refused_before_the_request_exists() {
+    let client = raw_serving().await?;
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: String::new() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("an empty segment is refused")?;
+    assert!(
+        matches!(&error, client::Error::UnsendablePath { parameter: "petId", rendered } if rendered.is_empty()),
+        "{error:?}"
+    );
+}
+
+/// The pet key goes only where the description requires it, and the client never spells it in
+/// its `Debug` output.
+#[test_util::test]
+async fn the_key_is_sent_only_where_it_is_required() {
+    let client = raw_serving()
+        .await?
+        .with_pet_key(reqwest::header::HeaderValue::from_static("hunter2"));
+
+    let pet = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "keyed".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(pet.into_value().name.as_deref(), Some("hunter2"));
+
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await?;
+    assert_eq!(
+        pets.headers().get("x-saw-pet-key").map(|value| value.as_bytes()),
+        Some(&b"none"[..])
+    );
+
+    // Without a key set, the request that requires one is sent without it.
+    let unkeyed = raw_serving().await?;
+    let pet = unkeyed
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "keyed".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(pet.into_value().name.as_deref(), Some("none"));
+
+    let debug = format!("{client:?}");
+    assert!(!debug.contains("hunter2"), "{debug}");
 }
 "#};

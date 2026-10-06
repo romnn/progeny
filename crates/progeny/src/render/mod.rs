@@ -109,6 +109,7 @@ pub(crate) fn run(
                 config.body_limit,
                 contracts.uses_presence().into(),
                 decoding,
+                (http && !api.schemes().is_empty()).into(),
             ),
         ));
     }
@@ -473,8 +474,13 @@ fn client_use(api: &ApiModel) -> crate::support::ClientUse {
                 crate::api::Location::Header => used.header = true,
                 crate::api::Location::Cookie => used.cookie = true,
             }
+            // A cookie parameter rides the cookie header, which is sent sensitive whole.
+            if parameter.credential || parameter.style.location() == crate::api::Location::Cookie {
+                used.sensitive_header = true;
+            }
         }
     }
+    used.credentials = !api.schemes().is_empty();
     used
 }
 
@@ -1174,10 +1180,170 @@ mod tests {
         });
         let rendered = client(document)?;
         assert!(rendered.contains("Error::UnsendablePath"), "{rendered}");
+        // An empty value is refused by the same check: `/files//metadata` is not this file's
+        // metadata either.
         assert!(
-            rendered.contains(r#"matches!(segment.as_str(), "." | "..")"#),
+            rendered.contains(r#"matches!(segment.as_str(), "" | "." | "..")"#),
             "{rendered}"
         );
+    }
+
+    /// Every request carries its reading settings to the shared decoders, and an operation with
+    /// no declared response, which reads no body, binds none.
+    #[test_util::test]
+    fn a_request_hands_its_body_reading_to_the_shared_decoder() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets": {"get": {
+                    "operationId": "listPets",
+                    "responses": {"200": {"description": "ok", "content": {
+                        "application/json": {"schema": {"type": "array", "items": {"type": "string"}}},
+                    }}},
+                }},
+                "/ping": {"get": {"operationId": "ping", "responses": {}}},
+            },
+        }))?;
+        // One setter per request, taking a byte count or `None`, on one line like the others.
+        assert!(
+            rendered
+                .contains("pub fn response_body_limit(mut self, bytes: impl Into<Option<usize>>)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub fn keep_raw_body(mut self)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("reading: support::BodyReading"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("self.reading.under(self.client.reading)"),
+            "{rendered}"
+        );
+        // The decoder takes the settings as a value: no per-operation reading code.
+        assert!(
+            rendered.contains("support::decode_lenient(\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("reading,\n"), "{rendered}");
+        // One binding for `listPets`, none for `ping`, whose response is handed back unread.
+        assert_eq!(rendered.matches("let reading =").count(), 1, "{rendered}");
+    }
+
+    /// A declared credential header and the cookie header go through the helper that marks them
+    /// sensitive; an ordinary header is set directly.
+    #[test_util::test]
+    fn credential_headers_are_sent_sensitive() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "paths": {"/me": {"get": {
+                "operationId": "me",
+                "parameters": [
+                    {"name": "Authorization", "in": "header", "required": true,
+                     "schema": {"type": "string"}},
+                    {"name": "proxy-authorization", "in": "header", "schema": {"type": "string"}},
+                    {"name": "X-Trace", "in": "header", "schema": {"type": "string"}},
+                    {"name": "session", "in": "cookie", "schema": {"type": "string"}},
+                ],
+                "responses": {"204": {"description": "done"}},
+            }}},
+        }))?;
+        assert_eq!(
+            rendered.matches("support::sensitive_header(").count(),
+            3,
+            "{rendered}"
+        );
+        assert!(rendered.contains("\"Authorization\""), "{rendered}");
+        // Compared without whitespace, because the formatter decides where a call wraps.
+        let compact: String = rendered.split_whitespace().collect();
+        assert!(
+            compact.contains("request.header(\"X-Trace\""),
+            "the ordinary header stays a plain one: {rendered}"
+        );
+        assert!(
+            rendered.contains("support::sensitive_header(request, \"cookie\""),
+            "{rendered}"
+        );
+    }
+
+    /// A header `apiKey` scheme becomes one client setter, and only the operations that require
+    /// it send through the held credentials, with their alternatives as a static list.
+    #[test_util::test]
+    fn an_api_key_scheme_is_held_by_the_client_and_sent_where_required() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "security": [{"key": []}],
+            "components": {"securitySchemes": {
+                "key": {"type": "apiKey", "in": "header", "name": "X-Api-Key",
+                        "description": "The account key."},
+                "tenant": {"type": "apiKey", "in": "header", "name": "X-Tenant"},
+            }},
+            "paths": {
+                "/inherited": {"get": {"operationId": "inherited",
+                    "responses": {"204": {"description": "done"}}}},
+                "/either": {"get": {"operationId": "either",
+                    "security": [{"key": [], "tenant": []}, {"tenant": []}],
+                    "responses": {"204": {"description": "done"}}}},
+                "/open": {"get": {"operationId": "open", "security": [],
+                    "responses": {"204": {"description": "done"}}}},
+            },
+        }))?;
+        assert!(
+            rendered.contains("pub fn with_key(mut self, value: ::reqwest::header::HeaderValue)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("pub fn with_tenant("), "{rendered}");
+        assert!(rendered.contains("The account key."), "{rendered}");
+        assert!(
+            rendered.contains("support::Credentials::new(&[\"X-Api-Key\", \"X-Tenant\"])"),
+            "{rendered}"
+        );
+        // The document's requirement for `inherited`, the operation's own alternatives for
+        // `either`, and a plain send for `open`, which requires nothing.
+        // Compared without whitespace, because the formatter decides where a call wraps.
+        let compact: String = rendered.split_whitespace().collect();
+        assert!(
+            compact.contains("credentials.send(request,&[&[0usize]])"),
+            "{rendered}"
+        );
+        assert!(
+            compact.contains("credentials.send(request,&[&[0usize,1usize],&[1usize]])"),
+            "{rendered}"
+        );
+        assert_eq!(
+            compact.matches("credentials.send(").count(),
+            2,
+            "{rendered}"
+        );
+        assert_eq!(
+            compact.matches("request.send().await?").count(),
+            1,
+            "{rendered}"
+        );
+    }
+
+    /// A description without a header `apiKey` scheme generates nothing for credentials.
+    #[test_util::test]
+    fn a_description_without_a_key_scheme_holds_no_credentials() {
+        let rendered = files(
+            json!({
+                "openapi": "3.1.0",
+                "components": {"securitySchemes": {
+                    "bearer": {"type": "http", "scheme": "bearer"},
+                    "query": {"type": "apiKey", "in": "query", "name": "key"},
+                }},
+                "security": [{"bearer": []}, {"query": []}],
+                "paths": {"/pets": {"get": {"operationId": "listPets",
+                    "responses": {"204": {"description": "done"}}}}},
+            }),
+            &Config::default(),
+        )?;
+        for (path, source) in &rendered {
+            assert!(!source.contains("Credentials"), "{path}: {source}");
+            assert!(!source.contains("credentials"), "{path}: {source}");
+        }
     }
 
     #[test_util::test]

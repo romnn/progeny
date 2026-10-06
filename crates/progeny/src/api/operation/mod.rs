@@ -23,7 +23,7 @@ mod response;
 
 use super::route::{self, PathTemplate};
 use super::style::Location;
-use super::{ApiModel, Method, OperationContract};
+use super::{ApiModel, Method, OperationContract, ParamContract};
 use std::collections::BTreeMap;
 
 use crate::config::Config;
@@ -55,6 +55,7 @@ pub(super) fn run(
         content_positions: BTreeMap::new(),
         namer: Namer::default(),
         stems: Namer::default(),
+        schemes: super::security::schemes(resolved, ctx),
     };
     let mut operations = Vec::new();
     // Webhooks are deliberately absent: they are carried losslessly in the document model and are
@@ -76,9 +77,12 @@ pub(super) fn run(
     build.check_media_type_requests()?;
 
     super::registrable::classify(&mut operations, ctx);
+    let mut schemes = build.schemes;
+    super::security::name_setters(&mut schemes, &mut build.namer);
     Ok(ApiModel {
         operations,
         servers: Vec::new(),
+        schemes,
     })
 }
 
@@ -96,6 +100,9 @@ struct Build<'a> {
     /// (`x_1` and `x1` both camel to `X1`), so unique method names alone still let two
     /// operations' generated types collide.
     stems: Namer,
+    /// The header `apiKey` schemes, read before the walk so each operation can name the ones it
+    /// requires.
+    schemes: Vec<super::security::CredentialScheme>,
 }
 
 impl Build<'_> {
@@ -231,6 +238,8 @@ impl Build<'_> {
             return None;
         }
 
+        let security = self.security(operation, &mut params);
+
         let rust_name = self.name(operation, method, route, at, ctx);
         // Body first, then responses: the order the struct literal used to evaluate them in, kept
         // so that hoisting the calls does not reorder their diagnostics under the fold cap.
@@ -265,6 +274,7 @@ impl Build<'_> {
             body_variant: false,
             pagination: None,
             origin: at.clone(),
+            security,
         };
         // One sibling method per further declared media type. Everything but the name, the body,
         // and the sentence saying which encoding it sends is the primary's: same route, same
@@ -292,6 +302,26 @@ impl Build<'_> {
         }
         built.insert(0, primary);
         Some(built)
+    }
+
+    /// The scheme alternatives the operation requires, marking the header parameters that carry
+    /// one of the schemes' credentials on the way: such a parameter is as secret as the scheme.
+    fn security(&self, operation: &Operation, params: &mut [ParamContract]) -> Vec<Vec<usize>> {
+        for param in params.iter_mut() {
+            if param.style.location() == Location::Header
+                && self
+                    .schemes
+                    .iter()
+                    .any(|scheme| scheme.header.eq_ignore_ascii_case(&param.wire_name))
+            {
+                param.credential = true;
+            }
+        }
+        super::security::requirement(
+            operation,
+            self.resolved.document().security.as_ref(),
+            &self.schemes,
+        )
     }
 
     /// The method name, kept unique across the client.

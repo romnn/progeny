@@ -3,12 +3,16 @@
 use std::collections::BTreeMap;
 
 use super::Build;
-use crate::api::ParamContract;
 use crate::api::style::{self, ParamShape};
+use crate::api::{Location, ParamContract};
 use crate::contract::{ContractKind, Contracts, Namer, RustIdent, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{Operation, Parameter, PathItem};
 use crate::shape::Docs;
+
+/// The headers whose value is a credential by the header's own definition, whatever the
+/// description says about the parameter.
+const CREDENTIAL_HEADERS: [&str; 3] = ["authorization", "proxy-authorization", "cookie"];
 
 impl Build<'_> {
     /// The operation's parameters, path-level ones included.
@@ -105,9 +109,14 @@ impl Build<'_> {
                     },
                 ));
             }
+            let credential = style.location() == Location::Header
+                && CREDENTIAL_HEADERS
+                    .iter()
+                    .any(|header| header.eq_ignore_ascii_case(&name));
             params.push(ParamContract {
                 rust_name: used.unique(RustIdent::field(&name)),
                 wire_name: name,
+                credential,
                 style,
                 required,
                 ty,

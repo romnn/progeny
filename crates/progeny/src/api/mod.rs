@@ -26,6 +26,7 @@ mod payload;
 mod presence;
 mod registrable;
 mod route;
+mod security;
 mod style;
 
 #[cfg(feature = "harness")]
@@ -40,6 +41,7 @@ use crate::shape::{Docs, Shapes};
 pub(crate) use pagination::PaginationContract;
 pub(crate) use registrable::RegistrableRoute;
 pub(crate) use route::{PathTemplate, Piece};
+pub(crate) use security::CredentialScheme;
 pub(crate) use style::{Location, Style, StyleContract};
 
 /// Every operation a document declares, and the servers it declares them against.
@@ -47,11 +49,18 @@ pub(crate) use style::{Location, Style, StyleContract};
 pub(crate) struct ApiModel {
     operations: Vec<OperationContract>,
     servers: Vec<ServerEntry>,
+    schemes: Vec<CredentialScheme>,
 }
 
 impl ApiModel {
     pub(crate) fn operations(&self) -> &[OperationContract] {
         &self.operations
+    }
+
+    /// The `apiKey` schemes the client sends in a header, numbered by position: the numbers
+    /// [`OperationContract::security`] names them by.
+    pub(crate) fn schemes(&self) -> &[CredentialScheme] {
+        &self.schemes
     }
 
     /// The server URL a generated `Default` can point at, when the document declares one.
@@ -107,6 +116,10 @@ pub(crate) struct OperationContract {
     pub(crate) pagination: Option<PaginationContract>,
     /// Where the operation was written, for diagnostics that point at it.
     pub(crate) origin: JsonPointer,
+    /// The alternatives the request's credentials are chosen from, each a list of
+    /// [`ApiModel::schemes`] numbers; empty when the operation requires no scheme the client
+    /// sends.
+    pub(crate) security: Vec<Vec<usize>>,
 }
 
 impl OperationContract {
@@ -138,6 +151,11 @@ pub(crate) struct ParamContract {
     pub(crate) required: bool,
     pub(crate) ty: TypeRef,
     pub(crate) docs: Docs,
+    /// Whether the value is a credential, which the client sends as a sensitive header so it
+    /// stays out of `Debug` output and logs.
+    ///
+    /// Only ever true for a header parameter.
+    pub(crate) credential: bool,
 }
 
 /// The one body a request carries, and how.

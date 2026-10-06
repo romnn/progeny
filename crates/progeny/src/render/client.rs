@@ -24,8 +24,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::api::{
-    ApiModel, BodyContract, FormSpec, Location, OperationContract, ParamContract, PartKind,
-    PartSpec, Piece, ResponseArm, ResponseBody, Style,
+    ApiModel, BodyContract, CredentialScheme, FormSpec, Location, OperationContract, ParamContract,
+    PartKind, PartSpec, Piece, ResponseArm, ResponseBody, Style,
 };
 use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent, TypeRef};
@@ -112,7 +112,7 @@ pub(super) fn render(
         quote! { operations::Method::#variant => ::reqwest::Method::#constant, }
     });
 
-    let client = client_struct(methods, decoding);
+    let client = client_struct(methods, model.schemes(), decoding);
     let observing = observing(decoding);
     let reading = if decoding.is_lenient() {
         quote! {
@@ -139,7 +139,7 @@ pub(super) fn render(
         use super::support;
 
         #[doc(inline)]
-        pub use super::support::{DecodeError, Degradations, Error, ResponseValue};
+        pub use super::support::{BodyTooLarge, DecodeError, Degradations, Error, ResponseValue};
 
         #observing
 
@@ -250,8 +250,16 @@ fn never_degraded(decoding: Decoding) -> TokenStream {
 
 /// The `Client` itself: its constructors, its accessors, the observer hook, and one accessor
 /// per operation.
-fn client_struct(methods: impl Iterator<Item = TokenStream>, decoding: Decoding) -> TokenStream {
+fn client_struct(
+    methods: impl Iterator<Item = TokenStream>,
+    schemes: &[CredentialScheme],
+    decoding: Decoding,
+) -> TokenStream {
     let unobserved = never_degraded(decoding);
+    let held = credentials(schemes);
+    let credential_field = held.as_ref().map(|held| &held.field);
+    let credential_init = held.as_ref().map(|held| &held.init);
+    let credential_setters = held.as_ref().map(|held| &held.setters);
     quote! {
         /// A client for this API.
         ///
@@ -267,6 +275,8 @@ fn client_struct(methods: impl Iterator<Item = TokenStream>, decoding: Decoding)
             base_url: ::std::string::String,
             inner: ::reqwest::Client,
             observer: ::std::option::Option<Observer>,
+            reading: support::BodyReading,
+            #credential_field
         }
 
         impl Client {
@@ -292,6 +302,8 @@ fn client_struct(methods: impl Iterator<Item = TokenStream>, decoding: Decoding)
                     base_url,
                     inner,
                     observer: ::std::option::Option::None,
+                    reading: support::BodyReading::default(),
+                    #credential_init
                 }
             }
 
@@ -310,6 +322,25 @@ fn client_struct(methods: impl Iterator<Item = TokenStream>, decoding: Decoding)
                 self.observer = ::std::option::Option::Some(Observer::new(observe));
                 self
             }
+
+            /// The same client, refusing any response body longer than `bytes` with
+            /// [`Error::BodyTooLarge`].
+            ///
+            /// Takes a byte count, or `None` for **no limit** — not for "unset", which is what
+            /// not calling this is.
+            /// Here the two read the same: a client without a limit reads every body whole.
+            /// The limit counts the body as the transport hands it over, after any content
+            /// decoding, and is held while reading rather than trusted to `Content-Length`.
+            ///
+            /// A request's own `response_body_limit` overrides it, and a request's `None` lifts
+            /// it for that request; a request that does not call it inherits this one.
+            #[must_use]
+            pub fn response_body_limit(mut self, bytes: impl Into<Option<usize>>) -> Self {
+                self.reading = self.reading.limited(bytes.into());
+                self
+            }
+
+            #credential_setters
 
             /// A response on its way back to the caller, shown to the observer if degraded.
             #unobserved
@@ -345,6 +376,62 @@ fn client_struct(methods: impl Iterator<Item = TokenStream>, decoding: Decoding)
             #(#methods)*
         }
     }
+}
+
+/// What a client holding credentials adds to its struct: the field, its initializer and one setter
+/// per scheme.
+struct Holding {
+    field: TokenStream,
+    init: TokenStream,
+    setters: TokenStream,
+}
+
+/// The held credentials, when the description has a header `apiKey` scheme to hold them for.
+///
+/// One setter per scheme and nothing per operation beyond the static list of alternatives its
+/// request passes: the choosing is the shipped `support::Credentials`'s.
+fn credentials(schemes: &[CredentialScheme]) -> Option<Holding> {
+    if schemes.is_empty() {
+        return None;
+    }
+    let headers = schemes.iter().map(|scheme| scheme.header.as_str());
+    let setters = schemes.iter().enumerate().map(|(index, scheme)| {
+        let setter = ident(&scheme.setter);
+        let summary = format!(
+            " The same client, holding `value` for the `{}` security scheme: the `{}` header.",
+            scheme.name, scheme.header
+        );
+        let description = scheme.description.as_ref().map(|description| {
+            let prose = docs_prose(&crate::shape::Docs {
+                description: Some(description.clone()),
+                ..crate::shape::Docs::default()
+            });
+            quote! {
+                #[doc = ""]
+                #prose
+            }
+        });
+        quote! {
+            #[doc = #summary]
+            #description
+            ///
+            /// A request carries it when its operation requires the scheme, through the first
+            /// alternative of the requirement this client holds every credential of; one it holds
+            /// none for is sent without, for the server to answer.
+            /// The value is marked sensitive, and a header of the same name set on the request
+            /// wins over it.
+            #[must_use]
+            pub fn #setter(mut self, value: ::reqwest::header::HeaderValue) -> Self {
+                self.credentials.set(#index, value);
+                self
+            }
+        }
+    });
+    Some(Holding {
+        field: quote! { credentials: support::Credentials, },
+        init: quote! { credentials: support::Credentials::new(&[#(#headers),*]), },
+        setters: quote! { #(#setters)* },
+    })
 }
 
 /// A `Default` impl, when the document declares a server to default to.
@@ -410,6 +497,7 @@ fn interface(
         decoding,
     };
     let send = send(operation, &success.name, &failure.name, &reading);
+    let reading_setters = reading_setters();
     let stream = stream(operation, contracts, config, decoding);
 
     let success_decl = &success.declaration;
@@ -456,6 +544,7 @@ fn interface(
             client: &'a Client,
             #params_field
             headers: ::reqwest::header::HeaderMap,
+            reading: support::BodyReading,
         }
 
         #deprecation
@@ -465,6 +554,7 @@ fn interface(
                     client,
                     #params_init
                     headers: ::reqwest::header::HeaderMap::new(),
+                    reading: support::BodyReading::default(),
                 }
             }
 
@@ -484,8 +574,36 @@ fn interface(
                 self
             }
 
+            #reading_setters
+
             #send
             #stream
+        }
+    }
+}
+
+/// The two settings every request has for reading its response body.
+///
+/// Each only hands a value to the shipped `support::BodyReading`, so the reading itself stays in
+/// the shared decoders.
+/// Their docs are one line and point at the full contract, which is written once on the client
+/// and the response rather than once per operation.
+/// The limit's parameter names `Into` and `Option` through the prelude rather than by full path,
+/// which keeps the signature on one line: the client module declares neither name.
+fn reading_setters() -> TokenStream {
+    quote! {
+        /// Overrides [`Client::response_body_limit`]; `None` means unlimited, not inherited.
+        #[must_use]
+        pub fn response_body_limit(mut self, bytes: impl Into<Option<usize>>) -> Self {
+            self.reading = self.reading.limited(bytes.into());
+            self
+        }
+
+        /// Keep the body's bytes as they arrived, as [`ResponseValue::raw_body`].
+        #[must_use]
+        pub fn keep_raw_body(mut self) -> Self {
+            self.reading = self.reading.keeping();
+            self
         }
     }
 }
@@ -728,12 +846,7 @@ fn page_walk(
         .iter()
         .chain(&pagination.items)
         .map(|step| {
-            let holder = type_ref_in(
-                &TypeRef::Named(step.holder),
-                contracts,
-                config,
-                Scope::Edge,
-            );
+            let holder = type_ref_in(&TypeRef::Named(step.holder), contracts, config, Scope::Edge);
             let constant = super::lenient::site_const(&step.rust_name);
             quote! { #holder::#constant }
         });
@@ -900,6 +1013,12 @@ fn send(
         .then(|| quote! { let mut declared_content_type = false; });
     let accept = accept_header(operation);
     let body = request_body(operation, operation_name);
+    let transport = transport(operation);
+    // Bound only where some arm reads a body: an operation whose every status is undeclared hands
+    // the response back unread, and an unused binding is a lint the consumer would see.
+    let reading_binding = (!operation.responses.arms.is_empty()
+        || operation.responses.default.is_some())
+    .then(|| quote! { let reading = self.reading.under(self.client.reading); });
     let dispatch = dispatch(operation, success, failure, reading);
     let body_note = if reading.decoding.is_lenient() {
         quote! {
@@ -935,10 +1054,27 @@ fn send(
                 // declared parameter, the cookies, the body's content type.
                 request = request.headers(self.headers);
             }
-            let response = request.send().await?;
+            let response = #transport;
+            #reading_binding
             #dispatch
         }
     }
+}
+
+/// The expression that sends the assembled request.
+///
+/// An operation that requires a header `apiKey` scheme sends through the client's held
+/// credentials with its alternatives as a static list; every other operation sends the request as
+/// assembled, so a description without such a scheme generates nothing for it.
+fn transport(operation: &OperationContract) -> TokenStream {
+    if operation.security.is_empty() {
+        return quote! { request.send().await? };
+    }
+    let alternatives = operation
+        .security
+        .iter()
+        .map(|schemes| quote! { &[#(#schemes),*] });
+    quote! { self.client.credentials.send(request, &[#(#alternatives),*]).await? }
 }
 
 /// The URL expression: the base, then the template with its variables filled in.
@@ -976,6 +1112,8 @@ fn path_expression(operation: &OperationContract) -> TokenStream {
         // reqwest's included — folds away before the request leaves, so `/files/{id}/meta`
         // with `id = ".."` would silently ask for `/meta`. Percent-encoding cannot save it
         // (`%2E` segments normalize the same way), so the request is refused instead.
+        // An empty segment is refused for the same reason: `/files/{id}` with `id = ""` asks
+        // for `/files/`, the collection rather than one of its members.
         let mut piece_steps = Vec::new();
         for piece in segment.pieces() {
             match piece {
@@ -1024,7 +1162,7 @@ fn path_expression(operation: &OperationContract) -> TokenStream {
             {
                 let mut segment = ::std::string::String::new();
                 #(#piece_steps)*
-                if matches!(segment.as_str(), "." | "..") {
+                if matches!(segment.as_str(), "" | "." | "..") {
                     return ::std::result::Result::Err(Error::UnsendablePath {
                         parameter: #blame,
                         rendered: segment,
@@ -1117,9 +1255,25 @@ fn headers(operation: &OperationContract) -> TokenStream {
         let field = ident(&param.rust_name);
         let wire = &param.wire_name;
         let explode = param.style.explode();
+        // A credential goes through the one shared helper that marks it sensitive.
+        // Every other header is set directly, which keeps the helper call out of operations
+        // that send no credential.
+        let set = if param.credential {
+            quote! {
+                request = support::sensitive_header(
+                    request,
+                    #wire,
+                    support::style::header_value(&value, #explode),
+                );
+            }
+        } else {
+            quote! {
+                request = request.header(#wire, support::style::header_value(&value, #explode));
+            }
+        };
         let body = quote! {
             let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
-            request = request.header(#wire, support::style::header_value(&value, #explode));
+            #set
         };
         // The flag `body_content_type` reads: a set `Content-Type` parameter means the body's
         // automatic header stays home.
@@ -1170,7 +1324,8 @@ fn headers(operation: &OperationContract) -> TokenStream {
             let mut cookies: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
             #(#cookies)*
             if !cookies.is_empty() {
-                request = request.header("cookie", cookies.join("; "));
+                // A cookie is as likely a session as a preference, so the header is sensitive.
+                request = support::sensitive_header(request, "cookie", cookies.join("; "));
             }
         });
     }
@@ -1554,6 +1709,7 @@ fn decode(
                     operations::Operation::#variant,
                     support::decode_lenient(
                         response,
+                        reading,
                         support::Site::new(
                             #operation,
                             #origin,
@@ -1565,14 +1721,14 @@ fn decode(
             }
         }
         ResponseBody::Json { .. } | ResponseBody::Empty => {
-            quote! { support::decode_json(response).await? }
+            quote! { support::decode_json(response, reading).await? }
         }
-        ResponseBody::Text { .. } => quote! { support::decode_text(response).await? },
+        ResponseBody::Text { .. } => quote! { support::decode_text(response, reading).await? },
         ResponseBody::Bytes { .. } => match reading.config.formats.bytes {
-            BytesRepr::Vec => quote! { support::decode_bytes(response).await? },
+            BytesRepr::Vec => quote! { support::decode_bytes(response, reading).await? },
             BytesRepr::Bytes => {
                 quote! {
-                    support::decode_bytes(response).await?
+                    support::decode_bytes(response, reading).await?
                         .map(::bytes::Bytes::from)
                 }
             }

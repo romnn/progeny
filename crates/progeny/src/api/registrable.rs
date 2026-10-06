@@ -193,6 +193,7 @@ mod tests {
             registrable: None,
             pagination: None,
             origin: JsonPointer::root().child(template),
+            security: Vec::new(),
         })
     }
 
