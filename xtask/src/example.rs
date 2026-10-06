@@ -55,7 +55,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let keyed = with_key_scheme(bytes)?;
+    let keyed = with_security_schemes(bytes)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
@@ -103,32 +103,54 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// The subject with a header `apiKey` scheme that one operation requires.
+/// The subject with one security scheme of every type progeny sends, which one operation
+/// requires as alternatives.
 ///
 /// Spliced in here rather than written into the committed document, which every other gate
-/// fingerprints: the scheme is this harness's question alone.
-/// `showPetById` requires the key and `listPets` requires nothing, so one client shows the header
-/// sent where it is required and nowhere else.
-fn with_key_scheme(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+/// fingerprints: the schemes are this harness's question alone.
+/// `showPetById` requires a credential and `listPets` requires nothing, so one client shows each
+/// credential sent where it is required and nowhere else.
+fn with_security_schemes(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const SCHEMES: &str = indoc::indoc! {"
+        securitySchemes:
+          petKey: {type: apiKey, in: header, name: X-Pet-Key}
+          queryKey: {type: apiKey, in: query, name: api_key}
+          cookieKey: {type: apiKey, in: cookie, name: session}
+          bearer: {type: http, scheme: bearer}
+          basic: {type: http, scheme: basic}
+          oauth:
+            type: oauth2
+            flows:
+              clientCredentials:
+                tokenUrl: https://example.invalid/token
+                scopes: {'pets:read': read}
+    "};
+    // The query key goes with the cookie key or not at all, so an alternative met in part is
+    // shown passed over.
+    const REQUIREMENT: &str = indoc::indoc! {"
+        security:
+          - petKey: []
+          - queryKey: []
+            cookieKey: []
+          - bearer: []
+          - basic: []
+          - oauth: ['pets:read']
+    "};
     let text = std::str::from_utf8(bytes).wrap_err("the subject is UTF-8")?;
     let mut keyed = text.to_owned();
-    // Flow style keeps each insertion on one line, where `indoc` cannot strip the indentation
-    // its position in the document needs.
-    for (anchor, insertion) in [
-        (
-            "components:\n",
-            "  securitySchemes: {petKey: {type: apiKey, in: header, name: X-Pet-Key}}\n",
-        ),
-        (
-            "      operationId: showPetById\n",
-            "      security: [{petKey: []}]\n",
-        ),
+    for (anchor, insertion, indent) in [
+        ("components:\n", SCHEMES, "  "),
+        ("      operationId: showPetById\n", REQUIREMENT, "      "),
     ] {
         let at = keyed
             .find(anchor)
             .wrap_err_with(|| format!("the subject no longer has `{}`", anchor.trim()))?
             + anchor.len();
-        keyed.insert_str(at, insertion);
+        let mut indented = String::new();
+        for line in insertion.lines() {
+            let _ = writeln!(indented, "{indent}{line}");
+        }
+        keyed.insert_str(at, &indented);
     }
     Ok(keyed.into_bytes())
 }
@@ -350,13 +372,23 @@ async fn serving() -> eyre::Result<(Double, client::Client)> {
     Ok((double, client::Client::new(format!("http://{address}"))))
 }
 
-/// The pet key a request carried, or `none`.
-fn saw_pet_key(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-pet-key")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("none")
-        .to_owned()
+/// Every credential a request carried, each named after where it travelled, or `none`.
+fn saw_credentials(headers: &axum::http::HeaderMap, query: Option<&str>) -> String {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let seen: Vec<String> = [
+        ("key", header("x-pet-key")),
+        ("query", query),
+        ("cookie", header("cookie")),
+        ("auth", header("authorization")),
+    ]
+    .into_iter()
+    .filter_map(|(place, value)| value.map(|value| format!("{place}={value}")))
+    .collect();
+    if seen.is_empty() {
+        "none".to_owned()
+    } else {
+        seen.join(" ")
+    }
 }
 
 /// Start a hand-written raw server so the generated client cannot agree with its own renderer.
@@ -385,12 +417,12 @@ async fn raw_serving() -> eyre::Result<client::Client> {
         )
         // A vendor that drifted: a required member sent as `null`, a member the description
         // never declared, and a required member missing from one record of the page.
-        // It also says whether the request carried the pet key, which `listPets` never requires.
+        // It also says which credentials the request carried, which `listPets` never requires.
         .route(
             "/pets",
-            get(|headers: axum::http::HeaderMap| async move {
+            get(|headers: axum::http::HeaderMap, axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
                 (
-                    [("x-saw-pet-key", saw_pet_key(&headers))],
+                    [("x-saw-credentials", saw_credentials(&headers, query.as_deref()))],
                     axum::Json(serde_json::json!([
                         {"id": 1, "name": null, "tag": "dog", "color": "brown"},
                         {"id": 2, "tag": "cat"},
@@ -414,19 +446,20 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                 }
             }),
         )
-        // `keyed` answers with the pet key the request carried, `chunked` with a body of no
+        // `keyed` answers with the credentials the request carried, `chunked` with a body of no
         // declared length, and anything else with a root that is not what the description
         // declares at all.
         .route(
             "/pets/{pet_id}",
             get(
                 |axum::extract::Path(pet_id): axum::extract::Path<String>,
+                 axum::extract::RawQuery(query): axum::extract::RawQuery,
                  headers: axum::http::HeaderMap| async move {
                     use axum::response::IntoResponse as _;
                     match pet_id.as_str() {
                         "keyed" => axum::Json(serde_json::json!({
                             "id": 7,
-                            "name": saw_pet_key(&headers),
+                            "name": saw_credentials(&headers, query.as_deref()),
                         }))
                         .into_response(),
                         "chunked" => axum::body::Body::from_stream(futures_util::stream::iter([
@@ -895,38 +928,102 @@ async fn an_empty_path_value_is_refused_before_the_request_exists() {
     );
 }
 
-/// The pet key goes only where the description requires it, and the client never spells it in
-/// its `Debug` output.
+/// Each credential goes only where the description requires it, in its own place and format,
+/// and the client never spells one in its `Debug` output.
 #[test_util::test]
-async fn the_key_is_sent_only_where_it_is_required() {
+async fn each_credential_is_sent_only_where_it_is_required() {
+    use reqwest::header::HeaderValue;
+
+    /// What the server saw on the operation that requires a credential, and on one that does
+    /// not.
+    async fn seen(client: &client::Client) -> eyre::Result<(String, String)> {
+        let pet = client
+            .show_pet_by_id(client::ShowPetByIdParams { pet_id: "keyed".to_owned() })
+            .send()
+            .await?;
+        let pets = client
+            .list_pets(client::ListPetsParams { limit: None })
+            .send()
+            .await?;
+        let listed = pets
+            .headers()
+            .get("x-saw-credentials")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        Ok((pet.into_value().name.unwrap_or_default(), listed))
+    }
+
+    // Header key
+    let client = raw_serving().await?.with_pet_key(HeaderValue::from_static("hunter2"));
+    assert_eq!(seen(&client).await?, ("key=hunter2".to_owned(), "none".to_owned()));
+    assert!(!format!("{client:?}").contains("hunter2"));
+
+    // Query and cookie keys, which only go together; the cookie value is encoded.
     let client = raw_serving()
         .await?
-        .with_pet_key(reqwest::header::HeaderValue::from_static("hunter2"));
+        .with_query_key("q s")
+        .with_cookie_key("c;1");
+    assert_eq!(
+        seen(&client).await?,
+        ("query=api_key=q+s cookie=session=c%3B1".to_owned(), "none".to_owned())
+    );
+    let debug = format!("{client:?}");
+    assert!(!debug.contains("q s") && !debug.contains("c;1"), "{debug}");
+    // One without the other meets no alternative, so neither is sent.
+    let half = raw_serving().await?.with_query_key("q");
+    assert_eq!(seen(&half).await?.0, "none");
 
+    // Bearer
+    let client = raw_serving().await?.with_bearer(HeaderValue::from_static("t0ken"));
+    assert_eq!(seen(&client).await?, ("auth=Bearer t0ken".to_owned(), "none".to_owned()));
+
+    // Basic, with RFC 7617's example
+    let client = raw_serving().await?.with_basic("Aladdin", "open sesame");
+    assert_eq!(seen(&client).await?.0, "auth=Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+
+    // OAuth2: a bearer token the caller obtained, after the alternatives before it went unmet.
+    let client = raw_serving().await?.with_oauth(HeaderValue::from_static("access"));
+    assert_eq!(seen(&client).await?.0, "auth=Bearer access");
+
+    // The first alternative met wins, and a header set on the request outranks the client's.
+    let client = raw_serving()
+        .await?
+        .with_pet_key(HeaderValue::from_static("hunter2"))
+        .with_bearer(HeaderValue::from_static("t0ken"));
+    assert_eq!(seen(&client).await?.0, "key=hunter2");
     let pet = client
         .show_pet_by_id(client::ShowPetByIdParams { pet_id: "keyed".to_owned() })
+        .header(
+            reqwest::header::HeaderName::from_static("x-pet-key"),
+            HeaderValue::from_static("explicit"),
+        )
         .send()
         .await?;
-    assert_eq!(pet.into_value().name.as_deref(), Some("hunter2"));
+    assert_eq!(pet.into_value().name.as_deref(), Some("key=explicit"));
 
-    let pets = client
-        .list_pets(client::ListPetsParams { limit: None })
-        .send()
-        .await?;
-    assert_eq!(
-        pets.headers().get("x-saw-pet-key").map(|value| value.as_bytes()),
-        Some(&b"none"[..])
-    );
+    // Without any credential set, the request that requires one is sent without it.
+    assert_eq!(seen(&raw_serving().await?).await?.0, "none");
+}
 
-    // Without a key set, the request that requires one is sent without it.
-    let unkeyed = raw_serving().await?;
-    let pet = unkeyed
+/// A query key is in the URL, which no header marking covers, so the error a failed request
+/// returns drops the query before it can print the key.
+#[test_util::test]
+async fn a_query_key_does_not_reach_an_error_message() {
+    // Nothing listens on the discard port, so the request fails before any response.
+    // The cookie key is set too, because the query key only goes with it.
+    let client = client::Client::new("http://127.0.0.1:9")
+        .with_query_key("s3cret")
+        .with_cookie_key("c");
+    let error = client
         .show_pet_by_id(client::ShowPetByIdParams { pet_id: "keyed".to_owned() })
         .send()
-        .await?;
-    assert_eq!(pet.into_value().name.as_deref(), Some("none"));
-
-    let debug = format!("{client:?}");
-    assert!(!debug.contains("hunter2"), "{debug}");
+        .await
+        .err()
+        .ok_or_eyre("nothing answers on the discard port")?;
+    assert!(matches!(error, client::Error::Request(_)), "{error:?}");
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        assert!(!rendered.contains("s3cret"), "{rendered}");
+    }
 }
 "#};

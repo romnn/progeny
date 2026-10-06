@@ -100,8 +100,8 @@ struct Build<'a> {
     /// (`x_1` and `x1` both camel to `X1`), so unique method names alone still let two
     /// operations' generated types collide.
     stems: Namer,
-    /// The header `apiKey` schemes, read before the walk so each operation can name the ones it
-    /// requires.
+    /// The schemes the client sends, read before the walk so each operation can name the ones
+    /// it requires.
     schemes: Vec<super::security::CredentialScheme>,
 }
 
@@ -312,7 +312,8 @@ impl Build<'_> {
                 && self
                     .schemes
                     .iter()
-                    .any(|scheme| scheme.header.eq_ignore_ascii_case(&param.wire_name))
+                    .filter_map(|scheme| scheme.place.header())
+                    .any(|header| header.eq_ignore_ascii_case(&param.wire_name))
             {
                 param.credential = true;
             }

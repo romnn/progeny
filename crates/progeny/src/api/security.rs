@@ -1,13 +1,17 @@
-//! The `apiKey` security schemes a client sends in a header, and which of them each operation
+//! The security schemes a client can send a credential for, and which of them each operation
 //! requires.
 //!
-//! Only `apiKey` with `in: header` is modelled.
-//! A key `in: query` lands in the URL, where no marking keeps it out of logs, and one
-//! `in: cookie` shares the cookie header with the operation's cookie parameters; `http` (bearer
-//! and basic), `oauth2` and `openIdConnect` all need a token lifecycle the caller's own
-//! `reqwest::Client` already handles.
-//! A requirement alternative naming any of those keeps only its header `apiKey` schemes: the
-//! rest is the caller's to supply, as it is for a description with no scheme progeny sends.
+//! Every scheme progeny sends becomes one credential the client holds and one place it goes:
+//!
+//! - `apiKey` in a header, the query string or the cookie header, under the scheme's `name`;
+//! - `http` with the `bearer` scheme, `oauth2` and `openIdConnect`: a token in
+//!   `Authorization: Bearer`, because at request time an `OAuth2` or `OpenID Connect` token is a
+//!   bearer token and obtaining one is the caller's business;
+//! - `http` with the `basic` scheme: a username and password in `Authorization: Basic`.
+//!
+//! Anything else — another `http` scheme such as `digest`, `mutualTLS`, an unknown type — is
+//! left to the caller's own `reqwest::Client`, and a requirement alternative naming one keeps
+//! only the schemes progeny sends.
 //!
 //! What this module decides is data: the schemes, numbered, and per operation a list of
 //! alternatives, each a list of scheme numbers.
@@ -16,10 +20,10 @@
 
 use crate::contract::{Namer, RustIdent};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
-use crate::doc::{Operation, SecurityRequirement};
+use crate::doc::{Operation, SecurityRequirement, SecurityScheme};
 use crate::resolve::ResolvedDocument;
 
-/// One `apiKey` scheme sent in a header.
+/// One scheme the client sends a credential for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CredentialScheme {
     /// The scheme's key in `components.securitySchemes`, which requirements name it by.
@@ -27,16 +31,47 @@ pub(crate) struct CredentialScheme {
     /// The client method that sets the credential, unique among the client's methods once
     /// [`name_setters`] has run.
     pub(crate) setter: RustIdent,
-    /// The header the credential travels in, as the document spells it.
-    pub(crate) header: String,
+    /// Where the credential travels.
+    pub(crate) place: Place,
+    /// The scheme's declared `type`, for the setter's documentation.
+    pub(crate) kind: String,
+    /// The scopes an `oauth2` scheme's flows declare, documented on the setter and never
+    /// checked: whether a token carries them is the authorization server's business.
+    pub(crate) scopes: Vec<String>,
     pub(crate) description: Option<String>,
 }
 
-/// The header `apiKey` schemes the document declares, in key order — which is the numbering
-/// requirements use.
+/// Where a credential travels, with the name it travels under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Place {
+    /// A header of this name, carrying the value as given.
+    Header(String),
+    /// A query parameter of this name.
+    Query(String),
+    /// A cookie of this name, merged into the `Cookie` header.
+    Cookie(String),
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `Authorization: Basic <base64 of username:password>`.
+    Basic,
+}
+
+impl Place {
+    /// The header a declared header parameter would have to be named to carry this credential.
+    pub(crate) fn header(&self) -> Option<&str> {
+        match self {
+            Self::Header(name) => Some(name),
+            Self::Bearer | Self::Basic => Some("authorization"),
+            Self::Query(_) | Self::Cookie(_) => None,
+        }
+    }
+}
+
+/// The schemes the document declares that the client can send, in key order — which is the
+/// numbering requirements use.
 ///
-/// A scheme whose header name is missing or is not a valid header name is left out and
-/// reported: it can be sent nowhere.
+/// An `apiKey` scheme whose name cannot be sent where it says — a header or cookie name that is
+/// not a token, an empty query name — is left out and reported: it can be sent nowhere.
 pub(crate) fn schemes(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Vec<CredentialScheme> {
     let Some(declared) = resolved
         .document()
@@ -51,35 +86,83 @@ pub(crate) fn schemes(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Vec<Credent
         let Some(scheme) = resolved.security_scheme(node) else {
             continue;
         };
-        if scheme.kind.as_deref() != Some("apiKey") || scheme.location.as_deref() != Some("header")
-        {
+        let Some(place) = place(name, scheme, ctx) else {
             continue;
-        }
-        let header = scheme.name.clone().unwrap_or_default();
-        if !is_header_name(&header) {
-            ctx.report(Diagnostic::new(
-                BreakageClass::MalformedMember,
-                Action::Degrade,
-                JsonPointer::root()
-                    .child("components")
-                    .child("securitySchemes")
-                    .child(name.clone())
-                    .child("name"),
-                format!(
-                    "the `apiKey` scheme names the header `{header}`, which is not a valid \
-                     header name; the client cannot send it, so the scheme is left out"
-                ),
-            ));
-            continue;
-        }
+        };
         schemes.push(CredentialScheme {
             name: name.clone(),
             setter: RustIdent::method(&["with".to_owned(), name.clone()]),
-            header,
+            place,
+            kind: scheme.kind.clone().unwrap_or_default(),
+            scopes: scopes(scheme),
             description: scheme.description.clone(),
         });
     }
     schemes
+}
+
+/// Where one scheme's credential goes, or `None` for a scheme the client does not send.
+fn place(name: &str, scheme: &SecurityScheme, ctx: &mut Ctx) -> Option<Place> {
+    match scheme.kind.as_deref()? {
+        "apiKey" => {
+            let wire = scheme.name.clone().unwrap_or_default();
+            let (place, valid, what) = match scheme.location.as_deref()? {
+                "header" => (Place::Header(wire.clone()), is_token(&wire), "header"),
+                "cookie" => (Place::Cookie(wire.clone()), is_token(&wire), "cookie"),
+                "query" => (
+                    Place::Query(wire.clone()),
+                    !wire.is_empty(),
+                    "query parameter",
+                ),
+                _ => return None,
+            };
+            if !valid {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::MalformedMember,
+                    Action::Degrade,
+                    JsonPointer::root()
+                        .child("components")
+                        .child("securitySchemes")
+                        .child(name.to_owned())
+                        .child("name"),
+                    format!(
+                        "the `apiKey` scheme names the {what} `{wire}`, which is not a valid \
+                         {what} name; the client cannot send it, so the scheme is left out"
+                    ),
+                ));
+                return None;
+            }
+            Some(place)
+        }
+        // The `scheme` member is a case-insensitive HTTP authentication scheme name.
+        "http" => match scheme.scheme.as_deref()?.to_ascii_lowercase().as_str() {
+            "bearer" => Some(Place::Bearer),
+            "basic" => Some(Place::Basic),
+            _ => None,
+        },
+        "oauth2" | "openIdConnect" => Some(Place::Bearer),
+        _ => None,
+    }
+}
+
+/// Every scope an `oauth2` scheme's flows declare, once each, in order.
+fn scopes(scheme: &SecurityScheme) -> Vec<String> {
+    let Some(flows) = &scheme.flows else {
+        return Vec::new();
+    };
+    let mut scopes: Vec<String> = [
+        &flows.implicit,
+        &flows.password,
+        &flows.client_credentials,
+        &flows.authorization_code,
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|flow| flow.scopes.iter().flatten().map(|(scope, _)| scope.clone()))
+    .collect();
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 /// Make every setter name unique among the client's methods.
@@ -125,8 +208,9 @@ pub(crate) fn requirement(
         .collect()
 }
 
-/// Whether `name` is an RFC 9110 field name: one or more token characters.
-fn is_header_name(name: &str) -> bool {
+/// Whether `name` is an RFC 9110 token: one or more token characters, which is what a header
+/// name and a cookie name both have to be.
+fn is_token(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
@@ -135,14 +219,14 @@ fn is_header_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre;
+    use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
+    use super::Place;
     use crate::api::tests::model_of;
 
     /// The document's requirement applies where an operation declares none; an operation's own
-    /// replaces it, an empty one requires nothing, and alternatives keep their order with the
-    /// schemes the client does not send left out.
+    /// replaces it, an empty one requires nothing, and alternatives keep their order.
     #[test_util::test]
     fn each_operation_requires_its_effective_alternatives() {
         let (model, _) = model_of(json!({
@@ -169,7 +253,15 @@ mod tests {
             .iter()
             .map(|scheme| (scheme.name.as_str(), scheme.setter.as_str()))
             .collect();
-        assert_eq!(names, [("key", "with_key"), ("tenant", "with_tenant")]);
+        assert_eq!(
+            names,
+            [
+                ("bearer", "with_bearer"),
+                ("key", "with_key"),
+                ("query", "with_query"),
+                ("tenant", "with_tenant"),
+            ]
+        );
         let required = |name: &str| {
             model
                 .operations()
@@ -177,9 +269,9 @@ mod tests {
                 .find(|operation| operation.rust_name.as_str() == name)
                 .map(|operation| operation.security.clone())
         };
-        assert_eq!(required("inherited"), Some(vec![vec![0]]));
-        // `bearer` and `query` are the caller's business, and `{}` sends nothing.
-        assert_eq!(required("own"), Some(vec![vec![0, 1]]));
+        assert_eq!(required("inherited"), Some(vec![vec![1]]));
+        // Every alternative in order, and `{}`, which sends nothing, dropped.
+        assert_eq!(required("own"), Some(vec![vec![0], vec![1, 3], vec![2]]));
         assert_eq!(required("open"), Some(vec![]));
     }
 
@@ -199,6 +291,53 @@ mod tests {
             .first()
             .map(|scheme| scheme.setter.as_str().to_owned());
         assert_eq!(setter.as_deref(), Some("with_key2"));
+    }
+
+    /// Each scheme type goes to its place, a type progeny does not send is left out silently, and
+    /// an `oauth2` scheme's scopes are collected for its setter's documentation.
+    #[test_util::test]
+    fn each_scheme_type_has_its_place() {
+        let (model, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "components": {"securitySchemes": {
+                "basic": {"type": "http", "scheme": "Basic"},
+                "bearer": {"type": "http", "scheme": "bearer"},
+                "cookie": {"type": "apiKey", "in": "cookie", "name": "session"},
+                "digest": {"type": "http", "scheme": "digest"},
+                "oauth": {"type": "oauth2", "flows": {
+                    "implicit": {"authorizationUrl": "https://example.invalid/a",
+                                 "scopes": {"b": "", "a": ""}},
+                    "password": {"tokenUrl": "https://example.invalid/t", "scopes": {"a": ""}}}},
+                "oidc": {"type": "openIdConnect", "openIdConnectUrl": "https://example.invalid"},
+                "query": {"type": "apiKey", "in": "query", "name": "api_key"},
+                "tls": {"type": "mutualTLS"},
+            }},
+            "paths": {"/p": {"get": {"operationId": "p",
+                "responses": {"204": {"description": "done"}}}}},
+        }))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let places: Vec<(&str, &Place)> = model
+            .schemes()
+            .iter()
+            .map(|scheme| (scheme.name.as_str(), &scheme.place))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("basic", &Place::Basic),
+                ("bearer", &Place::Bearer),
+                ("cookie", &Place::Cookie("session".to_owned())),
+                ("oauth", &Place::Bearer),
+                ("oidc", &Place::Bearer),
+                ("query", &Place::Query("api_key".to_owned())),
+            ]
+        );
+        let oauth = model
+            .schemes()
+            .iter()
+            .find(|scheme| scheme.name == "oauth")
+            .ok_or_eyre("the oauth2 scheme")?;
+        assert_eq!(oauth.scopes, ["a", "b"]);
     }
 
     /// A header parameter named like a scheme's header is a credential, and a scheme that names

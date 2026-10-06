@@ -88,8 +88,8 @@ const HTTP: &str = include_str!("http.rs");
 /// The serving runtime, compiled the same two ways: it names `axum`.
 const ROUTER: &str = include_str!("router.rs");
 
-/// The held credentials of a client whose description sends an `apiKey` scheme in a header,
-/// compiled the same two ways as the client runtime it joins.
+/// The held credentials of a client whose description declares a scheme progeny sends, compiled
+/// the same two ways as the client runtime it joins.
 const CREDENTIALS: &str = include_str!("credentials.rs");
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -148,8 +148,9 @@ pub(crate) struct ClientUse {
     /// Any header the client marks sensitive: a declared credential header parameter, or the
     /// cookie header its cookie parameters are sent in.
     pub(crate) sensitive_header: bool,
-    /// Any `apiKey` security scheme sent in a header, which ships the held credentials.
-    pub(crate) credentials: bool,
+    /// Where the security schemes progeny sends put their credentials; any at all ships the held
+    /// credentials.
+    pub(crate) credentials: PlaceUse,
     pub(crate) styles: StyleUse,
     pub(crate) parts: PartUse,
 }
@@ -201,6 +202,60 @@ pub(crate) struct PartUse {
 pub(crate) enum PresenceUse {
     Omitted,
     Preserved,
+}
+
+/// Where a client's credentials go, by the kind of scheme that sends them.
+///
+/// Decides which of the shipped credential machinery a precise edge can reach, so what it cannot
+/// is expected dead rather than reported.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PlaceUse {
+    pub(crate) header: bool,
+    pub(crate) query: bool,
+    pub(crate) cookie: bool,
+    pub(crate) bearer: bool,
+    pub(crate) basic: bool,
+}
+
+impl PlaceUse {
+    const ALL: Self = Self {
+        header: true,
+        query: true,
+        cookie: true,
+        bearer: true,
+        basic: true,
+    };
+
+    pub(crate) fn any(self) -> bool {
+        self.header || self.query || self.cookie || self.bearer || self.basic
+    }
+
+    /// Why the item `name` of the shipped credentials is dead, when nothing these places send
+    /// reaches it.
+    fn unreached(self, name: &str) -> Option<&'static str> {
+        let held_header = self.header || self.bearer || self.basic;
+        match name {
+            "Header" if !self.header => Some("this description sends no header `apiKey`"),
+            "Query" if !self.query => Some("this description sends no query `apiKey`"),
+            "Cookie" if !self.cookie => Some("this description sends no cookie `apiKey`"),
+            "Authorization" if !self.bearer && !self.basic => {
+                Some("this description sends no bearer, basic, OAuth2 or OpenID Connect scheme")
+            }
+            "Text" | "set_text" if !self.query && !self.cookie => {
+                Some("this description sends no query or cookie `apiKey`")
+            }
+            "set" | "Held::Header" if !held_header => {
+                Some("this description sends no credential in a header")
+            }
+            "set_bearer" if !self.bearer => {
+                Some("this description sends no bearer, OAuth2 or OpenID Connect scheme")
+            }
+            "set_basic" | "base64_encode" if !self.basic => {
+                Some("this description sends no basic scheme")
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Whether a client holds credentials, which ships `credentials.rs` beside the client runtime.
@@ -274,7 +329,11 @@ pub(crate) fn tokens(
         },
         body_limit,
         ClientUse {
-            credentials: credentials == CredentialUse::Held,
+            credentials: if credentials == CredentialUse::Held {
+                PlaceUse::ALL
+            } else {
+                PlaceUse::default()
+            },
             ..ClientUse::default()
         },
         ServerUse::ALL,
@@ -663,9 +722,12 @@ fn edge_tokens(
     // them rather than one per item.
     let wire = client.then(|| {
         let wire = client_source(HTTP, precise.then_some(client_use), decoding);
-        // Only a description with a header `apiKey` scheme holds credentials, so only its client
+        // Only a description with a scheme progeny sends holds credentials, so only its client
         // pays for them, under either packaging.
-        let credentials = client_use.credentials.then(|| source_items(CREDENTIALS));
+        let credentials = client_use
+            .credentials
+            .any()
+            .then(|| credentials_source(CREDENTIALS, precise.then_some(client_use.credentials)));
         quote::quote! {
             #calling
             pub mod wire {
@@ -927,6 +989,57 @@ fn impl_type_is(implementation: &syn::ItemImpl, expected: &str) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == expected)
+}
+
+/// The held credentials, with what the description's schemes cannot reach expected dead when
+/// `used` says which they are.
+///
+/// Spliced flat into the client runtime's module, so its items arrive without the file's own
+/// attributes.
+fn credentials_source(text: &str, used: Option<PlaceUse>) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(text) else {
+        return text.parse().unwrap_or_default();
+    };
+    file.items.retain(|item| !is_test_module(item));
+    let Some(used) = used else {
+        let items = &file.items;
+        return quote::quote! { #(#items)* };
+    };
+    for item in &mut file.items {
+        match item {
+            syn::Item::Enum(enumeration) => {
+                let held = enumeration.ident == "Held";
+                for variant in &mut enumeration.variants {
+                    let name = variant.ident.to_string();
+                    let key = if held && name == "Header" {
+                        "Held::Header".to_owned()
+                    } else {
+                        name
+                    };
+                    if let Some(reason) = used.unreached(&key) {
+                        expect_dead_code(&mut variant.attrs, reason);
+                    }
+                }
+            }
+            syn::Item::Fn(function) => {
+                if let Some(reason) = used.unreached(&function.sig.ident.to_string()) {
+                    expect_dead_code(&mut function.attrs, reason);
+                }
+            }
+            syn::Item::Impl(implementation) => {
+                for implementation_item in &mut implementation.items {
+                    if let syn::ImplItem::Fn(function) = implementation_item
+                        && let Some(reason) = used.unreached(&function.sig.ident.to_string())
+                    {
+                        expect_dead_code(&mut function.attrs, reason);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let items = &file.items;
+    quote::quote! { #(#items)* }
 }
 
 fn expect_dead_code(attributes: &mut Vec<syn::Attribute>, reason: &str) {
@@ -1247,6 +1360,64 @@ mod tests {
             .to_string()
             .contains("cfg (feature"),
         );
+    }
+
+    /// A precise client expects dead exactly the credential machinery its schemes cannot reach,
+    /// and an imprecise one, whose support module is public, expects nothing.
+    #[test_util::test]
+    fn credential_machinery_a_description_cannot_reach_is_expected_dead() {
+        let query_only = super::PlaceUse {
+            query: true,
+            ..super::PlaceUse::default()
+        };
+        let pruned = super::credentials_source(super::CREDENTIALS, Some(query_only));
+        let file: syn::File = syn::parse2(pruned)?;
+        let mut expected = Vec::new();
+        let mut note = |name: String, attributes: &[syn::Attribute]| {
+            if attributes
+                .iter()
+                .any(|attribute| attribute.path().is_ident("expect"))
+            {
+                expected.push(name);
+            }
+        };
+        for item in &file.items {
+            match item {
+                syn::Item::Enum(enumeration) => {
+                    for variant in &enumeration.variants {
+                        note(
+                            format!("{}::{}", enumeration.ident, variant.ident),
+                            &variant.attrs,
+                        );
+                    }
+                }
+                syn::Item::Fn(function) => note(function.sig.ident.to_string(), &function.attrs),
+                syn::Item::Impl(implementation) => {
+                    for inner in &implementation.items {
+                        if let syn::ImplItem::Fn(function) = inner {
+                            note(function.sig.ident.to_string(), &function.attrs);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        expected.sort();
+        assert_eq!(
+            expected,
+            [
+                "Held::Header",
+                "Place::Authorization",
+                "Place::Cookie",
+                "Place::Header",
+                "base64_encode",
+                "set",
+                "set_basic",
+                "set_bearer",
+            ]
+        );
+        let imprecise = super::credentials_source(super::CREDENTIALS, None).to_string();
+        assert!(!imprecise.contains("expect"), "{imprecise}");
     }
 
     /// The body ceiling is a knob, and the shipped constant is what it turns.

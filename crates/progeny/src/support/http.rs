@@ -356,8 +356,14 @@ async fn read_body(
     reading: BodyReading,
 ) -> Result<Vec<u8>, BodyError> {
     let status = response.status();
-    let unreadable =
-        |error: ::reqwest::Error| DecodeError::new(status, ::serde::de::Error::custom(error));
+    // The URL's query is dropped from the error: it can hold an API key, and the message is
+    // about the body, which the status already places.
+    let unreadable = |mut error: ::reqwest::Error| {
+        if let Some(url) = error.url_mut() {
+            url.set_query(None);
+        }
+        DecodeError::new(status, ::serde::de::Error::custom(error))
+    };
     let Limit::Bytes(limit) = reading.limit else {
         let bytes = response.bytes().await.map_err(unreadable)?;
         return Ok(Vec::from(bytes));

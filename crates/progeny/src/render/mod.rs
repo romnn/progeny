@@ -480,7 +480,16 @@ fn client_use(api: &ApiModel) -> crate::support::ClientUse {
             }
         }
     }
-    used.credentials = !api.schemes().is_empty();
+    for scheme in api.schemes() {
+        let places = &mut used.credentials;
+        match scheme.place {
+            crate::api::Place::Header(_) => places.header = true,
+            crate::api::Place::Query(_) => places.query = true,
+            crate::api::Place::Cookie(_) => places.cookie = true,
+            crate::api::Place::Bearer => places.bearer = true,
+            crate::api::Place::Basic => places.basic = true,
+        }
+    }
     used
 }
 
@@ -1296,8 +1305,12 @@ mod tests {
         );
         assert!(rendered.contains("pub fn with_tenant("), "{rendered}");
         assert!(rendered.contains("The account key."), "{rendered}");
+        // Compared without whitespace, because the formatter decides where a list wraps.
         assert!(
-            rendered.contains("support::Credentials::new(&[\"X-Api-Key\", \"X-Tenant\"])"),
+            rendered.split_whitespace().collect::<String>().contains(
+                "support::Credentials::new(&[support::Place::Header(\"X-Api-Key\"),\
+                 support::Place::Header(\"X-Tenant\"),],)"
+            ),
             "{rendered}"
         );
         // The document's requirement for `inherited`, the operation's own alternatives for
@@ -1324,17 +1337,18 @@ mod tests {
         );
     }
 
-    /// A description without a header `apiKey` scheme generates nothing for credentials.
+    /// A description whose only schemes progeny does not send generates nothing for
+    /// credentials.
     #[test_util::test]
-    fn a_description_without_a_key_scheme_holds_no_credentials() {
+    fn a_description_without_a_sendable_scheme_holds_no_credentials() {
         let rendered = files(
             json!({
                 "openapi": "3.1.0",
                 "components": {"securitySchemes": {
-                    "bearer": {"type": "http", "scheme": "bearer"},
-                    "query": {"type": "apiKey", "in": "query", "name": "key"},
+                    "digest": {"type": "http", "scheme": "digest"},
+                    "tls": {"type": "mutualTLS"},
                 }},
-                "security": [{"bearer": []}, {"query": []}],
+                "security": [{"digest": []}, {"tls": []}],
                 "paths": {"/pets": {"get": {"operationId": "listPets",
                     "responses": {"204": {"description": "done"}}}}},
             }),
@@ -1344,6 +1358,87 @@ mod tests {
             assert!(!source.contains("Credentials"), "{path}: {source}");
             assert!(!source.contains("credentials"), "{path}: {source}");
         }
+    }
+
+    /// Each scheme type becomes a setter whose parameters follow where its credential goes,
+    /// and a place the shipped credentials put it; requirements resolve the same way for all of
+    /// them.
+    #[test_util::test]
+    fn every_scheme_type_is_held_and_placed() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "security": [{"bearer": []}],
+            "components": {"securitySchemes": {
+                "query": {"type": "apiKey", "in": "query", "name": "api_key"},
+                "cookie": {"type": "apiKey", "in": "cookie", "name": "session"},
+                "bearer": {"type": "http", "scheme": "Bearer", "bearerFormat": "JWT"},
+                "basic": {"type": "http", "scheme": "basic"},
+                "oauth": {"type": "oauth2", "flows": {"clientCredentials": {
+                    "tokenUrl": "https://example.invalid/token",
+                    "scopes": {"pets:read": "read", "pets:write": "write"}}}},
+                "oidc": {"type": "openIdConnect",
+                         "openIdConnectUrl": "https://example.invalid/.well-known"},
+            }},
+            "paths": {
+                "/inherited": {"get": {"operationId": "inherited",
+                    "responses": {"204": {"description": "done"}}}},
+                "/either": {"get": {"operationId": "either",
+                    "security": [{"query": [], "cookie": []}, {"basic": []}, {}],
+                    "responses": {"204": {"description": "done"}}}},
+                "/scoped": {"get": {"operationId": "scoped",
+                    "security": [{"oauth": ["pets:read"]}, {"oidc": []}],
+                    "responses": {"204": {"description": "done"}}}},
+                "/open": {"get": {"operationId": "open", "security": [],
+                    "responses": {"204": {"description": "done"}}}},
+            },
+        }))?;
+        // Compared without whitespace, because the formatter decides where a call wraps.
+        let compact: String = rendered.split_whitespace().collect();
+        for setter in [
+            "pubfnwith_query(mutself,value:implInto<String>)->Self",
+            "pubfnwith_cookie(mutself,value:implInto<String>)->Self",
+            "pubfnwith_bearer(mutself,token:::reqwest::header::HeaderValue)->Self",
+            "pubfnwith_basic(mutself,username:&str,password:&str)->Self",
+            "pubfnwith_oauth(mutself,token:::reqwest::header::HeaderValue)->Self",
+            "pubfnwith_oidc(mutself,token:::reqwest::header::HeaderValue)->Self",
+        ] {
+            assert!(compact.contains(setter), "{setter}: {rendered}");
+        }
+        // Schemes are numbered in key order: basic, bearer, cookie, oauth, oidc, query.
+        let places = "support::Place::Authorization,support::Place::Authorization,\
+                      support::Place::Cookie(\"session\"),support::Place::Authorization,\
+                      support::Place::Authorization,support::Place::Query(\"api_key\")";
+        assert!(compact.contains(places), "{rendered}");
+        // The document's bearer for `inherited`; `query AND cookie`, then `basic`, with the
+        // anonymous alternative dropped, for `either`; OAuth2, then OpenID Connect, for
+        // `scoped`; and nothing for `open`.
+        assert!(
+            compact.contains("credentials.send(request,&[&[1usize]])"),
+            "{rendered}"
+        );
+        assert!(
+            compact.contains("credentials.send(request,&[&[2usize,5usize],&[0usize]])"),
+            "{rendered}"
+        );
+        assert!(
+            compact.contains("credentials.send(request,&[&[3usize],&[4usize]])"),
+            "{rendered}"
+        );
+        assert_eq!(
+            compact.matches("request.send().await?").count(),
+            1,
+            "{rendered}"
+        );
+        // Scopes are documented, and the URL's exposure is too.
+        assert!(rendered.contains("`pets:read`, `pets:write`"), "{rendered}");
+        assert!(
+            rendered.contains("does not check that the token carries them"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("A URL cannot be marked sensitive."),
+            "{rendered}"
+        );
     }
 
     #[test_util::test]

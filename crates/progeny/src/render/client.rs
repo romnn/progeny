@@ -25,7 +25,7 @@ use quote::{format_ident, quote};
 
 use crate::api::{
     ApiModel, BodyContract, CredentialScheme, FormSpec, Location, OperationContract, ParamContract,
-    PartKind, PartSpec, Piece, ResponseArm, ResponseBody, Style,
+    PartKind, PartSpec, Piece, Place, ResponseArm, ResponseBody, Style,
 };
 use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent, TypeRef};
@@ -386,52 +386,150 @@ struct Holding {
     setters: TokenStream,
 }
 
-/// The held credentials, when the description has a header `apiKey` scheme to hold them for.
+/// The held credentials, when the description has a scheme progeny sends.
 ///
 /// One setter per scheme and nothing per operation beyond the static list of alternatives its
-/// request passes: the choosing is the shipped `support::Credentials`'s.
+/// request passes: the choosing and the placing are the shipped `support::Credentials`'s.
 fn credentials(schemes: &[CredentialScheme]) -> Option<Holding> {
     if schemes.is_empty() {
         return None;
     }
-    let headers = schemes.iter().map(|scheme| scheme.header.as_str());
-    let setters = schemes.iter().enumerate().map(|(index, scheme)| {
-        let setter = ident(&scheme.setter);
-        let summary = format!(
-            " The same client, holding `value` for the `{}` security scheme: the `{}` header.",
-            scheme.name, scheme.header
-        );
-        let description = scheme.description.as_ref().map(|description| {
-            let prose = docs_prose(&crate::shape::Docs {
-                description: Some(description.clone()),
-                ..crate::shape::Docs::default()
-            });
-            quote! {
-                #[doc = ""]
-                #prose
-            }
-        });
-        quote! {
-            #[doc = #summary]
-            #description
-            ///
-            /// A request carries it when its operation requires the scheme, through the first
-            /// alternative of the requirement this client holds every credential of; one it holds
-            /// none for is sent without, for the server to answer.
-            /// The value is marked sensitive, and a header of the same name set on the request
-            /// wins over it.
-            #[must_use]
-            pub fn #setter(mut self, value: ::reqwest::header::HeaderValue) -> Self {
-                self.credentials.set(#index, value);
-                self
-            }
-        }
+    let places = schemes.iter().map(|scheme| match &scheme.place {
+        Place::Header(name) => quote! { support::Place::Header(#name) },
+        Place::Query(name) => quote! { support::Place::Query(#name) },
+        Place::Cookie(name) => quote! { support::Place::Cookie(#name) },
+        Place::Bearer | Place::Basic => quote! { support::Place::Authorization },
     });
+    let setters = schemes
+        .iter()
+        .enumerate()
+        .map(|(index, scheme)| setter(index, scheme));
     Some(Holding {
         field: quote! { credentials: support::Credentials, },
-        init: quote! { credentials: support::Credentials::new(&[#(#headers),*]), },
+        init: quote! { credentials: support::Credentials::new(&[#(#places),*]), },
         setters: quote! { #(#setters)* },
     })
+}
+
+/// The client setter for one scheme's credential, whose parameters follow where it goes.
+///
+/// A header-borne credential takes a `HeaderValue`, so a value that cannot be a header fails
+/// where the caller builds it rather than at send time; a query or cookie key takes text, which
+/// the client encodes; a username and password take text, which base64 makes a valid header.
+fn setter(index: usize, scheme: &CredentialScheme) -> TokenStream {
+    let setter = ident(&scheme.setter);
+    let name = &scheme.name;
+    let (summary, notes, signature, body) = match &scheme.place {
+        Place::Header(header) => (
+            format!(
+                " The same client, holding `value` for the `{name}` scheme: the `{header}` header."
+            ),
+            Vec::new(),
+            quote! { value: ::reqwest::header::HeaderValue },
+            quote! { self.credentials.set(#index, value); },
+        ),
+        Place::Query(parameter) => (
+            format!(
+                " The same client, holding `value` for the `{name}` scheme: the `{parameter}` \
+                 query parameter."
+            ),
+            vec![
+                " A URL cannot be marked sensitive.".to_owned(),
+                " The client drops the query from the URL of an error it returns for the \
+                 request, but the URL with the key is still the request's: a `reqwest` \
+                 middleware or a proxy can log it, and the response handed back with \
+                 [`Error::UnexpectedStatus`] reports it from `url()` and `Debug`."
+                    .to_owned(),
+            ],
+            quote! { value: impl Into<String> },
+            quote! { self.credentials.set_text(#index, value.into()); },
+        ),
+        Place::Cookie(cookie) => (
+            format!(
+                " The same client, holding `value` for the `{name}` scheme: the `{cookie}` cookie."
+            ),
+            vec![
+                " It joins the request's other cookies in one sensitive `Cookie` header, \
+                 percent-encoded outside the characters a cookie value may hold."
+                    .to_owned(),
+            ],
+            quote! { value: impl Into<String> },
+            quote! { self.credentials.set_text(#index, value.into()); },
+        ),
+        Place::Bearer => (
+            format!(
+                " The same client, holding `token` for the `{name}` scheme: `Authorization: \
+                 Bearer <token>`."
+            ),
+            token_notes(scheme),
+            quote! { token: ::reqwest::header::HeaderValue },
+            quote! { self.credentials.set_bearer(#index, &token); },
+        ),
+        Place::Basic => (
+            format!(
+                " The same client, holding `username` and `password` for the `{name}` scheme: \
+                 `Authorization: Basic`."
+            ),
+            Vec::new(),
+            quote! { username: &str, password: &str },
+            quote! { self.credentials.set_basic(#index, username, password); },
+        ),
+    };
+    let description = scheme.description.as_ref().map(|description| {
+        let prose = docs_prose(&crate::shape::Docs {
+            description: Some(description.clone()),
+            ..crate::shape::Docs::default()
+        });
+        quote! {
+            #[doc = ""]
+            #prose
+        }
+    });
+    let notes = notes
+        .iter()
+        .map(|note| quote! { #[doc = ""] #[doc = #note] });
+    quote! {
+        #[doc = #summary]
+        #description
+        ///
+        /// A request carries it when its operation requires the scheme, through the first
+        /// alternative of the requirement this client holds every credential of; one it holds
+        /// none for is sent without, for the server to answer.
+        /// It is marked sensitive where it travels in a header, and whatever the request
+        /// already carries under the same name wins over it.
+        #(#notes)*
+        #[must_use]
+        pub fn #setter(mut self, #signature) -> Self {
+            #body
+            self
+        }
+    }
+}
+
+/// What a token setter says beyond the summary: that obtaining and refreshing a token is the
+/// caller's, and which scopes an `oauth2` scheme declares.
+fn token_notes(scheme: &CredentialScheme) -> Vec<String> {
+    let mut notes = Vec::new();
+    if scheme.kind == "oauth2" || scheme.kind == "openIdConnect" {
+        notes.push(
+            " The client does not obtain or refresh the token: set a fresh one on a clone of \
+             the client, which shares its connection pool."
+                .to_owned(),
+        );
+    }
+    if !scheme.scopes.is_empty() {
+        let scopes = scheme
+            .scopes
+            .iter()
+            .map(|scope| format!("`{scope}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        notes.push(format!(
+            " The scheme declares the scopes {scopes}; which an operation needs is in the \
+             description, and the client does not check that the token carries them."
+        ));
+    }
+    notes
 }
 
 /// A `Default` impl, when the document declares a server to default to.
@@ -1063,7 +1161,7 @@ fn send(
 
 /// The expression that sends the assembled request.
 ///
-/// An operation that requires a header `apiKey` scheme sends through the client's held
+/// An operation that requires a scheme the client sends goes through the client's held
 /// credentials with its alternatives as a static list; every other operation sends the request as
 /// assembled, so a description without such a scheme generates nothing for it.
 fn transport(operation: &OperationContract) -> TokenStream {

@@ -221,32 +221,58 @@ Both settings are values every request carries into the shared decoders, so what
 operation is the two setters and a field, and a request that sets neither reads its body whole,
 keeping only the value.
 
-## API keys
+## Credentials
 
-An `apiKey` security scheme sent in a header becomes a setter on the client, named after the scheme
-and taking a `reqwest::header::HeaderValue`, so a value that is not a valid header fails where the
-caller builds it rather than at send time:
+Every security scheme a description declares that progeny can send becomes a setter on the client,
+named after the scheme, whose parameters follow where the credential goes:
+
+| Scheme | Setter takes | Sent as |
+| --- | --- | --- |
+| `apiKey` `in: header` | `HeaderValue` | that header |
+| `apiKey` `in: query` | `impl Into<String>` | that query parameter |
+| `apiKey` `in: cookie` | `impl Into<String>` | that cookie, in the one `Cookie` header |
+| `http` `bearer`, `oauth2`, `openIdConnect` | `HeaderValue` | `Authorization: Bearer <token>` |
+| `http` `basic` | `username: &str, password: &str` | `Authorization: Basic <base64>` |
+
+A header-borne value is typed, so a value that is not a valid header fails where the caller builds
+it rather than at send time; query and cookie keys are text the client encodes, and base64 makes
+any username and password a valid header.
 
 ```rust
-let client = Client::new(base_url).with_api_key(HeaderValue::from_str(&key)?);
+let client = Client::new(base_url)
+    .with_api_key(HeaderValue::from_str(&key)?)
+    .with_basic_auth("user", &password);
 ```
 
-The client stores the value marked sensitive and sends it only on the requests whose operation
-requires the scheme: the operation's own `security`, or the document's when the operation declares
-none; `security: []` requires nothing. Requirements are alternatives, each a set of schemes sent
-together, and a request carries the first alternative whose every key the client holds. A request
-whose requirement the client cannot meet is sent without a key for the server to answer, because a
-caller may supply the header another way — as a default header on its `reqwest::Client`, which is
-how every other kind of scheme is supplied. A header parameter of the same name, or a header set
-with `.header(...)`, wins over the stored key.
+The client sends a credential only on the requests whose operation requires the scheme: the
+operation's own `security`, or the document's when the operation declares none; `security: []`
+requires nothing. Requirements are alternatives, each a set of schemes sent together, and a request
+carries the first alternative whose every credential the client holds, whatever their types. A
+request whose requirement the client cannot meet is sent without a credential for the server to
+answer, because a caller may supply one another way — as a default header on its
+`reqwest::Client`, for instance. What the request already carries under the same name wins over a
+held credential: a header, query parameter or cookie from a declared parameter, or a header set
+with `.header(...)`. A held credential does win over a default header of the `reqwest::Client`,
+which only fills names a request leaves empty.
+
+An `oauth2` or `openIdConnect` scheme is a bearer token at request time, and obtaining and
+refreshing it stays the caller's: set a fresh token on a clone of the client, which shares its
+connection pool. The scopes an `oauth2` scheme declares are listed on its setter and are not checked
+against the token. `bearerFormat` is informational. Other `http` schemes, such as `digest`, and
+`mutualTLS` are left to the `reqwest::Client` the generated one is built on.
 
 A header that carries a credential is marked sensitive wherever the client sends one, so it prints
-as `Sensitive` in `Debug` output and logs: the stored keys, declared `Authorization`,
+as `Sensitive` in `Debug` output and logs: the held credentials, declared `Authorization`,
 `Proxy-Authorization` and `Cookie` header parameters, a parameter named like a scheme's header, and
-the cookie header cookie parameters are sent in.
+the cookie header that cookie parameters and cookie keys are sent in. The client's own `Debug`
+output never prints a held credential.
 
-A key `in: query` or `in: cookie`, and the `http`, `oauth2` and `openIdConnect` schemes, are left to
-the `reqwest::Client` the generated one is built on.
+A query key is in the URL, which nothing can mark sensitive. The client drops the query from the
+URL of an error it returns for a request that carried one, and from the URL of an error reading any
+body, so the key reaches neither the error's `Display` nor its `Debug`. It cannot do the same for a
+response it hands back as `Error::UnexpectedStatus`, whose `url()` and `Debug` still show the key,
+nor for anything that sees the request on its way out — `reqwest` middleware, a proxy, a server's
+access log. Prefer a header key where the API offers one.
 
 ## Client middleware
 

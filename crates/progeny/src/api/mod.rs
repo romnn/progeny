@@ -41,7 +41,7 @@ use crate::shape::{Docs, Shapes};
 pub(crate) use pagination::PaginationContract;
 pub(crate) use registrable::RegistrableRoute;
 pub(crate) use route::{PathTemplate, Piece};
-pub(crate) use security::CredentialScheme;
+pub(crate) use security::{CredentialScheme, Place};
 pub(crate) use style::{Location, Style, StyleContract};
 
 /// Every operation a document declares, and the servers it declares them against.
@@ -57,7 +57,7 @@ impl ApiModel {
         &self.operations
     }
 
-    /// The `apiKey` schemes the client sends in a header, numbered by position: the numbers
+    /// The security schemes the client sends a credential for, numbered by position: the numbers
     /// [`OperationContract::security`] names them by.
     pub(crate) fn schemes(&self) -> &[CredentialScheme] {
         &self.schemes
