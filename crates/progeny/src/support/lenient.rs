@@ -833,7 +833,10 @@ mod tests {
     #[test_util::test]
     fn an_absent_required_member_is_reported_and_an_absent_optional_one_is_not() {
         let (_, report) = decode::<Employment>("{}")?;
-        assert_eq!(only(&report, Employment::SITE_KIND)?.kind, DegradationKind::RequiredAbsent);
+        assert_eq!(
+            only(&report, Employment::SITE_KIND)?.kind,
+            DegradationKind::RequiredAbsent
+        );
         assert!(!report.touches(Employment::SITE_YEARS), "{report}");
     }
 
@@ -848,7 +851,10 @@ mod tests {
         assert_eq!(value.kind, None);
         assert!(!value.extra.contains_key("type"), "{:?}", value.extra);
         assert_eq!(value.extra.get("x"), Some(&serde_json::json!(2)));
-        assert_eq!(only(&report, Employment::SITE_KIND)?.kind, DegradationKind::Undecodable);
+        assert_eq!(
+            only(&report, Employment::SITE_KIND)?.kind,
+            DegradationKind::Undecodable
+        );
         assert_eq!(
             only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember
@@ -862,13 +868,22 @@ mod tests {
     fn only_a_plain_member_refuses_absence_or_null_strictly() {
         let (value, report) = decode::<Employment>(r#"{"type":"a","years":null}"#)?;
         assert_eq!(value.years, None);
-        assert_eq!(only(&report, Employment::SITE_YEARS)?.kind, DegradationKind::NullNotAllowed);
+        assert_eq!(
+            only(&report, Employment::SITE_YEARS)?.kind,
+            DegradationKind::NullNotAllowed
+        );
         assert!(!report.strict_refuses(), "{report}");
         let (_, report) = decode::<Address>(r#"{"street":"Main"}"#)?;
-        assert_eq!(only(&report, Address::SITE_UNIT)?.kind, DegradationKind::RequiredAbsent);
+        assert_eq!(
+            only(&report, Address::SITE_UNIT)?.kind,
+            DegradationKind::RequiredAbsent
+        );
         assert!(!report.strict_refuses(), "{report}");
         let (_, report) = decode::<Address>(r#"{"unit":null}"#)?;
-        assert_eq!(only(&report, Address::SITE_STREET)?.kind, DegradationKind::RequiredAbsent);
+        assert_eq!(
+            only(&report, Address::SITE_STREET)?.kind,
+            DegradationKind::RequiredAbsent
+        );
         assert!(report.strict_refuses(), "{report}");
     }
 
@@ -957,7 +972,10 @@ mod tests {
             ]
         );
         // The type's own site holds only what the type itself tolerated.
-        let at: Vec<DegradationKind> = report.at(Employment::SITE).map(|entry| entry.kind).collect();
+        let at: Vec<DegradationKind> = report
+            .at(Employment::SITE)
+            .map(|entry| entry.kind)
+            .collect();
         assert_eq!(at, [DegradationKind::UndeclaredMember]);
         // And asking `within` with a member's site answers about the type that declares it.
         assert_eq!(report.within(Employment::SITE_KIND).count(), 2);
@@ -997,7 +1015,10 @@ mod tests {
     fn a_duplicate_member_is_reported_rather_than_last_write_wins() {
         let (value, report) = decode::<Employment>(r#"{"type":"a","type":"b"}"#)?;
         assert_eq!(value.kind, None);
-        assert_eq!(only(&report, Employment::SITE_KIND)?.kind, DegradationKind::Undecodable);
+        assert_eq!(
+            only(&report, Employment::SITE_KIND)?.kind,
+            DegradationKind::Undecodable
+        );
     }
 
     /// Samples are capped, counts are not.
@@ -1100,7 +1121,10 @@ mod tests {
         assert_eq!(entry.samples, ["floor"]);
         // Denied by the strict form, so a union probing this variant would move on.
         assert!(report.strict_refuses());
-        assert!(!report.touches(Address::SITE_UNIT) && !report.touches(Address::SITE_NOTE), "{report}");
+        assert!(
+            !report.touches(Address::SITE_UNIT) && !report.touches(Address::SITE_NOTE),
+            "{report}"
+        );
     }
 
     /// A string enum with an open arm, read through `open_string` the way the renderer writes
@@ -1216,7 +1240,10 @@ mod tests {
         let (value, report) =
             decode::<Contact>(r#"{"type":"salaried","years":null,"street":"Main"}"#)?;
         assert!(matches!(value, Contact::Employment(_)), "{value:?}");
-        assert_eq!(only(&report, Employment::SITE_YEARS)?.kind, DegradationKind::NullNotAllowed);
+        assert_eq!(
+            only(&report, Employment::SITE_YEARS)?.kind,
+            DegradationKind::NullNotAllowed
+        );
         assert_eq!(
             only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember
@@ -1283,16 +1310,28 @@ mod tests {
         let mut report = Degradations::new();
         let content: Content<'_> = serde_json::from_str(r#"{"years":null,"type":"x"}"#)?;
         let mut members = Members::of(content, "Employment")?;
-        assert!(matches!(members.take_raw(Employment::SITE_YEARS, &mut report), Slot::Null));
+        assert!(matches!(
+            members.take_raw(Employment::SITE_YEARS, &mut report),
+            Slot::Null
+        ));
         assert!(matches!(
             members.take_raw(Employment::SITE_KIND, &mut report),
             Slot::Value(_)
         ));
-        assert!(matches!(members.take_raw(Employment::SITE_KIND, &mut report), Slot::Absent));
+        assert!(matches!(
+            members.take_raw(Employment::SITE_KIND, &mut report),
+            Slot::Absent
+        ));
         assert!(report.is_empty());
         let content: Content<'_> = serde_json::from_str(r#"{"years":1,"years":2}"#)?;
         let mut members = Members::of(content, "Employment")?;
-        assert!(matches!(members.take_raw(Employment::SITE_YEARS, &mut report), Slot::Absent));
-        assert_eq!(only(&report, Employment::SITE_YEARS)?.kind, DegradationKind::Undecodable);
+        assert!(matches!(
+            members.take_raw(Employment::SITE_YEARS, &mut report),
+            Slot::Absent
+        ));
+        assert_eq!(
+            only(&report, Employment::SITE_YEARS)?.kind,
+            DegradationKind::Undecodable
+        );
     }
 }
