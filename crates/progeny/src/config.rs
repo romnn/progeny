@@ -4,6 +4,13 @@
 //! passthrough field anywhere in it, which is what makes an unsupported customization a config
 //! parse error rather than a latent codegen bug: the opaque-token injection path that let a
 //! caller change a wire contract behind the generator's back does not exist here.
+//!
+//! [`ExtraDerives`] is the one place a caller names Rust it wrote, and it names *derive paths*,
+//! validated as paths, never attributes. A derive adds an implementation and cannot change the
+//! serde one: one that tried would collide with progeny's and fail to compile, which is loud. The
+//! remaining way a derive can disagree with the wire, reading `#[serde(...)]` attributes a
+//! hand-written type does not carry, is a ruling the caller has to state in
+//! [`ExtraDerives::serde_attributes`] rather than one progeny assumes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -110,6 +117,153 @@ pub struct Config {
     /// did and what did not generalize. See [`Pagination`].
     #[serde(default)]
     pub pagination: BTreeMap<String, Pagination>,
+    /// Derives from outside the typed [`Derive`] set, on the types each rule selects and on every
+    /// generated type those reach. Empty by default. See [`ExtraDerives`].
+    #[serde(default)]
+    pub extra_derives: Vec<ExtraDerives>,
+    /// `schemars::JsonSchema` implementations written from the wire contract. Off by default.
+    /// See [`JsonSchemaImpls`].
+    #[serde(default)]
+    pub json_schema: Option<JsonSchemaImpls>,
+}
+
+/// Which generated types a rule applies to.
+///
+/// Whatever is selected, every generated type it reaches is included as well: its fields, list
+/// items and map values, its union variants, the anonymous types written inline in it, and the
+/// read forms a read form names. An implementation on the outer type does not compile without one
+/// on each of those, so the closure is computed from the type graph rather than left to the
+/// caller to list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TypeSelection {
+    /// Every generated type.
+    #[default]
+    All,
+    /// The types these selectors name, and everything they reach.
+    ///
+    /// A selector is a key under the grammar every type-keyed map uses — a `components.schemas`
+    /// name such as `Pet`, or a JSON Pointer such as `/components/schemas/Pet` — optionally
+    /// qualified by the module the wanted form lives in:
+    ///
+    /// * `Pet` selects every form of the type: its strict form and its read twin when it has
+    ///   both, and otherwise the one type there is.
+    /// * `read::Pet` selects what `types::read::Pet` names: the read twin, a type only responses
+    ///   reach, or a shared type the `read` module re-exports. A type with no read form — one
+    ///   only requests reach, or any type under [`Decoding::Strict`] — is an error.
+    /// * `strict::Pet` selects what `types::Pet` names: the strict form, or a shared type. A type
+    ///   only responses reach has none, and is an error.
+    ///
+    /// The part after the qualifier is the component name or pointer, as everywhere else in the
+    /// configuration, not the Rust name. A selector that names nothing, and an empty list, are
+    /// errors rather than rules that quietly apply to nothing.
+    Only(Vec<String>),
+}
+
+/// Derives from outside progeny's typed [`Derive`] set, on the types a rule selects.
+///
+/// The open counterpart of [`Config::type_derives`], for derive macros progeny does not know:
+/// a caller's own trait, a test-data generator, a schema crate. Each derive lands on every selected
+/// type and, unless [`ExtraDerives::nested`] is off, every generated type those reach (see
+/// [`TypeSelection`]), skipping type aliases, which cannot carry one. Types progeny does not generate — scalars, `String`, the standard containers,
+/// `serde_json::Value`, the configured date, UUID and map crates, and the support types
+/// `Presence` and `Upload` — get nothing, so the derived trait must already be implemented for
+/// those a selected type holds, or the generated source does not compile.
+///
+/// A rule names no dependency: the crate the generated source is compiled in has to provide each
+/// derive's crate. That is the consumer's own manifest under [`Packaging::Module`]; a generated
+/// manifest declares only the gating [`ExtraDerives::feature`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ExtraDerives {
+    /// The derive macros, as paths written inside `#[derive(...)]`: `::my_crate::Fixture`.
+    ///
+    /// Each must parse as a path without generic arguments. The derives progeny itself owns are
+    /// refused here, because a second copy would conflict with the one progeny emits: the typed
+    /// set belongs in [`Config::derives`] and [`Config::type_derives`], serde's two are progeny's
+    /// serde strategy, and `schemars::JsonSchema` is [`Config::json_schema`], which knows the wire
+    /// format where a derive would have to guess it from attributes.
+    pub derives: Vec<String>,
+    /// Which types get them, before the closure over everything those reach.
+    #[serde(default)]
+    pub types: TypeSelection,
+    /// Whether the derives also land on every generated type the selected ones reach. On by
+    /// default.
+    ///
+    /// Off, they land on the selected types alone; a selected alias still passes them to the type
+    /// it names, since an alias cannot carry a derive itself. The derive then compiles only if
+    /// every generated type a selected one holds already implements the trait — through another
+    /// rule, or through progeny's own derives — which is the caller's to arrange.
+    #[serde(default = "yes")]
+    pub nested: bool,
+    /// A cargo feature of the crate the generated source is compiled in, to put the derives
+    /// behind: `#[cfg_attr(feature = "…", derive(…))]`. Ungated when absent.
+    ///
+    /// The gate is evaluated in the *consuming* crate, so a build that leaves the feature off
+    /// compiles none of these impls. A generated manifest declares the feature; under
+    /// [`Packaging::Module`] the including crate must declare it.
+    #[serde(default)]
+    pub feature: Option<String>,
+    /// Whether these derives read `#[serde(...)]` attributes. Required, with no default.
+    ///
+    /// progeny cannot tell. A type on the hand-written serde path carries no serde attributes,
+    /// so a derive that reads them sees Rust field names where the wire has its own, and no
+    /// tagging where the wire has one: it would describe a different type than the one on the
+    /// wire, which is the forbidden failure mode. The caller knows what their derive reads and
+    /// says so here.
+    pub serde_attributes: SerdeAttributes,
+}
+
+/// What a set of [`ExtraDerives`] makes of `#[serde(...)]` attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SerdeAttributes {
+    /// The derives never look at them, so the serde strategy stays as configured.
+    ///
+    /// The caller vouches for this: progeny has no way to check it. A derive that does read them
+    /// and is declared `ignored` describes Rust names on every hand-written type.
+    Ignored,
+    /// The derives read them, so every type the rule lands on takes the serde derive path, where
+    /// the attributes are the wire contract.
+    ///
+    /// That costs compile time on exactly those types, and it is refused for the kinds no serde
+    /// attribute can describe — an open string enum and a union whose variants carry their own
+    /// tag — because there is no attribute set that would tell such a derive the truth.
+    Read,
+}
+
+/// `schemars::JsonSchema` implementations for generated types.
+///
+/// Written by hand from the wire contract rather than derived, which is what makes them correct
+/// on every type: the derive learns the wire format from `#[serde(...)]` attributes, and a type on
+/// the hand-written serde path carries none. A schema here names each member by its wire name,
+/// requires what the description requires, describes a union the way it is tagged on the wire, and
+/// includes every open enum's fallback — so a value the type writes validates, and the schema says
+/// as much about a payload as the type does.
+///
+/// The impls are schemars 1.x's, and the only crate they name besides `serde_json`: every format,
+/// container and support type is described inline from the contract, so no schemars feature for
+/// `chrono`, `uuid` or `indexmap` is needed. A schema's name is the type's path under `types` —
+/// `Pet`, and `read.Pet` for the read form — so a strict type and its read twin never collide.
+///
+/// A read form is described as the well-formed payload: every member optional, undeclared members
+/// allowed through `additionalProperties`, each member typed as the description declares it. The
+/// lenient decoder accepts more than that — a member that is `null` or unreadable, a list element
+/// it skips — and reports each one, and a validator built on the schema refuses those, which is
+/// what a fixture or a seed payload wants.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct JsonSchemaImpls {
+    /// Which types get one, before the closure over everything those reach.
+    #[serde(default)]
+    pub types: TypeSelection,
+    /// A cargo feature of the crate the generated source is compiled in, to put the impls behind:
+    /// `#[cfg(feature = "…")]`. Ungated when absent.
+    ///
+    /// A generated manifest declares the feature with an optional `schemars` dependency behind
+    /// it; under [`Packaging::Module`] the including crate declares both.
+    #[serde(default)]
+    pub feature: Option<String>,
 }
 
 /// How one operation paginates.
@@ -266,6 +420,10 @@ pub enum MapKind {
 /// `rename`, `skip_serializing_if` and the tagging attributes — would emit a description of a
 /// different type than the one on the wire. That is the forbidden failure mode, so the set is
 /// closed against it by construction.
+///
+/// A derive outside the set goes through [`ExtraDerives`], which makes the caller rule on exactly
+/// that question, and a JSON Schema through [`Config::json_schema`], which answers it from the
+/// wire contract instead of from attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Derive {
@@ -425,7 +583,8 @@ pub enum Packaging {
     Crate,
     /// A workspace containing `<name>-types`, `<name>-client`, and `<name>-server` crates.
     ///
-    /// The types crate has no features; the edge crates pin its exact generated version and may be
+    /// The types crate has no HTTP features, only the gates [`Config::json_schema`] and
+    /// [`Config::extra_derives`] name; the edge crates pin its exact generated version and may be
     /// published after it.
     Workspace,
     /// One file to `include!` from a build script or to check in.
@@ -569,7 +728,167 @@ impl<'a> Address<'a> {
     }
 }
 
+/// Which forms of a type a [`TypeSelection`] selector reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormFilter {
+    /// Every form: the strict one and the read twin, or the one type there is.
+    Every,
+    /// What `types::read::Name` names.
+    Read,
+    /// What `types::Name` names.
+    Strict,
+}
+
+/// One [`TypeSelection::Only`] selector, parsed: a form qualifier and an [`Address`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Selector<'a> {
+    pub(crate) form: FormFilter,
+    pub(crate) address: Address<'a>,
+}
+
+impl<'a> Selector<'a> {
+    pub(crate) fn parse(key: &'a str) -> Self {
+        let (form, rest) = if let Some(rest) = key.strip_prefix("read::") {
+            (FormFilter::Read, rest)
+        } else if let Some(rest) = key.strip_prefix("strict::") {
+            (FormFilter::Strict, rest)
+        } else {
+            (FormFilter::Every, key)
+        };
+        Self {
+            form,
+            address: Address::parse(rest),
+        }
+    }
+}
+
+/// The derives progeny emits itself, by the last segment of their path.
+///
+/// A second copy from an open rule would be a conflicting implementation, so each is refused with
+/// the setting that owns it.
+const OWNED_DERIVES: [(&str, &str); 12] = [
+    ("Clone", "`derives` or `type-derives`"),
+    ("Debug", "`derives` or `type-derives`"),
+    ("PartialEq", "`derives` or `type-derives`"),
+    ("Eq", "`derives` or `type-derives`"),
+    ("Hash", "`derives` or `type-derives`"),
+    ("PartialOrd", "`derives` or `type-derives`"),
+    ("Ord", "`derives` or `type-derives`"),
+    ("Default", "`derives` or `type-derives`"),
+    ("Copy", "`derives` or `type-derives`"),
+    ("Serialize", "`serde-impl`"),
+    ("Deserialize", "`serde-impl`"),
+    ("JsonSchema", "`json-schema`"),
+];
+
+/// The features a generated crate manifest declares itself, which a gate cannot reuse without
+/// declaring the same key twice.
+const GENERATED_FEATURES: [&str; 8] = [
+    "default",
+    "client",
+    "server",
+    "rustls",
+    "native-tls",
+    "http2",
+    "charset",
+    "system-proxy",
+];
+
+/// Whether a string is a feature name cargo accepts: ASCII letters, digits, `_`, `-`, `+` and
+/// `.`, not starting with one of the last three.
+fn feature_shaped(feature: &str) -> bool {
+    feature
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric() || first == '_')
+        && feature.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '+' | '.')
+        })
+}
+
+/// Why a derive path cannot be emitted, when it cannot be.
+fn derive_path_validity(path: &str) -> Result<(), String> {
+    let parsed = syn::parse_str::<syn::Path>(path).map_err(|_| {
+        format!(
+            "the configured extra derive `{path}` is not a Rust path; write it as it would \
+             appear inside `#[derive(...)]`, such as `::my_crate::MyTrait`"
+        )
+    })?;
+    if parsed
+        .segments
+        .iter()
+        .any(|segment| !segment.arguments.is_none())
+    {
+        return Err(format!(
+            "the configured extra derive `{path}` has generic arguments, which a derive path \
+             cannot"
+        ));
+    }
+    let last = parsed
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default();
+    if let Some((_, owner)) = OWNED_DERIVES.iter().find(|(name, _)| *name == last) {
+        return Err(format!(
+            "the configured extra derive `{path}` is one progeny emits itself; ask for it \
+             through {owner}, or the two copies conflict"
+        ));
+    }
+    Ok(())
+}
+
 impl Config {
+    /// Why the open derive and JSON Schema settings cannot be rendered, when they cannot be.
+    ///
+    /// Checked before anything is generated, like [`Package::validity`]: each value ends up in
+    /// emitted source or in a generated manifest, and a malformed one would surface as a parse
+    /// error in a file the caller did not write.
+    pub(crate) fn extension_validity(&self) -> Result<(), String> {
+        let mut gates = Vec::new();
+        for rule in &self.extra_derives {
+            if rule.derives.is_empty() {
+                return Err(
+                    "an `extra-derives` rule lists no derives, so it would apply nothing"
+                        .to_owned(),
+                );
+            }
+            for path in &rule.derives {
+                derive_path_validity(path)?;
+            }
+            gates.push(("extra-derives", rule.feature.as_deref(), &rule.types));
+        }
+        if let Some(schemas) = &self.json_schema {
+            gates.push(("json-schema", schemas.feature.as_deref(), &schemas.types));
+        }
+        for (table, feature, types) in gates {
+            if let TypeSelection::Only(selectors) = types
+                && selectors.is_empty()
+            {
+                return Err(format!(
+                    "the configuration's `{table}` selects an empty list of types, so it would \
+                     apply to nothing; select `all` or name a type"
+                ));
+            }
+            let Some(feature) = feature else {
+                continue;
+            };
+            if !feature_shaped(feature) {
+                return Err(format!(
+                    "the configuration's `{table}` gates on `{feature}`, which is not a feature \
+                     name cargo accepts; use ASCII letters, digits, `_`, `-`, `+` and `.`"
+                ));
+            }
+            if self.packaging == Packaging::Crate && GENERATED_FEATURES.contains(&feature) {
+                return Err(format!(
+                    "the configuration's `{table}` gates on `{feature}`, which the generated \
+                     manifest already declares for itself; pick a feature of its own"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this optional and nullable property keeps all three presence states.
     pub(crate) fn preserves_optional_nullable_at(&self, address: &JsonPointer) -> bool {
         self.preserve_optional_nullable
@@ -751,5 +1070,139 @@ mod tests {
                 .get("/components/schemas/Patch/properties/nickname"),
             Some(&super::SchemaType::String)
         );
+    }
+
+    #[test_util::test]
+    fn the_open_derive_and_json_schema_settings_are_read_from_toml() {
+        let config: Config = toml::from_str(indoc::indoc! {r#"
+            [json-schema]
+            types = { only = ["read::UserPartnerApi"] }
+            feature = "schemars"
+
+            [[extra-derives]]
+            derives = ["::fixtures::Fixture"]
+            feature = "fixtures"
+            serde-attributes = "ignored"
+        "#})?;
+        assert_eq!(
+            config.json_schema,
+            Some(super::JsonSchemaImpls {
+                types: super::TypeSelection::Only(vec!["read::UserPartnerApi".to_owned()]),
+                feature: Some("schemars".to_owned()),
+            })
+        );
+        assert_eq!(
+            config.extra_derives,
+            [super::ExtraDerives {
+                derives: vec!["::fixtures::Fixture".to_owned()],
+                types: super::TypeSelection::All,
+                nested: true,
+                feature: Some("fixtures".to_owned()),
+                serde_attributes: super::SerdeAttributes::Ignored,
+            }]
+        );
+        config
+            .extension_validity()
+            .map_err(|reason| eyre::eyre!(reason))?;
+
+        let flat: Config = toml::from_str(indoc::indoc! {r#"
+            [[extra-derives]]
+            derives = ["::fixtures::Fixture"]
+            nested = false
+            serde-attributes = "ignored"
+        "#})?;
+        assert!(
+            flat.extra_derives.first().is_some_and(|rule| !rule.nested),
+            "{flat:?}"
+        );
+
+        // The section alone is every type, ungated.
+        let everything: Config = toml::from_str("[json-schema]")?;
+        assert_eq!(
+            everything.json_schema,
+            Some(super::JsonSchemaImpls::default())
+        );
+        assert_eq!(Config::default().json_schema, None);
+    }
+
+    /// The ruling has no default: a derive progeny cannot inspect is never assumed to be blind.
+    #[test_util::test]
+    fn an_open_derive_must_say_whether_it_reads_serde_attributes() {
+        let error = toml::from_str::<Config>(indoc::indoc! {r#"
+            [[extra-derives]]
+            derives = ["::fixtures::Fixture"]
+        "#})
+        .err()
+        .ok_or_eyre("the test expects this operation to fail")?;
+        assert!(error.to_string().contains("serde-attributes"), "{error}");
+    }
+
+    #[test_util::test]
+    fn an_open_derive_or_gate_that_cannot_be_rendered_is_refused() {
+        let rule = |path: &str, feature: Option<&str>| super::ExtraDerives {
+            derives: vec![path.to_owned()],
+            types: super::TypeSelection::All,
+            nested: true,
+            feature: feature.map(ToOwned::to_owned),
+            serde_attributes: super::SerdeAttributes::Ignored,
+        };
+        let validity = |rule: super::ExtraDerives, packaging: super::Packaging| {
+            Config {
+                extra_derives: vec![rule],
+                packaging,
+                ..Config::default()
+            }
+            .extension_validity()
+        };
+        for (path, owner) in [
+            ("Clone", "type-derives"),
+            ("::core::hash::Hash", "type-derives"),
+            ("serde::Serialize", "serde-impl"),
+            ("::schemars::JsonSchema", "json-schema"),
+        ] {
+            let refused = validity(rule(path, None), super::Packaging::Module)
+                .err()
+                .ok_or_eyre(format!("`{path}` must be refused"))?;
+            assert!(refused.contains(owner), "{refused}");
+        }
+        for path in ["not a path", "Fixture<T>", ""] {
+            assert!(
+                validity(rule(path, None), super::Packaging::Module).is_err(),
+                "`{path}` must be refused"
+            );
+        }
+        for feature in ["", "-fixtures", "has space", "quote\""] {
+            assert!(
+                validity(rule("Fixture", Some(feature)), super::Packaging::Module).is_err(),
+                "`{feature}` must be refused"
+            );
+        }
+        // A gate may not redeclare a feature the generated manifest has, and may name it when
+        // the including crate owns the manifest.
+        assert!(validity(rule("Fixture", Some("client")), super::Packaging::Crate).is_err());
+        validity(rule("Fixture", Some("client")), super::Packaging::Module)
+            .map_err(|reason| eyre::eyre!(reason))?;
+        validity(
+            rule("::a::b::Fixture", Some("test-data+1.x")),
+            super::Packaging::Crate,
+        )
+        .map_err(|reason| eyre::eyre!(reason))?;
+
+        let nothing = Config {
+            json_schema: Some(super::JsonSchemaImpls {
+                types: super::TypeSelection::Only(Vec::new()),
+                feature: None,
+            }),
+            ..Config::default()
+        };
+        assert!(nothing.extension_validity().is_err());
+        let no_derives = Config {
+            extra_derives: vec![super::ExtraDerives {
+                derives: Vec::new(),
+                ..rule("Fixture", None)
+            }],
+            ..Config::default()
+        };
+        assert!(no_derives.extension_validity().is_err());
     }
 }

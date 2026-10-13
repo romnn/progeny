@@ -39,6 +39,7 @@ pub(super) fn run(
     promote_recursive_aliases(&mut types);
     break_cycles(&mut types);
 
+    let mut extensions = super::select::run(&types, config)?;
     let supported = supported_derives(&types, config);
     let mut frozen = Vec::with_capacity(types.len());
     for (index, contract) in types.iter().enumerate() {
@@ -91,13 +92,29 @@ pub(super) fn run(
         derives.sort_unstable();
         derives.dedup();
 
+        let attributes_read = extensions
+            .attributes_read
+            .get(index)
+            .copied()
+            .unwrap_or(false);
         frozen.push(TypeContract {
             rust_name: contract.rust_name.clone(),
             docs: contract.docs.clone(),
-            deser: decide(&contract.kind, contract.unknown_fields, config),
+            deser: decide(
+                &contract.kind,
+                contract.unknown_fields,
+                config,
+                attributes_read,
+            ),
             kind: contract.kind.clone(),
             unknown_fields: contract.unknown_fields,
             derives,
+            extra_derives: extensions
+                .derives
+                .get_mut(index)
+                .map(std::mem::take)
+                .unwrap_or_default(),
+            json_schema: extensions.json_schema.get(index).cloned().flatten(),
             form: contract.form,
             origin: contract.origin.clone(),
         });
@@ -124,8 +141,23 @@ fn matches(contract: &Provisional, key: &str) -> bool {
 /// struct's derive expands to 9 function bodies and a fieldless enum's to 8 and climbing, while an
 /// untagged enum's expands to 1 — so converting a union would *cost* compile time rather than save
 /// it, and unions stay derived on purpose.
-fn decide(kind: &ContractKind, unknown_fields: UnknownFields, config: &Config) -> DeserStrategy {
-    match config.serde_impl {
+///
+/// `attributes_read` is a caller's ruling that some derive on this type reads `#[serde(...)]`
+/// attributes. Such a type takes the escape hatch's ruling, the one strategy where the attributes
+/// are the wire contract; the two kinds the hatch still writes by hand were refused before this
+/// ran, in [`super::select`].
+fn decide(
+    kind: &ContractKind,
+    unknown_fields: UnknownFields,
+    config: &Config,
+    attributes_read: bool,
+) -> DeserStrategy {
+    let serde_impl = if attributes_read {
+        SerdeImpl::DeriveAlways
+    } else {
+        config.serde_impl
+    };
+    match serde_impl {
         // The escape hatch. Every corpus document is generated both ways from stage 8 on, because
         // an escape hatch nobody runs is not one — the first corpus run in the other mode failed on
         // all eight tier documents. One kind is exempt from it: a carried-tag enum has no derive
@@ -489,7 +521,8 @@ mod tests {
             decide(
                 &ContractKind::Struct { fields: Vec::new() },
                 UnknownFields::Ignore,
-                &escape
+                &escape,
+                false
             ),
             DeserStrategy::Derive,
         );
@@ -502,7 +535,8 @@ mod tests {
                     fallback: RustIdent::variant("Unknown"),
                 },
                 UnknownFields::Ignore,
-                &escape
+                &escape,
+                false
             ),
             DeserStrategy::HandWrittenFieldless,
         );
@@ -519,7 +553,8 @@ mod tests {
             decide(
                 &ContractKind::Struct { fields: Vec::new() },
                 UnknownFields::Ignore,
-                &Config::default()
+                &Config::default(),
+                false
             ),
             DeserStrategy::HandWrittenBuffered {
                 unknown: UnknownFields::Ignore
@@ -531,7 +566,7 @@ mod tests {
     fn the_two_paths_measurement_justifies_are_the_two_that_are_taken() {
         let plain = ContractKind::Struct { fields: Vec::new() };
         assert_eq!(
-            decide(&plain, UnknownFields::Ignore, &hand_written()),
+            decide(&plain, UnknownFields::Ignore, &hand_written(), false),
             DeserStrategy::HandWrittenBuffered {
                 unknown: UnknownFields::Ignore
             }
@@ -544,7 +579,7 @@ mod tests {
             fallback: RustIdent::variant("Unknown"),
         };
         assert_eq!(
-            decide(&strings, UnknownFields::Ignore, &hand_written()),
+            decide(&strings, UnknownFields::Ignore, &hand_written(), false),
             DeserStrategy::HandWrittenFieldless
         );
     }
@@ -555,7 +590,7 @@ mod tests {
     fn capturing_unknown_members_stays_on_the_buffered_path() {
         let kind = ContractKind::Struct { fields: Vec::new() };
         assert_eq!(
-            decide(&kind, UnknownFields::Capture, &hand_written()),
+            decide(&kind, UnknownFields::Capture, &hand_written(), false),
             DeserStrategy::HandWrittenBuffered {
                 unknown: UnknownFields::Capture
             }
@@ -576,7 +611,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                decide(&kind, UnknownFields::Ignore, &hand_written()),
+                decide(&kind, UnknownFields::Ignore, &hand_written(), false),
                 DeserStrategy::Derive,
                 "{kind:?} took a hand-written path"
             );

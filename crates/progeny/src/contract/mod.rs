@@ -20,6 +20,7 @@ mod finalize;
 mod lower;
 mod name;
 mod reach;
+mod select;
 mod twin;
 
 use std::collections::BTreeMap;
@@ -470,9 +471,35 @@ pub(crate) struct TypeContract {
     kind: ContractKind,
     unknown_fields: UnknownFields,
     derives: Vec<Derive>,
+    /// The caller's open derives, one entry per rule that reached this type.
+    extra_derives: Vec<GatedDerives>,
+    /// Whether the type gets a `schemars::JsonSchema` impl, and behind what.
+    json_schema: Option<Gate>,
     deser: DeserStrategy,
     form: Form,
     origin: JsonPointer,
+}
+
+/// Whether an opt-in item is always compiled, or only when a feature of the consuming crate is on.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Gate {
+    Always,
+    /// `#[cfg(feature = "…")]`, evaluated in the crate the generated source is compiled in.
+    Feature(String),
+}
+
+impl Gate {
+    pub(crate) fn of(feature: Option<&str>) -> Self {
+        feature.map_or(Self::Always, |feature| Self::Feature(feature.to_owned()))
+    }
+}
+
+/// Derives from one of the caller's [`crate::config::ExtraDerives`] rules, behind its gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatedDerives {
+    pub(crate) gate: Gate,
+    /// Derive macro paths, validated by the configuration before anything is generated.
+    pub(crate) paths: Vec<String>,
 }
 
 impl TypeContract {
@@ -498,6 +525,14 @@ impl TypeContract {
 
     pub(crate) fn derives(&self) -> &[Derive] {
         &self.derives
+    }
+
+    pub(crate) fn extra_derives(&self) -> &[GatedDerives] {
+        &self.extra_derives
+    }
+
+    pub(crate) fn json_schema(&self) -> Option<&Gate> {
+        self.json_schema.as_ref()
     }
 
     pub(crate) fn deser(&self) -> DeserStrategy {

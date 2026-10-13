@@ -15,8 +15,8 @@ use quote::{format_ident, quote};
 use crate::api::{ApiModel, BodyContract, ResponseBody};
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{
-    ContractKind, Contracts, DeserStrategy, FieldContract, Form, RustIdent, SkipRule, TypeContract,
-    TypeRef,
+    ContractKind, Contracts, DeserStrategy, FieldContract, Form, Gate, RustIdent, SkipRule,
+    TypeContract, TypeRef,
 };
 use crate::shape::{Docs, Format};
 
@@ -80,7 +80,8 @@ pub(super) fn render(
         let item = one(contract, contracts, config);
         let serde = super::serde_impl::one(contract);
         let lenient = super::lenient::impls(contract, contracts, config);
-        let tokens = quote! { #item #serde #lenient };
+        let schema = super::json_schema::implementation(contract, contracts, config);
+        let tokens = quote! { #item #serde #lenient #schema };
         if contract.form().is_lenient() {
             read.push(tokens);
         } else {
@@ -209,14 +210,26 @@ fn deprecated_alias_names(
         for reference in contract.kind().references() {
             note_deprecated(reference, contracts, names);
         }
-        // Its own impls name it: the hand-written serde ones, and the lenient decoder every
-        // read-reachable type carries.
+        // Its own impls name it: the hand-written serde ones, the lenient decoder every
+        // read-reachable type carries, and a JSON Schema impl.
         if contract.docs().deprecated
             && (contract.deser() != DeserStrategy::Derive
                 || matches!(contract.kind(), ContractKind::StringEnum { .. })
-                || contract.form().is_read())
+                || contract.form().is_read()
+                || contract.json_schema().is_some())
         {
             names.insert(contract.rust_name().as_str().to_owned());
+        }
+        // A JSON Schema impl writes an alias's target in place of the alias, so it names what
+        // the alias names, from this module.
+        if contract.json_schema().is_some() {
+            for index in super::json_schema::named(contract, contracts) {
+                if let Some(named) = contracts.get(index)
+                    && named.docs().deprecated
+                {
+                    names.insert(named.rust_name().as_str().to_owned());
+                }
+            }
         }
         // A twin's `From` impl names its strict half from inside `read`.
         if let Form::Lenient {
@@ -765,7 +778,31 @@ fn derives(contract: &TypeContract) -> TokenStream {
             quote! {}
         }
     };
-    quote! { #[derive(#(#names),* #serde)] }
+    // The caller's open derives, each rule's behind its own gate. A gate is a `cfg_attr`, so the
+    // consuming crate's build that leaves the feature off expands none of them.
+    let extra = contract.extra_derives().iter().map(|rule| {
+        let paths = rule.paths.iter().map(|path| derive_path(path));
+        match &rule.gate {
+            Gate::Always => quote! { #[derive(#(#paths),*)] },
+            Gate::Feature(feature) => {
+                quote! { #[cfg_attr(feature = #feature, derive(#(#paths),*))] }
+            }
+        }
+    });
+    quote! { #[derive(#(#names),* #serde)] #(#extra)* }
+}
+
+/// A derive path the configuration validated before anything was generated.
+///
+/// The validation is what makes the fallback unreachable; were it ever reached, the consumer's
+/// build stops on it rather than the derive silently going missing.
+fn derive_path(path: &str) -> TokenStream {
+    if let Ok(parsed) = syn::parse_str::<syn::Path>(path) {
+        quote! { #parsed }
+    } else {
+        let message = format!("progeny: `{path}` is not a derive path");
+        quote! { ::core::compile_error!(#message) }
+    }
 }
 
 /// A type reference, spelled out from the given scope.

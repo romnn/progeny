@@ -87,8 +87,9 @@ use std::collections::BTreeMap;
 use camino::Utf8PathBuf;
 
 pub use crate::config::{
-    BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit, Formats, MapKind,
-    Package, Packaging, Pagination, SchemaType, SerdeImpl, UnknownFields, UuidCrate,
+    BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit, ExtraDerives,
+    Formats, JsonSchemaImpls, MapKind, Package, Packaging, Pagination, SchemaType, SerdeAttributes,
+    SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
@@ -133,7 +134,11 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
              on the type layer, so there is nothing left to generate",
         ));
     }
-    if let Err(reason) = config.package.validity() {
+    if let Err(reason) = config
+        .package
+        .validity()
+        .and_then(|()| config.extension_validity())
+    {
         return Err(RejectError::new(RejectKind::UnsatisfiableConfig, reason));
     }
     let mut ctx = diag::Ctx::new();
@@ -302,6 +307,22 @@ mod tests {
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
+    }
+
+    /// An open derive progeny would emit twice is refused before anything is generated, rather
+    /// than reaching the consumer's build as two conflicting impls.
+    #[test_util::test]
+    fn an_open_derive_progeny_owns_stops_generation() {
+        let config: Config = toml::from_str(indoc::indoc! {r#"
+            [[extra-derives]]
+            derives = ["serde::Serialize"]
+            serde-attributes = "ignored"
+        "#})?;
+        let error = generate(PETSTORE, &config)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
+        assert_eq!(error.kind(), RejectKind::UnsatisfiableConfig);
+        assert!(error.detail().contains("serde-impl"), "{error}");
     }
 
     /// An opted-in field's generated shape is pinned as a reviewable source snapshot.

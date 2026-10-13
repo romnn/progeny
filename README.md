@@ -337,8 +337,9 @@ or a consumer workspace whose domain crates should not inherit an HTTP stack, op
 packaging = "workspace"
 ```
 
-This emits `<name>-types`, `<name>-client`, and `<name>-server`. The types crate has no features and
-the two edge crates depend on its exact generated version, so Cargo feature unification cannot pull
+This emits `<name>-types`, `<name>-client`, and `<name>-server`. The types crate has no HTTP features
+(only the gates of [JSON Schema and extra derives](#json-schema-and-extra-derives), when configured)
+and the two edge crates depend on its exact generated version, so Cargo feature unification cannot pull
 client or server dependencies into a types-only consumer. Publish in dependency order: types first,
 then client and server. The generated workspace README repeats its concrete names and pins.
 
@@ -380,6 +381,60 @@ Every name is checked against the document before anything is generated, and a n
 resolve says what it looked for and what the document had instead. The operation then gains a
 `stream()` beside its `send()` — never instead of it — and the generated crate depends on
 `futures-core` and `futures-util` only because you asked for one.
+
+## JSON Schema and extra derives
+
+Both are off by default, and a configuration that asks for neither generates no attribute, no impl
+and no dependency for them.
+
+`json-schema` gives generated types a `schemars::JsonSchema` (schemars 1.x) implementation:
+
+```toml
+[json-schema]
+types = { only = ["read::UserPartnerApi"] }   # or "all", the default
+feature = "schemars"                          # optional: `#[cfg(feature = "schemars")]`
+```
+
+The implementations are **written from the wire contract, not derived**. The schemars derive reads
+`#[serde(...)]` attributes, and a type on the hand-written serde path has none, so a derived schema
+would name members by their Rust names and get optionality and union tagging wrong. A generated
+schema names each member by its wire name, requires what the description requires, describes a
+union as the wire tags it and includes every open enum's fallback, whichever serde strategy is
+configured. A read form is the well-formed payload: every member optional, its `extra` members as
+`additionalProperties`. The lenient decoder accepts more than that (a `null` or unreadable member)
+and reports it; a validator built on the schema refuses it. Schema names follow the Rust path, so
+`read::Pet` is `read.Pet` and never collides with its strict twin `Pet`.
+
+`extra-derives` puts derives progeny does not know on generated types, optionally behind a feature
+of the consuming crate (`#[cfg_attr(feature = "…", derive(…))]`):
+
+```toml
+[[extra-derives]]
+derives = ["::fixtures::Fixture"]
+types = { only = ["Pet"] }
+feature = "fixtures"
+serde-attributes = "ignored"   # required: "ignored", or "read"
+nested = true                  # the default; false derives on the selected types alone
+```
+
+`serde-attributes` has no default because progeny cannot tell whether a derive reads `#[serde]`
+attributes, and one that does describes a different type than the wire carries on every
+hand-written type. `"read"` moves exactly the types the rule lands on to the serde derive, where
+the attributes are the wire contract, and refuses the kinds no attribute describes. Derives progeny
+emits itself (the typed set, serde's, `JsonSchema`) are refused; ask for them where they live.
+
+Either setting reaches beyond the types it names. A selector is a component name or JSON Pointer,
+optionally qualified — `Pet` is every form of the type, `read::Pet` what `types::read::Pet` names,
+`strict::Pet` what `types::Pet` names — and every generated type the selected ones hold (members,
+list items, map values, union variants, inline types, the read forms a read form names) gets the
+same treatment, because the outer impl does not compile without them. An `extra-derives` rule with
+`nested = false` stops at the selected types (a selected alias still passes the derive to the type
+it names), so its derive compiles only if the generated types they hold already implement the
+trait, through another rule or progeny's own derives; JSON Schema impls always cover everything
+they reach. A selector that names nothing, or a form the type does not have, is an error. Under `packaging = "module"` the including
+crate declares the feature and the dependencies; a generated manifest declares each feature, with
+an optional `schemars` behind the JSON Schema one, but cannot know the crate an extra derive comes
+from.
 
 ## Releasing
 

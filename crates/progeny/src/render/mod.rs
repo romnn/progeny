@@ -14,6 +14,7 @@
 // probe harness reuses their naming — type paths, group, response and route names — instead of
 // growing a second copy that could drift from what is actually rendered.
 pub(crate) mod client;
+mod json_schema;
 mod lenient;
 mod manifest;
 pub(crate) mod operations;
@@ -698,7 +699,9 @@ mod tests {
     /// compile. And any *other* derive that reads them would then see a different type than the wire
     /// format has — `schemars::JsonSchema` honours `rename` and `skip_serializing_if`, so a schema
     /// generated beside a hand-written impl would disagree with the bytes. That is the forbidden
-    /// failure mode, and it is why `DeriveSet` is a closed set of attribute-blind derives.
+    /// failure mode, and it is why `DeriveSet` is a closed set of attribute-blind derives, why an
+    /// open derive needs the caller's ruling on serde attributes, and why a JSON Schema is written
+    /// from the contract rather than derived.
     ///
     /// The wire name has to survive the move: it stops being an attribute and becomes a string in
     /// the generated impl, and this checks it is still there rather than merely gone from the type.
@@ -736,6 +739,214 @@ mod tests {
         assert!(rendered.contains(r#""petName""#), "{rendered}");
         assert!(rendered.contains("pub pet_name: String"), "{rendered}");
         assert!(rendered.contains("pub type_: Option<String>"), "{rendered}");
+    }
+
+    /// The source with every whitespace character removed, so an assertion about a token
+    /// sequence does not depend on where the formatter broke a line.
+    fn squeezed(source: &str) -> String {
+        source.chars().filter(|it| !it.is_whitespace()).collect()
+    }
+
+    fn json_schema_for(selectors: &[&str]) -> Config {
+        Config {
+            json_schema: Some(crate::config::JsonSchemaImpls {
+                types: crate::config::TypeSelection::Only(
+                    selectors.iter().map(|&it| it.to_owned()).collect(),
+                ),
+                feature: Some("schemars".to_owned()),
+            }),
+            ..Config::default()
+        }
+    }
+
+    /// The schema of a type on the hand-written path speaks the wire format, which is what a
+    /// derive reading the absent serde attributes could not: wire names, the required member and
+    /// only it, and the type itself still free of serde attributes.
+    #[test_util::test]
+    fn a_json_schema_names_the_wire_members_of_a_hand_written_type() {
+        let rendered = types(
+            with_schemas(json!({
+                "Pet": {
+                    "type": "object",
+                    "required": ["petName"],
+                    "properties": {
+                        "petName": {"type": "string"},
+                        "type": {"type": "string"},
+                    },
+                },
+            })),
+            &json_schema_for(&["Pet"]),
+        )?;
+        syn::parse_file(&rendered)?;
+        assert!(!rendered.contains("#[serde("), "{rendered}");
+        let flat = squeezed(&rendered);
+        assert!(
+            flat.contains(r#"#[cfg(feature="schemars")]impl::schemars::JsonSchemaforPet{"#),
+            "{rendered}"
+        );
+        assert!(
+            flat.contains(r#"::std::borrow::Cow::Borrowed("Pet")"#),
+            "{rendered}"
+        );
+        for wire in ["petName", "type"] {
+            assert!(
+                flat.contains(&format!(r#"(::std::string::String::from("{wire}"),"#)),
+                "{rendered}"
+            );
+        }
+        for rust in ["pet_name", "type_"] {
+            assert!(
+                !flat.contains(&format!(r#"String::from("{rust}")"#)),
+                "{rendered}"
+            );
+        }
+        assert!(
+            flat.contains(
+                r#"(::std::string::String::from("required"),::serde_json::Value::Array(::std::vec::Vec::from([::serde_json::Value::from("petName")])"#
+            ),
+            "{rendered}"
+        );
+    }
+
+    /// A read form's schema requires nothing and admits the undeclared members it keeps in
+    /// `extra`, under a name that cannot collide with its strict twin's; the strict twin, not
+    /// selected, gets no impl at all.
+    #[test_util::test]
+    fn a_read_form_schema_requires_nothing_and_admits_its_extra_members() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"post": {
+                "operationId": "addPet",
+                "requestBody": {"content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Pet"},
+                }}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Pet"},
+                }}}},
+            }}},
+            "components": {"schemas": {"Pet": {
+                "type": "object",
+                "required": ["petName"],
+                "properties": {"petName": {"type": "string"}},
+                "additionalProperties": false,
+            }}},
+        });
+        let rendered = types(document, &json_schema_for(&["read::Pet"]))?;
+        let flat = squeezed(&rendered);
+        assert_eq!(
+            flat.matches("impl::schemars::JsonSchemafor").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(
+            flat.contains(r#"::std::borrow::Cow::Borrowed("read.Pet")"#),
+            "{rendered}"
+        );
+        assert!(
+            flat.contains(
+                r#"(::std::string::String::from("additionalProperties"),::serde_json::Value::Bool(true),)"#
+            ),
+            "{rendered}"
+        );
+        assert!(!flat.contains(r#"String::from("required")"#), "{rendered}");
+        // The capture member is flattened, so `extra` is no property of the schema.
+        assert!(!flat.contains(r#"String::from("extra")"#), "{rendered}");
+    }
+
+    /// An open derive renders behind its gate on the selected type and on what it reaches, and
+    /// nowhere else; without a gate it is a plain derive.
+    #[test_util::test]
+    fn an_open_derive_renders_behind_its_gate_on_the_closure() {
+        let document = with_schemas(json!({
+            "Holder": {"type": "object", "properties": {
+                "items": {"type": "array", "items": {"$ref": "#/components/schemas/Item"}},
+            }},
+            "Item": {"type": "object", "properties": {"name": {"type": "string"}}},
+            "Unrelated": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }));
+        let rule = |feature: Option<&str>| crate::config::ExtraDerives {
+            derives: vec!["::fixtures::Fixture".to_owned()],
+            types: crate::config::TypeSelection::Only(vec!["Holder".to_owned()]),
+            nested: true,
+            feature: feature.map(ToOwned::to_owned),
+            serde_attributes: crate::config::SerdeAttributes::Ignored,
+        };
+        let gated = types(
+            document.clone(),
+            &Config {
+                extra_derives: vec![rule(Some("fixtures"))],
+                ..Config::default()
+            },
+        )?;
+        syn::parse_file(&gated)?;
+        let flat = squeezed(&gated);
+        let attribute = r#"#[cfg_attr(feature="fixtures",derive(::fixtures::Fixture))]"#;
+        assert_eq!(flat.matches(attribute).count(), 2, "{gated}");
+        assert!(
+            flat.contains(&format!("{attribute}pubstructHolder{{")),
+            "{gated}"
+        );
+        assert!(
+            flat.contains(&format!("{attribute}pubstructItem{{")),
+            "{gated}"
+        );
+
+        let ungated = types(
+            document,
+            &Config {
+                extra_derives: vec![rule(None)],
+                ..Config::default()
+            },
+        )?;
+        let flat = squeezed(&ungated);
+        assert_eq!(
+            flat.matches("#[derive(::fixtures::Fixture)]").count(),
+            2,
+            "{ungated}"
+        );
+        assert!(!flat.contains("cfg_attr"), "{ungated}");
+    }
+
+    /// A generated manifest declares each gate, and the JSON Schema gate turns on an optional
+    /// `schemars`; with nothing configured, neither appears anywhere.
+    #[test_util::test]
+    fn a_gate_is_declared_by_the_manifest_and_nothing_configured_costs_nothing() {
+        let document = with_schemas(json!({
+            "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }));
+        let config = Config {
+            extra_derives: vec![crate::config::ExtraDerives {
+                derives: vec!["::fixtures::Fixture".to_owned()],
+                types: crate::config::TypeSelection::All,
+                nested: true,
+                feature: Some("fixtures".to_owned()),
+                serde_attributes: crate::config::SerdeAttributes::Ignored,
+            }],
+            ..json_schema_for(&["Pet"])
+        };
+        let generated = files(document.clone(), &config)?;
+        let manifest = generated
+            .get(camino::Utf8Path::new("Cargo.toml"))
+            .ok_or_eyre("a crate manifest")?;
+        assert!(
+            manifest.contains(indoc::indoc! {r#"
+                [features]
+                fixtures = []
+                schemars = ["dep:schemars"]
+            "#}),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(r#"schemars = { version = "1", optional = true }"#),
+            "{manifest}"
+        );
+
+        let plain = files(document, &Config::default())?;
+        for (path, text) in &plain {
+            assert!(!text.contains("schemars"), "{path}: {text}");
+            assert!(!text.contains("cfg_attr"), "{path}: {text}");
+            assert!(!text.contains("[features]"), "{path}: {text}");
+        }
     }
 
     #[test_util::test]
