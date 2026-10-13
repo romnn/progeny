@@ -451,7 +451,7 @@ mod tests {
         for (plain, encoded) in [
             ("", ""),
             ("f", "Zg=="),
-            ("fo", "Zm8="),
+            ("fo", "Zm8="), // spellcheck:ignore-line
             ("foo", "Zm9v"),
             ("foob", "Zm9vYg=="),
             ("fooba", "Zm9vYmE="),
