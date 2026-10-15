@@ -3618,6 +3618,29 @@ mod tests {
         assert!(support.contains("degradations: Degradations,"), "{support}");
     }
 
+    /// A strict workspace client carries its own report in a private support module, so it
+    /// re-exports only what its runtime names, and leaves out the constructor only the lenient
+    /// decoder calls: anything more is a warning in the consumer's build.
+    #[test_util::test]
+    fn a_strict_workspace_client_ships_only_the_report_it_uses() {
+        let config = Config {
+            decoding: crate::config::Decoding::Strict,
+            packaging: Packaging::Workspace,
+            ..Config::default()
+        };
+        let rendered = files(read_forms_document(), &config)?;
+        let support = rendered
+            .get(camino::Utf8Path::new("api-client/src/support.rs"))
+            .ok_or_eyre("the client crate has a support module")?;
+        assert!(support.contains("pub mod degradations {"), "{support}");
+        assert!(
+            support.contains("pub use degradations::{Decoded, Degradations};"),
+            "{support}"
+        );
+        assert!(!support.contains("fn decoded("), "{support}");
+        assert!(support.contains("fn into_decoded("), "{support}");
+    }
+
     /// A stream over read forms asks the page's report about every member on its two paths
     /// before walking them, and walks them as the `Option`s they are.
     #[test_util::test]
