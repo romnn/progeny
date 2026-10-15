@@ -677,7 +677,7 @@ mod tests {
             .get("http://[")
             .build()
             .err()
-            .ok_or_eyre("an unparseable URL is refused")?;
+            .ok_or_eyre("an unparsable URL is refused")?;
         let url = ::reqwest::Url::parse(
             "https://user:hunter2@tenant.example/tokens/t0k3n?api_key=k3y#fragment",
         )?;
