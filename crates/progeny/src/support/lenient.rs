@@ -32,7 +32,7 @@ use std::fmt;
 
 use serde::de::{self, Deserialize, Deserializer, Error as _};
 
-use super::degradations::{Decoded, DegradationKind, Degradations, Site};
+use super::degradations::{Decoded, DegradationKind, Degradations, MemberSite, Site};
 use super::{Content, ContentDeserializer, choice};
 
 /// The error the decoder reasons with: a message, and no position.
@@ -245,16 +245,16 @@ impl<'de> Members<'de> {
     /// strict decode — and disqualify an untagged variant — only for that one declaration.
     pub(crate) fn take<T>(
         &mut self,
-        site: Site,
+        member: MemberSite,
         declared: Declared,
         report: &mut Degradations,
     ) -> Option<T>
     where
         T: Lenient<'de>,
     {
-        let name = site.member().unwrap_or_default();
+        let site = member.site();
         let strict_refuses = declared == Declared::Required;
-        match self.slot(name) {
+        match self.slot(member.member()) {
             Ok(Slot::Absent) => {
                 if !declared.allows_absent() {
                     report.record(site, DegradationKind::RequiredAbsent, None, strict_refuses);
@@ -296,12 +296,12 @@ impl<'de> Members<'de> {
     ///
     /// A member written twice is reported and read as absent.
     #[doc(hidden)]
-    pub(crate) fn take_raw(&mut self, site: Site, report: &mut Degradations) -> Slot<'de> {
-        match self.slot(site.member().unwrap_or_default()) {
+    pub(crate) fn take_raw(&mut self, member: MemberSite, report: &mut Degradations) -> Slot<'de> {
+        match self.slot(member.member()) {
             Ok(slot) => slot,
             Err(err) => {
                 report.record(
-                    site,
+                    member.site(),
                     DegradationKind::Undecodable,
                     Some(err.to_string()),
                     true,
@@ -750,7 +750,9 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
 
     use super::super::degradations::{Decoded, Degradation};
-    use super::{Declared, DegradationKind, Degradations, Lenient, Members, Site, Slot};
+    use super::{
+        Declared, DegradationKind, Degradations, Lenient, MemberSite, Members, Site, Slot,
+    };
     use crate::support::buffered::Content;
 
     /// A struct written the way the renderer writes a read form: two declared members and a
@@ -764,13 +766,10 @@ mod tests {
 
     impl Employment {
         const SITE: Site = Site::new("Employment", "/components/schemas/Employment", None);
-        const SITE_KIND: Site =
-            Site::new("Employment", "/components/schemas/Employment", Some("type"));
-        const SITE_YEARS: Site = Site::new(
-            "Employment",
-            "/components/schemas/Employment",
-            Some("years"),
-        );
+        const SITE_KIND: MemberSite =
+            MemberSite::new("Employment", "/components/schemas/Employment", "type");
+        const SITE_YEARS: MemberSite =
+            MemberSite::new("Employment", "/components/schemas/Employment", "years");
     }
 
     impl<'de> Lenient<'de> for Employment {
@@ -799,7 +798,8 @@ mod tests {
         Ok((decoded.value, decoded.degradations))
     }
 
-    fn only(report: &Degradations, site: Site) -> eyre::Result<Degradation<'_>> {
+    fn only(report: &Degradations, site: impl Into<Site>) -> eyre::Result<Degradation<'_>> {
+        let site = site.into();
         let mut at = report.at(site);
         let first = at.next().ok_or_eyre("something was recorded at the site")?;
         assert!(
@@ -837,7 +837,7 @@ mod tests {
             only(&report, Employment::SITE_KIND)?.kind,
             DegradationKind::RequiredAbsent
         );
-        assert!(!report.touches(Employment::SITE_YEARS), "{report}");
+        assert!(!report.touches(Employment::SITE_YEARS.site()), "{report}");
     }
 
     /// A member written more than once is refused as one, however many copies there were:
@@ -978,7 +978,7 @@ mod tests {
             .collect();
         assert_eq!(at, [DegradationKind::UndeclaredMember]);
         // And asking `within` with a member's site answers about the type that declares it.
-        assert_eq!(report.within(Employment::SITE_KIND).count(), 2);
+        assert_eq!(report.within(Employment::SITE_KIND.site()).count(), 2);
     }
 
     /// The aggregation the report exists for: two hundred records with one drift is one line.
@@ -1027,7 +1027,7 @@ mod tests {
         let mut report = Degradations::new();
         for value in ["a", "b", "a", "c", "d", "e", "f"] {
             report.record(
-                Employment::SITE_KIND,
+                Employment::SITE_KIND.site(),
                 DegradationKind::UnknownEnumValue,
                 Some(value.to_owned()),
                 false,
@@ -1052,6 +1052,26 @@ mod tests {
             Site::new("T", "/components/schemas/T", None).pointer(),
             "/components/schemas/T"
         );
+    }
+
+    /// A member's site reads its wire name without an `Option`, and is in every other respect
+    /// the general site a report keys the member's entries at.
+    #[test_util::test]
+    fn a_member_site_is_the_general_site_with_its_member_always_there() {
+        let member = MemberSite::new("T", "/components/schemas/T", "a/b~c");
+        let site = Site::new("T", "/components/schemas/T", Some("a/b~c"));
+        assert_eq!(member.member(), "a/b~c");
+        assert_eq!(member.type_name(), "T");
+        assert_eq!(member.origin(), "/components/schemas/T");
+
+        // Converting names the same report key, which is not the declaring type's own.
+        assert_eq!(member.site(), site);
+        assert_eq!(Site::from(member), site);
+        assert_ne!(member.site(), Site::new("T", "/components/schemas/T", None));
+
+        // A report prints and points at a member the same way whichever constant named it.
+        assert_eq!(member.to_string(), site.to_string());
+        assert_eq!(member.pointer(), site.pointer());
     }
 
     /// Fixed arities are all or nothing, and a nullable element is a `None` element.
@@ -1082,10 +1102,12 @@ mod tests {
 
     impl Address {
         const SITE: Site = Site::new("Address", "/components/schemas/Address", None);
-        const SITE_STREET: Site =
-            Site::new("Address", "/components/schemas/Address", Some("street"));
-        const SITE_UNIT: Site = Site::new("Address", "/components/schemas/Address", Some("unit"));
-        const SITE_NOTE: Site = Site::new("Address", "/components/schemas/Address", Some("note"));
+        const SITE_STREET: MemberSite =
+            MemberSite::new("Address", "/components/schemas/Address", "street");
+        const SITE_UNIT: MemberSite =
+            MemberSite::new("Address", "/components/schemas/Address", "unit");
+        const SITE_NOTE: MemberSite =
+            MemberSite::new("Address", "/components/schemas/Address", "note");
     }
 
     impl<'de> Lenient<'de> for Address {
@@ -1122,7 +1144,8 @@ mod tests {
         // Denied by the strict form, so a union probing this variant would move on.
         assert!(report.strict_refuses());
         assert!(
-            !report.touches(Address::SITE_UNIT) && !report.touches(Address::SITE_NOTE),
+            !report.touches(Address::SITE_UNIT.site())
+                && !report.touches(Address::SITE_NOTE.site()),
             "{report}"
         );
     }

@@ -131,6 +131,8 @@ pub(super) fn render(
             ///
             /// Every type here carries the sites a report keys its entries at: `Pet::SITE` for
             /// what the type itself tolerated, `Pet::SITE_NAME` for one of its members.
+            /// A member's is a `MemberSite`, whose `member()` is the wire name itself rather
+            /// than an `Option`.
             pub mod read {
                 #deprecated
                 #(#shared)*
