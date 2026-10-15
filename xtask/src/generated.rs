@@ -108,7 +108,7 @@ pub fn write_wire_test(directory: &Utf8Path, file_name: &str, source: &str) -> e
             color-eyre = "0.6"
             futures-util = "0.3"
             test-util = {{ path = "../../../crates/test-util" }}
-            tokio = {{ version = "1", features = ["rt-multi-thread", "macros", "net"] }}
+            tokio = {{ version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }}
         "#},
     )
     .wrap_err_with(|| format!("writing {manifest}"))?;

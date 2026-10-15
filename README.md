@@ -192,6 +192,11 @@ refusal is `Error::BodyTooLarge`, carrying the status and the limit. It applies 
 client reads, a declared error's included; an undeclared status is handed back unread as
 `Error::UnexpectedStatus`, so that body is the caller's to bound.
 
+A body that breaks off after its status arrived — a reset connection, a stall past a timeout, a
+corrupt content encoding — is `Error::BodyRead`, carrying the status and the `reqwest::Error`, so
+it is classified as the transport failure it is. A response body that arrived whole and did not
+match the description is `Error::Decode`.
+
 The setter takes a byte count or an `Option<usize>`, and `None` means **no limit**, not "unset". A
 request that never calls it inherits the client's limit; a request that passes `None` lifts it, for
 an operation known to answer with more than the client otherwise allows. On the client, `None` sets

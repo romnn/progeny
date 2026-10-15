@@ -127,8 +127,8 @@ pub(super) fn render(
     } else {
         quote! {
             //!
-            //! A response body is read strictly: it matches the description or the response
-            //! fails with [`Error::Decode`].
+            //! A response body is read strictly: once it has arrived whole, it matches the
+            //! description or the response fails with [`Error::Decode`].
         }
     };
     quote! {
@@ -139,7 +139,9 @@ pub(super) fn render(
         use super::support;
 
         #[doc(inline)]
-        pub use super::support::{BodyTooLarge, DecodeError, Degradations, Error, ResponseValue};
+        pub use super::support::{
+            BodyReadError, BodyTooLarge, DecodeError, Degradations, Error, ResponseValue,
+        };
 
         #observing
 
