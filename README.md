@@ -274,12 +274,14 @@ as `Sensitive` in `Debug` output and logs: the held credentials, declared `Autho
 the cookie header that cookie parameters and cookie keys are sent in. The client's own `Debug`
 output never prints a held credential.
 
-A query key is in the URL, which nothing can mark sensitive. The client drops the query from the
-URL of an error it returns for a request that carried one, and from the URL of an error reading any
-body, so the key reaches neither the error's `Display` nor its `Debug`. It cannot do the same for a
-response it hands back as `Error::UnexpectedStatus`, whose `url()` and `Debug` still show the key,
-nor for anything that sees the request on its way out — `reqwest` middleware, a proxy, a server's
-access log. Prefer a header key where the API offers one.
+A query key is in the URL, which nothing can mark sensitive, and so is any credential an API puts
+in a path segment. No error the client returns names the URL it requested, in its `Display` or its
+`Debug`: the URL is dropped from a request that never completed and from a body that could not be
+read, and `Error::UnexpectedStatus` prints only its status. That response still knows its URL, for
+a caller who asks it with `url()`, and nothing can hide the URL from what sees the request on its
+way out — `reqwest` middleware, a proxy, a server's access log — or from an error a redirect policy
+raises, which `reqwest` nests with the redirect's target in it. Prefer a header key where the API
+offers one.
 
 ## Client middleware
 

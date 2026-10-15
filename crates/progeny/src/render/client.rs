@@ -437,10 +437,10 @@ fn setter(index: usize, scheme: &CredentialScheme) -> TokenStream {
             ),
             vec![
                 " A URL cannot be marked sensitive.".to_owned(),
-                " The client drops the query from the URL of an error it returns for the \
-                 request, but the URL with the key is still the request's: a `reqwest` \
-                 middleware or a proxy can log it, and the response handed back with \
-                 [`Error::UnexpectedStatus`] reports it from `url()` and `Debug`."
+                " No error the client returns names the URL itself (see [`Error`] for what \
+                 else one can carry), but the URL with the key is still the request's: a \
+                 `reqwest` middleware or a proxy can log it, and the response handed back with \
+                 [`Error::UnexpectedStatus`] reports it from `url()`."
                     .to_owned(),
             ],
             quote! { value: impl Into<String> },

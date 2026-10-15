@@ -117,8 +117,8 @@ impl Credentials {
     ///
     /// Returns what `reqwest` returns for the request: an invalid header, method or URL, or a
     /// request that never completed.
-    /// When a query key was added, the error's URL has its query removed, so the key does not
-    /// reach the error's `Display` or `Debug` output.
+    /// The error keeps whatever URL `reqwest` attached to it, a query key included; the
+    /// conversion into the client's `Error` drops it.
     pub async fn send(
         &self,
         request: ::reqwest::RequestBuilder,
@@ -126,27 +126,13 @@ impl Credentials {
     ) -> ::std::result::Result<::reqwest::Response, ::reqwest::Error> {
         let (client, request) = request.build_split();
         let mut request = request?;
-        let queried = self.apply(&mut request, requirement);
-        client.execute(request).await.map_err(|mut error| {
-            // Taken as one optional borrow rather than a nested `if`, which the edition 2021
-            // the generated crates use could not collapse into a let chain.
-            let url = if queried {
-                error.url_mut()
-            } else {
-                ::std::option::Option::None
-            };
-            if let ::std::option::Option::Some(url) = url {
-                url.set_query(::std::option::Option::None);
-            }
-            error
-        })
+        self.apply(&mut request, requirement);
+        client.execute(request).await
     }
 
     /// Add the chosen alternative's credentials to `request`, leaving whatever it already
     /// carries under the same name.
-    ///
-    /// Returns whether a query key was added, which is what makes the URL secret.
-    fn apply(&self, request: &mut ::reqwest::Request, requirement: &[&[usize]]) -> bool {
+    fn apply(&self, request: &mut ::reqwest::Request, requirement: &[&[usize]]) {
         let held = |scheme: &usize| {
             self.values
                 .get(*scheme)
@@ -156,9 +142,8 @@ impl Credentials {
             .iter()
             .find(|schemes| !schemes.is_empty() && schemes.iter().all(held))
         else {
-            return false;
+            return;
         };
-        let mut queried = false;
         for &scheme in *chosen {
             let (
                 ::std::option::Option::Some(place),
@@ -188,7 +173,6 @@ impl Credentials {
                     let url = request.url_mut();
                     if !url.query_pairs().any(|(key, _)| key == *name) {
                         url.query_pairs_mut().append_pair(name, value);
-                        queried = true;
                     }
                 }
                 (Place::Cookie(name), Held::Text(value)) => {
@@ -198,7 +182,6 @@ impl Credentials {
                 _ => {}
             }
         }
-        queried
     }
 }
 
@@ -375,18 +358,17 @@ mod tests {
         assert!(!format!("{key_only:?}").contains("\"key\""));
     }
 
-    /// A query key joins the query string unless a parameter of its name is already there, and
-    /// reports that the URL now holds a secret.
+    /// A query key joins the query string unless a parameter of its name is already there.
     #[test_util::test]
     fn a_query_key_is_appended_unless_its_name_is_taken() {
         let mut credentials = Credentials::new(PLACES);
         credentials.set_text(2, "s3cret value".to_owned());
         let mut request = get("http://localhost/pets?limit=2")?;
-        assert!(credentials.apply(&mut request, &[&[2]]));
+        credentials.apply(&mut request, &[&[2]]);
         assert_eq!(request.url().query(), Some("limit=2&api_key=s3cret+value"));
 
         let mut taken = get("http://localhost/pets?api_key=explicit")?;
-        assert!(!credentials.apply(&mut taken, &[&[2]]));
+        credentials.apply(&mut taken, &[&[2]]);
         assert_eq!(taken.url().query(), Some("api_key=explicit"));
         // Nor does the text reach the client's own `Debug` output.
         assert!(!format!("{credentials:?}").contains("s3cret"));
