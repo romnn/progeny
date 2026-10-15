@@ -84,6 +84,11 @@ jobs:
       # largest measured member is 9.19 GiB rather than the single crate's 14.7 GiB floor.
       - name: The same, with the derive escape hatch
         run: task corpus:compile -- --serde derive
+      # Strict decoding ships a different client runtime: no read forms, no decoder, and under
+      # workspace packaging a report of its own in a private support module. Its unused imports
+      # went unseen while every gate compiled only the lenient default.
+      - name: The same, decoding strictly
+        run: task corpus:compile -- --decoding strict
       # Runs serde against real payloads rather than asking whether source compiles, which makes it
       # the only gate here that can catch output that is wrong on the wire. It found a `default`
       # rendered as `#[serde(default = "…")]`, which put members into 60 requests the caller never

@@ -391,14 +391,22 @@ impl Decoding {
 /// The report vocabulary as a submodule, re-exported at the support root — where the client
 /// runtime reaches it as `super::…` and the types module as `super::support::…`.
 fn degradations_tokens() -> proc_macro2::TokenStream {
+    let degradations = degradations_module();
+    quote::quote! {
+        #degradations
+        pub use degradations::{
+            Decoded, Degradation, DegradationKind, Degradations, MemberSite, Site,
+        };
+    }
+}
+
+/// The report as a submodule, without the re-exports a caller names it by.
+fn degradations_module() -> proc_macro2::TokenStream {
     let degradations = source_without_file_expectation(DEGRADATIONS);
     quote::quote! {
         pub mod degradations {
             #degradations
         }
-        pub use degradations::{
-            Decoded, Degradation, DegradationKind, Degradations, MemberSite, Site,
-        };
     }
 }
 
@@ -557,9 +565,10 @@ fn presence_lenient_tokens() -> proc_macro2::TokenStream {
 
 /// Support owned by a generated client crate.
 ///
-/// The decoding vocabulary is the types crate's — one `Degradations` type, shared by the
-/// `Lenient` impls there and the client runtime here — so it is re-exported from the crate root's
-/// `types`, which is where the client runtime's `super::…` paths look.
+/// Decoded leniently, the decoding vocabulary is the types crate's — one `Degradations` type,
+/// shared by the `Lenient` impls there and the client runtime here — so it is re-exported from
+/// the crate root's `types`, which is where the client runtime's `super::…` paths look.
+/// Decoded strictly, the client carries a report of its own.
 pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2::TokenStream {
     // Shipped only where the multipart writer's `super::base64_decode` needs resolving; with no
     // multipart body in the description nothing here would be live at all.
@@ -572,11 +581,18 @@ pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2:
         decoding,
     );
     // Lenient: the report is the types crate's, because the `Lenient` impls there record into
-    // it. Strict: nothing in the types crate names a report, so the client carries its own.
+    // it.
+    // Strict: nothing in the types crate names a report, so the client carries its own.
+    // Its support module is private, so only what the runtime names is re-exported: anything
+    // more would be an unused import in the consumer's build.
     let vocabulary = if decoding.is_lenient() {
         quote::quote! { pub use super::types::{Decoded, Degradations, Lenient, Site}; }
     } else {
-        degradations_tokens()
+        let degradations = degradations_module();
+        quote::quote! {
+            #degradations
+            pub use degradations::{Decoded, Degradations};
+        }
     };
     quote::quote! {
         #vocabulary
@@ -922,8 +938,10 @@ fn client_source(
         return text.parse().unwrap_or_default();
     };
     // The report and its vocabulary stay: `ResponseValue` carries a report whichever way its
-    // body was decoded. Only the decoder goes — the two functions, and the one `use` that names
-    // what only they name, which `http.rs` keeps on a line of its own for exactly this.
+    // body was decoded.
+    // Only the decoder goes — the two functions, the one `use` that names what only they name,
+    // which `http.rs` keeps on a line of its own for exactly this, and below, the constructor
+    // only they call.
     let lenient_decoder = |item: &syn::Item| match item {
         syn::Item::Fn(function) => function.sig.ident.to_string().starts_with("decode_lenient"),
         syn::Item::Use(import) => {
@@ -934,6 +952,21 @@ fn client_source(
     };
     file.items
         .retain(|item| !is_test_module(item) && (decoding.is_lenient() || !lenient_decoder(item)));
+    // The constructor that takes a decoded report
+    if !decoding.is_lenient() {
+        for item in &mut file.items {
+            if let syn::Item::Impl(implementation) = item
+                && impl_type_is(implementation, "ResponseValue")
+            {
+                implementation.items.retain(|implementation_item| {
+                    !matches!(
+                        implementation_item,
+                        syn::ImplItem::Fn(function) if function.sig.ident == "decoded"
+                    )
+                });
+            }
+        }
+    }
     let Some(used) = used else {
         return quote::quote! { #file };
     };

@@ -76,6 +76,14 @@ pub struct Args {
     /// Which ahead-of-time packaging to compile. Ordinary corpus runs keep the crate default.
     #[arg(long, value_name = "PACKAGING", requires = "compile")]
     packaging: Option<PackagingChoice>,
+
+    /// How the generated client reads responses, rather than the configuration default.
+    ///
+    /// Strict decoding ships a different client runtime — no read forms, no decoder, and under
+    /// workspace packaging a report of its own — so a gate that only compiles the default is
+    /// blind to what a strict client warns about.
+    #[arg(long, value_name = "DECODING", requires = "compile")]
+    decoding: Option<DecodingChoice>,
 }
 
 /// The two serde strategies, as a command-line word.
@@ -111,6 +119,21 @@ impl From<PackagingChoice> for progeny::Packaging {
         match choice {
             PackagingChoice::Crate => Self::Crate,
             PackagingChoice::Workspace => Self::Workspace,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum DecodingChoice {
+    Lenient,
+    Strict,
+}
+
+impl From<DecodingChoice> for progeny::Decoding {
+    fn from(choice: DecodingChoice) -> Self {
+        match choice {
+            DecodingChoice::Lenient => Self::Lenient,
+            DecodingChoice::Strict => Self::Strict,
         }
     }
 }
@@ -609,6 +632,9 @@ fn check(
     }
     if let Some(packaging) = args.packaging {
         config.packaging = packaging.into();
+    }
+    if let Some(decoding) = args.decoding {
+        config.decoding = decoding.into();
     }
     let output = match progeny::generate(&bytes, &config) {
         Ok(output) => output,
