@@ -1027,4 +1027,99 @@ async fn a_query_key_does_not_reach_an_error_message() {
         assert!(!rendered.contains("s3cret"), "{rendered}");
     }
 }
+
+/// A server that answers every request with `status` and a body that breaks off: the headers
+/// promise more bytes than follow, and the connection then closes.
+///
+/// Written on a raw socket rather than through axum, because hyper may refuse a body stream
+/// that fails at once before it has sent the status, and the point is a failure after it.
+/// The bytes that do arrive are a whole JSON value, so only the framing can fail the read.
+async fn truncating_serving(status: u16, body: &'static str) -> eyre::Result<client::Client> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                // The request is read up to the end of its headers; none of these carry a body.
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let promised = body.len() + 64;
+                let head = indoc::formatdoc! {"
+                    HTTP/1.1 {status} Answered
+                    content-type: application/json
+                    content-length: {promised}
+
+                "}
+                .replace('\n', "\r\n");
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    Ok(client::Client::new(format!("http://{address}")))
+}
+
+/// A body that breaks off after its status is a failed read carrying that status, not a body
+/// that failed to decode: a caller classifies it as the transport failure it is.
+#[test_util::test]
+async fn a_body_that_breaks_off_is_a_failed_read_rather_than_a_bad_payload() {
+    // Read whole, with a query key the error must not carry.
+    let client = truncating_serving(200, "{\"id\": 7, \"name\": \"Rex\"}")
+        .await?
+        .with_query_key("s3cret")
+        .with_cookie_key("c");
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "7".to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a body that breaks off is refused")?;
+    let client::Error::BodyRead(read) = &error else {
+        eyre::bail!("expected BodyRead, got {error:?}");
+    };
+    assert_eq!(read.status().as_u16(), 200);
+    assert_eq!(error.status().map(|status| status.as_u16()), Some(200));
+    // Not every `reqwest` names the URL on a failed read; where it does, the key is not in it.
+    if let Some(url) = read.reqwest_error().url() {
+        assert_eq!(url.query(), None, "{url}");
+    }
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        assert!(!rendered.contains("s3cret"), "{rendered}");
+    }
+
+    // Read in chunks under a limit the promised length does not pass, so the limit is not
+    // what refuses it.
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "7".to_owned() })
+        .response_body_limit(1 << 20)
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a body that breaks off under a limit is refused")?;
+    assert!(matches!(error, client::Error::BodyRead(_)), "{error:?}");
+
+    // A declared error status reads its body the same way, and keeps its own status.
+    let client = truncating_serving(409, "{\"code\": 409, \"message\": \"conflict\"}").await?;
+    let error = client
+        .typed_errors(client::TypedErrorsParams {
+            kind: "conflict".to_owned(),
+        })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a declared failure whose body breaks off is refused")?;
+    let client::Error::BodyRead(read) = &error else {
+        eyre::bail!("expected BodyRead, got {error:?}");
+    };
+    assert_eq!(read.status().as_u16(), 409);
+}
 "#};

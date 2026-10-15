@@ -155,6 +155,9 @@ impl<T> ResponseValue<T> {
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E> {
     /// The request never completed: DNS, TLS, connection, timeout.
+    ///
+    /// A failure after the status arrived, while reading the body, is an [`Error::BodyRead`]
+    /// instead, which keeps the status.
     #[error("the request failed: {0}")]
     Request(#[from] ::reqwest::Error),
     /// A status the document declares as an error, with its payload parsed.
@@ -170,6 +173,15 @@ pub enum Error<E> {
         .0.status()
     )]
     UnexpectedStatus(::std::boxed::Box<::reqwest::Response>),
+    /// The status arrived and its body could not be read to the end: the connection reset or
+    /// stalled past a timeout, the framing broke off, or the content encoding was corrupt.
+    ///
+    /// A transport failure rather than a payload one, so it is not an [`Error::Decode`]: the
+    /// bytes that would have been decoded never all arrived.
+    /// It applies to every body the client reads, a declared error's included, and carries
+    /// that response's status.
+    #[error(transparent)]
+    BodyRead(#[from] BodyReadError),
     /// The body arrived and did not match the contract the document stated.
     #[error(transparent)]
     Decode(#[from] DecodeError),
@@ -233,6 +245,7 @@ impl<E> Error<E> {
             Self::Request(error) => error.status(),
             Self::Declared(response) => Some(response.status()),
             Self::UnexpectedStatus(response) => Some(response.status()),
+            Self::BodyRead(error) => Some(error.status()),
             Self::Decode(error) => Some(error.status()),
             Self::BodyTooLarge(error) => Some(error.status()),
             Self::DegradedPage(page) => Some(page.status()),
@@ -244,6 +257,7 @@ impl<E> Error<E> {
 impl<E> From<BodyError> for Error<E> {
     fn from(error: BodyError) -> Self {
         match error {
+            BodyError::Read(error) => Self::BodyRead(error),
             BodyError::Decode(error) => Self::Decode(error),
             BodyError::TooLarge(error) => Self::BodyTooLarge(error),
         }
@@ -277,8 +291,15 @@ impl BodyTooLarge {
 #[doc(hidden)]
 #[derive(Debug)]
 pub enum BodyError {
+    Read(BodyReadError),
     Decode(DecodeError),
     TooLarge(BodyTooLarge),
+}
+
+impl From<BodyReadError> for BodyError {
+    fn from(error: BodyReadError) -> Self {
+        Self::Read(error)
+    }
 }
 
 impl From<DecodeError> for BodyError {
@@ -356,13 +377,17 @@ async fn read_body(
     reading: BodyReading,
 ) -> Result<Vec<u8>, BodyError> {
     let status = response.status();
-    // The URL's query is dropped from the error: it can hold an API key, and the message is
-    // about the body, which the status already places.
+    // The URL's query is dropped from the error itself rather than from a message about it,
+    // because the error is handed back whole: it can hold an API key, and the status already
+    // places the failure.
     let unreadable = |mut error: ::reqwest::Error| {
         if let Some(url) = error.url_mut() {
             url.set_query(None);
         }
-        DecodeError::new(status, ::serde::de::Error::custom(error))
+        BodyReadError {
+            status,
+            source: error,
+        }
     };
     let Limit::Bytes(limit) = reading.limit else {
         let bytes = response.bytes().await.map_err(unreadable)?;
@@ -385,6 +410,34 @@ async fn read_body(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// A response body that could not be read to the end, after its status arrived.
+///
+/// Every failure of the read itself lands here, whatever `reqwest` calls it: it reports a body
+/// that broke off as a decoding failure too, so its own classification cannot tell the two
+/// apart.
+/// What was read is not decoded.
+#[derive(Debug, thiserror::Error)]
+#[error("could not read the {status} response body: {source}")]
+pub struct BodyReadError {
+    status: ::reqwest::StatusCode,
+    source: ::reqwest::Error,
+}
+
+impl BodyReadError {
+    /// The status whose body could not be read.
+    pub fn status(&self) -> ::reqwest::StatusCode {
+        self.status
+    }
+
+    /// The failure itself, for `reqwest`'s own questions about it, such as
+    /// [`is_timeout`](::reqwest::Error::is_timeout).
+    ///
+    /// Its URL has no query, which can hold an API key.
+    pub fn reqwest_error(&self) -> &::reqwest::Error {
+        &self.source
+    }
 }
 
 /// A body that did not match the type the description said it would be.
