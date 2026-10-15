@@ -1030,6 +1030,7 @@ async fn a_query_key_does_not_reach_an_error_message() {
 
 /// A server that answers every request with `status` and a body that breaks off: the headers
 /// promise more bytes than follow, and the connection then closes.
+/// It also sets a cookie, as a header that carries a secret.
 ///
 /// Written on a raw socket rather than through axum, because hyper may refuse a body stream
 /// that fails at once before it has sent the status, and the point is a failure after it.
@@ -1055,6 +1056,7 @@ async fn truncating_serving(status: u16, body: &'static str) -> eyre::Result<cli
                 let head = indoc::formatdoc! {"
                     HTTP/1.1 {status} Answered
                     content-type: application/json
+                    set-cookie: session=cookie-secret
                     content-length: {promised}
 
                 "}
@@ -1121,5 +1123,69 @@ async fn a_body_that_breaks_off_is_a_failed_read_rather_than_a_bad_payload() {
         eyre::bail!("expected BodyRead, got {error:?}");
     };
     assert_eq!(read.status().as_u16(), 409);
+}
+
+/// Asserts that none of `secrets` reaches the error's `Display` or `Debug` output.
+fn assert_hidden(error: &client::Error<impl std::fmt::Debug>, secrets: &[&str]) {
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        for secret in secrets {
+            assert!(!rendered.contains(secret), "`{secret}` in {rendered}");
+        }
+    }
+}
+
+/// No error names the URL it requested: a path segment can be a credential — an access token
+/// read back by its own value — and so can any other part of a URL.
+#[test_util::test]
+async fn no_error_names_the_url_it_requested() {
+    let secret = "secret-in-the-path";
+
+    // Both ways a request is sent, through the credentials and without them, hide a secret in
+    // the path the operation adds and in the base URL's own when the request never completes.
+    // The connection error underneath still names the address it dialed, which is not the URL.
+    let client = client::Client::new(format!("http://127.0.0.1:9/{secret}-base"));
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: secret.to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("nothing answers on the discard port")?;
+    assert!(matches!(error, client::Error::Request(_)), "{error:?}");
+    assert_hidden(&error, &[secret]);
+    let error = client
+        .list_pets(client::ListPetsParams { limit: None })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("nothing answers on the discard port")?;
+    assert!(matches!(error, client::Error::Request(_)), "{error:?}");
+    assert_hidden(&error, &[secret]);
+
+    // A body that breaks off after its status.
+    let client = truncating_serving(200, "{\"id\": 7, \"name\": \"Rex\"}").await?;
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: secret.to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a body that breaks off is refused")?;
+    assert!(matches!(error, client::Error::BodyRead(_)), "{error:?}");
+    assert_hidden(&error, &[secret]);
+
+    // A status the description does not declare, handed back with its response: the URL stays
+    // on the response for a caller who asks for it, and only there.
+    let client = truncating_serving(418, "").await?;
+    let error = client
+        .typed_errors(client::TypedErrorsParams { kind: secret.to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("an undeclared status is refused")?;
+    let client::Error::UnexpectedStatus(response) = &error else {
+        eyre::bail!("expected UnexpectedStatus, got {error:?}");
+    };
+    assert!(response.url().path().contains(secret), "{}", response.url());
+    assert!(response.headers().contains_key("set-cookie"));
+    assert_hidden(&error, &[secret, "cookie-secret"]);
 }
 "#};

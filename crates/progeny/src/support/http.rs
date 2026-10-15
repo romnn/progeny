@@ -152,18 +152,30 @@ impl<T> ResponseValue<T> {
 /// operation's return, so its width is paid on the success path too — and unboxed, a `HeaderMap`
 /// alone puts it past the width at which `clippy::result_large_err` calls a `Result` too expensive
 /// to return by value, in the generated crate and in its consumer's build alike.
-#[derive(Debug, thiserror::Error)]
+///
+/// No error an operation returns names the URL it requested, in its `Display` or its `Debug`:
+/// any part of a URL can be a credential — an access token in a path segment, an API key in the
+/// query, a tenant in the host.
+/// What the server sent is another matter: a declared payload, a degradation sample or a header
+/// the caller reads off a response says whatever the server put in it.
+/// So does an error a redirect policy raises, which `reqwest` can nest inside the one returned
+/// with the redirect's target in it.
+#[derive(thiserror::Error)]
 pub enum Error<E> {
     /// The request never completed: DNS, TLS, connection, timeout.
     ///
     /// A failure after the status arrived, while reading the body, is an [`Error::BodyRead`]
     /// instead, which keeps the status.
+    /// The error carries no URL.
     #[error("the request failed: {0}")]
-    Request(#[from] ::reqwest::Error),
+    Request(#[source] ::reqwest::Error),
     /// A status the document declares as an error, with its payload parsed.
     #[error("the server answered {}", .0.status())]
     Declared(::std::boxed::Box<ResponseValue<E>>),
     /// A status the document does not declare at all, handed back raw.
+    ///
+    /// The response is whole, its URL and headers included, for a caller who asks it; this
+    /// error's `Debug` shows only its status, because either can carry a credential.
     ///
     /// Undeclared rather than unexpected in the ordinary sense: a document that lists only `200`
     /// says nothing about `503`, and inventing a shape for it would be describing a payload
@@ -236,6 +248,40 @@ pub enum Error<E> {
         /// The segment as it would have gone on the wire.
         rendered: String,
     },
+}
+
+impl<E> From<::reqwest::Error> for Error<E> {
+    fn from(error: ::reqwest::Error) -> Self {
+        Self::Request(error.without_url())
+    }
+}
+
+impl<E: ::std::fmt::Debug> ::std::fmt::Debug for Error<E> {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match self {
+            Self::Request(error) => formatter.debug_tuple("Request").field(error).finish(),
+            Self::Declared(response) => formatter.debug_tuple("Declared").field(response).finish(),
+            // A response's own `Debug` prints the URL it answered and its headers.
+            Self::UnexpectedStatus(response) => formatter
+                .debug_struct("UnexpectedStatus")
+                .field("status", &response.status())
+                .finish_non_exhaustive(),
+            Self::BodyRead(error) => formatter.debug_tuple("BodyRead").field(error).finish(),
+            Self::Decode(error) => formatter.debug_tuple("Decode").field(error).finish(),
+            Self::BodyTooLarge(error) => {
+                formatter.debug_tuple("BodyTooLarge").field(error).finish()
+            }
+            Self::DegradedPage(page) => formatter.debug_tuple("DegradedPage").field(page).finish(),
+            Self::UnsendablePath {
+                parameter,
+                rendered,
+            } => formatter
+                .debug_struct("UnsendablePath")
+                .field("parameter", parameter)
+                .field("rendered", rendered)
+                .finish(),
+        }
+    }
 }
 
 impl<E> Error<E> {
@@ -377,17 +423,12 @@ async fn read_body(
     reading: BodyReading,
 ) -> Result<Vec<u8>, BodyError> {
     let status = response.status();
-    // The URL's query is dropped from the error itself rather than from a message about it,
-    // because the error is handed back whole: it can hold an API key, and the status already
+    // The URL is dropped from the error itself rather than from a message about it, because the
+    // error is handed back whole: any part of it can be a credential, and the status already
     // places the failure.
-    let unreadable = |mut error: ::reqwest::Error| {
-        if let Some(url) = error.url_mut() {
-            url.set_query(None);
-        }
-        BodyReadError {
-            status,
-            source: error,
-        }
+    let unreadable = |error: ::reqwest::Error| BodyReadError {
+        status,
+        source: error.without_url(),
     };
     let Limit::Bytes(limit) = reading.limit else {
         let bytes = response.bytes().await.map_err(unreadable)?;
@@ -434,7 +475,7 @@ impl BodyReadError {
     /// The failure itself, for `reqwest`'s own questions about it, such as
     /// [`is_timeout`](::reqwest::Error::is_timeout).
     ///
-    /// Its URL has no query, which can hold an API key.
+    /// It carries no URL, any part of which can be a credential.
     pub fn reqwest_error(&self) -> &::reqwest::Error {
         &self.source
     }
@@ -621,11 +662,36 @@ pub async fn decode_bytes(
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre;
+    use color_eyre::eyre::{self, OptionExt as _};
 
     use super::super::Site;
 
     const ROOT: Site = Site::new("list", "/paths/~1list/get/responses/200", None);
+
+    /// A `reqwest` error converted into the client's carries no part of the URL it was about:
+    /// every part of one can be a credential, the host included.
+    #[test_util::test]
+    fn a_transport_error_loses_its_whole_url_on_the_way_in() {
+        // Any `reqwest` error will do; this one is refused before it is sent.
+        let refused = ::reqwest::Client::new()
+            .get("http://[")
+            .build()
+            .err()
+            .ok_or_eyre("an unparseable URL is refused")?;
+        let url = ::reqwest::Url::parse(
+            "https://user:hunter2@tenant.example/tokens/t0k3n?api_key=k3y#fragment",
+        )?;
+        let error: super::Error<()> = refused.with_url(url).into();
+        let super::Error::Request(inner) = &error else {
+            eyre::bail!("expected Request, got {error:?}");
+        };
+        assert!(inner.url().is_none(), "{:?}", inner.url());
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            for secret in ["user", "hunter2", "tenant", "t0k3n", "k3y", "fragment"] {
+                assert!(!rendered.contains(secret), "`{secret}` in {rendered}");
+            }
+        }
+    }
 
     /// Leniency is about the shape of what was sent, not about what was sent: a body that goes
     /// on after its value is not a JSON document and is refused, the way the strict decoder
