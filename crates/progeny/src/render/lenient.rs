@@ -54,24 +54,31 @@ pub(super) fn impls(
 ///
 /// The only spelling of a site anywhere — the decoder below references these constants rather
 /// than restating the literals — because the origin pointer in a site is the description's and
-/// nothing else in the generated crate says it. A consumer reads a site, compares it, and asks a
-/// report about it; nobody constructs one.
+/// nothing else in the generated crate says it.
+/// A consumer reads a site, compares it, and asks a report about it; nobody constructs one.
+///
+/// The type's own is a `Site` and each member's a `MemberSite`, so a consumer reads a member's
+/// wire name without an impossible `None`; the decoder hands a member's straight to the member
+/// readers, which take a `MemberSite` for the same reason.
 /// The capture member gets none: what the description never declared is recorded at the type's
-/// own site. An alias has no impls to hang any of it on.
+/// own site.
+/// An alias has no impls to hang any of it on.
 fn site_constants(contract: &TypeContract, scope: Scope) -> TokenStream {
     if matches!(contract.kind(), ContractKind::Alias { .. }) {
         return TokenStream::new();
     }
     let support = scope.support();
     let name = implementation_type(contract);
-    let own = site_literal(contract, None, scope);
+    let type_name = contract.rust_name().as_str();
+    let origin = contract.origin().to_string();
     let members = declared_fields(contract).map(|field| {
         let constant = site_const(&field.rust_name);
-        let literal = site_literal(contract, Some(field.wire_name.as_str()), scope);
-        let docs = format!(" The member `{}`.", field.wire_name);
+        let member = field.wire_name.as_str();
+        let docs = format!(" The member `{member}`.");
         quote! {
             #[doc = #docs]
-            pub const #constant: #support::Site = #literal;
+            pub const #constant: #support::MemberSite =
+                #support::MemberSite::new(#type_name, #origin, #member);
         }
     });
     quote! {
@@ -80,8 +87,8 @@ fn site_constants(contract: &TypeContract, scope: Scope) -> TokenStream {
             /// does not declare, or the root when a payload decoded standalone is this type.
             ///
             /// What `Degradations::at`, `touches` and `within` are asked with; a member has its
-            /// own `SITE_…` constant beside this one.
-            pub const SITE: #support::Site = #own;
+            /// own `SITE_…` constant beside this one, a `MemberSite` that always names it.
+            pub const SITE: #support::Site = #support::Site::new(#type_name, #origin, None);
             #(#members)*
         }
     }
@@ -664,15 +671,6 @@ fn mapper(element: &TypeRef, contracts: &Contracts) -> TokenStream {
     } else {
         quote! { |element| #converted }
     }
-}
-
-/// The site itself, as the constructor call the constants above are initialized from.
-fn site_literal(contract: &TypeContract, member: Option<&str>, scope: Scope) -> TokenStream {
-    let support = scope.support();
-    let type_name = contract.rust_name().as_str();
-    let origin = contract.origin().to_string();
-    let member = member.map_or_else(|| quote! { None }, |member| quote! { Some(#member) });
-    quote! { #support::Site::new(#type_name, #origin, #member) }
 }
 
 /// An expectation on the exact statement that touches a deprecated contract member.

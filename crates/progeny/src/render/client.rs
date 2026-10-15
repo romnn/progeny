@@ -946,7 +946,7 @@ fn page_walk(
         .map(|step| {
             let holder = type_ref_in(&TypeRef::Named(step.holder), contracts, config, Scope::Edge);
             let constant = super::lenient::site_const(&step.rust_name);
-            quote! { #holder::#constant }
+            quote! { #holder::#constant.site() }
         });
     let next_steps = next_path.map(|member| quote! { .and_then(|step| step.#member.as_ref()) });
     let items_steps = items_path.map(|member| quote! { .and_then(|step| step.#member) });

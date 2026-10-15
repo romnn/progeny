@@ -150,10 +150,12 @@ let client = Client::new(base_url).observe(|degraded| {
 Every type a report can name carries its sites — `read::User::SITE` for the type itself,
 `read::User::SITE_ID` for one of its members — so asking a report about one place needs nothing
 copied out of the generated source, and there is nothing to spell wrong: a `Site` cannot be
-constructed, only read, compared, and asked about.
+constructed, only read, compared, and asked about. A member's site is a `MemberSite`, whose
+`member()` is the wire name itself rather than an `Option`; `.site()` turns it into the `Site` a
+report is keyed and asked by.
 
 ```rust
-if page.degradations().touches(read::User::SITE_ID) { … }
+if page.degradations().touches(read::User::SITE_ID.site()) { … }
 for entry in page.degradations().within(read::User::SITE) { … }   // the type and its members
 ```
 

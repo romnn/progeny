@@ -31,6 +31,13 @@ use std::fmt;
 /// associated constants — `read::Pet::SITE` for the type itself, `read::Pet::SITE_NAME` for one
 /// of its members — so a consumer reads a site, compares it, and asks a report about it, and
 /// never restates a pointer the description owns.
+///
+/// The type's own `SITE` is a `Site`, whose member is `None`.
+/// Each `SITE_<MEMBER>` is a [`MemberSite`] instead, because it always names a member: its
+/// wire name is a plain `&'static str`, and [`MemberSite::site`] gives the `Site` a report keys
+/// the member's entries at.
+/// A report holds and is asked with `Site`s, since one entry may be about the type and the next
+/// about a member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Site {
     type_name: &'static str,
@@ -99,6 +106,81 @@ impl fmt::Display for Site {
             Some(member) => write!(formatter, "{}.{member}", self.type_name()),
             None => formatter.write_str(self.type_name()),
         }
+    }
+}
+
+/// The site of one member a generated type declares: a [`Site`] whose member is always there.
+///
+/// Every `SITE_<MEMBER>` constant has this type, so a consumer that needs the member's wire
+/// name — to index a raw document, or to name what a write sends — reads it without a `None`
+/// that cannot happen.
+/// The type's own `SITE` stays a [`Site`], because it names no member.
+///
+/// A report keys a member's entries at the [`Site`] that [`site`](Self::site) returns, so a
+/// report is asked about a member with `report.at(Pet::SITE_NAME.site())`, and a reported entry
+/// is compared with `entry.site == Pet::SITE_NAME.site()`.
+/// A member site and its [`Site`] print the same and have the same [`pointer`](Self::pointer),
+/// and converting keeps the order between member sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemberSite {
+    type_name: &'static str,
+    origin: &'static str,
+    member: &'static str,
+}
+
+impl MemberSite {
+    /// One member's site, as the generated crate spells it.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(type_name: &'static str, origin: &'static str, member: &'static str) -> Self {
+        Self {
+            type_name,
+            origin,
+            member,
+        }
+    }
+
+    /// The generated type that declares the member.
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        self.type_name
+    }
+
+    /// Where the declaring type is written in the description, as a JSON Pointer; see
+    /// [`Site::origin`].
+    #[must_use]
+    pub const fn origin(self) -> &'static str {
+        self.origin
+    }
+
+    /// The member, by its wire name.
+    #[must_use]
+    pub const fn member(self) -> &'static str {
+        self.member
+    }
+
+    /// The general site, which is what a report keys this member's entries at.
+    #[must_use]
+    pub const fn site(self) -> Site {
+        Site::new(self.type_name, self.origin, Some(self.member))
+    }
+
+    /// The JSON Pointer of the member's schema, which is what an override would be keyed by.
+    #[must_use]
+    pub fn pointer(&self) -> String {
+        self.site().pointer()
+    }
+}
+
+impl From<MemberSite> for Site {
+    fn from(site: MemberSite) -> Self {
+        site.site()
+    }
+}
+
+impl fmt::Display for MemberSite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.site(), formatter)
     }
 }
 
@@ -274,8 +356,8 @@ impl Degradations {
             })
     }
 
-    /// The entries recorded at exactly this site: `at(read::Pet::SITE_NAME)` for one member,
-    /// `at(read::Pet::SITE)` for what the type itself tolerated.
+    /// The entries recorded at exactly this site: `at(read::Pet::SITE_NAME.site())` for one
+    /// member, `at(read::Pet::SITE)` for what the type itself tolerated.
     pub fn at(&self, site: Site) -> impl Iterator<Item = Degradation<'_>> {
         self.iter().filter(move |entry| entry.site == site)
     }

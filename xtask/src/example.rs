@@ -631,8 +631,9 @@ async fn a_drifted_response_decodes_as_far_as_it_can_and_says_what_it_tolerated(
     // nothing a consumer could construct wrong.
     let name = types::read::Pet::SITE_NAME;
     assert_eq!(name.origin(), "/components/schemas/Pet");
-    assert_eq!(name.member(), Some("name"));
-    let kinds: Vec<types::DegradationKind> = report.at(name).map(|entry| entry.kind).collect();
+    assert_eq!(name.member(), "name");
+    let kinds: Vec<types::DegradationKind> =
+        report.at(name.site()).map(|entry| entry.kind).collect();
     assert_eq!(
         kinds,
         [types::DegradationKind::RequiredAbsent, types::DegradationKind::NullNotAllowed]
@@ -640,7 +641,7 @@ async fn a_drifted_response_decodes_as_far_as_it_can_and_says_what_it_tolerated(
     // The member's entries belong to the type; the type's own site holds only what the type
     // itself tolerated, which here is the member the description never declared.
     assert!(report.within(types::read::Pet::SITE).count() > kinds.len());
-    assert!(!report.touches(types::read::Pet::SITE_TAG));
+    assert!(!report.touches(types::read::Pet::SITE_TAG.site()));
     let undeclared = report
         .iter()
         .find(|entry| entry.kind == types::DegradationKind::UndeclaredMember)

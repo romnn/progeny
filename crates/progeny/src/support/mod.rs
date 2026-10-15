@@ -396,7 +396,9 @@ fn degradations_tokens() -> proc_macro2::TokenStream {
         pub mod degradations {
             #degradations
         }
-        pub use degradations::{Decoded, Degradation, DegradationKind, Degradations, Site};
+        pub use degradations::{
+            Decoded, Degradation, DegradationKind, Degradations, MemberSite, Site,
+        };
     }
 }
 
@@ -525,13 +527,14 @@ fn presence_lenient_tokens() -> proc_macro2::TokenStream {
             /// value that does not read as `T` is `Omitted` with the reason recorded.
             pub(crate) fn take_presence<T>(
                 &mut self,
-                site: Site,
+                member: MemberSite,
                 report: &mut Degradations,
             ) -> Presence<T>
             where
                 T: Lenient<'de>,
             {
-                match self.take_raw(site, report) {
+                let site = member.site();
+                match self.take_raw(member, report) {
                     lenient::Slot::Absent => Presence::Omitted,
                     lenient::Slot::Null => Presence::Null,
                     lenient::Slot::Value(content) => match T::lenient(content, site, report) {

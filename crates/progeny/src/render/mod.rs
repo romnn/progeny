@@ -72,7 +72,7 @@ pub(crate) fn run(
         // alone can name what a read form's decoder hands back.
         types_body.extend(quote! {
             pub use super::support::{
-                Decoded, Degradation, DegradationKind, Degradations, Lenient, Site,
+                Decoded, Degradation, DegradationKind, Degradations, Lenient, MemberSite, Site,
             };
         });
     }
@@ -3640,8 +3640,8 @@ mod tests {
         assert!(client.contains(".touches("), "{client}");
         // Asked with the constants the holder's read form carries, reached through its path from
         // the client: the client restates no pointer of its own.
-        assert!(client.contains("read::Page::SITE_ITEMS"), "{client}");
-        assert!(client.contains("read::Page::SITE_NEXT"), "{client}");
+        assert!(client.contains("read::Page::SITE_ITEMS.site()"), "{client}");
+        assert!(client.contains("read::Page::SITE_NEXT.site()"), "{client}");
         assert!(client.contains("Error::DegradedPage("), "{client}");
         assert!(client.contains("page.map(|_| ())"), "{client}");
         assert!(client.contains(".and_then(|step| step.items)"), "{client}");
