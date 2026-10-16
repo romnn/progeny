@@ -3520,7 +3520,10 @@ mod tests {
         assert!(types.contains("pub name: Option<String>,"), "{types}");
         assert!(types.contains("pub mod read {"), "{types}");
         assert!(types.contains("pub use super::Mood;"), "{types}");
-        assert!(types.contains("impl From<super::Pet> for Pet {"), "{types}");
+        assert!(
+            types.contains("impl ::std::convert::From<super::Pet> for Pet {"),
+            "{types}"
+        );
         assert!(types.contains("name: Some(value.name),"), "{types}");
         assert!(types.contains("pub struct Page {"), "{types}");
         assert!(types.contains("pub items: Option<Vec<Pet>>,"), "{types}");
@@ -3734,7 +3737,7 @@ mod tests {
         let rendered = files(document, &Config::default())?;
         let types = &rendered[camino::Utf8Path::new("src/types.rs")];
         assert!(
-            types.contains("impl From<super::Thing> for Thing {"),
+            types.contains("impl ::std::convert::From<super::Thing> for Thing {"),
             "{types}"
         );
         // The alias `Parts` converts element by element rather than through an `Into` it lacks.
@@ -3826,10 +3829,10 @@ mod tests {
         // The one place the impl names a deprecated item is a member, and that statement carries
         // the expectation.
         let (_, conversion) = types
-            .split_once("impl From<super::__progeny_deprecated::Thing>")
+            .split_once("impl ::std::convert::From<super::__progeny_deprecated::Thing>")
             .ok_or_eyre("the conversion is rendered")?;
         let (before, _) = types
-            .split_once("impl From<super::__progeny_deprecated::Thing>")
+            .split_once("impl ::std::convert::From<super::__progeny_deprecated::Thing>")
             .ok_or_eyre("the conversion is rendered")?;
         assert!(
             !before.trim_end().ends_with(")]"),

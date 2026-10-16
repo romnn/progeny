@@ -498,7 +498,7 @@ fn from_strict(
     // No expectation on the impl itself: both type paths go through the non-deprecated aliases,
     // and each member that is deprecated carries its own, so one here would go unfulfilled.
     quote! {
-        impl From<#strict_name> for #name {
+        impl ::std::convert::From<#strict_name> for #name {
             /// The strict value as a read value: every required member present, nothing
             /// undeclared.
             /// Infallible, so tests and mock servers can build strict values and answer
@@ -527,7 +527,7 @@ fn struct_conversion(
         else {
             // The capture member the read form added: a strict value has nothing undeclared to
             // bring along.
-            return quote! { #deprecated #member: Default::default(), };
+            return quote! { #deprecated #member: ::std::default::Default::default(), };
         };
         let converted = convert(quote! { value.#member }, &source.ty, contracts);
         if field.presence == Presence::Required && !field.is_capture() {
