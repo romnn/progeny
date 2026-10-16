@@ -17,7 +17,7 @@ runs:
         >> "$GITHUB_OUTPUT"
     - name: Restore the corpus
       id: cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: corpus/cache
         key: ${{ steps.key.outputs.key }}
@@ -31,7 +31,7 @@ runs:
     # succeeding would routinely never run.
     - name: Save the corpus
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: corpus/cache
         key: ${{ steps.key.outputs.key }}
