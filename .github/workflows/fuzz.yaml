@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+name: fuzz
+# A workflow of its own rather than a job in `test`: it runs on nightly, and `release` calls `test`,
+# so a nightly regression here must not be able to block a release.
+on:
+  push: {}
+  workflow_dispatch: {}
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+env:
+  MISE_GITHUB_TOKEN: ${{ github.token }}
+  MISE_AUTO_INSTALL: "0"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+        with:
+          install: false
+          cache: true
+          env: false
+      # Before installing cargo-fuzz: mise builds it from source with cargo.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - run: mise install task cargo:cargo-fuzz
+      # fuzz/ is a workspace of its own, with its own target directory.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          cache-on-failure: true
+      - name: Build the fuzz targets
+        run: task fuzz:build
+      - name: Lint the fuzz targets
+        run: task fuzz:lint
+      - name: Replay the regression inputs
+        run: task fuzz:regressions
+      # A smoke test, not a soak: it catches a target that crashes on its first inputs or no
+      # longer starts.
+      - name: Fuzz every target briefly
+        run: task fuzz:smoke

@@ -155,12 +155,83 @@ tasks:
     cmds:
       - cargo test --doc --workspace {{.CLI_ARGS}}
 
+  # cargo-fuzz defaults `--target` to the triple its own binary was built for.
+  # A prebuilt download can be a static musl binary, and the address sanitizer cannot run against
+  # static musl, so these tasks pass the nightly compiler's host triple instead.
   fuzz:
     desc: "soak a fuzz target (front_end or round_trip); needs nightly + cargo-fuzz"
     dir: "{{.ROOT_DIR}}/fuzz"
     interactive: true
+    vars:
+      HOST:
+        sh: "rustc +nightly -vV | sed -n 's/^host: //p'"
     cmds:
-      - cargo +nightly fuzz run {{.CLI_ARGS}}
+      - cargo +nightly fuzz run --target {{.HOST}} {{.CLI_ARGS}}
+
+  fuzz:build:
+    desc: "build every fuzz target with the sanitizer"
+    dir: "{{.ROOT_DIR}}/fuzz"
+    vars:
+      HOST:
+        sh: "rustc +nightly -vV | sed -n 's/^host: //p'"
+    cmds:
+      - cargo +nightly fuzz build --target {{.HOST}} {{.CLI_ARGS}}
+
+  fuzz:lint:
+    desc: "lint the fuzz targets"
+    dir: "{{.ROOT_DIR}}/fuzz"
+    cmds:
+      - cargo +nightly clippy --all-targets --no-deps {{.CLI_ARGS}}
+
+  # libFuzzer writes new inputs into the first corpus directory only, so the committed regression
+  # inputs seed the run without being changed by it.
+  fuzz:smoke:
+    desc: "fuzz every target briefly (FUZZ_SECONDS each, default 30), seeded with the regressions"
+    dir: "{{.ROOT_DIR}}/fuzz"
+    vars:
+      HOST:
+        sh: "rustc +nightly -vV | sed -n 's/^host: //p'"
+      TARGETS:
+        sh: cargo +nightly fuzz list
+      SECONDS: '{{.FUZZ_SECONDS | default "30"}}'
+    cmds:
+      - for: { var: TARGETS }
+        cmd: >-
+          mkdir -p corpus/{{.ITEM}} &&
+          cargo +nightly fuzz run --target {{.HOST}} {{.ITEM}} corpus/{{.ITEM}} regressions/{{.ITEM}}
+          -- -max_total_time={{.SECONDS}}
+
+  # `fuzz/regressions/<target>` is committed: a minimal edge-covering set of each target's inputs,
+  # plus any crash input worth keeping fixed.
+  # `-runs=0` executes every input once and fuzzes nothing, so this is deterministic.
+  fuzz:regressions:
+    desc: "replay the committed regression inputs through every fuzz target"
+    dir: "{{.ROOT_DIR}}/fuzz"
+    vars:
+      HOST:
+        sh: "rustc +nightly -vV | sed -n 's/^host: //p'"
+      TARGETS:
+        sh: cargo +nightly fuzz list
+    cmds:
+      - for: { var: TARGETS }
+        cmd: cargo +nightly fuzz run --target {{.HOST}} {{.ITEM}} regressions/{{.ITEM}} -- -runs=0
+
+  # Counting edges rather than hit-count buckets keeps the set small: about 360 inputs a target
+  # instead of thousands, with the same edge coverage.
+  fuzz:regressions:merge:
+    desc: "fold inputs that reach new edges from the local corpus into the regression sets"
+    dir: "{{.ROOT_DIR}}/fuzz"
+    vars:
+      HOST:
+        sh: "rustc +nightly -vV | sed -n 's/^host: //p'"
+      TARGETS:
+        sh: cargo +nightly fuzz list
+    cmds:
+      - for: { var: TARGETS }
+        cmd: >-
+          mkdir -p regressions/{{.ITEM}} &&
+          cargo +nightly fuzz run --target {{.HOST}} {{.ITEM}} regressions/{{.ITEM}} corpus/{{.ITEM}}
+          -- -set_cover_merge=1 -use_counters=0 -use_value_profile=0
 
   fuzz:list:
     desc: "list the fuzz targets"

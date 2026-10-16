@@ -20,8 +20,8 @@ zig = "latest"
 "aqua:rustsec/rustsec/cargo-audit" = "latest"
 "github:est31/cargo-udeps" = "latest"
 "github:romnn/cargo-watchdoc" = { version = "latest", minimum_release_age = "0" }
-# The fuzz targets under fuzz/ need nightly and a sanitizer, so this is local-only: soaks run on a
-# dev box, and CI gates the corpus instead. No prebuilt backend publishes it.
+# The fuzz targets under fuzz/ need nightly and a sanitizer, so long soaks run on a dev box and CI
+# only builds, lints and briefly fuzzes them. No prebuilt backend publishes it.
 "cargo:cargo-fuzz" = "latest"
 
 [settings]

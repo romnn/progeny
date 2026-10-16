@@ -8,6 +8,8 @@ extend-exclude = [
   # a finding about progeny's own prose. `zoom` writes `timstamp`, and correcting it would make the
   # snapshot disagree with the document it is a snapshot of.
   "corpus/snapshots/**",
+  # Fuzzer inputs are mangled text by design.
+  "fuzz/regressions/**",
 ]
 
 [default]

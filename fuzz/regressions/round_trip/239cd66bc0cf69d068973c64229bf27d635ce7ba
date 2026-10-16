@@ -1,0 +1,49 @@
+-661004:		1040
+!TR	14:	0010iiiiiiiii14
+!	005:		1040
+!TTR	14:	110010iiiiii040
+!TR	14:	110010iiiiii0
+!TR	14:	0010iiiiiii14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiiiiiiii!!1001iiiii!!100i14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiii0
+!TR	14:	0010iiiiiii14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiiiiiiii!!10010iiiiiiiii14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiii0
+!TR	14:	0010iiiiiii14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiiiiiiii!!1001iiiii!!100i14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiii0
+!TR	14:	0010iiiiiii10iiiiii040
+!TR	14:	110010iiiiii0
+!TR	14:	0010iiiiiii14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiiiiiiii!!1001iiiii!!100i14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110iiiiii040
+!TR	14:	110010iiiiii1iiiii!!10010!004		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiii0
+!TR	14:	0010iiiiCii14
+!	005:		1040
+!TR	14:	110010iiiiii040
+!TR	14:	110010iiiiii1iiiii!!10010!004
+!	005:		1040
+!T*	14:	110!!14
+!	005:iiii!!1001ii!004
+!	005:		1040
+!T*	14:	1!!410!
+1	005:iiii!!1001iiiii!!10010!004
+!	6
