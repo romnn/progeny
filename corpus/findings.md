@@ -467,30 +467,6 @@ provisional entry as the basis of a comparison. A test asserts that the checked-
 its own recorded conditions, which is what the old file did not — it recorded the numbers *and* the
 load and never drew the conclusion.
 
-### Stage 4 did not change what the output costs to compile
-
-The derive-only tree as it stood at the end of stage 3 is archived, so the "A" side of every future
-comparison survives both `git clean` and any amount of generator drift. Measured against the
-current tree on the same machine within the same few minutes:
-
-| `oxide`, derive rendering | CPU | peak RSS |
-| --- | ---: | ---: |
-| stage 3, archived | 6.63 s | 684.9 MiB |
-| stage 4 | 6.01–7.42 s across two runs | 684.3 MiB |
-
-The spread between two runs of the *same* tree is wider than the difference between the two trees,
-and peak RSS agrees to within 0.1%. Stage 4 changed which unions are representable; it did not
-change what the result costs.
-
-**Where the archive is, because an archive nobody can find is a note.** Both sides of the stage-4
-A/B — six crates, 10 MiB — sit at `/home/roman/dev/progeny-bench-stage4/`, outside the repository so
-they survive `git clean`, with a `GENERATED_FROM.txt` recording the revision they came from and a
-`bench-rendering.toml` that `--reuse` reads for the directory list. They are the subject the
-−63…−68% claim is *about*: stage 5 added the client surface, so the same measurement taken against
-today's output would answer a different question. To re-take the corrected figure, copy them back
-into `target/generated/` and run `--reuse`; the recorded `scope = "types-only"` then travels into
-the baseline entry, and `--check` will refuse to compare it against anything with a client in it.
-
 ## What the API model found, and what it cost
 
 Stage 5 turned the corpus into operations. Four things it settled that no earlier stage could:

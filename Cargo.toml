@@ -7,7 +7,7 @@ version = "0.0.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/romnn/progeny"
-authors = ["romnn <roman@airtype.de>"]
+authors = ["romnn <contact@romnn.com>"]
 keywords = ["openapi", "codegen", "reqwest", "axum", "serde"]
 categories = ["development-tools", "web-programming"]
 
