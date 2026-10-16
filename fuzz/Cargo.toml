@@ -27,7 +27,7 @@ indoc = "2"
 libfuzzer-sys = "0.4"
 progeny = { path = "../crates/progeny", features = ["harness"] }
 # The generation target asserts that what comes out parses as Rust, which needs a parser.
-syn = { version = "2", features = ["full", "parsing"] }
+syn = { version = "3.0.6", features = ["full", "parsing"] }
 
 [[bin]]
 name = "front_end"
