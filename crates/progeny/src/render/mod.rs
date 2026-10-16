@@ -451,9 +451,10 @@ fn client_use(api: &ApiModel) -> crate::support::ClientUse {
             .chain(operation.responses.default.iter())
         {
             match arm.body {
+                crate::api::ResponseBody::Json { .. } => used.json_response = true,
+                crate::api::ResponseBody::Empty => used.empty_response = true,
                 crate::api::ResponseBody::Text { .. } => used.text_response = true,
                 crate::api::ResponseBody::Bytes { .. } => used.byte_response = true,
-                crate::api::ResponseBody::Json { .. } | crate::api::ResponseBody::Empty => {}
             }
         }
         for parameter in &operation.params {

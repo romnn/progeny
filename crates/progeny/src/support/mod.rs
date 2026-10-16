@@ -135,6 +135,8 @@ impl ServerUse {
 pub(crate) struct ClientUse {
     pub(crate) form: bool,
     pub(crate) multipart: bool,
+    pub(crate) json_response: bool,
+    pub(crate) empty_response: bool,
     pub(crate) text_response: bool,
     pub(crate) byte_response: bool,
     pub(crate) query: bool,
@@ -983,6 +985,16 @@ fn client_source(
                     &mut function.attrs,
                     "this description declares no form or multipart request body",
                 ),
+                // The strict decoder reads every empty body, and a JSON one only where responses
+                // are not read leniently.
+                "decode_json" if !used.empty_response && decoding.is_lenient() => expect_dead_code(
+                    &mut function.attrs,
+                    "this client reads JSON leniently and declares no empty response body",
+                ),
+                "decode_json" if !used.empty_response && !used.json_response => expect_dead_code(
+                    &mut function.attrs,
+                    "this description declares no JSON or empty response body",
+                ),
                 "decode_text" if !used.text_response => expect_dead_code(
                     &mut function.attrs,
                     "this description declares no text response body",
@@ -1454,6 +1466,51 @@ mod tests {
         );
         let imprecise = super::credentials_source(super::CREDENTIALS, None).to_string();
         assert!(!imprecise.contains("expect"), "{imprecise}");
+    }
+
+    /// The strict decoder reads every empty body and, unless responses are read leniently, every
+    /// JSON one, so a precise client expects it dead only when neither reaches it.
+    #[test_util::test]
+    fn the_strict_decoder_is_expected_dead_when_no_response_reaches_it() {
+        let lenient = super::Decoding::Lenient(super::LeafUse::default());
+        let strict = super::Decoding::Strict;
+        let json = super::ClientUse {
+            json_response: true,
+            ..super::ClientUse::default()
+        };
+        let empty = super::ClientUse {
+            empty_response: true,
+            ..super::ClientUse::default()
+        };
+        let expected_dead = |used: super::ClientUse, decoding: super::Decoding| {
+            let file: syn::File =
+                syn::parse2(super::client_source(super::HTTP, Some(used), decoding))?;
+            let decoder = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(function) if function.sig.ident == "decode_json" => {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .ok_or_eyre("the client runtime ships `decode_json`")?;
+            eyre::Ok(
+                decoder
+                    .attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("expect")),
+            )
+        };
+
+        // Lenient: only an empty body reaches it
+        assert!(expected_dead(json, lenient)?);
+        assert!(!expected_dead(empty, lenient)?);
+
+        // Strict: a JSON or an empty body reaches it
+        assert!(!expected_dead(json, strict)?);
+        assert!(!expected_dead(empty, strict)?);
+        assert!(expected_dead(super::ClientUse::default(), strict)?);
     }
 
     /// The body ceiling is a knob, and the shipped constant is what it turns.
