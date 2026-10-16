@@ -61,7 +61,7 @@ write it where it likes.
 
 ```toml
 [build-dependencies]
-progeny = "0.0.2"
+progeny = "0.0.3"
 ```
 
 `progeny-cli` is the front end for the checked-in-output workflow, and the only part that touches
