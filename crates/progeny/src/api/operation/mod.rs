@@ -77,7 +77,15 @@ pub(super) fn run(
     build.check_media_type_requests()?;
 
     super::registrable::classify(&mut operations, ctx);
+    // A client holds a credential only to send it. When no operation requires a scheme the
+    // client sends, a setter would hold a value that no request carries.
     let mut schemes = build.schemes;
+    if operations
+        .iter()
+        .all(|operation| operation.security.is_empty())
+    {
+        schemes.clear();
+    }
     super::security::name_setters(&mut schemes, &mut build.namer);
     Ok(ApiModel {
         operations,

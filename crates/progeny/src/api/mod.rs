@@ -59,6 +59,8 @@ impl ApiModel {
 
     /// The security schemes the client sends a credential for, numbered by position: the numbers
     /// [`OperationContract::security`] names them by.
+    ///
+    /// Empty when no operation requires one of them.
     pub(crate) fn schemes(&self) -> &[CredentialScheme] {
         &self.schemes
     }

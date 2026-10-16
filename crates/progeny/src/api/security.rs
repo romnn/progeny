@@ -275,6 +275,32 @@ mod tests {
         assert_eq!(required("open"), Some(vec![]));
     }
 
+    /// A client whose every operation is anonymous holds no credential, because no request would
+    /// carry one, but a header parameter named like a scheme stays as secret as the scheme.
+    #[test_util::test]
+    fn schemes_no_operation_requires_are_not_held() {
+        let (model, _) = model_of(json!({
+            "openapi": "3.1.0",
+            "components": {"securitySchemes": {
+                "key": {"type": "apiKey", "in": "header", "name": "X-Api-Key"},
+                "query": {"type": "apiKey", "in": "query", "name": "api_key"},
+            }},
+            "paths": {"/open": {"get": {"operationId": "open", "security": [],
+                "parameters": [{"name": "X-Api-Key", "in": "header", "schema": {"type": "string"}}],
+                "responses": {"204": {"description": "done"}}}}},
+        }))?;
+        assert_eq!(model.schemes(), []);
+        let operation = model
+            .operations()
+            .first()
+            .ok_or_eyre("the document declares one operation")?;
+        let header = operation
+            .params
+            .first()
+            .ok_or_eyre("the operation declares one parameter")?;
+        assert!(header.credential);
+    }
+
     /// A scheme setter yields to an operation that already took its name.
     #[test_util::test]
     fn a_setter_yields_to_an_operation_of_the_same_name() {
@@ -312,7 +338,7 @@ mod tests {
                 "query": {"type": "apiKey", "in": "query", "name": "api_key"},
                 "tls": {"type": "mutualTLS"},
             }},
-            "paths": {"/p": {"get": {"operationId": "p",
+            "paths": {"/p": {"get": {"operationId": "p", "security": [{"bearer": []}],
                 "responses": {"204": {"description": "done"}}}}},
         }))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -350,7 +376,7 @@ mod tests {
                 "key": {"type": "apiKey", "in": "header", "name": "X-Api-Key"},
                 "broken": {"type": "apiKey", "in": "header", "name": "two words"},
             }},
-            "paths": {"/key": {"get": {"operationId": "key",
+            "paths": {"/key": {"get": {"operationId": "key", "security": [{"key": []}],
                 "parameters": [
                     {"name": "x-api-key", "in": "header", "schema": {"type": "string"}},
                     {"name": "X-Trace", "in": "header", "schema": {"type": "string"}},
