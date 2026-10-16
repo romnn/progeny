@@ -10,6 +10,10 @@
 # cooldown
 .cooldown.lock
 
+goreleaser-dist/
+.intentionally-empty-file.o
+*_compiler_family.o
+
 # Vendor OpenAPI documents: ~117 MB, and redistribution rights vary by publisher.
 # Fetched from corpus/manifest.toml via `cargo xtask corpus --fetch`.
 /corpus/cache/

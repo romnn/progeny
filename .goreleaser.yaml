@@ -1,0 +1,108 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+dist: goreleaser-dist
+
+builds:
+  - id: &progeny progeny
+    builder: rust
+    binary: *progeny
+    tool: cargo
+    command: zigbuild
+    targets: &targets
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - x86_64-pc-windows-gnu
+      - aarch64-pc-windows-gnullvm
+    flags: ["--release", "--package=progeny-cli", "--bin=progeny"]
+  - id: &cargo-progeny cargo-progeny
+    builder: rust
+    binary: *cargo-progeny
+    tool: cargo
+    command: zigbuild
+    targets: *targets
+    flags: ["--release", "--package=progeny-cli", "--bin=cargo-progeny"]
+
+archives:
+  - id: *progeny
+    ids: [*progeny]
+    formats: ["tar.gz"]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE-MIT, LICENSE-APACHE]
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+  - id: *cargo-progeny
+    ids: [*cargo-progeny]
+    formats: ["tar.gz"]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE-MIT, LICENSE-APACHE]
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  filters:
+    exclude: ["^ci(\\(.*\\))?:", "^docs(\\(.*\\))?:", "^test(\\(.*\\))?:"]
+
+homebrew_casks:
+  - name: *progeny
+    ids: [*progeny]
+    description: "Generate a Rust client and server from an OpenAPI description"
+    custom_block: |
+      os macos: "darwin", linux: "linux"
+
+      postflight_steps do
+        on_macos do
+          if_path_exists "/usr/bin/xattr" do
+            run "/usr/bin/xattr",
+                args:         ["-dr", "com.apple.quarantine", "{{ `{{staged_path}}` }}/progeny"],
+                must_succeed: false
+          end
+        end
+      end
+    directory: Casks
+    commit_author:
+      name: romnn
+      email: contact@romnn.com
+    repository:
+      owner: romnn
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      pull_request:
+        enabled: false
+  - name: *cargo-progeny
+    ids: [*cargo-progeny]
+    description: "Cargo subcommand to generate a Rust client and server from an OpenAPI description"
+    custom_block: |
+      os macos: "darwin", linux: "linux"
+
+      postflight_steps do
+        on_macos do
+          if_path_exists "/usr/bin/xattr" do
+            run "/usr/bin/xattr",
+                args:         ["-dr", "com.apple.quarantine", "{{ `{{staged_path}}` }}/cargo-progeny"],
+                must_succeed: false
+          end
+        end
+      end
+    directory: Casks
+    commit_author:
+      name: romnn
+      email: contact@romnn.com
+    repository:
+      owner: romnn
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      pull_request:
+        enabled: false
+
+release:
+  draft: false

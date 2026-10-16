@@ -1,6 +1,10 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: "3"
 
+vars:
+  ZIGBUILD_IMAGE: ghcr.io/rust-cross/cargo-zigbuild:latest
+  GORELEASER_VERSION: "2.17.0"
+
 tasks:
   default:
     cmds:
@@ -20,6 +24,36 @@ tasks:
     desc: "build in release mode"
     cmds:
       - cargo build --all-targets --release {{.CLI_ARGS}}
+
+  goreleaser:
+    internal: true
+    requires:
+      vars: [GORELEASER_ARGS]
+    cmds:
+      # The image provides Rust, zig, cargo-zigbuild and the release targets; only GoReleaser is missing.
+      # The bind-mounted checkout needs safe.directory, and build outputs must retain host ownership.
+      - >-
+          docker run --rm -e GITHUB_TOKEN -e TAP_GITHUB_TOKEN -e "HOST_UID=$(id -u)" -e
+          "HOST_GID=$(id -g)" -v "${PWD}:/workspace" -w /workspace {{.ZIGBUILD_IMAGE}} bash
+          -euo pipefail -c ' fix_perms() { for d in target goreleaser-dist; do [ -e "$d" ] &&
+          chown -R "${HOST_UID}:${HOST_GID}" "$d" || true; done; }; trap fix_perms EXIT; case
+          "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=arm64 ;; *) echo
+          "unsupported arch" >&2; exit 1 ;; esac; curl -sSfL
+          "https://github.com/goreleaser/goreleaser/releases/download/v{{.GORELEASER_VERSION}}/goreleaser_Linux_${arch}.tar.gz"
+          | tar -xz -C /usr/local/bin goreleaser; git config --global --add safe.directory
+          "$(pwd)"; goreleaser {{.GORELEASER_ARGS}}'
+
+  build:goreleaser:
+    desc: "build in release mode using goreleaser"
+    cmds:
+      - task: goreleaser
+        vars: { GORELEASER_ARGS: "build --snapshot --clean" }
+
+  release:
+    desc: "release using goreleaser"
+    cmds:
+      - task: goreleaser
+        vars: { GORELEASER_ARGS: "release --clean" }
 
   check:
     desc: "check cargo workspace"

@@ -61,7 +61,7 @@ write it where it likes.
 
 ```toml
 [build-dependencies]
-progeny = "0.0.1"
+progeny = "0.0.2"
 ```
 
 `progeny-cli` is the front end for the checked-in-output workflow, and the only part that touches
@@ -72,6 +72,14 @@ consumers who would rather not remember a second one.
 cargo install progeny-cli
 progeny openapi.yaml --config progeny.toml --out-dir generated/
 cargo progeny openapi.yaml --out-dir generated/
+```
+
+Precompiled binaries are available from [GitHub Releases](https://github.com/romnn/progeny/releases)
+for Linux, macOS, and Windows. Homebrew installs either command independently:
+
+```sh
+brew install --cask romnn/tap/progeny
+brew install --cask romnn/tap/cargo-progeny
 ```
 
 `progeny --version` reports the version of the *library* that would generate the output, not of the
@@ -447,8 +455,18 @@ from.
 
 ## Releasing
 
+Tag pushes run the test workflow, publish `progeny` and `progeny-cli` to crates.io, and publish
+separate `progeny` and `cargo-progeny` archives and Homebrew casks. The release workflow needs
+`CARGO_REGISTRY_TOKEN` for crates.io and `TAP_GITHUB_TOKEN` with write access to
+`romnn/homebrew-tap`; GitHub supplies `GITHUB_TOKEN` for release assets.
+
+`task build:goreleaser` checks the release builds locally in Docker without publishing.
+After the checks below pass, `bumpversion patch` updates the manifests and lockfile, commits the
+version bump, and creates its tag. Pushing that tag starts publication.
+
 ```sh
-task test:all               # unit, integration and doc tests
+task test:all               # unit and integration tests
+task test:doc               # doc tests
 task lint:fc                # every feature combination × target, warnings denied
 task lint:layers            # the one-directional layer rule
 task typos                  # prose, excluding the vendor documents and their snapshots
