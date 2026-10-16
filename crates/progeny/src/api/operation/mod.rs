@@ -496,7 +496,7 @@ mod tests {
         let (model, diagnostics) = model_of(with_paths(json!({
             "/pets/{petId}": {"get": {"operationId": "getPet", "responses": {"200": {"description": "ok"}}}},
         })))?;
-        assert!(model.operations().is_empty());
+        assert_eq!(model.operations(), []);
         let found = diagnostics
             .iter()
             .find(|found| found.class() == crate::BreakageClass::UnregistrableRoute)

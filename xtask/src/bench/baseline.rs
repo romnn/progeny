@@ -421,8 +421,14 @@ mod tests {
 
     #[test_util::test]
     fn a_measurement_within_the_discipline_says_nothing() {
-        assert!(shortfalls(discipline::MIN_KEPT, discipline::MAX_LOAD, false).is_empty());
-        assert!(shortfalls(discipline::MIN_KEPT + 1, 0.30, false).is_empty());
+        assert_eq!(
+            shortfalls(discipline::MIN_KEPT, discipline::MAX_LOAD, false),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            shortfalls(discipline::MIN_KEPT + 1, 0.30, false),
+            Vec::<String>::new()
+        );
     }
 
     #[test_util::test]

@@ -561,9 +561,9 @@ mod tests {
         // Recording 0.40 here would describe a run that spent a third of itself at load 9 as
         // having been taken on an idle machine.
         assert!((summary.worst_load() - 9.10).abs() < 1e-9);
-        assert!(
-            !crate::bench::baseline::shortfalls(summary.kept.len(), summary.worst_load(), false)
-                .is_empty()
+        assert_ne!(
+            crate::bench::baseline::shortfalls(summary.kept.len(), summary.worst_load(), false),
+            Vec::<String>::new()
         );
     }
 

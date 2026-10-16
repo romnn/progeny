@@ -339,7 +339,10 @@ mod tests {
     #[test]
     fn module_paths_come_from_file_paths() {
         let root = Utf8Path::new("/w/crates/progeny/src");
-        assert!(module_path(root, Utf8Path::new("/w/crates/progeny/src/lib.rs")).is_empty());
+        assert_eq!(
+            module_path(root, Utf8Path::new("/w/crates/progeny/src/lib.rs")),
+            Vec::<String>::new()
+        );
         assert_eq!(
             module_path(root, Utf8Path::new("/w/crates/progeny/src/load.rs")),
             ["load"]

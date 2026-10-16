@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn the_budget_refuses_cost_and_behavior_regressions() {
-        assert!(budget_violations(&comparison(), true).is_empty());
+        assert_eq!(budget_violations(&comparison(), true), Vec::<String>::new());
 
         let mut expensive = comparison();
         expensive.valid_allocations_ratio = MAX_ALLOCATIONS_RATIO + 0.01;

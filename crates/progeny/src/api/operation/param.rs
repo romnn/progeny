@@ -295,7 +295,7 @@ mod tests {
                 },
             },
         })))?;
-        assert!(model.operations().is_empty());
+        assert_eq!(model.operations(), []);
     }
 
     #[test_util::test]
@@ -339,7 +339,7 @@ mod tests {
                 },
             },
         })))?;
-        assert!(model.operations()[0].params.is_empty());
+        assert_eq!(model.operations()[0].params, []);
         let report = diagnostics
             .iter()
             .find(|diagnostic| diagnostic.detail().contains("no variable of `/pets`"))

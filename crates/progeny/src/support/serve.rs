@@ -450,7 +450,7 @@ mod tests {
             panic!("{rejected:?}");
         };
         assert_eq!(*parameter, "limit");
-        assert!(!detail.is_empty());
+        assert_ne!(detail, "");
         // The sentence names the operation as well, because a service logging these has no other
         // way to tell two `limit` parameters apart.
         assert!(rejected.to_string().contains("listPets"), "{rejected}");

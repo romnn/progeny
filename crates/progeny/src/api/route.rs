@@ -248,6 +248,9 @@ mod tests {
     fn a_variable_no_parameter_declares_is_reported_by_name() {
         let template = parse("/pets/{petId}/toys/{toyId}")?;
         assert_eq!(unbound(&template, &["petId".to_owned()]), ["toyId"]);
-        assert!(unbound(&template, &["petId".to_owned(), "toyId".to_owned()]).is_empty());
+        assert_eq!(
+            unbound(&template, &["petId".to_owned(), "toyId".to_owned()]),
+            Vec::<&str>::new()
+        );
     }
 }

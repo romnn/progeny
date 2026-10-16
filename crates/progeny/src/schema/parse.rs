@@ -312,7 +312,7 @@ mod tests {
         let id = schema(json!(false), &mut store, &mut ctx)
             .map_err(|value| eyre::eyre!("invalid schema: {value}"))?;
         assert_eq!(store.get(id), &Schema::Bool(false));
-        assert!(ctx.into_diagnostics().is_empty());
+        assert_eq!(ctx.into_diagnostics(), []);
     }
 
     #[test_util::test]
@@ -343,7 +343,7 @@ mod tests {
             "xml": {"name": "a", "wrapped": true},
             "externalDocs": {"url": "https://example.test"},
         }))?;
-        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics, []);
         assert_eq!(object.id.as_deref(), Some("https://example.test/a"));
         assert_eq!(object.all_of.as_ref().map(Vec::len), Some(2));
         assert_eq!(object.properties.as_ref().map(BTreeMap::len), Some(1));
@@ -381,7 +381,7 @@ mod tests {
             "x-vendor": {"deep": [1, 2]},
             "futureKeyword": "whatever",
         }))?;
-        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics, []);
         assert_eq!(object.unknown.len(), 2);
         assert_eq!(object.unknown["x-vendor"], json!({"deep": [1, 2]}));
     }
@@ -394,7 +394,7 @@ mod tests {
             "$ref": "#/components/schemas/Pet",
             "description": "one pet",
         }))?;
-        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics, []);
         assert_eq!(
             object.reference.as_deref(),
             Some("#/components/schemas/Pet")

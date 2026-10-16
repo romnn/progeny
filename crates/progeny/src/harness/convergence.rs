@@ -295,7 +295,7 @@ mod tests {
         let shared = record("nothing tells these apart");
         let other = record("something else entirely");
 
-        assert!(super::asymmetric(&shared, &shared).is_empty());
+        assert_eq!(super::asymmetric(&shared, &shared), []);
         let found = super::asymmetric(&shared, &other);
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].location, "3.1");

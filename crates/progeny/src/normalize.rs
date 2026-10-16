@@ -1281,7 +1281,7 @@ mod tests {
         let both = json!({"items": [{"type": "string"}], "prefixItems": [{"type": "integer"}]});
         let (rewritten, diagnostics) = normalized_schema_31(&both)?;
         assert_eq!(rewritten, both);
-        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics, []);
     }
 
     #[test_util::test]
@@ -1327,7 +1327,7 @@ mod tests {
             with_schema(&json!({"minimum": 0, "exclusiveMinimum": true})),
             &mut ctx,
         )?;
-        assert!(ctx.into_diagnostics().is_empty());
+        assert_eq!(ctx.into_diagnostics(), []);
     }
 
     #[test_util::test]
@@ -1367,7 +1367,7 @@ mod tests {
         let mut ctx = Ctx::new();
         let out = normalize(document.clone(), &mut ctx)?.into_value();
         assert_eq!(out, document);
-        assert!(ctx.into_diagnostics().is_empty());
+        assert_eq!(ctx.into_diagnostics(), []);
     }
 
     #[test_util::test]

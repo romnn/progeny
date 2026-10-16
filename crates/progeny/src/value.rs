@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(rest.len(), 2);
         assert_eq!(rest["x-vendor"], json!({"nested": [1, 2]}));
         assert_eq!(rest["unknownKeyword"], json!(true));
-        assert!(ctx.into_diagnostics().is_empty());
+        assert_eq!(ctx.into_diagnostics(), []);
     }
 
     #[test_util::test]
@@ -386,7 +386,7 @@ mod tests {
         let mut node = members(json!({"default": null}));
         assert_eq!(node.value("default"), Some(Value::Null));
         assert_eq!(node.value("default"), None);
-        assert!(ctx.into_diagnostics().is_empty());
+        assert_eq!(ctx.into_diagnostics(), []);
     }
 
     #[test_util::test]

@@ -595,8 +595,8 @@ mod tests {
         );
         let file = syn::parse2::<syn::File>(render(&model))?;
         assert_eq!(enum_variants(&file, "Operation")?, ["ShowOwner", "ShowPet"]);
-        assert!(enum_variants(&file, "Route")?.is_empty());
-        assert!(all_of(&file, "Route")?.is_empty());
+        assert_eq!(enum_variants(&file, "Route")?, Vec::<String>::new());
+        assert_eq!(all_of(&file, "Route")?, Vec::<String>::new());
         // An empty enum cannot be cast to an index, so its accessor is the empty match and the
         // table it would index is not emitted at all.
         assert!(static_elements(&file, "ROUTES").is_none());

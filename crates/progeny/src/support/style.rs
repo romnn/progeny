@@ -788,7 +788,7 @@ mod tests {
             [("limit".to_owned(), "20".to_owned())]
         );
         // An absent value contributes nothing at all, rather than an empty pair.
-        assert!(query_pairs("tag", &json!(null), Style::Form, true).is_empty());
+        assert_eq!(query_pairs("tag", &json!(null), Style::Form, true), []);
     }
 
     #[test]

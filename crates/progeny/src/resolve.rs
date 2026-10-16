@@ -1116,7 +1116,7 @@ mod tests {
         assert_eq!(diagnostics[0].class(), BreakageClass::DanglingRef);
         assert_eq!(diagnostics[0].action(), Action::Degrade);
         assert_eq!(resolved.counts().dangling, 1);
-        assert!(resolved.materialized().is_empty());
+        assert_eq!(resolved.materialized(), []);
     }
 
     #[test_util::test]
