@@ -89,30 +89,7 @@ fn inheritance_union(
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) {
-    if view.union.is_some() {
-        return;
-    }
-    let Some(declared) = &view.discriminator else {
-        return;
-    };
-    if declared.mapping.is_empty() || key.parts().len() != 1 {
-        return;
-    }
-
-    let mut branches: Vec<ShapeKey> = Vec::new();
-    let mut unmapped: Vec<&str> = Vec::new();
-    for target in declared.mapping.values() {
-        let Some(id) = resolved.discriminator_target(target) else {
-            unmapped.push(target);
-            continue;
-        };
-        let branch = merge::key_of(resolved, id);
-        // A mapping naming the base itself would make the union one of its own variants, which is
-        // a type that contains itself by value.
-        if &branch != key && !branches.contains(&branch) {
-            branches.push(branch);
-        }
-    }
+    let Subtypes { branches, unmapped } = subtypes(resolved, view, key);
     for target in unmapped {
         degrade(
             ctx,
@@ -198,7 +175,8 @@ fn core(
     at: &JsonPointer,
 ) -> Shape {
     if let Some(branches) = &view.union {
-        return union(resolved, view, branches, component_names, ctx, at);
+        let shape = union(resolved, view, branches, component_names, ctx, at);
+        return keep_own_members(resolved, view, shape, ctx, at);
     }
     if let Some(values) = string_values(view, ctx, at) {
         return Shape::StringEnum(values);
@@ -472,6 +450,249 @@ fn union(
         return Shape::Optional(ShapeRef::Inline(Box::new(inner)));
     }
     inner
+}
+
+/// The subtypes a base schema's discriminator mapping names, and the mapped targets that name no
+/// schema.
+///
+/// Empty unless `key` is the schema that declares the discriminator, for the reason
+/// [`inheritance_union`] gives.
+fn subtypes<'a>(resolved: &ResolvedDocument, view: &'a View, key: &ShapeKey) -> Subtypes<'a> {
+    let mut branches: Vec<ShapeKey> = Vec::new();
+    let mut unmapped: Vec<&str> = Vec::new();
+    let Some(declared) = &view.discriminator else {
+        return Subtypes { branches, unmapped };
+    };
+    if view.union.is_some() || key.parts().len() != 1 {
+        return Subtypes { branches, unmapped };
+    }
+    for target in declared.mapping.values() {
+        let Some(id) = resolved.discriminator_target(target) else {
+            unmapped.push(target);
+            continue;
+        };
+        let branch = merge::key_of(resolved, id);
+        // A mapping naming the base itself would make the union one of its own variants, which is
+        // a type that contains itself by value.
+        if &branch != key && !branches.contains(&branch) {
+            branches.push(branch);
+        }
+    }
+    Subtypes { branches, unmapped }
+}
+
+/// What [`subtypes`] reads from a discriminator mapping.
+struct Subtypes<'a> {
+    branches: Vec<ShapeKey>,
+    unmapped: Vec<&'a str>,
+}
+
+/// Whether a schema is the base of an inheritance union, which [`inheritance_union`] reads as the
+/// union of its subtypes.
+fn names_its_subtypes(resolved: &ResolvedDocument, view: &View, key: &ShapeKey) -> bool {
+    subtypes(resolved, view, key).branches.len() >= 2
+}
+
+/// The union's shape, or arbitrary JSON when that shape would drop members declared beside it.
+///
+/// `{properties: P, anyOf: [A, B]}` means `P` and one of `A` or `B`, but the union is generated from
+/// the branches alone.
+/// A member of `P` that a branch's struct has no field for is read past and lost when the value is
+/// written back, so the union is kept only when every branch carries every member the schema
+/// names beside it, and keeps the extra members its `additionalProperties` describes.
+/// A tag the union reads is exempt, because the enum writes it back itself.
+fn keep_own_members(
+    resolved: &ResolvedDocument,
+    view: &View,
+    shape: Shape,
+    ctx: &mut Ctx,
+    at: &JsonPointer,
+) -> Shape {
+    let inner = match &shape {
+        Shape::Optional(ShapeRef::Inline(inner)) => inner.as_ref(),
+        other => other,
+    };
+    let (variants, tag): (Vec<&ShapeKey>, Option<&str>) = match inner {
+        Shape::Alias(ShapeRef::Key(key)) => (vec![key], None),
+        Shape::Union(union) => (
+            union
+                .variants
+                .iter()
+                .filter_map(|variant| match &variant.shape {
+                    ShapeRef::Key(key) => Some(key),
+                    ShapeRef::Inline(_) => None,
+                })
+                .collect(),
+            union.tag.as_ref().map(|tag| tag.property.as_str()),
+        ),
+        // Strings carry no members, and arbitrary JSON keeps them all.
+        _ => return shape,
+    };
+    let mut dropped: BTreeSet<String> = BTreeSet::new();
+    for key in variants {
+        dropped.extend(dropped_members(resolved, view, key, 0));
+    }
+    if let Some(tag) = tag {
+        dropped.remove(&format!("`{tag}`"));
+    }
+    if dropped.is_empty() {
+        return shape;
+    }
+    let dropped: Vec<String> = dropped.into_iter().collect();
+    degrade(
+        ctx,
+        at,
+        BreakageClass::UnsupportedConstruct,
+        &format!(
+            "this schema declares {} beside its `oneOf`/`anyOf`, and a branch does not keep them, \
+             so that branch would drop them; the value is typed as arbitrary JSON so that no member \
+             is lost",
+            dropped.join(", ")
+        ),
+    );
+    Shape::Any
+}
+
+/// How deep into nested members the test for dropped members follows them before giving up.
+///
+/// A recursive schema nests forever, so the depth is capped, and the cap answers "dropped",
+/// which is the direction that degrades rather than loses members.
+const MAX_MEMBER_DEPTH: usize = 4;
+
+/// The members `source` declares that a value read through `destination`'s type loses, each named
+/// for the diagnostic.
+///
+/// A destination that is not an object loses nothing, because a value it accepts has no members.
+fn dropped_members(
+    resolved: &ResolvedDocument,
+    source: &View,
+    destination: &ShapeKey,
+    depth: usize,
+) -> Vec<String> {
+    let target = merge::view(resolved, destination);
+    let union = target.union.is_some() || names_its_subtypes(resolved, &target, destination);
+    if !union && kind_of(resolved, &target) != Some(Kind::Object) {
+        return Vec::new();
+    }
+    let keeps =
+        |member: Option<&ShapeKey>| !union && keeps_undeclared(resolved, &target, member, depth);
+    let declared = source
+        .properties
+        .iter()
+        .map(|(name, key)| (name, Some(key)));
+    let required = source
+        .required
+        .iter()
+        .filter(|name| !source.properties.contains_key(*name))
+        .map(|name| (name, None));
+    let mut dropped: Vec<String> = declared
+        .chain(required)
+        .filter(|(name, member)| match target.properties.get(*name) {
+            Some(own) => !lands_intact(resolved, *member, Some(own), depth),
+            None => !keeps(*member),
+        })
+        .map(|(name, _)| format!("`{name}`"))
+        .collect();
+    // Extra members land in the capture or in a field the source does not name.
+    // A pattern also covers the names `properties` lists, so its members may land in any field.
+    let extras = [
+        (source.additional.as_ref(), false, "additionalProperties"),
+        (source.uniform_pattern.as_ref(), true, "patternProperties"),
+    ];
+    for (extra, covers_named, keyword) in extras {
+        let Some(extra) = extra else {
+            continue;
+        };
+        let fields_keep = target
+            .properties
+            .iter()
+            .filter(|(name, _)| covers_named || !source.properties.contains_key(*name))
+            .all(|(_, own)| lands_intact(resolved, Some(extra), Some(own), depth));
+        if !keeps(Some(extra)) || !fields_keep {
+            dropped.push(format!("the members its `{keyword}` describes"));
+        }
+    }
+    dropped
+}
+
+/// Whether an object `destination` keeps a member it does not declare, whose value `member`
+/// describes.
+///
+/// It keeps it only in a map or a typed capture the value lands in intact.
+fn keeps_undeclared(
+    resolved: &ResolvedDocument,
+    destination: &View,
+    member: Option<&ShapeKey>,
+    depth: usize,
+) -> bool {
+    let capture = destination
+        .additional
+        .as_ref()
+        .or(destination.uniform_pattern.as_ref());
+    !destination.additional_denied
+        && (destination.properties.is_empty() || capture.is_some())
+        && lands_intact(resolved, member, capture, depth)
+}
+
+/// Whether a member value `member` describes survives a round trip through `destination`.
+///
+/// `None` stands for a value the document says nothing about, or for arbitrary JSON.
+/// The value survives a destination of the same schema or arbitrary JSON, a destination that
+/// keeps every member and element it declares, or any destination when it is a scalar or
+/// declares nothing to lose.
+fn lands_intact(
+    resolved: &ResolvedDocument,
+    member: Option<&ShapeKey>,
+    destination: Option<&ShapeKey>,
+    depth: usize,
+) -> bool {
+    let (Some(member), Some(destination)) = (member, destination) else {
+        return true;
+    };
+    if member == destination {
+        return true;
+    }
+    if depth >= MAX_MEMBER_DEPTH {
+        return false;
+    }
+    let (source, target) = (
+        merge::view(resolved, member),
+        merge::view(resolved, destination),
+    );
+    let (source_union, target_union) = (
+        source.union.is_some() || names_its_subtypes(resolved, &source, member),
+        target.union.is_some() || names_its_subtypes(resolved, &target, destination),
+    );
+    let declares_nothing = !source_union
+        && source.properties.is_empty()
+        && source.required.is_empty()
+        && source.additional.is_none()
+        && source.uniform_pattern.is_none()
+        && source.items.is_none()
+        && source.prefix_items.is_none();
+    if declares_nothing || (!target_union && kind_of(resolved, &target).is_none()) {
+        return true;
+    }
+    if source_union || target_union {
+        return false;
+    }
+    match (kind_of(resolved, &source), kind_of(resolved, &target)) {
+        (Some(Kind::String | Kind::Number | Kind::Boolean | Kind::Null), _) => true,
+        (Some(Kind::Object), Some(Kind::Object)) => {
+            dropped_members(resolved, &source, destination, depth + 1).is_empty()
+        }
+        (Some(Kind::Array), Some(Kind::Array)) => {
+            source.prefix_items.is_none()
+                && target.prefix_items.is_none()
+                && lands_intact(
+                    resolved,
+                    source.items.as_ref(),
+                    target.items.as_ref(),
+                    depth + 1,
+                )
+        }
+        _ => false,
+    }
 }
 
 /// What a union's branches amount to once `null` and repeated branches are set aside.
