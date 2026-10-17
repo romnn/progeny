@@ -1251,6 +1251,405 @@ mod tests {
         );
     }
 
+    /// Whether classifying `schemas` reported a wild union, and typed `name` as arbitrary JSON.
+    fn degrades_as_wild_union(schemas: Value, name: &str) -> eyre::Result<bool> {
+        let (shapes, diagnostics) = shapes_of(with_schemas(schemas))?;
+        let reported = diagnostics
+            .iter()
+            .any(|d| d.class() == crate::BreakageClass::WildUnion);
+        Ok(reported && shape_of(&shapes, name)? == &Shape::Any)
+    }
+
+    /// serde's externally tagged enum, as `schemars` exports it.
+    #[test_util::test]
+    fn a_string_branch_beside_others_does_not_swallow_a_later_string() {
+        // The first branch becomes an open enum that reads `"abort"` as its own unlisted value, so
+        // the third branch would never be reached.
+        assert!(degrades_as_wild_union(
+            json!({
+                "Denied": {
+                    "type": "object", "required": ["denied"],
+                    "properties": {"denied": {"type": "string"}},
+                },
+                "ReviewDecision": {"oneOf": [
+                    {"type": "string", "enum": ["approved"]},
+                    {"$ref": "#/components/schemas/Denied"},
+                    {"type": "string", "enum": ["abort"]},
+                ]},
+            }),
+            "ReviewDecision",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_constant_does_not_tell_two_objects_apart() {
+        // `Plain` lacks `type`, so nothing reads it as a tag, and the open enum generated for
+        // `LocalImage`'s `type` reads `localAudio` too.
+        assert!(degrades_as_wild_union(
+            json!({
+                "LocalImage": {
+                    "type": "object", "required": ["path", "type"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "type": {"type": "string", "enum": ["localImage"]},
+                    },
+                },
+                "LocalAudio": {
+                    "type": "object", "required": ["path", "type"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "type": {"type": "string", "enum": ["localAudio"]},
+                    },
+                },
+                "Plain": {
+                    "type": "object", "required": ["x"],
+                    "properties": {"x": {"type": "string"}},
+                },
+                "Input": {"oneOf": [
+                    {"$ref": "#/components/schemas/LocalImage"},
+                    {"$ref": "#/components/schemas/LocalAudio"},
+                    {"$ref": "#/components/schemas/Plain"},
+                ]},
+            }),
+            "Input",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_nested_union_swallows_the_branches_after_it_but_not_the_ones_before() {
+        let object = |name: &str| {
+            json!({
+                "type": "object", "required": [name],
+                "properties": {name: {"type": "string"}},
+            })
+        };
+        let inner = |first: &str, second: &str| {
+            json!({"oneOf": [
+                {"$ref": format!("#/components/schemas/{first}")},
+                {"$ref": format!("#/components/schemas/{second}")},
+            ]})
+        };
+
+        // `Inner`'s own fallback reads `{"d": …}`, so `D` after it is never reached.
+        assert!(degrades_as_wild_union(
+            json!({
+                "B": object("b"), "C": object("c"), "D": object("d"),
+                "Inner": inner("B", "C"),
+                "Outer": inner("Inner", "D"),
+            }),
+            "Outer",
+        )?);
+
+        // Last, the same fallback only runs once `D` has turned the payload down.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "B": object("b"), "C": object("c"), "D": object("d"),
+            "Inner": inner("B", "C"),
+            "Outer": inner("D", "Inner"),
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(outer) = shape_of(&shapes, "Outer")? else {
+            panic!("expected a union");
+        };
+        assert_eq!(outer.variants.len(), 2);
+    }
+
+    #[test_util::test]
+    fn a_nested_union_of_strings_is_one_string_branch() {
+        // `Mode` becomes one string enum, which turns every object down, so it can sit first.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Mode": {"anyOf": [{"const": "fast"}, {"const": "slow"}]},
+            "Custom": {
+                "type": "object", "required": ["speed"],
+                "properties": {"speed": {"type": "number"}},
+            },
+            "Setting": {"oneOf": [
+                {"$ref": "#/components/schemas/Mode"},
+                {"$ref": "#/components/schemas/Custom"},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Setting")?, Shape::Union(_)));
+    }
+
+    #[test_util::test]
+    fn string_branches_merge_into_one_open_enum() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Effort": {"oneOf": [
+                {"type": "string", "enum": ["auto", "concise", "detailed"]},
+                {"type": "string", "enum": ["none"]},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let values = ["auto", "concise", "detailed", "none"].map(ToOwned::to_owned);
+        assert_eq!(
+            shape_of(&shapes, "Effort")?,
+            &Shape::StringEnum(values.to_vec())
+        );
+    }
+
+    #[test_util::test]
+    fn listed_strings_before_any_string_are_not_matched_by_shape() {
+        // The open enum reads `"custom"` as an unlisted value of its own, where the document means
+        // the plain string after it.
+        assert!(degrades_as_wild_union(
+            json!({"Model": {"anyOf": [
+                {"type": "string", "enum": ["small", "large"]},
+                {"type": "string"},
+            ]}}),
+            "Model",
+        )?);
+
+        // After any string, the listed ones are payloads the plain string already admits, so the
+        // document itself does not say which branch they are.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Model": {"anyOf": [
+            {"type": "string"},
+            {"type": "string", "enum": ["small", "large"]},
+        ]}})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Model")?, Shape::Union(_)));
+
+        // Behind a plain string no string reaches the constants, so they are never compared with
+        // one another. `anthropic` names its models this way.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Model": {"anyOf": [
+            {"type": "string"},
+            {"const": "small"},
+            {"const": "large"},
+        ]}})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Model")?, Shape::Union(_)));
+    }
+
+    #[test_util::test]
+    fn a_constrained_string_branch_is_not_folded_out_of_sight() {
+        // Folded into one enum, the first branch would never be classified and its `pattern` never
+        // reported, so the union is matched by shape instead, where the open enum it becomes
+        // would read `"b"`.
+        assert!(degrades_as_wild_union(
+            json!({"Code": {"oneOf": [
+                {"type": "string", "enum": ["aa", "ab"], "pattern": "^aa$"},
+                {"type": "string", "enum": ["b"]},
+            ]}}),
+            "Code",
+        )?);
+    }
+
+    #[test_util::test]
+    fn an_optional_wrapper_does_not_hide_a_nested_unions_fallback() {
+        let object = |name: &str| {
+            json!({
+                "type": "object", "required": [name],
+                "properties": {name: {"type": "string"}},
+            })
+        };
+        // `Maybe` is an `Option<Inner>`, and `Inner`'s fallback reads `{"d": …}` before `D` is
+        // tried, however many wrappers stand between them.
+        assert!(degrades_as_wild_union(
+            json!({
+                "B": object("b"), "C": object("c"), "D": object("d"),
+                "Inner": {"oneOf": [
+                    {"$ref": "#/components/schemas/B"},
+                    {"$ref": "#/components/schemas/C"},
+                ]},
+                "Maybe": {"anyOf": [{"type": "null"}, {"$ref": "#/components/schemas/Inner"}]},
+                "Outer": {"oneOf": [
+                    {"$ref": "#/components/schemas/Maybe"},
+                    {"$ref": "#/components/schemas/D"},
+                ]},
+            }),
+            "Outer",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_nested_union_of_strings_is_one_branch_wherever_it_sits() {
+        // `Mode` is one string enum, so its two constants are never compared with each other.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Mode": {"anyOf": [{"const": "fast"}, {"const": "slow"}]},
+            "Setting": {"oneOf": [
+                {"type": "integer"},
+                {"$ref": "#/components/schemas/Mode"},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Setting")?, Shape::Union(_)));
+    }
+
+    #[test_util::test]
+    fn only_a_member_the_struct_insists_on_tells_objects_apart() {
+        let d = json!({
+            "type": "object", "required": ["d"],
+            "properties": {"d": {"type": "string"}},
+        });
+        // Required but nullable, `a` is an `Option` that reads a missing member as `None`, so the
+        // first branch reads `{"d": …}` and drops `d`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": {
+                    "type": "object", "required": ["a"],
+                    "properties": {"a": {"type": ["string", "null"]}},
+                },
+                "D": d,
+                "Either": {"oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/D"},
+                ]},
+            }),
+            "Either",
+        )?);
+
+        // `p` is a string in one and a number in the other, but a payload of the second may leave
+        // it out, and then nothing shows the first one the other kind.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": {"type": "object", "properties": {"p": {"type": "string"}}},
+                "B": {
+                    "type": "object", "required": ["b"],
+                    "properties": {"p": {"type": "number"}, "b": {"type": "string"}},
+                },
+                "Either": {"oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+            }),
+            "Either",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_nullable_member_behind_an_alias_does_not_tell_objects_apart() {
+        // `P` is a union of one nullable branch, so `p` is still an `Option` that reads a missing
+        // member as `None`, and the first branch reads `{"d": …}`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "P": {"anyOf": [{"type": ["string", "null"]}]},
+                "A": {
+                    "type": "object", "required": ["p"],
+                    "properties": {"p": {"$ref": "#/components/schemas/P"}},
+                },
+                "D": {
+                    "type": "object", "required": ["d"],
+                    "properties": {"d": {"type": "string"}},
+                },
+                "Either": {"oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/D"},
+                ]},
+            }),
+            "Either",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_nested_union_is_compared_as_the_type_it_becomes() {
+        let object = |name: &str| {
+            json!({
+                "type": "object", "required": [name],
+                "properties": {name: {"type": "string"}},
+            })
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": object("a"), "B": object("b"),
+            // `A` again inside `Inner` is the same branch, which reads a payload the same way
+            // whichever of the two matches it.
+            "Inner": {"anyOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/B"},
+            ]},
+            "Repeats": {"anyOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/Inner"},
+            ]},
+            // A union of nothing but `null` is `null`, which no object payload fits.
+            "Nothing": {"anyOf": [{"type": "null"}, {"type": "null"}]},
+            "Null": {"anyOf": [
+                {"$ref": "#/components/schemas/Nothing"},
+                {"$ref": "#/components/schemas/A"},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Repeats")?, Shape::Union(_)));
+        assert!(matches!(shape_of(&shapes, "Null")?, Shape::Union(_)));
+    }
+
+    #[test_util::test]
+    fn a_string_branch_with_its_own_diagnostic_is_not_folded() {
+        // Folded, the vendor `type` would never be reported, so the branches stay separate and the
+        // union is matched by shape, where the first open enum would read `"c"`.
+        let (_, diagnostics) = shapes_of(with_schemas(json!({"Code": {"oneOf": [
+            {"type": "vendor-string", "enum": ["a", "b"]},
+            {"enum": ["c"]},
+        ]}})))?;
+        assert!(
+            !diagnostics.is_empty(),
+            "a folded branch hid its diagnostic: {diagnostics:?}"
+        );
+    }
+
+    #[test_util::test]
+    fn an_open_tuple_is_arbitrary_json_and_tells_nothing_apart() {
+        // A prefix followed by an `items` that admits values degrades to `serde_json::Value`,
+        // which reads `{"d": …}` before `D` is tried.
+        assert!(degrades_as_wild_union(
+            json!({
+                "D": {
+                    "type": "object", "required": ["d"],
+                    "properties": {"d": {"type": "string"}},
+                },
+                "Either": {"oneOf": [
+                    {
+                        "type": "array",
+                        "prefixItems": [{"type": "string"}],
+                        "items": {"type": "number"},
+                    },
+                    {"$ref": "#/components/schemas/D"},
+                ]},
+            }),
+            "Either",
+        )?);
+
+        // Beside `type: string` the same keywords make no array at all, so the branch is the string
+        // it says it is, which turns every object down.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "D": {
+                "type": "object", "required": ["d"],
+                "properties": {"d": {"type": "string"}},
+            },
+            "Either": {"oneOf": [
+                {"type": "string", "prefixItems": [{"type": "string"}], "items": true},
+                {"$ref": "#/components/schemas/D"},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
+    }
+
+    #[test_util::test]
+    fn a_member_the_earlier_struct_insists_on_tells_objects_apart_by_kind() {
+        // The later `p` may be `null`, but the earlier one is a required `String`, which turns down
+        // an integer, a `null` and an absent member alike.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Either": {"oneOf": [
+            {
+                "type": "object", "required": ["p"],
+                "properties": {"p": {"type": "string"}},
+            },
+            {
+                "type": "object", "required": ["p", "x"],
+                "properties": {"p": {"type": ["integer", "null"]}, "x": {"type": "integer"}},
+            },
+        ]}})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
+    }
+
+    #[test_util::test]
+    fn a_listed_number_does_not_swallow_a_later_number() {
+        // A numeric enumeration is the plain integer, so the first branch reads `2` as well.
+        assert!(degrades_as_wild_union(
+            json!({"Code": {"oneOf": [{"const": 1}, {"const": 2}]}}),
+            "Code",
+        )?);
+    }
+
     #[test_util::test]
     fn a_bare_numeric_enum_is_a_number_rather_than_arbitrary_json() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
