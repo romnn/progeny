@@ -12,6 +12,8 @@
 //! * **In a request body** the caller loses the ability to *send* an explicit null. Where a `null`
 //!   means "clear this field" and an absent member means "leave it alone" — the shape every PATCH
 //!   endpoint has — that is the difference between two operations.
+//!   A member whose type holds `null` itself, such as arbitrary JSON, can still send one, and
+//!   loses it only when a request is read back through the generated type.
 //! * **In a response body** the caller loses the ability to *tell* which one arrived. Usually
 //!   harmless, occasionally not.
 //! * **In both**, or in neither: a type reached from both directions pays both, and a type on no
@@ -57,6 +59,22 @@ impl Reach {
             (false, false) => "nothing on the wire is affected, because no operation carries it",
         }
     }
+
+    /// What reading an explicit null as absent costs at this position.
+    fn null_read_consequence(self) -> &'static str {
+        match (self.request, self.response) {
+            (true, true) => {
+                "neither a request nor a response read through the generated type can tell an \
+                 explicit null from an absent member"
+            }
+            (true, false) => {
+                "a request read through the generated type cannot tell an explicit null from an \
+                 absent member"
+            }
+            (false, true) => "a caller cannot tell an explicit null from an absent member",
+            (false, false) => "nothing on the wire is affected, because no operation carries it",
+        }
+    }
 }
 
 /// Report every collapse, split by the position its type occupies.
@@ -82,6 +100,18 @@ pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
                      different; both become `None`. The type is reached from {}, so {}",
                     at.describe(),
                     at.consequence()
+                ),
+            )),
+            CollapseKind::NullReadsAbsent => ctx.report(Diagnostic::new(
+                BreakageClass::PresenceCollapse,
+                Action::Degrade,
+                collapse.at.clone(),
+                format!(
+                    "the property may be absent, and its type also holds `null`; an explicit \
+                     `null` is written out but read back as `None`, the same as absent. The type \
+                     is reached from {}, so {}",
+                    at.describe(),
+                    at.null_read_consequence()
                 ),
             )),
             // An access marker costs nothing until the type crosses the direction it excludes;
@@ -190,7 +220,7 @@ fn close(contracts: &Contracts, start: BTreeSet<TypeIndex>) -> BTreeSet<TypeInde
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre;
+    use color_eyre::eyre::{self, OptionExt as _};
 
     use serde_json::json;
 
@@ -216,6 +246,25 @@ mod tests {
                 "Unused": {"type": "object", "properties": {"note": {"type": ["string", "null"]}}},
             }},
         })
+    }
+
+    /// A member whose type holds `null` itself can send one, so only reading it back loses it.
+    #[test_util::test]
+    fn a_null_the_type_holds_is_lost_only_when_read() {
+        let mut document = split_document();
+        document["components"]["schemas"]["PetPatch"]["properties"]["nickname"] = json!({});
+        let (_, diagnostics) = model_of(document)?;
+        let request = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::PresenceCollapse)
+            .map(crate::Diagnostic::detail)
+            .find(|detail| detail.contains("a request body"))
+            .ok_or_eyre("the request-side member should be reported")?;
+        assert!(
+            request.contains("read through the generated type"),
+            "{request}"
+        );
+        assert!(!request.contains("cannot send"), "{request}");
     }
 
     #[test_util::test]
