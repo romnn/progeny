@@ -355,12 +355,13 @@ pub(crate) enum ContractKind {
     },
     /// A data-carrying enum whose payload names its own variant in a member that the variant
     /// types keep: the union reads the member to pick a variant and replays the whole payload —
-    /// tag included — into it, and serializing writes the variant as it is, which already carries
-    /// its tag.
+    /// tag included — into it, and serializing writes the variant with a tag that names it.
     ///
-    /// Used where matching by shape would be unsound *and* the tag cannot be consumed, because
-    /// some variant type also puts the property on the wire somewhere else ([`crate::shape`]). A
-    /// kind of its own rather than a flag beside [`ContractKind::TaggedEnum`] for the same reason
+    /// Used where matching by shape would be unsound *and* the tag cannot be consumed.
+    /// Either some variant type also puts the property on the wire somewhere else
+    /// ([`crate::shape`]), or the union reads a tag it would not write back — an alias, or a
+    /// missing or `null` tag — which only the variant's own member can remember.
+    /// A kind of its own rather than a flag beside [`ContractKind::TaggedEnum`] for the same reason
     /// that kind is one beside [`ContractKind::Enum`]: the two render nothing alike — a consumed
     /// tag is a serde attribute, a carried one is a pair of hand-written impls — and a flag would
     /// put that ruling back inside the renderer.
@@ -368,6 +369,8 @@ pub(crate) enum ContractKind {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
+        /// The variants a payload is when its tag member is missing or `null`.
+        routes: TagRoutes,
         /// The variant holding a payload whose tag names no variant, as `serde_json::Value`.
         fallback: RustIdent,
     },
@@ -471,9 +474,30 @@ pub(crate) struct VariantContract {
 pub(crate) struct TaggedVariant {
     pub(crate) rust_name: RustIdent,
     pub(crate) ty: TypeRef,
-    /// The exact bytes the tag member holds for this variant — what lets the renderer write a
-    /// `rename` without asking whether it should.
+    /// The canonical spelling of this variant's tag, the exact bytes the union writes for it —
+    /// what lets the renderer write a `rename` without asking whether it should.
     pub(crate) tag_value: String,
+    /// Other spellings of the tag that name this variant too, read and kept but never written in
+    /// place of [`TaggedVariant::tag_value`].
+    ///
+    /// Always empty in a [`ContractKind::TaggedEnum`], which writes the tag itself.
+    pub(crate) aliases: Vec<String>,
+}
+
+/// The variants of a carried-tag union a payload is when its tag member names none by its text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TagRoutes {
+    /// The position of the variant a payload without the tag member is.
+    pub(crate) absent: Option<usize>,
+    /// The position of the variant a payload whose tag is `null` is.
+    pub(crate) null: Option<usize>,
+}
+
+impl TaggedVariant {
+    /// Every spelling of this variant's tag, the written one first.
+    pub(crate) fn spellings(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.tag_value.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
 }
 
 /// One variant of a keyed union.

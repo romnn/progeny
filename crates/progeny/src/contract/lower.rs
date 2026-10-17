@@ -22,7 +22,7 @@ use serde_json::Value;
 use super::name::{self, Namer, RustIdent};
 use super::{
     Capture, ContractKind, FieldContract, Form, KeyedVariant, Presence, SkipRule, StringVariant,
-    TaggedVariant, TypeIndex, TypeRef, VariantContract,
+    TagRoutes, TaggedVariant, TypeIndex, TypeRef, VariantContract,
 };
 use crate::config::{Config, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
@@ -457,13 +457,14 @@ impl Lower<'_> {
                         (
                             self.reference(&variant.shape, key, ctx),
                             variant.tag.clone(),
+                            variant.aliases.clone(),
                         )
                     })
                     .collect::<Vec<_>>();
                 match &union.tag {
                     None => {
                         let (variants, fallback) =
-                            self.variants(variants.into_iter().map(|(ty, _)| ty).collect());
+                            self.variants(variants.into_iter().map(|(ty, ..)| ty).collect());
                         ContractKind::Enum { variants, fallback }
                     }
                     Some(tag) => {
@@ -477,6 +478,10 @@ impl Lower<'_> {
                                 TagStyle::Carried => ContractKind::CarriedTagEnum {
                                     tag: tag.property.clone(),
                                     variants,
+                                    routes: TagRoutes {
+                                        absent: tag.absent,
+                                        null: tag.null,
+                                    },
                                     fallback,
                                 },
                             }
@@ -924,17 +929,18 @@ impl Lower<'_> {
 /// tagged union always has all of them — and the caller treats `None` as that guarantee having
 /// broken.
 fn tagged_variants(
-    types: Vec<(TypeRef, Option<String>)>,
+    types: Vec<(TypeRef, Option<String>, Vec<String>)>,
 ) -> Option<(Vec<TaggedVariant>, RustIdent)> {
     let mut used = Namer::default();
     let variants = types
         .into_iter()
-        .map(|(ty, tag)| {
+        .map(|(ty, tag, aliases)| {
             let tag_value = tag?;
             Some(TaggedVariant {
                 rust_name: used.unique(RustIdent::variant(&tag_value)),
                 ty,
                 tag_value,
+                aliases,
             })
         })
         .collect::<Option<Vec<_>>>()?;

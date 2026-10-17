@@ -1872,6 +1872,73 @@ mod tests {
         }
     }
 
+    /// A union whose branches name themselves with an alias before the variants a missing or
+    /// `null` tag names, so a route is a position in the flattened list of spellings rather than
+    /// a variant's index.
+    #[test_util::test]
+    fn a_routed_carried_tag_enum_looks_its_routes_up_among_every_spelling() {
+        let tool = |kind: Value, required: Value| {
+            json!({
+                "type": "object",
+                "required": required,
+                "properties": {"type": kind, "name": {"type": "string"}},
+            })
+        };
+        let strict = with_schemas(json!({
+            "Search": tool(json!({"enum": ["search_v2", "search"]}), json!(["type"])),
+            "Custom": tool(json!({"const": "custom"}), json!([])),
+            "Nullish": tool(json!({"enum": ["nullish", null]}), json!(["type"])),
+            "Bash": tool(json!({"const": "bash"}), json!(["type"])),
+            "Tool": {"oneOf": [
+                {"$ref": "#/components/schemas/Search"},
+                {"$ref": "#/components/schemas/Custom"},
+                {"$ref": "#/components/schemas/Nullish"},
+                {"$ref": "#/components/schemas/Bash"},
+            ]},
+        }));
+        // A response that returns the union, so its read form's lenient decoder routes too.
+        let mut lenient = strict.clone();
+        lenient["paths"] = json!({"/tools": {"get": {"responses": {"200": {
+            "description": "a tool",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Tool"}}},
+        }}}}});
+        let documents = [(strict, "payload"), (lenient, ")? {")];
+        for ((document, after), config) in documents.iter().flat_map(|document| {
+            [Config::default(), derive_mode()].map(|config| (document, config))
+        }) {
+            let rendered = types(document.clone(), &config)?;
+            // Compared with the whitespace collapsed, because long calls and lists are printed
+            // one item per line.
+            let flat = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            // Every spelling, each variant's written one first.
+            assert!(
+                flat.contains(r#""search_v2", "search", "custom", "nullish", "bash""#),
+                "{rendered}"
+            );
+            // A missing tag is `Custom`, at position 2, and a `null` one `Nullish`, at 3, for the
+            // strict decoder and the lenient one alike.
+            assert!(
+                flat.contains(&format!(
+                    "TAG, VARIANTS, Some(2usize), Some(3usize), {after}"
+                )),
+                "{rendered}"
+            );
+            // Both spellings of the search tool read as it.
+            assert!(flat.contains("0usize..=1usize"), "{rendered}");
+            // Only the variants named more than one way keep their payload's own tag, so the
+            // plain one still writes its tag first.
+            assert!(
+                flat.contains(r#"names: &["search_v2", "search"],"#),
+                "{rendered}"
+            );
+            assert!(
+                flat.contains(r#"serialize_carried( value, "type", "bash", serializer"#)
+                    || flat.contains(r#"serialize_carried(value, "type", "bash", serializer"#),
+                "{rendered}"
+            );
+        }
+    }
+
     /// Two tagged unions that agree on everything but the bytes their tags read are two types.
     ///
     /// The trap is that a Rust variant name is a *normalization* of the tag value — `a-cat` and

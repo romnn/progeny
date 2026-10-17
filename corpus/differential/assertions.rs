@@ -336,3 +336,78 @@ fn every_combination_of_presence_agrees() {
         }
     }
 }
+
+/// Read a tool through both renderings and write it back, refusing a payload either refuses.
+fn tool(payload: &str) -> eyre::Result<(derived::types::Tool, String, String)> {
+    let left = serde_json::from_str::<derived::types::Tool>(payload)?;
+    let right = serde_json::from_str::<hand::types::Tool>(payload)?;
+    let written = serde_json::to_string(&left)?;
+    assert_eq!(written, serde_json::to_string(&right)?, "{payload}");
+    Ok((left, written, payload.to_owned()))
+}
+
+/// A union whose branches name themselves picks the branch every spelling, a missing tag and a
+/// `null` one name, and writes the tag back the way the payload had it.
+#[test_util::test]
+fn a_self_naming_union_reads_every_way_a_branch_is_named_and_keeps_it() {
+    use derived::types::Tool;
+
+    // A missing tag is the custom tool, and it stays missing.
+    let (read, written, payload) = tool(r#"{"name":"mine"}"#)?;
+    assert!(matches!(read, Tool::Custom(_)), "{read:?}");
+    assert_eq!(written, payload);
+    // A `null` tag is the nullish tool, and it stays `null`.
+    let (read, written, payload) = tool(r#"{"name":"mine","type":null}"#)?;
+    assert!(matches!(read, Tool::Nullish(_)), "{read:?}");
+    assert_eq!(written, payload);
+    // Both spellings of the search tool read as it, and each is written back as it was.
+    for spelling in ["search_v2", "search"] {
+        let (read, written, payload) = tool(&format!(r#"{{"name":"web","type":"{spelling}"}}"#))?;
+        assert!(matches!(read, Tool::SearchV2(_)), "{read:?}");
+        assert_eq!(written, payload);
+    }
+    // A tool named once is read and written as before.
+    let (read, written, _) = tool(r#"{"name":"sh","type":"bash"}"#)?;
+    assert!(matches!(read, Tool::Bash(_)), "{read:?}");
+    assert!(written.contains(r#""type":"bash""#), "{written}");
+    // A tag of another kind, or one no branch lists, is kept whole in the open arm.
+    for payload in [r#"{"name":"x","type":7}"#, r#"{"name":"x","type":"other"}"#] {
+        let (read, written, payload) = tool(payload)?;
+        assert!(matches!(read, Tool::Unknown(_)), "{read:?}");
+        assert_eq!(written, payload);
+    }
+}
+
+/// A hand-built value whose own tag names another branch is written with its branch's name, so
+/// it reads back as the branch it was built as.
+#[test_util::test]
+fn a_self_naming_union_writes_the_branch_a_value_was_built_as() {
+    let search = derived::types::SearchTool {
+        name: "web".to_owned(),
+        type_: derived::types::SearchToolType::Unknown("bash".to_owned()),
+    };
+    let written = serde_json::to_string(&derived::types::Tool::SearchV2(Box::new(search)))?;
+    assert!(written.contains(r#""type":"search_v2""#), "{written}");
+    let custom = hand::types::CustomTool {
+        name: "mine".to_owned(),
+        type_: Some(hand::types::CustomToolType::Unknown("bash".to_owned())),
+    };
+    let written = serde_json::to_string(&hand::types::Tool::Custom(Box::new(custom)))?;
+    assert!(written.contains(r#""type":"custom""#), "{written}");
+}
+
+/// The read form routes and writes the same way under both strategies.
+#[test_util::test]
+fn a_self_naming_union_read_form_routes_the_same_way() {
+    for payload in [
+        r#"{"name":"mine"}"#,
+        r#"{"name":"mine","type":null}"#,
+        r#"{"name":"web","type":"search"}"#,
+    ] {
+        let left = derived::types::Decoded::<derived::types::read::Tool>::from_json(payload)?;
+        let right = hand::types::Decoded::<hand::types::read::Tool>::from_json(payload)?;
+        assert!(left.degradations.is_empty(), "{payload}: {}", left.degradations);
+        assert_eq!(serde_json::to_string(&left.value)?, payload);
+        assert_eq!(serde_json::to_string(&right.value)?, payload);
+    }
+}

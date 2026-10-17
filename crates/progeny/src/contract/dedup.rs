@@ -215,16 +215,19 @@ fn fingerprint(contract: &Provisional) -> String {
         ContractKind::CarriedTagEnum {
             tag,
             variants,
+            routes,
             fallback,
         } => {
             let _ = write!(out, "carried({tag})");
+            // The aliases and routes are in too: they decide which variant a payload reads as.
             for variant in variants {
                 let _ = write!(
                     out,
-                    "|{}={}:{:?}",
-                    variant.rust_name, variant.tag_value, variant.ty
+                    "|{}={}{:?}:{:?}",
+                    variant.rust_name, variant.tag_value, variant.aliases, variant.ty
                 );
             }
+            let _ = write!(out, "|absent={:?}|null={:?}", routes.absent, routes.null);
             let _ = write!(out, "|?{fallback}");
         }
         // The wire names are in for the reason tag values are, and so is whether a variant has a

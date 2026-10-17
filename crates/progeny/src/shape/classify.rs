@@ -411,21 +411,29 @@ fn union(
         Reading::Variants(rest) => {
             if let Some(keyed) = keyed(resolved, view, &rest) {
                 Shape::Keyed(keyed)
-            } else if let Some((property, tags)) = constant_discriminator(resolved, &rest) {
+            } else if let Some(named) = constant_discriminator(resolved, &rest) {
                 // The branches name themselves: read the tag, the way a declared discriminator
                 // is read, rather than match by shape — which would rest on the constants, and a
                 // generated string enum reads any string.
                 Shape::Union(Union {
-                    variants: tags
+                    variants: named
+                        .variants
                         .into_iter()
-                        .map(|(key, tag)| Variant {
-                            shape: ShapeRef::Key(key),
-                            tag: Some(tag),
+                        .map(|(key, values)| {
+                            // The first spelling is the one written, and the rest are read too.
+                            let mut values = values.into_iter();
+                            Variant {
+                                shape: ShapeRef::Key(key),
+                                tag: values.next(),
+                                aliases: values.collect(),
+                            }
                         })
                         .collect(),
                     tag: Some(Tag {
-                        property,
+                        property: named.property,
                         style: TagStyle::Consumed,
+                        absent: named.absent,
+                        null: named.null,
                     }),
                 })
             } else {
@@ -438,6 +446,7 @@ fn union(
                             .map(|key| Variant {
                                 shape: ShapeRef::Key(key),
                                 tag: None,
+                                aliases: Vec::new(),
                             })
                             .collect(),
                         tag: None,
@@ -778,6 +787,7 @@ fn tagged(
             Variant {
                 shape: ShapeRef::Key(key),
                 tag,
+                aliases: Vec::new(),
             }
         })
         .collect();
@@ -785,27 +795,33 @@ fn tagged(
         variants,
         // Always proposed as consumed: [`super::discriminate`] may settle on carried instead,
         // once it can see how the variant types are used elsewhere.
-        tag: Some(Tag {
-            property: declared.property.clone(),
-            style: TagStyle::Consumed,
-        }),
+        tag: Some(Tag::consumed(declared.property.clone())),
     })
 }
 
-/// The property every branch declares as one string constant of its own, with each branch's
-/// constant, when there is such a property.
+/// The property every branch binds to string constants of its own, with each branch's
+/// constants, when there is such a property.
 ///
 /// `type: {enum: [creation]}` in one branch, `type: {enum: [update]}` in the next: a union of
 /// objects that name themselves this way is discriminated by that property whether or not the
-/// description spells `discriminator`, and is read the same way, by the tag's text. It cannot
-/// be read by shape: the separation would rest on the constants, and a generated string enum is
-/// open — it reads any string, so under it every branch fits every payload and the first one
-/// wins. The first qualifying property in wire order is the tag, so the answer is the same
-/// whichever branch is listed first.
-fn constant_discriminator(
-    resolved: &ResolvedDocument,
-    branches: &[ShapeKey],
-) -> Option<(String, Vec<(ShapeKey, String)>)> {
+/// description spells `discriminator`, and is read the same way, by the tag's text.
+/// It cannot be read by shape: the separation would rest on the constants, and a generated
+/// string enum is open — it reads any string, so under it every branch fits every payload and
+/// the first one wins.
+///
+/// A branch may list several spellings of its name, as anthropic's tool search tool lists a dated
+/// one and an alias.
+/// A property that binds every branch to one constant is preferred over one where a branch lists
+/// several, so a union whose tag is spelled once per branch keeps that tag.
+/// Within each of those two readings the first qualifying property in the first branch's wire
+/// order is the tag, so the answer does not turn on which other branch is listed first.
+///
+/// The tag does not have to be on every payload.
+/// One branch that leaves the property optional, where every other branch requires it, is what a
+/// payload without it is, which is how anthropic's custom tool is sent.
+/// One branch that admits `null` there is likewise what a payload with `null` in it is.
+/// With two such branches the payload could be either, so it names no variant.
+fn constant_discriminator(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<SelfNamed> {
     let views: Vec<(&ShapeKey, View)> = branches
         .iter()
         .map(|branch| (branch, merge::view(resolved, branch)))
@@ -818,24 +834,63 @@ fn constant_discriminator(
         return None;
     }
     let (_, first) = views.first()?;
-    'candidates: for name in first.properties.keys() {
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut tags = Vec::new();
-        for (key, view) in &views {
-            let Some(property) = view.properties.get(name) else {
-                continue 'candidates;
-            };
-            let Some(constant) = single_string_constant(resolved, property) else {
-                continue 'candidates;
-            };
-            if !seen.insert(constant.clone()) {
-                continue 'candidates;
+    // One constant per branch first, then several, so the stricter reading wins where both fit.
+    for several in [false, true] {
+        'candidates: for name in first.properties.keys() {
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            let mut variants = Vec::new();
+            let mut optional = Vec::new();
+            let mut nullable = Vec::new();
+            for (index, (key, view)) in views.iter().enumerate() {
+                let Some(property) = view.properties.get(name) else {
+                    continue 'candidates;
+                };
+                let Some(constants) = tag_constants(resolved, property) else {
+                    continue 'candidates;
+                };
+                if !several && constants.values.len() != 1 {
+                    continue 'candidates;
+                }
+                // A spelling two branches share would leave the tag unable to say which it is.
+                for value in &constants.values {
+                    if !seen.insert(value.clone()) {
+                        continue 'candidates;
+                    }
+                }
+                if !view.required.contains(name) {
+                    optional.push(index);
+                }
+                if constants.null {
+                    nullable.push(index);
+                }
+                variants.push(((*key).clone(), constants.values));
             }
-            tags.push(((*key).clone(), constant));
+            // A missing or `null` tag names a branch only where it can name just one.
+            let only = |positions: &[usize]| match positions {
+                [position] => Some(*position),
+                _ => None,
+            };
+            return Some(SelfNamed {
+                property: name.clone(),
+                variants,
+                absent: only(&optional),
+                null: only(&nullable),
+            });
         }
-        return Some((name.clone(), tags));
     }
     None
+}
+
+/// A union whose branches name themselves, as [`constant_discriminator`] reads it.
+struct SelfNamed {
+    /// The property the branches name themselves in.
+    property: String,
+    /// Each branch with its spellings, the one to write first.
+    variants: Vec<(ShapeKey, Vec<String>)>,
+    /// The position of the branch a payload without the property is.
+    absent: Option<usize>,
+    /// The position of the branch a payload with `null` in the property is.
+    null: Option<usize>,
 }
 
 /// The union as serde's externally tagged enum, when every branch names its variant on the wire.
@@ -1014,19 +1069,90 @@ fn declares_no_structure(view: &View) -> bool {
         && view.discriminator.is_none()
 }
 
-/// The one string a property is bound to, when `const` or a one-value `enum` binds it to one.
-fn single_string_constant(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<String> {
+/// The strings a property is bound to, and whether it admits `null` too.
+struct TagConstants {
+    values: Vec<String>,
+    null: bool,
+}
+
+/// The strings a property is bound to by `const` or `enum`, when every value but `null` is one.
+///
+/// Read through the nullable-emulation `anyOf: [{const: custom}, {type: null}]` too, which is how
+/// a 3.1 document widens a constant with `null`.
+/// `null` is a value only where every constraint on the property admits it — its own `type`, its
+/// own list and the union beside them — because a payload has to satisfy all of them.
+fn tag_constants(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<TagConstants> {
     let view = merge::view(resolved, key);
-    let values = match (&view.enumeration, &view.constant) {
+    let own = listed_constants(&view);
+    let united = view
+        .union
+        .as_ref()
+        .map(|branches| union_constants(resolved, branches));
+    match (own, united) {
+        // A list of its own is every value the property can hold, and a union beside it can only
+        // narrow the list further.
+        (Some(own), None) => Some(own),
+        (Some(own), Some(united)) => Some(TagConstants {
+            null: own.null && united.is_some_and(|united| united.null),
+            values: own.values,
+        }),
+        // Only the union lists the values, so the property's own `type` still has a say.
+        (None, Some(Some(united))) => Some(TagConstants {
+            null: united.null && admits_null_type(&view),
+            values: united.values,
+        }),
+        (None, Some(None) | None) => None,
+    }
+}
+
+/// The constants a union of `null` with constants lists, and whether its `null` branch is there.
+///
+/// Any other branch admits values no list names, so the union then lists nothing.
+fn union_constants(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<TagConstants> {
+    let (reading, nullable) = Reading::of(resolved, branches);
+    let mut constants = match reading {
+        Reading::One(inner) => {
+            let inner = merge::view(resolved, &inner);
+            if inner.union.is_some() {
+                return None;
+            }
+            listed_constants(&inner)?
+        }
+        Reading::Strings(values) => TagConstants {
+            values,
+            null: false,
+        },
+        Reading::Empty | Reading::Variants(_) => return None,
+    };
+    constants.null |= nullable;
+    Some(constants)
+}
+
+/// The strings a view's own `const` or `enum` lists, and whether `null` is one of its values.
+fn listed_constants(view: &View) -> Option<TagConstants> {
+    let declared = match (&view.enumeration, &view.constant) {
         (Some(listed), _) => listed.clone(),
         (None, Some(value)) => vec![value.clone()],
         (None, None) => return None,
     };
-    let values: Vec<&Value> = values.iter().filter(|value| !value.is_null()).collect();
-    match values.as_slice() {
-        [one] => one.as_str().map(ToOwned::to_owned),
-        _ => None,
+    let mut values = Vec::new();
+    for value in declared.iter().filter(|value| !value.is_null()) {
+        values.push(value.as_str()?.to_owned());
     }
+    if values.is_empty() {
+        return None;
+    }
+    Some(TagConstants {
+        values: unique(values),
+        null: admits_null_type(view) && declared.iter().any(Value::is_null),
+    })
+}
+
+/// Whether a view's own `type`, if it declares one, admits `null`.
+fn admits_null_type(view: &View) -> bool {
+    view.types
+        .as_ref()
+        .is_none_or(|types| types.contains(&TypeName::Null))
 }
 
 /// The discriminator every branch of this union inherits from one base schema.

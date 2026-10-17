@@ -17,7 +17,9 @@ use quote::{format_ident, quote};
 
 use super::types::Scope;
 use crate::config::UnknownFields;
-use crate::contract::{ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TypeContract};
+use crate::contract::{
+    ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TagRoutes, TypeContract,
+};
 
 /// Whether any type takes a hand-written path, and therefore whether the support module is needed.
 pub(super) fn needed(contracts: &Contracts) -> bool {
@@ -47,9 +49,10 @@ pub(super) fn one(contract: &TypeContract) -> TokenStream {
             ContractKind::CarriedTagEnum {
                 tag,
                 variants,
+                routes,
                 fallback,
             },
-        ) => carried(contract, tag, variants, fallback, serialize_only),
+        ) => carried(contract, tag, variants, *routes, fallback, serialize_only),
         // A read form's `Deserialize` is the lenient decoder's, and `Serialize` is derived in both.
         (DeserStrategy::HandWrittenKeyed, ContractKind::KeyedEnum { variants, fallback }) => {
             if serialize_only {
@@ -428,14 +431,20 @@ fn fieldless(
 /// tag it leaves in the payload.
 ///
 /// Deserializing buffers the payload, reads the tag member, and replays the whole payload — tag
-/// included — into the named variant's type, which declares the member and keeps it. Serializing
-/// is the variant as it is, for the same reason: the value already carries its tag. The match the
-/// resolver runs binds its last variant with a `_` arm, sound because the support `dispatch`
-/// hands back only positions inside `VARIANTS`.
+/// included — into the named variant's type, which declares the member and keeps it.
+/// A variant may be named by several spellings, or by a missing or `null` tag, and `VARIANTS`
+/// lists every spelling of every variant, so the resolver matches each variant by all of its
+/// positions.
+/// Serializing writes the variant through the support injector, so the wire names the arm the
+/// caller chose: as its one name, or, where the variant has several ways to be named, as the
+/// payload's own tag wherever that already names it.
+/// The match the resolver runs binds its last variant with a `_` arm, sound because the support
+/// `dispatch` hands back only positions inside `VARIANTS`.
 fn carried(
     contract: &TypeContract,
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    routes: TagRoutes,
     fallback: &RustIdent,
     serialize_only: bool,
 ) -> TokenStream {
@@ -443,10 +452,9 @@ fn carried(
     let support = Scope::of(contract).support();
     let fallback_name = fallback;
     let fallback = ident(fallback);
-    let wire_names: Vec<&str> = variants
-        .iter()
-        .map(|variant| variant.tag_value.as_str())
-        .collect();
+    let table = TagTable::of(variants, routes);
+    let wire_names = &table.names;
+    let (absent, null) = (table.absent(), table.null());
 
     let read = |variant: &crate::contract::TaggedVariant| {
         let member = ident(&variant.rust_name);
@@ -467,25 +475,29 @@ fn carried(
     };
     // One variant needs no match at all — and a `match` over a single `_` arm is a style lint in
     // the consumer's build about code they did not write.
-    let resolver = if let [only] = variants {
-        let body = read(only);
-        quote! { |_, replay| #body }
-    } else {
-        let arms = variants.iter().enumerate().map(|(index, variant)| {
-            let body = read(variant);
-            if index + 1 == variants.len() {
-                quote! { _ => #body, }
-            } else {
-                quote! { #index => #body, }
+    let resolver =
+        if let [only] = variants {
+            let body = read(only);
+            quote! { |_, replay| #body }
+        } else {
+            let arms = variants.iter().zip(&table.patterns).enumerate().map(
+                |(index, (variant, pattern))| {
+                    let body = read(variant);
+                    if index + 1 == variants.len() {
+                        quote! { _ => #body, }
+                    } else {
+                        // Every position of a spelling of the variant's tag
+                        quote! { #pattern => #body, }
+                    }
+                },
+            );
+            quote! {
+                |variant, replay| match variant {
+                    #(#arms)*
+                }
             }
-        });
-        quote! {
-            |variant, replay| match variant {
-                #(#arms)*
-            }
-        }
-    };
-    let write = carried_writes(contract, tag, variants, &support);
+        };
+    let write = carried_writes(contract, tag, variants, routes, &support);
     let deprecated = contract.docs().deprecated.then(|| {
         quote! {
             #[expect(
@@ -507,7 +519,7 @@ fn carried(
                     const VARIANTS: &[&str] = &[#(#wire_names),*];
                     let payload: #support::Content<'de> =
                         serde::Deserialize::deserialize(deserializer)?;
-                    #support::dispatch(TAG, VARIANTS, payload, #resolver, #unknown)
+                    #support::dispatch(TAG, VARIANTS, #absent, #null, payload, #resolver, #unknown)
                 }
             }
         }
@@ -655,17 +667,37 @@ fn carried_writes<'a>(
     contract: &'a TypeContract,
     tag: &'a str,
     variants: &'a [crate::contract::TaggedVariant],
+    routes: TagRoutes,
     support: &'a TokenStream,
 ) -> impl Iterator<Item = TokenStream> + 'a {
-    variants.iter().map(move |variant| {
+    variants.iter().enumerate().map(move |(index, variant)| {
         let member = ident(&variant.rust_name);
         let value = variant.tag_value.as_str();
+        let absent = routes.absent == Some(index);
+        let null = routes.null == Some(index);
         // Through the support injector rather than a bare delegation: the payload's own tag
         // member may be unset or stale in a hand-built value, and the wire must name the arm
         // the caller chose.
-        let write = quote! {
-            Self::#member(value) => {
-                #support::serialize_carried(value, #tag, #value, serializer)
+        let write = if variant.aliases.is_empty() && !absent && !null {
+            // One spelling: the tag is written as it, whatever the payload holds.
+            quote! {
+                Self::#member(value) => {
+                    #support::serialize_carried(value, #tag, #value, serializer)
+                }
+            }
+        } else {
+            // Several ways to name the arm: the payload's own one is kept where it names this
+            // arm, because rewriting an alias or filling in an absent tag changes what was sent.
+            let names = variant.spellings();
+            quote! {
+                Self::#member(value) => {
+                    static SPELLINGS: #support::Spellings = #support::Spellings {
+                        names: &[#(#names),*],
+                        absent: #absent,
+                        null: #null,
+                    };
+                    #support::serialize_carried_as(value, #tag, &SPELLINGS, serializer)
+                }
             }
         };
         if contract.docs().deprecated {
@@ -680,6 +712,62 @@ fn carried_writes<'a>(
             write
         }
     })
+}
+
+/// The tag spellings of a carried-tag union, laid out the way its decoders look them up.
+pub(super) struct TagTable<'a> {
+    /// Every spelling of every variant, each variant's written one first.
+    pub(super) names: Vec<&'a str>,
+    /// The pattern matching the positions in `names` of each variant's spellings.
+    ///
+    /// A variant's spellings sit together, so the pattern is one position or one range, which
+    /// is also what Clippy asks of the consumer's build.
+    pub(super) patterns: Vec<TokenStream>,
+    /// The position of each variant's first spelling.
+    starts: Vec<usize>,
+    routes: TagRoutes,
+}
+
+impl<'a> TagTable<'a> {
+    pub(super) fn of(variants: &'a [crate::contract::TaggedVariant], routes: TagRoutes) -> Self {
+        let mut names = Vec::new();
+        let mut patterns = Vec::new();
+        let mut starts = Vec::new();
+        for variant in variants {
+            let start = names.len();
+            names.extend(variant.spellings());
+            let last = names.len().saturating_sub(1);
+            patterns.push(if last > start {
+                quote! { #start..=#last }
+            } else {
+                quote! { #start }
+            });
+            starts.push(start);
+        }
+        Self {
+            names,
+            patterns,
+            starts,
+            routes,
+        }
+    }
+
+    /// The position a missing tag member resolves to, as an `Option<usize>` expression.
+    pub(super) fn absent(&self) -> TokenStream {
+        self.route(self.routes.absent)
+    }
+
+    /// The position a `null` tag member resolves to, as an `Option<usize>` expression.
+    pub(super) fn null(&self) -> TokenStream {
+        self.route(self.routes.null)
+    }
+
+    /// A variant's first position, which its decoder arm matches like any of its spellings.
+    fn route(&self, variant: Option<usize>) -> TokenStream {
+        variant
+            .and_then(|variant| self.starts.get(variant))
+            .map_or_else(|| quote! { None }, |position| quote! { Some(#position) })
+    }
 }
 
 fn ident(name: &RustIdent) -> proc_macro2::Ident {
