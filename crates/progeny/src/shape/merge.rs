@@ -148,6 +148,8 @@ pub(crate) struct View {
     pub(crate) max_items: Option<u32>,
     /// Whether some part says the value cannot be negative.
     pub(crate) unsigned: bool,
+    /// Whether some part's lower bound may also rule out zero, which an unsigned type admits.
+    pub(crate) bound_above_zero: bool,
     pub(crate) format: Option<String>,
     pub(crate) content_encoding: Option<String>,
     pub(crate) content_media_type: Option<String>,
@@ -342,6 +344,30 @@ fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocume
     {
         view.unsigned = true;
     }
+    // A bound admits zero only when proven to, because `1e-400` reads as `0.0` in `f64`.
+    if object
+        .minimum
+        .as_ref()
+        .is_some_and(|bound| !at_most_zero(bound))
+        || object
+            .exclusive_minimum
+            .as_ref()
+            .is_some_and(|bound| !below_zero(bound))
+    {
+        view.bound_above_zero = true;
+    }
+}
+
+/// Whether a bound is provably zero or negative.
+fn at_most_zero(bound: &Number) -> bool {
+    bound.as_i64().is_some_and(|value| value <= 0) || below_zero(bound)
+}
+
+/// Whether a bound is provably negative.
+///
+/// A positive literal never rounds to a negative `f64`, so a negative reading is exact enough.
+fn below_zero(bound: &Number) -> bool {
+    bound.as_f64().is_some_and(|value| value < 0.0)
 }
 
 /// Whether a bound says the value cannot be negative.
