@@ -1260,6 +1260,346 @@ mod tests {
         Ok(reported && shape_of(&shapes, name)? == &Shape::Any)
     }
 
+    /// Whether a schema degrades to arbitrary JSON because a branch would drop members declared
+    /// beside its union, and the diagnostic names `members`.
+    fn degrades_for_members_beside(
+        schemas: Value,
+        name: &str,
+        members: &str,
+    ) -> eyre::Result<bool> {
+        let (shapes, diagnostics) = shapes_of(with_schemas(schemas))?;
+        let reported = diagnostics.iter().any(|d| {
+            d.class() == crate::BreakageClass::UnsupportedConstruct
+                && d.detail().contains(&format!("declares {members} beside"))
+        });
+        Ok(reported && shape_of(&shapes, name)? == &Shape::Any)
+    }
+
+    /// A struct with a `#[serde(flatten)]` enum member, as `schemars` exports it.
+    #[test_util::test]
+    fn members_beside_a_union_that_a_branch_drops_degrade_the_union() {
+        for keyword in ["anyOf", "oneOf"] {
+            let image = json!({
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["image"]},
+                    "detail": {"type": "string"},
+                },
+                keyword: [
+                    {"type": "object", "required": ["url"],
+                     "properties": {"url": {"type": "string"}}},
+                    {"type": "object", "required": ["fileId"],
+                     "properties": {"fileId": {"type": "string"}}},
+                ],
+            });
+            assert!(
+                degrades_for_members_beside(
+                    json!({ "ImageUserInput": image }),
+                    "ImageUserInput",
+                    "`detail`, `type`",
+                )?,
+                "{keyword}"
+            );
+        }
+    }
+
+    #[test_util::test]
+    fn a_required_name_beside_a_union_is_a_member_a_branch_can_drop() {
+        // A required name is a member too, even where no property declares it.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Named": {
+                    "required": ["id"],
+                    "anyOf": [
+                        {"$ref": "#/components/schemas/A"},
+                        {"type": "object", "properties": {"id": {"type": "string"}}},
+                    ],
+                },
+                "A": {
+                    "type": "object",
+                    "required": ["a"],
+                    "properties": {"a": {"type": "string"}},
+                },
+            }),
+            "Named",
+            "`id`",
+        )?);
+    }
+
+    #[test_util::test]
+    fn nullable_emulation_beside_members_drops_them_like_any_union() {
+        // The one branch of nullable emulation drops them as surely as a union's branches do.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Maybe": {
+                    "properties": {"note": {"type": "string"}},
+                    "anyOf": [{"$ref": "#/components/schemas/A"}, {"type": "null"}],
+                },
+                "A": {"type": "object", "properties": {"a": {"type": "string"}}},
+            }),
+            "Maybe",
+            "`note`",
+        )?);
+    }
+
+    #[test_util::test]
+    fn typed_extra_members_beside_a_union_need_a_branch_that_captures_them() {
+        // Extra members the schema types beside the union are dropped by a struct that has no
+        // capture for them.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Tagged": {
+                    "additionalProperties": {"type": "string"},
+                    "anyOf": [
+                        {"$ref": "#/components/schemas/A"},
+                        {"type": "object", "required": ["b"], "properties": {"b": {"type": "string"}}},
+                    ],
+                },
+                "A": {
+                    "type": "object",
+                    "required": ["a"],
+                    "properties": {"a": {"type": "string"}},
+                },
+            }),
+            "Tagged",
+            "the members its `additionalProperties` describes",
+        )?);
+
+        // An extra member can also land in a field the branch names and the schema does not.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Spread": {
+                    "additionalProperties": {"type": "object", "properties": {
+                        "x": {"type": "string"},
+                    }},
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"payload": {
+                                "type": "object", "properties": {"y": {"type": "string"}},
+                            }},
+                            "additionalProperties": {},
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            }),
+            "Spread",
+            "the members its `additionalProperties` describes",
+        )?);
+
+        // A pattern covers a name `properties` lists too, so its members may land in that field.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Patterned": {
+                    "properties": {"payload": {}},
+                    "patternProperties": {"^payload$": {"type": "object", "properties": {
+                        "x": {"type": "string"},
+                    }}},
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"payload": {
+                                "type": "object", "properties": {"y": {"type": "string"}},
+                            }},
+                            "additionalProperties": {},
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            }),
+            "Patterned",
+            "the members its `patternProperties` describes",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_member_with_nested_members_survives_only_a_destination_that_keeps_them() {
+        // A branch that redeclares an object member reads past the nested members only the schema
+        // beside the union declares.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Nested": {
+                    "properties": {"payload": {"type": "object", "properties": {
+                        "id": {"type": "string"}, "note": {"type": "string"},
+                    }}},
+                    "anyOf": [{"$ref": "#/components/schemas/A"}, {"type": "null"}],
+                },
+                "A": {"type": "object", "properties": {"payload": {
+                    "type": "object", "properties": {"id": {"type": "string"}},
+                }}},
+            }),
+            "Nested",
+            "`payload`",
+        )?);
+
+        // A member with nested members of its own survives neither a typed capture that may read
+        // past them nor a subtyped base that only looks like a map.
+        let payload = json!({"type": "object", "required": ["x"], "properties": {
+            "x": {"type": "string"},
+        }});
+        for branch in [
+            json!({"type": "object", "additionalProperties": {
+                "type": "object", "properties": {"y": {"type": "string"}},
+            }}),
+            json!({"type": "object", "properties": {"payload": {
+                "type": "object", "properties": {"y": {"type": "string"}},
+            }}}),
+            json!({"$ref": "#/components/schemas/Base"}),
+            json!({"$ref": "#/components/schemas/Untyped"}),
+        ] {
+            assert!(
+                degrades_for_members_beside(
+                    json!({
+                        "Holder": {
+                            "properties": {"payload": payload.clone()},
+                            "anyOf": [branch.clone(), {"type": "null"}],
+                        },
+                        "Base": {
+                            "type": "object",
+                            "discriminator": {"propertyName": "kind", "mapping": {
+                                "c": "#/components/schemas/C", "d": "#/components/schemas/D",
+                            }},
+                        },
+                        // A base becomes the union of its subtypes whether or not it says
+                        // `type: object`.
+                        "Untyped": {
+                            "discriminator": {"propertyName": "kind", "mapping": {
+                                "c": "#/components/schemas/C", "d": "#/components/schemas/D",
+                            }},
+                        },
+                        "C": {"allOf": [{"$ref": "#/components/schemas/Base"}, {
+                            "properties": {"c": {"type": "string"}},
+                        }]},
+                        "D": {"allOf": [{"$ref": "#/components/schemas/Base"}, {
+                            "properties": {"d": {"type": "string"}},
+                        }]},
+                    }),
+                    "Holder",
+                    "`payload`",
+                )?,
+                "{branch}"
+            );
+        }
+
+        // A member that may be an object or a string still declares the members an object has.
+        assert!(degrades_for_members_beside(
+            json!({
+                "Either": {
+                    "properties": {"payload": {"type": ["object", "string"], "properties": {
+                        "x": {"type": "string"},
+                    }}},
+                    "anyOf": [
+                        {"type": "object", "properties": {"payload": {
+                            "type": "object", "properties": {"y": {"type": "string"}},
+                        }}},
+                        {"type": "null"},
+                    ],
+                },
+            }),
+            "Either",
+            "`payload`",
+        )?);
+    }
+
+    #[test_util::test]
+    fn members_beside_a_union_that_every_branch_declares_keep_the_union() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            // Each branch redeclares the member, which is how a union with a shared field is
+            // usually written.
+            "Shared": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}},
+                "oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ],
+            },
+            "A": {"type": "object", "required": ["id", "a"], "properties": {
+                "id": {"type": "string"}, "a": {"type": "integer"},
+            }},
+            "B": {"type": "object", "required": ["id", "b"], "properties": {
+                "id": {"type": "string"}, "b": {"type": "boolean"},
+            }},
+            // A string carries no members, so it drops none.
+            "Labelled": {
+                "properties": {"note": {"type": "string"}},
+                "anyOf": [{"enum": ["a"]}, {"enum": ["b"]}],
+            },
+            // The tag is read by the enum and written back by it.
+            "Tagged": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {"kind": {"type": "string"}},
+                "discriminator": {"propertyName": "kind"},
+                "oneOf": [
+                    {"$ref": "#/components/schemas/C"},
+                    {"$ref": "#/components/schemas/D"},
+                ],
+            },
+            "C": {"type": "object", "properties": {"c": {"type": "string"}}},
+            "D": {"type": "object", "properties": {"d": {"type": "string"}}},
+            // A map keeps every member, declared or not.
+            "Open": {
+                "properties": {"note": {"type": "string"}},
+                "anyOf": [{"type": "object"}, {"type": "null"}],
+            },
+            // A member redeclared in the same shape is kept, though it is written out again.
+            "Mapped": {
+                "type": "object",
+                "properties": {"metadata": {"type": "object", "additionalProperties": {
+                    "type": "string",
+                }}},
+                "anyOf": [
+                    {"type": "object", "required": ["e"], "properties": {
+                        "e": {"type": "string"},
+                        "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
+                    }},
+                    {"type": "null"},
+                ],
+            },
+            // A base that maps one subtype is not a union, so it stays the map it reads as.
+            "Single": {
+                "properties": {"note": {"type": "string"}},
+                "anyOf": [{"$ref": "#/components/schemas/Lone"}, {"type": "null"}],
+            },
+            "Lone": {
+                "type": "object",
+                "discriminator": {"propertyName": "kind", "mapping": {
+                    "c": "#/components/schemas/C",
+                }},
+            },
+            // A member declared as arbitrary JSON keeps whatever it holds.
+            "Loose": {
+                "properties": {"payload": {"type": "object", "properties": {
+                    "x": {"type": "string"},
+                }}},
+                "anyOf": [
+                    {"type": "object", "properties": {"payload": {}}},
+                    {"type": "null"},
+                ],
+            },
+        })))?;
+        assert!(matches!(shape_of(&shapes, "Shared")?, Shape::Union(_)));
+        assert!(matches!(
+            shape_of(&shapes, "Labelled")?,
+            Shape::StringEnum(_)
+        ));
+        assert!(matches!(shape_of(&shapes, "Tagged")?, Shape::Union(_)));
+        assert!(matches!(shape_of(&shapes, "Open")?, Shape::Optional(_)));
+        assert!(matches!(shape_of(&shapes, "Loose")?, Shape::Optional(_)));
+        assert!(matches!(shape_of(&shapes, "Mapped")?, Shape::Optional(_)));
+        assert!(matches!(shape_of(&shapes, "Single")?, Shape::Optional(_)));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.detail().contains("beside its `oneOf`/`anyOf`")),
+            "{diagnostics:#?}"
+        );
+    }
+
     /// serde's externally tagged enum, as `schemars` exports it.
     #[test_util::test]
     fn a_string_branch_beside_others_does_not_swallow_a_later_string() {
