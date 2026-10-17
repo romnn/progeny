@@ -525,14 +525,13 @@ impl Lower<'_> {
             }
             self.hints.entry(payload.clone()).or_insert(hint);
         }
-        // The wire name becomes the Rust name, and the open arm is named last, so a document that
-        // lists `unknown` keeps that spelling for its own variant.
+        // The wire name becomes the Rust name.
         let mut used = Namer::default();
         let variants = keyed
             .variants
             .iter()
             .map(|variant| KeyedVariant {
-                rust_name: used.unique(RustIdent::variant(&variant.name)),
+                rust_name: used.unique(RustIdent::declared_variant(&variant.name)),
                 wire_name: variant.name.clone(),
                 payload: variant
                     .payload
@@ -542,7 +541,7 @@ impl Lower<'_> {
             .collect();
         ContractKind::KeyedEnum {
             variants,
-            fallback: fallback_variant(&mut used),
+            fallback: RustIdent::fallback_variant(),
         }
     }
 
@@ -1003,11 +1002,11 @@ impl Lower<'_> {
         let variants = types
             .into_iter()
             .map(|ty| VariantContract {
-                rust_name: used.unique(RustIdent::variant(&self.variant_name(&ty))),
+                rust_name: used.unique(RustIdent::declared_variant(&self.variant_name(&ty))),
                 ty,
             })
             .collect();
-        (variants, fallback_variant(&mut used))
+        (variants, RustIdent::fallback_variant())
     }
 
     /// What to call a variant holding this type.
@@ -1055,22 +1054,14 @@ fn tagged_variants(
         .map(|(ty, tag, aliases)| {
             let tag_value = tag?;
             Some(TaggedVariant {
-                rust_name: used.unique(RustIdent::variant(&tag_value)),
+                rust_name: used.unique(RustIdent::declared_variant(&tag_value)),
                 ty,
                 tag_value,
                 aliases,
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    Some((variants, fallback_variant(&mut used)))
-}
-
-/// The name of an enum's fallback variant, claimed after every declared variant.
-///
-/// Claimed last so that a document enumerating `unknown` keeps the plain spelling for its own
-/// value, which is API, and the fallback takes the suffixed one.
-fn fallback_variant(used: &mut Namer) -> RustIdent {
-    used.unique(RustIdent::variant("Unknown"))
+    Some((variants, RustIdent::fallback_variant()))
 }
 
 fn format_name(format: Format) -> &'static str {
@@ -1126,11 +1117,11 @@ fn string_variants(values: &[String]) -> (Vec<StringVariant>, RustIdent) {
     let variants = values
         .iter()
         .map(|value| StringVariant {
-            rust_name: used.unique(RustIdent::variant(value)),
+            rust_name: used.unique(RustIdent::declared_variant(value)),
             wire_name: value.clone(),
         })
         .collect();
-    (variants, fallback_variant(&mut used))
+    (variants, RustIdent::fallback_variant())
 }
 
 /// One `multipart/form-data` request-body position: the body schema's key, and where the

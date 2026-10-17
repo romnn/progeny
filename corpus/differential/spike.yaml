@@ -78,9 +78,10 @@ components:
           type: string
         optional:
           type: integer
+    # `unknown` is declared so its variant has to step aside for the fallback's name.
     State:
       type: string
-      enum: [in-progress, done]
+      enum: [in-progress, done, unknown]
     # An object with no properties, which `cloudflare`, `github-31` and `okta` all declare. It is
     # here because it renders to code with nothing in it — no member to read, none to write — and
     # every binding that had nothing to do became a warning in the consumer's build: an unused
