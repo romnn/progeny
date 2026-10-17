@@ -19,7 +19,7 @@
 
 use serde_json::Value;
 
-use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Struct, Tag, TagStyle, Union};
+use super::{Extra, Keyed, Scalar, Shape, ShapeRef, Shapes, Struct, Tag, TagStyle, Union};
 
 /// The checker: the shape table, and the word the reasons call the value being judged.
 pub(crate) struct Fit<'a> {
@@ -86,6 +86,55 @@ impl<'a> Fit<'a> {
             Shape::FixedArray { item, len } => self.fixed(value, item, *len),
             Shape::Tuple { items, .. } => self.tuple(value, items),
             Shape::Union(union) => self.union(value, union),
+            Shape::Keyed(keyed) => self.keyed(value, keyed),
+        }
+    }
+
+    /// A keyed union's value: a listed string, or an object naming a variant by its one key.
+    ///
+    /// An object that carries a listed key beside other members may be a value of an open
+    /// branch, so only a single-member object is followed into its payload.
+    fn keyed(&self, value: &Value, keyed: &Keyed) -> Option<String> {
+        match value {
+            // A string is a unit variant, or the catch-all's when the union has one.
+            Value::String(text) => {
+                let listed = keyed
+                    .variants
+                    .iter()
+                    .any(|variant| variant.payload.is_none() && variant.name == *text);
+                (!listed && !keyed.open)
+                    .then(|| format!("`{text}` is not one of the strings the union lists"))
+            }
+            // An object is judged by the data variants whose keys it carries.
+            Value::Object(object) => {
+                let mut named = keyed.variants.iter().filter_map(|variant| {
+                    let payload = variant.payload.as_ref()?;
+                    object
+                        .get(&variant.name)
+                        .map(|present| (&variant.name, present, payload))
+                });
+                match (named.next(), named.next()) {
+                    // No listed key: only the catch-all accepts it.
+                    (None, _) => (!keyed.open).then(|| {
+                        format!("{} names none of the keys the union lists", self.subject)
+                    }),
+                    // Exactly one member, and it is listed: its value must fit the payload, unless
+                    // the catch-all accepts the object anyway.
+                    (Some((name, present, payload)), None) if object.len() == 1 && !keyed.open => {
+                        self.through(present, payload)
+                            .map(|reason| format!("at `{name}`, {reason}"))
+                    }
+                    // A listed key beside other members may suit an open branch, so nothing is
+                    // certain.
+                    _ => None,
+                }
+            }
+            // No branch accepts a number, a boolean, a list or `null`.
+            other => Some(format!(
+                "the schema says a string or an object, {} is {}",
+                self.subject,
+                kind(other)
+            )),
         }
     }
 

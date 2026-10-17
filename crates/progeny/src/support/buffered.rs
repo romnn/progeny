@@ -746,6 +746,104 @@ where
     Ok(text.and_then(|text| variants.iter().position(|variant| *variant == text)))
 }
 
+/// Which variant of a keyed union a payload names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyedChoice {
+    /// A listed string, by position among the unit variants.
+    Unit(usize),
+    /// A single-member object whose key is listed, by position among the data variants.
+    Data(usize),
+    /// Anything else, which the open arm keeps.
+    Other,
+}
+
+/// Which variant a keyed union's payload names: a listed string, or an object whose one member
+/// has a listed key.
+///
+/// An object with other members beside a listed key names no variant and stays whole.
+/// Only a payload that writes a listed key twice is refused: it has said two things, and neither
+/// reading is the open arm.
+pub(crate) fn keyed_choice<E>(
+    content: &Content<'_>,
+    units: &'static [&'static str],
+    keys: &'static [&'static str],
+) -> Result<KeyedChoice, E>
+where
+    E: de::Error,
+{
+    // A string names a unit variant, or nothing.
+    if let Some(text) = content.as_str() {
+        return Ok(units
+            .iter()
+            .position(|unit| *unit == text)
+            .map_or(KeyedChoice::Other, KeyedChoice::Unit));
+    }
+    // Anything but a string or an object names nothing.
+    let Content::Map(members) = content else {
+        return Ok(KeyedChoice::Other);
+    };
+    // A listed key written twice, wherever the two sit.
+    // Written without `let` chains: this file ships into crates on the 2021 edition.
+    for (index, (key, _)) in members.iter().enumerate() {
+        let Some(listed) = keys.iter().find(|listed| key.as_str() == Some(**listed)) else {
+            continue;
+        };
+        let repeated = members
+            .iter()
+            .skip(index + 1)
+            .any(|(other, _)| other.as_str() == Some(*listed));
+        if repeated {
+            return Err(de::Error::duplicate_field(listed));
+        }
+    }
+    // Only an object with exactly one member is named by its key.
+    let [(key, _)] = members.as_slice() else {
+        return Ok(KeyedChoice::Other);
+    };
+    Ok(key
+        .as_str()
+        .and_then(|key| keys.iter().position(|listed| *listed == key))
+        .map_or(KeyedChoice::Other, KeyedChoice::Data))
+}
+
+/// Reads a keyed union: a listed string through `unit`, a named payload through `data`, and
+/// anything else — or a named payload `data` cannot read — whole through `unknown`.
+///
+/// `unit` answers `None` for a position it does not hold, which only a union without unit
+/// variants has.
+pub(crate) fn keyed<'de, T, E, U, F, O>(
+    payload: Content<'de>,
+    units: &'static [&'static str],
+    keys: &'static [&'static str],
+    unit: U,
+    data: F,
+    unknown: O,
+) -> Result<T, E>
+where
+    E: de::Error,
+    U: FnOnce(usize) -> Option<T>,
+    F: FnOnce(usize, ContentDeserializer<'de, E>) -> Result<T, E>,
+    O: FnOnce(Value) -> T,
+{
+    let read = match keyed_choice::<E>(&payload, units, keys)? {
+        KeyedChoice::Unit(index) => unit(index),
+        // The member's value is read from a copy, so the envelope is still whole for the open
+        // arm if the payload's type refuses it.
+        KeyedChoice::Data(index) => match &payload {
+            Content::Map(members) => members
+                .first()
+                .and_then(|(_, value)| data(index, ContentDeserializer::new(value.clone())).ok()),
+            _ => None,
+        },
+        KeyedChoice::Other => None,
+    };
+    match read {
+        Some(value) => Ok(value),
+        // Open arm: the envelope exactly as it arrived.
+        None => Deserialize::deserialize(ContentDeserializer::<'de, E>::new(payload)).map(unknown),
+    }
+}
+
 /// Resolves an open string enum from the string alone.
 ///
 /// Read with `deserialize_str` rather than `deserialize_enum`: the wire carries a string, the
@@ -1402,6 +1500,102 @@ mod tests {
             replayed.is_err(),
             "replay accepted {replayed:?} and silently dropped the second member"
         );
+    }
+
+    /// A keyed enum, written the way the generator writes one: `Serialize` is serde's derive, and
+    /// `Deserialize` names the variant by the string or the one key.
+    mod keyed {
+        use color_eyre::eyre;
+        use serde::{Deserialize, Deserializer};
+
+        use super::super::{Content, keyed};
+
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct Denied {
+            rejection: String,
+        }
+
+        #[derive(Debug, PartialEq, serde::Serialize)]
+        enum Decision {
+            #[serde(rename = "approved")]
+            Approved,
+            #[serde(rename = "abort")]
+            Abort,
+            #[serde(rename = "denied")]
+            Denied(Box<Denied>),
+            #[serde(untagged)]
+            Unknown(Box<serde_json::Value>),
+        }
+
+        impl<'de> Deserialize<'de> for Decision {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                const UNITS: &[&str] = &["approved", "abort"];
+                const KEYS: &[&str] = &["denied"];
+                let payload: Content<'de> = Deserialize::deserialize(deserializer)?;
+                keyed(
+                    payload,
+                    UNITS,
+                    KEYS,
+                    |unit| {
+                        Some(match unit {
+                            0usize => Self::Approved,
+                            _ => Self::Abort,
+                        })
+                    },
+                    |_, payload| {
+                        Deserialize::deserialize(payload).map(|value| Self::Denied(Box::new(value)))
+                    },
+                    |value| Self::Unknown(Box::new(value)),
+                )
+            }
+        }
+
+        /// The value a wire reads as, after checking it writes back byte for byte.
+        fn round_trip(wire: &str) -> eyre::Result<Decision> {
+            let decision: Decision = serde_json::from_str(wire)?;
+            assert_eq!(serde_json::to_string(&decision)?, wire, "{decision:?}");
+            Ok(decision)
+        }
+
+        #[test_util::test]
+        fn a_string_or_one_key_names_the_variant() {
+            assert_eq!(round_trip(r#""abort""#)?, Decision::Abort);
+            assert_eq!(
+                round_trip(r#"{"denied":{"rejection":"no"}}"#)?,
+                Decision::Denied(Box::new(Denied {
+                    rejection: "no".to_owned()
+                }))
+            );
+        }
+
+        /// Everything the description does not name, and a named payload its type refuses, is
+        /// kept whole and written back as it arrived.
+        #[test_util::test]
+        fn anything_else_is_kept_whole() {
+            for wire in [
+                r#""later""#,
+                r#"{"maybe":1}"#,
+                r#"{"denied":{"rejection":"no"},"note":1}"#,
+                r#"{"denied":7}"#,
+                // An object naming a unit variant is not that variant.
+                r#"{"approved":null}"#,
+                "3",
+            ] {
+                assert!(
+                    matches!(round_trip(wire)?, Decision::Unknown(_)),
+                    "{wire} named a variant"
+                );
+            }
+        }
+
+        #[test_util::test]
+        fn a_key_written_twice_is_refused() {
+            let refused = serde_json::from_str::<Decision>(r#"{"denied":{},"denied":{}}"#);
+            assert!(refused.is_err(), "{refused:?}");
+        }
     }
 
     /// A carried-tag enum, written the way the generator writes one: the variant types declare

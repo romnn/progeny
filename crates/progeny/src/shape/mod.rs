@@ -122,6 +122,9 @@ pub(crate) enum Shape {
         len: u32,
     },
     Union(Union),
+    /// serde's externally tagged enum: a listed string, or an object whose one member's key
+    /// names the variant and whose value is its payload.
+    Keyed(Keyed),
     /// A shape that also admits `null`.
     Optional(ShapeRef),
     /// A shape that is exactly another one.
@@ -226,6 +229,30 @@ pub(crate) struct Union {
     /// itself, and carrying it costs every variant a member the builder of a value must fill in.
     /// Paying either when the shapes already distinguish the variants would be a loss for nothing.
     pub(crate) tag: Option<Tag>,
+}
+
+/// A union whose branches are listed strings and single-member objects, each named on the wire.
+///
+/// serde writes a Rust enum this way by default, and `schemars` exports it as such a union.
+/// The string or the one key is the variant's name, so the variants need no shape to tell them
+/// apart and no wrapper type to hold them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Keyed {
+    pub(crate) variants: Vec<KeyedVariant>,
+    /// Whether a last branch accepts any other string and any other object, which the open arm
+    /// holds.
+    pub(crate) open: bool,
+}
+
+/// One variant of a [`Keyed`] union, named by the string or key the wire carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyedVariant {
+    /// The string, or the object's one key.
+    pub(crate) name: String,
+    /// The value under the key, or `None` for a variant written as its bare string.
+    ///
+    /// `{"custom": null}` has a payload of `null` and is not the string `"custom"`.
+    pub(crate) payload: Option<ShapeRef>,
 }
 
 /// The tag of a union whose variants shape alone cannot tell apart.
@@ -440,6 +467,15 @@ fn children(shape: &Shape, out: &mut Vec<ShapeKey>) {
         Shape::Union(union) => {
             for variant in &union.variants {
                 push(&variant.shape);
+            }
+        }
+        Shape::Keyed(keyed) => {
+            for payload in keyed
+                .variants
+                .iter()
+                .filter_map(|variant| variant.payload.as_ref())
+            {
+                push(payload);
             }
         }
     }
@@ -830,8 +866,13 @@ mod tests {
     #[test_util::test]
     fn an_undiscriminated_one_of_is_matched_structurally() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
-            "Cat": {"type": "object", "required": ["meow"], "properties": {"meow": {"type": "string"}}},
-            "Dog": {"type": "object", "required": ["woof"], "properties": {"woof": {"type": "string"}}},
+            // A second member keeps each branch from being read by its one key.
+            "Cat": {"type": "object", "required": ["meow"], "properties": {
+                "meow": {"type": "string"}, "name": {"type": "string"},
+            }},
+            "Dog": {"type": "object", "required": ["woof"], "properties": {
+                "woof": {"type": "string"}, "name": {"type": "string"},
+            }},
             "Animal": {"oneOf": [
                 {"$ref": "#/components/schemas/Cat"},
                 {"$ref": "#/components/schemas/Dog"},
@@ -1600,16 +1641,131 @@ mod tests {
         );
     }
 
+    /// The variants of a keyed union as `(name, has payload)`, and whether it is open.
+    fn keyed_of(shapes: &Shapes, name: &str) -> eyre::Result<(Vec<(String, bool)>, bool)> {
+        let Shape::Keyed(keyed) = shape_of(shapes, name)? else {
+            eyre::bail!(
+                "{name} should be a keyed union, is {:?}",
+                shape_of(shapes, name)?
+            );
+        };
+        let variants = keyed
+            .variants
+            .iter()
+            .map(|variant| (variant.name.clone(), variant.payload.is_some()))
+            .collect();
+        Ok((variants, keyed.open))
+    }
+
+    /// serde's externally tagged enum, as `schemars` exports it, read by its strings and keys.
+    #[test_util::test]
+    fn strings_and_single_member_objects_are_one_keyed_union() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "ReviewDecision": {"oneOf": [
+                {"type": "string", "enum": ["approved"]},
+                {"type": "object", "additionalProperties": false, "required": ["denied"],
+                 "properties": {"denied": {"type": "object", "properties": {
+                     "rejection": {"type": "string"},
+                 }}}},
+                {"type": "string", "enum": ["approved_for_session", "abort"]},
+            ]},
+            // A last branch that takes any other string or object is the open arm.
+            "CodexErrorInfo": {"anyOf": [
+                {"type": "string", "enum": ["overloaded"]},
+                {"type": "object", "required": ["http"],
+                 "properties": {"http": {"type": "integer"}}},
+                {"type": ["string", "object"]},
+            ]},
+            // A nullable union is an `Option` of the keyed one.
+            "Maybe": {"anyOf": [
+                {"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}},
+                {"type": "object", "required": ["b"], "properties": {"b": {"type": "null"}}},
+                {"type": "null"},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        let (variants, open) = keyed_of(&shapes, "ReviewDecision")?;
+        assert_eq!(
+            variants,
+            [
+                ("approved".to_owned(), false),
+                ("denied".to_owned(), true),
+                ("approved_for_session".to_owned(), false),
+                ("abort".to_owned(), false),
+            ]
+        );
+        assert!(!open);
+
+        let (variants, open) = keyed_of(&shapes, "CodexErrorInfo")?;
+        assert_eq!(variants.len(), 2);
+        assert!(open);
+
+        assert!(matches!(shape_of(&shapes, "Maybe")?, Shape::Optional(_)));
+    }
+
+    /// A union is read by its keys only where nothing about a branch would be lost by it.
+    #[test_util::test]
+    fn a_union_is_not_keyed_where_a_key_does_not_say_everything() {
+        let member = |name: &str| json!({"type": "object", "required": [name], "properties": {name: {"type": "string"}}});
+        let refused = [
+            // A branch with a second member, even an optional one.
+            json!({"oneOf": [
+                {"type": "string", "enum": ["a"]},
+                {"type": "object", "required": ["b"],
+                 "properties": {"b": {"type": "string"}, "c": {"type": "string"}}},
+            ]}),
+            // Two branches under one key.
+            json!({"oneOf": [member("b"), member("b"), {"type": "string", "enum": ["a"]}]}),
+            // A string that is also a key.
+            json!({"oneOf": [{"type": "string", "enum": ["b"]}, member("b")]}),
+            // A key that is present but not required.
+            json!({"oneOf": [
+                {"type": "string", "enum": ["a"]},
+                {"type": "object", "properties": {"b": {"const": "x"}}},
+            ]}),
+            // A catch-all that is not last.
+            json!({"oneOf": [{"type": ["string", "object"]}, member("b")]}),
+            // A last branch that accepts more than strings and objects.
+            json!({"oneOf": [member("b"), {}]}),
+            // Members declared beside the union.
+            json!({"properties": {"c": {"type": "string"}}, "oneOf": [member("a"), member("b")]}),
+            // A branch with something to report.
+            json!({"oneOf": [member("a"), {"type": "string", "enum": ["b"], "maxLength": 3}]}),
+            // A branch that also admits `null`.
+            json!({"oneOf": [
+                member("a"),
+                {"type": ["object", "null"], "required": ["b"], "properties": {"b": {"type": "string"}}},
+            ]}),
+            // A member marked for one direction.
+            json!({"oneOf": [
+                member("a"),
+                {"type": "object", "required": ["b"],
+                 "properties": {"b": {"type": "string", "readOnly": true}}},
+            ]}),
+            // A catch-all for strings alone.
+            json!({"oneOf": [member("a"), {"type": "string"}]}),
+        ];
+        for schema in refused {
+            let (shapes, _) = shapes_of(with_schemas(json!({ "Either": schema.clone() })))?;
+            assert!(
+                !matches!(shape_of(&shapes, "Either")?, Shape::Keyed(_)),
+                "{schema} should not be keyed"
+            );
+        }
+    }
+
     /// serde's externally tagged enum, as `schemars` exports it.
     #[test_util::test]
     fn a_string_branch_beside_others_does_not_swallow_a_later_string() {
         // The first branch becomes an open enum that reads `"abort"` as its own unlisted value, so
         // the third branch would never be reached.
+        // `Denied` has a member beside its key, so the union is not read by that key.
         assert!(degrades_as_wild_union(
             json!({
                 "Denied": {
                     "type": "object", "required": ["denied"],
-                    "properties": {"denied": {"type": "string"}},
+                    "properties": {"denied": {"type": "string"}, "note": {"type": "string"}},
                 },
                 "ReviewDecision": {"oneOf": [
                     {"type": "string", "enum": ["approved"]},
@@ -1816,9 +1972,10 @@ mod tests {
 
     #[test_util::test]
     fn only_a_member_the_struct_insists_on_tells_objects_apart() {
+        // A second member keeps each branch from being read by its one key.
         let d = json!({
             "type": "object", "required": ["d"],
-            "properties": {"d": {"type": "string"}},
+            "properties": {"d": {"type": "string"}, "y": {"type": "string"}},
         });
         // Required but nullable, `a` is an `Option` that reads a missing member as `None`, so the
         // first branch reads `{"d": …}` and drops `d`.
@@ -1826,7 +1983,7 @@ mod tests {
             json!({
                 "A": {
                     "type": "object", "required": ["a"],
-                    "properties": {"a": {"type": ["string", "null"]}},
+                    "properties": {"a": {"type": ["string", "null"]}, "x": {"type": "string"}},
                 },
                 "D": d,
                 "Either": {"oneOf": [
@@ -1862,13 +2019,14 @@ mod tests {
         assert!(degrades_as_wild_union(
             json!({
                 "P": {"anyOf": [{"type": ["string", "null"]}]},
+                // A second member keeps each branch from being read by its one key.
                 "A": {
                     "type": "object", "required": ["p"],
-                    "properties": {"p": {"$ref": "#/components/schemas/P"}},
+                    "properties": {"p": {"$ref": "#/components/schemas/P"}, "x": {"type": "string"}},
                 },
                 "D": {
                     "type": "object", "required": ["d"],
-                    "properties": {"d": {"type": "string"}},
+                    "properties": {"d": {"type": "string"}, "y": {"type": "string"}},
                 },
                 "Either": {"oneOf": [
                     {"$ref": "#/components/schemas/A"},

@@ -141,6 +141,9 @@ fn decoder(
         } => tagged_body(
             contract, tag, variants, fallback, false, contracts, config, scope,
         ),
+        ContractKind::KeyedEnum { variants, fallback } => {
+            keyed_body(contract, variants, fallback, contracts, config, scope)
+        }
         ContractKind::Newtype { inner } => {
             let inner = type_ref_in(inner, contracts, config, scope);
             quote! {
@@ -343,6 +346,84 @@ fn tagged_body(
     }
 }
 
+/// A keyed union's decoder: a listed string is its unit variant, a single-member object with a
+/// listed key is read into that variant's payload, and anything else stays whole in the open arm.
+///
+/// A payload that cannot be read leaves the whole envelope to the open arm too, which is what the
+/// strict decoder (`serde_impl.rs`) does with it.
+fn keyed_body(
+    contract: &TypeContract,
+    variants: &[crate::contract::KeyedVariant],
+    fallback: &RustIdent,
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> TokenStream {
+    let support = scope.support();
+    let deprecated = contract.docs().deprecated;
+    let construct = |value: TokenStream| {
+        if deprecated {
+            quote! {
+                {
+                    #[expect(
+                        deprecated,
+                        reason = "the generated decoder must construct this deprecated variant"
+                    )]
+                    let resolved = #value;
+                    resolved
+                }
+            }
+        } else {
+            value
+        }
+    };
+    // The support helper names a variant by its position among the unit or the data variants.
+    let (units, data): (Vec<_>, Vec<_>) = variants
+        .iter()
+        .partition(|variant| variant.payload.is_none());
+    let unit_names = units.iter().map(|variant| variant.wire_name.as_str());
+    let key_names = data.iter().map(|variant| variant.wire_name.as_str());
+    // A listed string is its unit variant.
+    let unit_arms = units.iter().enumerate().map(|(index, variant)| {
+        let name = ident(&variant.rust_name);
+        let value = construct(quote! { Self::#name });
+        quote! { #support::KeyedChoice::Unit(#index) => Ok(#value), }
+    });
+    let fallback_ident = ident(fallback);
+    let open = construct(quote! { Self::#fallback_ident(Box::new(value)) });
+    // A listed key reads its payload leniently, and a payload that will not read leaves the
+    // envelope to the open arm.
+    let data_arms = data.iter().enumerate().filter_map(|(index, variant)| {
+        let payload = variant.payload.as_ref()?;
+        let name = ident(&variant.rust_name);
+        let ty = type_ref_in(payload, contracts, config, scope);
+        let wrap = wrapped(payload, deprecated, &name);
+        Some(quote! {
+            #support::KeyedChoice::Data(#index) => {
+                Ok(match #support::lenient::keyed_payload::<#ty>(content, site, report)? {
+                    Ok(value) => #wrap,
+                    Err(value) => #open,
+                })
+            }
+        })
+    });
+    let unknown = unknown_arm(contract, fallback);
+    quote! {
+        const UNITS: &[&str] = &[#(#unit_names),*];
+        const KEYS: &[&str] = &[#(#key_names),*];
+        match #support::keyed_choice(&content, UNITS, KEYS)? {
+            #(#unit_arms)*
+            #(#data_arms)*
+            // Anything else stays whole, recorded with the string or key it named.
+            _ => {
+                let key = #support::lenient::keyed_text(&content).map(str::to_owned);
+                #support::lenient::unknown_union(content, site, report, key.as_deref())
+                    .map(#unknown)
+            }
+        }
+    }
+}
+
 /// A read value placed in its variant, boxed the way the enum declares it.
 fn wrapped(ty: &TypeRef, deprecated: bool, variant: &proc_macro2::Ident) -> TokenStream {
     let value = if enum_type_is_boxed(ty) {
@@ -474,6 +555,13 @@ fn from_strict(
                 .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
             variant_conversions(pairs, fallback, &strict_name, contracts)
         }
+        (
+            ContractKind::KeyedEnum { variants, fallback },
+            ContractKind::KeyedEnum {
+                variants: strict_variants,
+                ..
+            },
+        ) => keyed_conversion(variants, strict_variants, fallback, &strict_name, contracts),
         (ContractKind::Newtype { .. }, ContractKind::Newtype { inner }) => {
             let converted = convert(quote! { value.0 }, inner, contracts);
             quote! { Self(#converted) }
@@ -552,6 +640,36 @@ fn variant_conversions<'a>(
         let converted = boxed_convert(strict, read, contracts);
         quote! { #strict_name::#name(value) => Self::#name(#converted), }
     });
+    let fallback = ident(fallback);
+    quote! {
+        match value {
+            #(#arms)*
+            #strict_name::#fallback(value) => Self::#fallback(value),
+        }
+    }
+}
+
+/// The strict keyed value as a read one: a unit variant as it is, a payload converted if its type
+/// twins, and the open arm unchanged.
+fn keyed_conversion(
+    variants: &[crate::contract::KeyedVariant],
+    strict_variants: &[crate::contract::KeyedVariant],
+    fallback: &RustIdent,
+    strict_name: &TokenStream,
+    contracts: &Contracts,
+) -> TokenStream {
+    let arms = variants
+        .iter()
+        .zip(strict_variants)
+        .map(|(variant, source)| {
+            let name = ident(&variant.rust_name);
+            if let (Some(read), Some(strict)) = (&variant.payload, &source.payload) {
+                let converted = boxed_convert(strict, read, contracts);
+                quote! { #strict_name::#name(value) => Self::#name(#converted), }
+            } else {
+                quote! { #strict_name::#name => Self::#name, }
+            }
+        });
     let fallback = ident(fallback);
     quote! {
         match value {

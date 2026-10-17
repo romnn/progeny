@@ -331,6 +331,14 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                 #body
             }
         }
+        ContractKind::KeyedEnum { variants, fallback } => {
+            let body = keyed_enum(variants, fallback, contract, contracts, config, scope);
+            quote! {
+                #docs
+                #derives
+                #body
+            }
+        }
         ContractKind::CarriedTagEnum {
             variants, fallback, ..
         } => {
@@ -467,7 +475,8 @@ fn data_enum(
         // on would be a second source of truth — and would not resolve without the derive anyway.
         DeserStrategy::HandWrittenBuffered { .. }
         | DeserStrategy::HandWrittenFieldless
-        | DeserStrategy::HandWrittenCarriedTag => {
+        | DeserStrategy::HandWrittenCarriedTag
+        | DeserStrategy::HandWrittenKeyed => {
             quote! {}
         }
     };
@@ -497,6 +506,44 @@ fn fallback_variant(fallback: &RustIdent, when: &str) -> TokenStream {
         #[doc = ""]
         #[doc = " Written back unchanged, so a value round-trips whether or not the description knows its shape."]
         #fallback(Box<serde_json::Value>),
+    }
+}
+
+/// A keyed enum: a unit variant per listed string and a newtype variant per key, each renamed to
+/// its exact wire name.
+///
+/// The attributes are for the derived `Serialize`, which writes serde's own enum encoding and the
+/// open arm untagged.
+/// `Deserialize` is hand-written (`serde_impl.rs`), because the derive also reads a unit variant
+/// from an object, `{"approved": null}`, and would write it back as the bare string.
+fn keyed_enum(
+    variants: &[crate::contract::KeyedVariant],
+    fallback: &RustIdent,
+    contract: &TypeContract,
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> TokenStream {
+    let name = ident(contract.rust_name());
+    let arms = variants.iter().map(|variant| {
+        let variant_ident = ident(&variant.rust_name);
+        let wire = &variant.wire_name;
+        let rename = (variant_ident != *wire).then(|| quote! { #[serde(rename = #wire)] });
+        // A data variant holds its payload; a unit variant is its bare string.
+        if let Some(payload) = &variant.payload {
+            let ty = enum_type_ref(payload, contracts, config, scope);
+            quote! { #rename #variant_ident(#ty), }
+        } else {
+            quote! { #rename #variant_ident, }
+        }
+    });
+    let fallback = fallback_variant(fallback, "names no variant");
+    quote! {
+        pub enum #name {
+            #(#arms)*
+            #[serde(untagged)]
+            #fallback
+        }
     }
 }
 
@@ -550,7 +597,8 @@ fn tagged_enum(
         // on would be a second source of truth — and would not resolve without the derive anyway.
         DeserStrategy::HandWrittenBuffered { .. }
         | DeserStrategy::HandWrittenFieldless
-        | DeserStrategy::HandWrittenCarriedTag => {
+        | DeserStrategy::HandWrittenCarriedTag
+        | DeserStrategy::HandWrittenKeyed => {
             quote! {}
         }
     };
@@ -770,7 +818,11 @@ fn derives(contract: &TypeContract) -> TokenStream {
     // `Deserialize` goes through the lenient decoder and is written by hand under both.
     let serde = match (contract.deser(), contract.form().is_lenient()) {
         (DeserStrategy::Derive, false) => quote! { , serde::Serialize, serde::Deserialize },
-        (DeserStrategy::Derive, true) => quote! { , serde::Serialize },
+        // A keyed enum's `Serialize` is serde's own encoding, and only its `Deserialize` is
+        // written by hand.
+        (DeserStrategy::Derive, true) | (DeserStrategy::HandWrittenKeyed, _) => {
+            quote! { , serde::Serialize }
+        }
         (
             DeserStrategy::HandWrittenBuffered { .. }
             | DeserStrategy::HandWrittenFieldless

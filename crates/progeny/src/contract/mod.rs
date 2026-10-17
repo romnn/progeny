@@ -306,6 +306,12 @@ pub(crate) enum DeserStrategy {
     /// this, because the encodings a tagged union could otherwise take (`tag = "…"`, `untagged`)
     /// buffer through serde's private `Content` and already require a self-describing format.
     HandWrittenCarriedTag,
+    /// Hand-written `Deserialize` for a keyed enum, beside the derived `Serialize`.
+    ///
+    /// The only strategy such an enum takes: serde's derive also reads a unit variant from an
+    /// object, `{"approved": null}`, and writes it back as the string, which turns a payload the
+    /// open arm should keep into a different one.
+    HandWrittenKeyed,
 }
 
 /// What kind of Rust item a type is.
@@ -365,6 +371,16 @@ pub(crate) enum ContractKind {
         /// The variant holding a payload whose tag names no variant, as `serde_json::Value`.
         fallback: RustIdent,
     },
+    /// serde's externally tagged enum: a unit variant is its string on the wire, and a data variant
+    /// is an object whose one key names it and whose value is its payload.
+    ///
+    /// A kind of its own because the wire names the variant without a tag member: there is no
+    /// property for [`ContractKind::TaggedEnum`] to name, and a unit variant has no payload type.
+    KeyedEnum {
+        variants: Vec<KeyedVariant>,
+        /// The variant holding a string or object that names no variant, as `serde_json::Value`.
+        fallback: RustIdent,
+    },
     /// An enum of strings: the serde path that never buffers.
     StringEnum {
         variants: Vec<StringVariant>,
@@ -396,6 +412,10 @@ impl ContractKind {
             Self::TaggedEnum { variants, .. } | Self::CarriedTagEnum { variants, .. } => {
                 variants.iter().map(|variant| &variant.ty).collect()
             }
+            Self::KeyedEnum { variants, .. } => variants
+                .iter()
+                .filter_map(|variant| variant.payload.as_ref())
+                .collect(),
             Self::StringEnum { .. } => Vec::new(),
             Self::Newtype { inner } | Self::Alias { target: inner } => vec![inner],
             Self::Tuple { items } => items.iter().collect(),
@@ -454,6 +474,16 @@ pub(crate) struct TaggedVariant {
     /// The exact bytes the tag member holds for this variant — what lets the renderer write a
     /// `rename` without asking whether it should.
     pub(crate) tag_value: String,
+}
+
+/// One variant of a keyed union.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyedVariant {
+    pub(crate) rust_name: RustIdent,
+    /// The string, or the object's one key: the exact bytes on the wire.
+    pub(crate) wire_name: String,
+    /// The value under the key, or `None` for a variant written as its bare string.
+    pub(crate) payload: Option<TypeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

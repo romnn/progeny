@@ -473,6 +473,58 @@ pub(crate) fn tag_text<'a>(content: &'a Content<'_>, tag: &str) -> Option<&'a st
         .and_then(|(_, value)| value.as_str())
 }
 
+/// Read the payload of a keyed union's data variant, or hand the whole envelope back.
+///
+/// The payload is read with a scratch report that joins the real one only when the read
+/// succeeds, so a payload that cannot be read leaves the envelope to the open arm, recorded the
+/// way any other unrecognized union payload is.
+///
+/// # Errors
+///
+/// Never in practice: arbitrary JSON reads every buffered value.
+#[doc(hidden)]
+pub(crate) fn keyed_payload<'de, T>(
+    content: Content<'de>,
+    site: Site,
+    report: &mut Degradations,
+) -> Result<Result<T, serde_json::Value>, Problem>
+where
+    T: Lenient<'de>,
+{
+    let mut scratch = Degradations::new();
+    // The one member's value, copied so the envelope stays whole for the open arm.
+    let payload = match &content {
+        Content::Map(members) => match members.as_slice() {
+            [(_, payload)] => Some(payload.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    // Read: what it tolerated joins the report.
+    // A strict decode keeps a payload it refuses in the open arm, so the union as a whole is never
+    // refused, and an enclosing untagged union must still see it accepted.
+    if let Some(Ok(value)) = payload.map(|payload| T::lenient(payload, site, &mut scratch)) {
+        report.merge_tolerated(scratch);
+        return Ok(Ok(value));
+    }
+    // Refused: the scratch report is dropped, and the envelope is recorded as unrecognized.
+    let key = keyed_text(&content).map(str::to_owned);
+    unknown_union(content, site, report, key.as_deref()).map(Err)
+}
+
+/// The string or the single key a keyed union's payload names, for the report's sample.
+#[doc(hidden)]
+#[must_use]
+pub(crate) fn keyed_text<'a>(content: &'a Content<'_>) -> Option<&'a str> {
+    match content {
+        Content::Map(members) => match members.as_slice() {
+            [(key, _)] => key.as_str(),
+            _ => None,
+        },
+        other => other.as_str(),
+    }
+}
+
 /// Read a string enum leniently: a value the description does not list is recorded.
 ///
 /// # Errors
@@ -753,7 +805,7 @@ mod tests {
     use super::{
         Declared, DegradationKind, Degradations, Lenient, MemberSite, Members, Site, Slot,
     };
-    use crate::support::buffered::Content;
+    use crate::support::buffered::{Content, KeyedChoice};
 
     /// A struct written the way the renderer writes a read form: two declared members and a
     /// capture map, each member taken by the constant that names its site.
@@ -1271,6 +1323,83 @@ mod tests {
             only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember
         );
+    }
+
+    /// A keyed union, written the way the renderer writes one.
+    #[derive(Debug, PartialEq)]
+    enum Placement {
+        Remote,
+        Office(Address),
+        Contract(Employment),
+        Unknown(Box<serde_json::Value>),
+    }
+
+    impl<'de> Lenient<'de> for Placement {
+        fn lenient(
+            content: Content<'de>,
+            site: Site,
+            report: &mut Degradations,
+        ) -> Result<Self, super::Problem> {
+            const UNITS: &[&str] = &["remote"];
+            const KEYS: &[&str] = &["office", "contract"];
+            match crate::support::buffered::keyed_choice(&content, UNITS, KEYS)? {
+                KeyedChoice::Unit(_) => Ok(Self::Remote),
+                KeyedChoice::Data(0) => Ok(
+                    match super::keyed_payload::<Address>(content, site, report)? {
+                        Ok(value) => Self::Office(value),
+                        Err(value) => Self::Unknown(Box::new(value)),
+                    },
+                ),
+                KeyedChoice::Data(_) => Ok(
+                    match super::keyed_payload::<Employment>(content, site, report)? {
+                        Ok(value) => Self::Contract(value),
+                        Err(value) => Self::Unknown(Box::new(value)),
+                    },
+                ),
+                KeyedChoice::Other => {
+                    let key = super::keyed_text(&content).map(str::to_owned);
+                    super::unknown_union(content, site, report, key.as_deref())
+                        .map(|value| Self::Unknown(Box::new(value)))
+                }
+            }
+        }
+    }
+
+    /// The payload under a listed key is read leniently, with what it tolerates reported; any
+    /// other payload is kept whole and reported with the string or key it named.
+    #[test_util::test]
+    fn a_keyed_union_reads_its_payload_leniently_and_keeps_the_rest() {
+        let (value, report) = decode::<Placement>(r#""remote""#)?;
+        assert_eq!(value, Placement::Remote);
+        assert!(report.is_empty(), "{report}");
+
+        let (value, report) = decode::<Placement>(r#"{"office":{"street":"Main","floor":2}}"#)?;
+        assert!(matches!(value, Placement::Office(_)), "{value:?}");
+        assert_eq!(
+            only(&report, Address::SITE)?.kind,
+            DegradationKind::UndeclaredMember
+        );
+
+        // A strict decode keeps a payload it would refuse in the open arm, so what the lenient
+        // read tolerated inside it is reported without the union counting as refused, which an
+        // enclosing untagged union's probe relies on.
+        let (value, report) = decode::<Placement>(r#"{"contract":{"years":null}}"#)?;
+        assert!(matches!(value, Placement::Contract(_)), "{value:?}");
+        assert_eq!(
+            only(&report, Employment::SITE_YEARS)?.kind,
+            DegradationKind::NullNotAllowed
+        );
+        assert!(!report.strict_refuses(), "{report}");
+
+        for wire in [r#""hybrid""#, r#"{"office":7}"#, r#"{"remote":null}"#] {
+            let (value, report) = decode::<Placement>(wire)?;
+            assert!(matches!(value, Placement::Unknown(_)), "{wire}: {value:?}");
+            assert_eq!(
+                only(&report, ROOT)?.kind,
+                DegradationKind::UnknownUnionValue,
+                "{wire}"
+            );
+        }
     }
 
     /// A tagged union whose tag the union consumes, written the way the renderer writes one.

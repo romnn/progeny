@@ -157,6 +157,10 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
         | ContractKind::CarriedTagEnum { variants, .. } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
+        ContractKind::KeyedEnum { variants, .. } => variants
+            .iter_mut()
+            .filter_map(|variant| variant.payload.as_mut())
+            .collect(),
         ContractKind::StringEnum { .. } => Vec::new(),
         ContractKind::Newtype { inner } => vec![inner],
         ContractKind::Tuple { items } => items.iter_mut().collect(),
@@ -219,6 +223,19 @@ fn fingerprint(contract: &Provisional) -> String {
                     out,
                     "|{}={}:{:?}",
                     variant.rust_name, variant.tag_value, variant.ty
+                );
+            }
+            let _ = write!(out, "|?{fallback}");
+        }
+        // The wire names are in for the reason tag values are, and so is whether a variant has a
+        // payload: `"custom"` and `{"custom": …}` are different bytes.
+        ContractKind::KeyedEnum { variants, fallback } => {
+            out.push_str("keyed");
+            for variant in variants {
+                let _ = write!(
+                    out,
+                    "|{}={}:{:?}",
+                    variant.rust_name, variant.wire_name, variant.payload
                 );
             }
             let _ = write!(out, "|?{fallback}");

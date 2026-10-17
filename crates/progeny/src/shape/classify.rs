@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use super::merge::{self, Discriminated, View};
 use super::{
-    Docs, Extra, Field, Format, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey, ShapeRef, Struct, Tag,
-    TagStyle, Union, Variant,
+    Docs, Extra, Field, Format, Keyed, KeyedVariant, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey,
+    ShapeRef, Struct, Tag, TagStyle, Union, Variant,
 };
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
@@ -409,7 +409,9 @@ fn union(
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(values) => Shape::StringEnum(values),
         Reading::Variants(rest) => {
-            if let Some((property, tags)) = constant_discriminator(resolved, &rest) {
+            if let Some(keyed) = keyed(resolved, view, &rest) {
+                Shape::Keyed(keyed)
+            } else if let Some((property, tags)) = constant_discriminator(resolved, &rest) {
                 // The branches name themselves: read the tag, the way a declared discriminator
                 // is read, rather than match by shape — which would rest on the constants, and a
                 // generated string enum reads any string.
@@ -526,6 +528,7 @@ fn keep_own_members(
             union.tag.as_ref().map(|tag| tag.property.as_str()),
         ),
         // Strings carry no members, and arbitrary JSON keeps them all.
+        // A keyed union is read so only where nothing is declared beside it ([`keyed`]).
         _ => return shape,
     };
     let mut dropped: BTreeSet<String> = BTreeSet::new();
@@ -833,6 +836,182 @@ fn constant_discriminator(
         return Some((name.clone(), tags));
     }
     None
+}
+
+/// The union as serde's externally tagged enum, when every branch names its variant on the wire.
+///
+/// A branch that lists strings is one unit variant per string, and an object whose one property
+/// is also its one required member is a variant named by that key, holding its value.
+/// A payload is read by the key it arrives under, so the variants need no shape to tell them
+/// apart, and anything else — an unlisted string or key, or an object with other members — is
+/// kept whole in the open arm.
+/// A last branch that accepts any other string or object, the way a forward-compatible schema
+/// ends such a union, is that open arm already.
+///
+/// Refused where reading by key would lose or misread something: members declared beside the
+/// union, a branch with something to report or any other structure, a key two branches use, or
+/// a string that is also a key.
+fn keyed(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> Option<Keyed> {
+    // Members beside the union would have nowhere to live in the enum, and a declared
+    // discriminator says the document chose a tag property instead.
+    let declares_members = !view.properties.is_empty()
+        || !view.required.is_empty()
+        || view.additional.is_some()
+        || view.additional_denied
+        || view.uniform_pattern.is_some()
+        || view.discriminator.is_some();
+    if declares_members {
+        return None;
+    }
+    let mut variants: Vec<KeyedVariant> = Vec::new();
+    let mut units: BTreeSet<String> = BTreeSet::new();
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    let mut open = false;
+    for (index, branch) in branches.iter().enumerate() {
+        let view = merge::view(resolved, branch);
+        // A folded branch is never classified on its own, so whatever it would have reported, or
+        // a union inside it, would vanish with it.
+        let reported = !view.uninterpreted.is_empty()
+            || !view.unknown_types.is_empty()
+            || view.conflict.is_some()
+            || view.impossible
+            || view.unions_collide
+            || view.union.is_some();
+        // A branch that also admits `null` would lose it: a keyed variant is a string or an
+        // object, never `null`.
+        if reported || declares_null(&view) {
+            return None;
+        }
+        let last = index + 1 == branches.len();
+        match keyed_branch(resolved, &view, branch, last)? {
+            // One unit variant per string, and a string two branches list is one variant.
+            KeyedBranch::Strings(listed) => {
+                for value in listed {
+                    if units.insert(value.clone()) {
+                        variants.push(KeyedVariant {
+                            name: value,
+                            payload: None,
+                        });
+                    }
+                }
+            }
+            // One data variant, named by its key.
+            // Two branches under one key would leave the key unable to say which payload it holds.
+            KeyedBranch::Member(key, payload) => {
+                if !keys.insert(key.clone()) {
+                    return None;
+                }
+                variants.push(KeyedVariant {
+                    name: key,
+                    payload: Some(ShapeRef::Key(payload)),
+                });
+            }
+            // The open arm already holds whatever the catch-all accepts.
+            KeyedBranch::Rest => open = true,
+        }
+    }
+    // A string that is also a key would put two variants under one serde name, and a union with
+    // no object branch is a string enum, which [`folded_strings`] already reads.
+    let disjoint = units.is_disjoint(&keys);
+    (disjoint && !keys.is_empty()).then_some(Keyed { variants, open })
+}
+
+/// How one branch of a keyed union names itself on the wire.
+enum KeyedBranch {
+    /// A string enumeration: each listed string is a unit variant.
+    Strings(Vec<String>),
+    /// An object whose one property is also its one required member: the key and its payload.
+    Member(String, ShapeKey),
+    /// The last branch, accepting any other string or object.
+    Rest,
+}
+
+/// How a branch names itself on the wire, or `None` when it does not.
+fn keyed_branch(
+    resolved: &ResolvedDocument,
+    view: &View,
+    branch: &ShapeKey,
+    last: bool,
+) -> Option<KeyedBranch> {
+    if let Some(listed) = listed_strings(resolved, view) {
+        return Some(KeyedBranch::Strings(listed));
+    }
+    if let Some((key, payload)) = sole_member(resolved, view, branch) {
+        return Some(KeyedBranch::Member(key, payload));
+    }
+    (last && accepts_any_string_or_object(view)).then_some(KeyedBranch::Rest)
+}
+
+/// The strings a branch lists, when it is a string enumeration and nothing else.
+fn listed_strings(resolved: &ResolvedDocument, view: &View) -> Option<Vec<String>> {
+    if kind_of(resolved, view) != Some(Kind::String) || !declares_no_structure(view) {
+        return None;
+    }
+    let listed = match (&view.enumeration, &view.constant) {
+        (Some(listed), _) => listed.clone(),
+        (None, Some(value)) => vec![value.clone()],
+        (None, None) => return None,
+    };
+    let strings: Option<Vec<String>> = listed
+        .iter()
+        .map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect();
+    strings.filter(|strings| !strings.is_empty())
+}
+
+/// The key and payload of an object branch whose one property is also its one required member.
+fn sole_member(
+    resolved: &ResolvedDocument,
+    view: &View,
+    branch: &ShapeKey,
+) -> Option<(String, ShapeKey)> {
+    let mut properties = view.properties.iter();
+    let (Some((name, payload)), None) = (properties.next(), properties.next()) else {
+        return None;
+    };
+    // An access marker on the member is a fact about the direction it travels, which a variant
+    // has nowhere to record, so a marked member stays a struct field.
+    let sole = kind_of(resolved, view) == Some(Kind::Object)
+        && view.required.len() == 1
+        && view.required.contains(name)
+        && !view.read_only.contains(name)
+        && !view.write_only.contains(name)
+        && view.additional.is_none()
+        && view.uniform_pattern.is_none()
+        && view.items.is_none()
+        && view.prefix_items.is_none()
+        && view.enumeration.is_none()
+        && view.constant.is_none()
+        && view.discriminator.is_none()
+        && !names_its_subtypes(resolved, view, branch);
+    sole.then(|| (name.clone(), payload.clone()))
+}
+
+/// Whether a branch accepts any string and any object, and constrains nothing else.
+///
+/// Only both together, which is how a forward-compatible schema ends such a union: the open arm
+/// then holds exactly what the branch accepts, so [`Keyed::open`] needs to say nothing more.
+fn accepts_any_string_or_object(view: &View) -> bool {
+    view.types.as_ref().is_some_and(|types| {
+        types.len() == 2 && types.contains(&TypeName::String) && types.contains(&TypeName::Object)
+    }) && declares_no_structure(view)
+        && view.enumeration.is_none()
+        && view.constant.is_none()
+        && view.format.is_none()
+        && view.content_encoding.is_none()
+        && view.content_media_type.is_none()
+}
+
+/// Whether a view declares no members, elements or other structure of its own.
+fn declares_no_structure(view: &View) -> bool {
+    view.properties.is_empty()
+        && view.required.is_empty()
+        && view.additional.is_none()
+        && !view.additional_denied
+        && view.uniform_pattern.is_none()
+        && view.items.is_none()
+        && view.prefix_items.is_none()
+        && view.discriminator.is_none()
 }
 
 /// The one string a property is bound to, when `const` or a one-value `enum` binds it to one.

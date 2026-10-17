@@ -115,6 +115,7 @@ fn differs(types: &[Provisional]) -> BTreeSet<usize> {
             ContractKind::Enum { .. }
             | ContractKind::TaggedEnum { .. }
             | ContractKind::CarriedTagEnum { .. }
+            | ContractKind::KeyedEnum { .. }
             | ContractKind::StringEnum { .. }
             | ContractKind::Newtype { .. }
             | ContractKind::Tuple { .. }

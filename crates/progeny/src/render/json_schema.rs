@@ -206,6 +206,7 @@ impl Writer<'_> {
             ContractKind::Enum { variants, .. } => self.untagged(variants),
             ContractKind::TaggedEnum { tag, variants, .. } => self.tagged(tag, variants),
             ContractKind::CarriedTagEnum { tag, variants, .. } => self.carried(tag, variants),
+            ContractKind::KeyedEnum { variants, .. } => self.keyed(variants),
             ContractKind::StringEnum { variants, .. } => strings(variants),
             ContractKind::Newtype { inner } => self.reference(inner),
             ContractKind::Tuple { items } => self.tuple(items),
@@ -330,6 +331,41 @@ impl Writer<'_> {
             })
             .collect();
         arms.push(fallback("names no variant in its tag"));
+        Node::object([("anyOf", Node::Array(arms))])
+    }
+
+    /// A union named on the wire: the listed strings, one single-member object per data variant,
+    /// and the open arm.
+    fn keyed(&self, variants: &[crate::contract::KeyedVariant]) -> Node {
+        let units: Vec<Value> = variants
+            .iter()
+            .filter(|variant| variant.payload.is_none())
+            .map(|variant| Value::String(variant.wire_name.clone()))
+            .collect();
+        let mut arms = Vec::new();
+        if !units.is_empty() {
+            arms.push(Node::json(
+                serde_json::json!({"type": "string", "enum": units}),
+            ));
+        }
+        for variant in variants {
+            let Some(payload) = &variant.payload else {
+                continue;
+            };
+            arms.push(Node::object([
+                ("type", Node::json(Value::from("object"))),
+                (
+                    "properties",
+                    Node::Object(vec![(variant.wire_name.clone(), self.reference(payload))]),
+                ),
+                (
+                    "required",
+                    Node::json(serde_json::json!([variant.wire_name])),
+                ),
+                ("additionalProperties", Node::json(Value::Bool(false))),
+            ]));
+        }
+        arms.push(fallback("names no variant"));
         Node::object([("anyOf", Node::Array(arms))])
     }
 
