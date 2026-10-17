@@ -20,12 +20,12 @@
 use serde_json::{Map, Value};
 
 use super::{ApiModel, BodyContract};
-use crate::contract::{Contracts, TypeRef};
+use crate::contract::{ContractKind, Contracts, FieldContract, SkipRule, TypeRef};
 use crate::diag::JsonPointer;
 use crate::doc::{MaybeRef, MediaType};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Extra, Keyed, Shape, ShapeRef, Shapes, Tag, TagStyle, Union};
+use crate::shape::{Extra, Keyed, Shape, ShapeKey, ShapeRef, Shapes, Tag, TagStyle, Union};
 
 /// One example payload, and what a faithful round trip through the generated type must produce.
 #[derive(Debug, Clone)]
@@ -167,7 +167,8 @@ struct Collect<'a> {
 /// The type a position decodes into, as a test spells it.
 struct Named {
     type_name: String,
-    shape: Shape,
+    /// The shape the position classified as, which the payload is pruned under.
+    key: ShapeKey,
     /// Whether it is a read form, which keeps every member the payload carried.
     lenient: bool,
 }
@@ -196,7 +197,7 @@ impl Collect<'_> {
             }
             let Named {
                 type_name,
-                shape,
+                key,
                 lenient,
             } = match self.named(id, response) {
                 Ok(named) => named,
@@ -206,7 +207,8 @@ impl Collect<'_> {
                 }
             };
             for (location, original) in examples {
-                let Some(expected) = self.prune(&original, &shape, lenient) else {
+                let Some(expected) = self.through(&original, &ShapeRef::Key(key.clone()), lenient)
+                else {
                     skipped.push(Skipped::Captures);
                     continue;
                 };
@@ -235,7 +237,9 @@ impl Collect<'_> {
     /// lives there.
     fn named(&self, id: SchemaId, response: bool) -> Result<Named, Skipped> {
         let key = crate::shape::key_of(self.resolved, id);
-        let shape = self.shapes.get(&key).cloned().ok_or(Skipped::Unnamed)?;
+        if self.shapes.get(&key).is_none() {
+            return Err(Skipped::Unnamed);
+        }
         let ty = self.contracts.type_of(&key).ok_or(Skipped::Opaque)?;
         let ty = if response {
             self.contracts.read_form(ty)
@@ -253,7 +257,7 @@ impl Collect<'_> {
                     } else {
                         name.to_owned()
                     },
-                    shape,
+                    key,
                     lenient,
                 })
             }
@@ -275,43 +279,7 @@ impl Collect<'_> {
         match shape {
             // Arbitrary JSON is carried whole, so nothing is pruned from it.
             Shape::Any => Some(value.clone()),
-            Shape::Struct(structure) => {
-                let members = value.as_object()?;
-                if matches!(structure.extra, Extra::Typed(_)) {
-                    // A typed catch-all keeps undeclared members in a map, so the pruned payload is
-                    // not what a round trip produces and this cannot say what is.
-                    return None;
-                }
-                let mut out = Map::new();
-                for field in &structure.fields {
-                    let Some(present) = members.get(&field.wire) else {
-                        continue;
-                    };
-                    // An optional field is an `Option` that is left out when it is `None`, so an
-                    // explicit `null` comes back *absent*. That is the presence collapse, already
-                    // reported as a `Degrade` against the position it costs — expecting the null
-                    // back would make this gate red for a documented policy rather than for a
-                    // defect, which is how a gate stops being read. A read form collapses one
-                    // step further: a required member that is not nullable is an `Option` too,
-                    // and a `null` in it is a tolerated deviation written back as absent.
-                    if present.is_null() && !self.keeps_null(field, lenient) {
-                        continue;
-                    }
-                    out.insert(
-                        field.wire.clone(),
-                        self.through(present, &field.shape, lenient)?,
-                    );
-                }
-                if lenient {
-                    // The read form keeps every member the description did not declare, verbatim.
-                    for (key, member) in members {
-                        if !structure.fields.iter().any(|field| field.wire == *key) {
-                            out.insert(key.clone(), member.clone());
-                        }
-                    }
-                }
-                Some(Value::Object(out))
-            }
+            Shape::Struct(structure) => self.prune_struct(value, structure, None, lenient),
             Shape::Map { value: element } => {
                 let members = value.as_object()?;
                 let mut out = Map::new();
@@ -490,21 +458,163 @@ impl Collect<'_> {
         Some(pruned)
     }
 
-    fn through(&self, value: &Value, reference: &ShapeRef, lenient: bool) -> Option<Value> {
-        match reference {
-            ShapeRef::Key(key) => {
-                let shape = self.shapes.get(key)?.clone();
-                self.prune(value, &shape, lenient)
-            }
-            ShapeRef::Inline(shape) => self.prune(value, shape, lenient),
+    /// A struct's payload restricted to its declared members.
+    ///
+    /// `fields` is the struct's frozen contract where the shape names one, which is what says
+    /// whether a member writes an explicit `null` back.
+    fn prune_struct(
+        &self,
+        value: &Value,
+        structure: &crate::shape::Struct,
+        fields: Option<&[FieldContract]>,
+        lenient: bool,
+    ) -> Option<Value> {
+        let members = value.as_object()?;
+        if matches!(structure.extra, Extra::Typed(_)) {
+            // A typed catch-all keeps undeclared members in a map, so the pruned payload is
+            // not what a round trip produces and this cannot say what is.
+            return None;
         }
+        let mut out = Map::new();
+        for field in &structure.fields {
+            let Some(present) = members.get(&field.wire) else {
+                continue;
+            };
+            // A member left out when it is `None` reads an explicit `null` as `None`, so the
+            // `null` comes back *absent*.
+            // By default that is every optional member: the presence collapse, already reported
+            // as a `Degrade` against the position it costs, and expecting the `null` back would
+            // make this gate red for a documented policy rather than for a defect.
+            // `preserve-optional-nullable` and `nullability-overrides` keep it instead, which the
+            // member's contract says.
+            // A read form collapses one step further: a required member that is not nullable is
+            // an `Option` too, and a `null` in it is a tolerated deviation written back as absent.
+            let contract = fields.and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|contract| contract.wire_name == field.wire)
+            });
+            if present.is_null() && !self.keeps_null(field, contract, lenient) {
+                continue;
+            }
+            let ty = contract.map(|contract| contract.ty.clone());
+            out.insert(
+                field.wire.clone(),
+                self.through_typed(present, &field.shape, ty, lenient)?,
+            );
+        }
+        if lenient {
+            // The read form keeps every member the description did not declare, verbatim.
+            for (key, member) in members {
+                if !structure.fields.iter().any(|field| field.wire == *key) {
+                    out.insert(key.clone(), member.clone());
+                }
+            }
+        }
+        Some(Value::Object(out))
+    }
+
+    fn through(&self, value: &Value, reference: &ShapeRef, lenient: bool) -> Option<Value> {
+        self.through_typed(value, reference, None, lenient)
+    }
+
+    /// [`Collect::through`], knowing the type the position became where the caller does.
+    ///
+    /// A keyed shape says which type it became itself.
+    /// An inline one does not, so the type comes from the member that holds it, which is how a
+    /// nullable nested object still reaches its struct's contract through the `Option` around it.
+    fn through_typed(
+        &self,
+        value: &Value,
+        reference: &ShapeRef,
+        ty: Option<TypeRef>,
+        lenient: bool,
+    ) -> Option<Value> {
+        let (shape, ty) = match reference {
+            ShapeRef::Key(key) => (self.shapes.get(key)?, self.type_of(key, lenient).or(ty)),
+            ShapeRef::Inline(shape) => (&**shape, ty),
+        };
+        match shape {
+            // A struct is pruned against its contract, which the shape alone does not settle.
+            Shape::Struct(structure) => {
+                let fields = ty.as_ref().and_then(|ty| self.fields_of(ty));
+                self.prune_struct(value, structure, fields, lenient)
+            }
+            // The wrapper's type holds the inner one.
+            Shape::Optional(inner) | Shape::Alias(inner) => {
+                if value.is_null() {
+                    return Some(Value::Null);
+                }
+                let inner_ty = ty.and_then(|ty| self.unwrapped(ty));
+                self.through_typed(value, inner, inner_ty, lenient)
+            }
+            _ => self.prune(value, shape, lenient),
+        }
+    }
+
+    /// The type a classified shape became, in the form the payload decodes into.
+    fn type_of(&self, key: &ShapeKey, lenient: bool) -> Option<TypeRef> {
+        let ty = self.contracts.type_of(key)?;
+        Some(if lenient {
+            self.contracts.read_form(ty)
+        } else {
+            ty.clone()
+        })
+    }
+
+    /// The type an `Option`, a box, a presence wrapper or an alias holds.
+    fn unwrapped(&self, ty: TypeRef) -> Option<TypeRef> {
+        match ty {
+            TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+                Some(*inner)
+            }
+            TypeRef::Named(index) => match self.contracts.get(index)?.kind() {
+                ContractKind::Alias { target } => Some(target.clone()),
+                _ => Some(ty),
+            },
+            other => Some(other),
+        }
+    }
+
+    /// The frozen fields of the struct a type names, through any wrapper around it.
+    fn fields_of(&self, ty: &TypeRef) -> Option<&[FieldContract]> {
+        // Bounded, because an alias of an alias is a chain the contract layer already cut.
+        let mut ty = ty.clone();
+        for _ in 0..8 {
+            match ty {
+                TypeRef::Named(index) => match self.contracts.get(index)?.kind() {
+                    ContractKind::Struct { fields } => return Some(fields),
+                    ContractKind::Alias { target } => ty = target.clone(),
+                    _ => return None,
+                },
+                TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+                    ty = *inner;
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Whether a `null` in this member survives the round trip.
     ///
-    /// Strictly, a required member is always written; leniently, only a required member the
-    /// description lets be `null` — everything else is an `Option` left out when `None`.
-    fn keeps_null(&self, field: &crate::shape::Field, lenient: bool) -> bool {
+    /// The member's contract answers where there is one: a `null` is written back unless the
+    /// member is left out when `None`, which is the presence collapse.
+    /// That is the fact the renderer acts on, so the expectation and the emitted type agree,
+    /// under `preserve-optional-nullable` and `nullability-overrides` as much as by default.
+    ///
+    /// Without one, strictly, a required member is always written; leniently, only a required
+    /// member the description lets be `null` — everything else is an `Option` left out when
+    /// `None`.
+    fn keeps_null(
+        &self,
+        field: &crate::shape::Field,
+        contract: Option<&FieldContract>,
+        lenient: bool,
+    ) -> bool {
+        if let Some(contract) = contract {
+            return contract.skip_serializing_if != SkipRule::WhenNone;
+        }
         if !field.required {
             return false;
         }
@@ -553,14 +663,18 @@ mod tests {
 
     /// Collect the payloads of a document the way the harness does.
     fn payloads_of(document: Value) -> eyre::Result<Vec<super::Payload>> {
-        let config = Config::default();
+        payloads_under(document, &Config::default())
+    }
+
+    /// Collect the payloads of a document generated under `config`.
+    fn payloads_under(document: Value, config: &Config) -> eyre::Result<Vec<super::Payload>> {
         let mut ctx = Ctx::new();
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
         let shapes = shape::classify(&resolved, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
-        let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
+        let model = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
         Ok(super::collect(&resolved, &shapes, &contracts, &model).0)
     }
 
@@ -796,6 +910,51 @@ mod tests {
             }},
         }))?;
         assert_eq!(found[0].expected, json!({"type": "a", "size": 3}));
+    }
+
+    /// A `null` the generated type writes back is expected back: an optional nullable member
+    /// under `preserve-optional-nullable` or a `nullability-overrides` entry is three-state, and
+    /// only the default collapse drops it.
+    #[test_util::test]
+    fn an_explicit_null_the_type_keeps_is_expected_back() {
+        let schema = json!({"type": "object", "properties": {
+            "note": {"type": ["string", "null"]},
+            "anything": {},
+        }});
+        let example = json!({"note": null, "anything": null});
+
+        // The default collapses both, so both come back absent.
+        let found = payloads_of(requesting(&schema, &example))?;
+        assert_eq!(found[0].expected, json!({}));
+
+        // Preserving presence keeps both.
+        let preserving = Config {
+            preserve_optional_nullable: true,
+            ..Config::default()
+        };
+        let found = payloads_under(requesting(&schema, &example), &preserving)?;
+        assert_eq!(found[0].expected, example);
+
+        // So does naming one position, and only that one.
+        let overriding: Config = toml::from_str(indoc::indoc! {r#"
+            [nullability-overrides]
+            "/paths/~1pets/post/requestBody/content/application~1json/schema/properties/note" = "string"
+        "#})?;
+        let found = payloads_under(requesting(&schema, &example), &overriding)?;
+        assert_eq!(found[0].expected, json!({"note": null}));
+
+        // A nullable nested object is its own struct behind an `Option`, and its members keep
+        // their `null` the same way.
+        let nested = json!({"type": "object", "properties": {
+            "child": {"type": ["object", "null"], "properties": {
+                "note": {"type": ["string", "null"]},
+            }},
+        }});
+        let example = json!({"child": {"note": null}});
+        let found = payloads_under(requesting(&nested, &example), &preserving)?;
+        assert_eq!(found[0].expected, example);
+        let found = payloads_of(requesting(&nested, &example))?;
+        assert_eq!(found[0].expected, json!({"child": {}}));
     }
 
     #[test_util::test]
