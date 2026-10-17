@@ -146,3 +146,48 @@ components:
         kind:
           type: string
           enum: [gen, async]
+    # Members declared beside an `anyOf` that no branch names, as `schemars` exports a struct with
+    # a `#[serde(flatten)]` enum member: a struct whose union reads the members it leaves.
+    ImageUserInput:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [image]
+        detail:
+          type: string
+      anyOf:
+        - type: object
+          required: [url]
+          properties:
+            url:
+              type: string
+        - type: object
+          required: [fileId]
+          properties:
+            fileId:
+              type: string
+    # The same beside a `oneOf` of closed branches with two members each, which shape decides.
+    Located:
+      type: object
+      properties:
+        label:
+          type: string
+      oneOf:
+        - type: object
+          required: [lat, lon]
+          additionalProperties: false
+          properties:
+            lat:
+              type: number
+            lon:
+              type: number
+        - type: object
+          required: [street, city]
+          additionalProperties: false
+          properties:
+            street:
+              type: string
+            city:
+              type: string

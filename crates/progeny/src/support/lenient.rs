@@ -377,6 +377,21 @@ impl<'de> Members<'de> {
         }
     }
 
+    /// The members no declared name claimed, read as the union flattened beside them.
+    ///
+    /// The union reads them as one object and reports its own drift, because they are its
+    /// members rather than members the struct did not declare.
+    ///
+    /// # Errors
+    ///
+    /// Returns the union's [`Problem`] when the members read as none of its variants.
+    pub(crate) fn flattened<T>(self, site: Site, report: &mut Degradations) -> Result<T, Problem>
+    where
+        T: Lenient<'de>,
+    {
+        T::lenient(Content::Map(self.members), site, report)
+    }
+
     /// The content with one member removed: a consumed tag, before its variant reads the rest.
     #[doc(hidden)]
     #[must_use]
@@ -1202,6 +1217,56 @@ mod tests {
             !report.touches(Address::SITE_UNIT.site())
                 && !report.touches(Address::SITE_NOTE.site()),
             "{report}"
+        );
+    }
+
+    /// A struct holding one declared member and, flattened beside it, a type that reads the rest
+    /// as one object, the way the renderer writes a struct beside a union.
+    #[derive(Debug, PartialEq)]
+    struct Assignment {
+        detail: Option<String>,
+        employment: Employment,
+    }
+
+    impl Assignment {
+        const SITE: Site = Site::new("Assignment", "/components/schemas/Assignment", None);
+        const SITE_DETAIL: MemberSite =
+            MemberSite::new("Assignment", "/components/schemas/Assignment", "detail");
+    }
+
+    impl<'de> Lenient<'de> for Assignment {
+        const ROOT: Site = Self::SITE;
+
+        fn lenient(
+            content: Content<'de>,
+            _site: Site,
+            report: &mut Degradations,
+        ) -> Result<Self, super::Problem> {
+            let mut members = Members::of(content, "Assignment")?;
+            Ok(Self {
+                detail: members.take(Self::SITE_DETAIL, Declared::Optional, report),
+                employment: members.flattened(Self::SITE, report)?,
+            })
+        }
+    }
+
+    /// The flattened type reads every member the declared ones leave as its own, so its members
+    /// are not drift, and what it does not declare is reported where it lands.
+    #[test_util::test]
+    fn a_flattened_member_reads_what_the_declared_members_leave() {
+        let (value, report) =
+            decode::<Assignment>(r#"{"type":"salaried","detail":"remote","years":3}"#)?;
+        assert_eq!(value.detail.as_deref(), Some("remote"));
+        assert_eq!(value.employment.kind.as_deref(), Some("salaried"));
+        assert_eq!(value.employment.years, Some(3));
+        assert!(value.employment.extra.is_empty());
+        assert!(report.is_empty(), "{report}");
+        // A member neither declares lands in the flattened type's own capture.
+        let (value, report) = decode::<Assignment>(r#"{"type":"salaried","floor":2}"#)?;
+        assert_eq!(value.employment.extra.get("floor"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            only(&report, Employment::SITE)?.kind,
+            DegradationKind::UndeclaredMember
         );
     }
 

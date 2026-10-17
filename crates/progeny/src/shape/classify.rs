@@ -65,7 +65,7 @@ pub(crate) fn key(
     report_unknown_types(&mut view, ctx, &at);
     inheritance_union(resolved, &mut view, key, ctx, &at);
 
-    let shape = nullable(resolved, &view, component_names, ctx, &at);
+    let shape = nullable(resolved, &view, key, component_names, ctx, &at);
     report_uninterpreted(&view, &shape, ctx, &at);
     shape
 }
@@ -90,7 +90,10 @@ fn inheritance_union(
     at: &JsonPointer,
 ) {
     let Subtypes { branches, unmapped } = subtypes(resolved, view, key);
-    for target in unmapped {
+    // A union flattened beside its schema's members is that schema's union again, and the schema
+    // has reported what its mapping says already.
+    let report = !key.is_branches();
+    for target in unmapped.into_iter().filter(|_| report) {
         degrade(
             ctx,
             at,
@@ -104,6 +107,10 @@ fn inheritance_union(
     // Fewer than two variants is not a union, and the literal reading — the base as it is written —
     // loses nothing that a one-armed enum would keep.
     if branches.len() < 2 {
+        return;
+    }
+    if !report {
+        view.union = Some(branches);
         return;
     }
     ctx.report(Diagnostic::new(
@@ -125,6 +132,7 @@ fn inheritance_union(
 fn nullable(
     resolved: &ResolvedDocument,
     view: &View,
+    key: &ShapeKey,
     component_names: &ComponentNames,
     ctx: &mut Ctx,
     at: &JsonPointer,
@@ -144,7 +152,7 @@ fn nullable(
         return Shape::Null;
     }
 
-    let core = core(resolved, view, others.as_ref(), component_names, ctx, at);
+    let core = core(resolved, view, key, others.as_ref(), component_names, ctx, at);
     if declares_null(view) {
         return Shape::Optional(ShapeRef::Inline(Box::new(core)));
     }
@@ -169,12 +177,17 @@ fn declares_null(view: &View) -> bool {
 fn core(
     resolved: &ResolvedDocument,
     view: &View,
+    key: &ShapeKey,
     types: Option<&BTreeSet<TypeName>>,
     component_names: &ComponentNames,
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
     if let Some(branches) = &view.union {
+        // Members beside the union that no branch reads are a struct with the union flattened.
+        if let Some(structure) = flattened(resolved, view, key, branches) {
+            return structure;
+        }
         let shape = union(resolved, view, branches, component_names, ctx, at);
         return keep_own_members(resolved, view, shape, ctx, at);
     }
@@ -309,7 +322,11 @@ fn object(view: &View) -> Shape {
     } else {
         Extra::Open
     };
-    Shape::Struct(Struct { fields, extra })
+    Shape::Struct(Struct {
+        fields,
+        extra,
+        flattened: None,
+    })
 }
 
 fn array(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Shape {
@@ -502,6 +519,81 @@ struct Subtypes<'a> {
 /// union of its subtypes.
 fn names_its_subtypes(resolved: &ResolvedDocument, view: &View, key: &ShapeKey) -> bool {
     subtypes(resolved, view, key).branches.len() >= 2
+}
+
+/// `{properties: P, anyOf: [A, B]}` as a struct of `P`'s members with the union of `A` and `B`
+/// flattened beside them, when every member has exactly one reader.
+///
+/// The struct's fields take `P`'s members, and the union, classified apart under
+/// [`ShapeKey::branches`], takes every other member.
+/// That is sound only where no member could belong to both or to neither, so this declines, and
+/// the union is read as [`keep_own_members`] reads it, wherever:
+///
+/// - there is one distinct branch, which is an alias rather than a union and flattens differently
+///   under the derive;
+/// - a branch is not an object of its own, or may be `null`, because only an object's members can
+///   sit beside `P`'s;
+/// - a branch declares or requires a member `P` declares or requires, or names one as its
+///   discriminator, because the fields would take it before the branch saw it;
+/// - `P` requires a member it does not declare, because no field would read it;
+/// - `P` says what its other members are, with `additionalProperties` or `patternProperties`,
+///   because the union reads those members too;
+/// - the discriminator names a member of `P`, because the union could not read its own tag.
+fn flattened(
+    resolved: &ResolvedDocument,
+    view: &View,
+    key: &ShapeKey,
+    branches: &[ShapeKey],
+) -> Option<Shape> {
+    let own: BTreeSet<&str> = view
+        .properties
+        .keys()
+        .chain(&view.required)
+        .map(String::as_str)
+        .collect();
+    let undeclared_required = view
+        .required
+        .iter()
+        .any(|name| !view.properties.contains_key(name));
+    let describes_others = view.additional_denied
+        || view.additional.is_some()
+        || view.uniform_pattern.is_some()
+        || view.uninterpreted.contains(&"patternProperties");
+    let own_tag = view
+        .discriminator
+        .as_ref()
+        .is_some_and(|declared| own.contains(declared.property.as_str()));
+    let distinct: BTreeSet<&ShapeKey> = branches.iter().collect();
+    if distinct.len() < 2
+        || view.properties.is_empty()
+        || undeclared_required
+        || describes_others
+        || own_tag
+    {
+        return None;
+    }
+    for branch in branches {
+        let branch_view = merge::view(resolved, branch);
+        let object = branch_view.union.is_none()
+            && !names_its_subtypes(resolved, &branch_view, branch)
+            && !declares_null(&branch_view)
+            && kind_of(resolved, &branch_view) == Some(Kind::Object);
+        // A discriminator a branch inherits names a member as surely as a property does.
+        let shares = branch_view
+            .properties
+            .keys()
+            .chain(&branch_view.required)
+            .chain(branch_view.discriminator.iter().map(|declared| &declared.property))
+            .any(|name| own.contains(name.as_str()));
+        if !object || shares {
+            return None;
+        }
+    }
+    let Shape::Struct(mut structure) = object(view) else {
+        return None;
+    };
+    structure.flattened = Some(ShapeRef::Key(key.branches()));
+    Some(Shape::Struct(structure))
 }
 
 /// The union's shape, or arbitrary JSON when that shape would drop members declared beside it.

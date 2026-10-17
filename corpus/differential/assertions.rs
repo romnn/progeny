@@ -431,3 +431,66 @@ fn a_name_edition_2024_reserves_is_escaped_and_round_trips() {
     assert_eq!(serde_json::to_string(&left)?, payload);
     assert_eq!(serde_json::to_string(&right)?, payload);
 }
+
+/// Read `payload` as `T` and `U`, the two renderings of one type, and write both back.
+fn round_trip<T, U>(payload: &str) -> eyre::Result<(String, String)>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+    U: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let left = serde_json::to_string(&serde_json::from_str::<T>(payload)?)?;
+    let right = serde_json::to_string(&serde_json::from_str::<U>(payload)?)?;
+    Ok((left, right))
+}
+
+/// Members beside a union read into the struct and the union beside it, and are written back
+/// among each other, the same bytes under both strategies.
+#[test_util::test]
+fn members_beside_a_union_round_trip_through_the_flattened_union() {
+    for payload in [
+        r#"{"type":"image","url":"https://x","detail":"high"}"#,
+        r#"{"fileId":"f1","type":"image"}"#,
+    ] {
+        let (left, right) = round_trip::<
+            derived::types::ImageUserInput,
+            hand::types::ImageUserInput,
+        >(payload)?;
+        assert_eq!(left, right, "{payload}");
+        // The same members come back, in the order the struct writes them.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&left)?,
+            serde_json::from_str::<serde_json::Value>(payload)?,
+            "{payload}"
+        );
+    }
+    // The union holds what the struct's own members left.
+    let image = serde_json::from_str::<hand::types::ImageUserInput>(
+        r#"{"type":"image","url":"u","detail":"high"}"#,
+    )?;
+    assert_eq!(image.detail.as_deref(), Some("high"));
+    assert!(matches!(
+        image.variant,
+        hand::types::ImageUserInputVariant::Url(ref url) if url.as_str() == "u"
+    ));
+
+    // Closed branches decided by shape see only the members the struct leaves them.
+    for payload in [
+        r#"{"label":"home","lat":1.5,"lon":2.5}"#,
+        r#"{"street":"Main","city":"X"}"#,
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::Located, hand::types::Located>(payload)?;
+        assert_eq!(left, right, "{payload}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&left)?,
+            serde_json::from_str::<serde_json::Value>(payload)?,
+            "{payload}"
+        );
+    }
+    let located = serde_json::from_str::<hand::types::Located>(r#"{"street":"Main","city":"X"}"#)?;
+    assert_eq!(located.label, None);
+    assert!(!matches!(
+        located.variant,
+        hand::types::LocatedVariant::Unknown(_)
+    ));
+}

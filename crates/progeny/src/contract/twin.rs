@@ -148,7 +148,8 @@ fn differs(types: &[Provisional]) -> BTreeSet<usize> {
 ///
 /// A struct's required members become `Option`s left out of the wire when `None` — a member that
 /// was absent or unreadable is written back absent, never as an invented `null` — and a capture
-/// map joins the members unless the schema's own `additionalProperties` already put one there.
+/// map joins the members unless the schema's own `additionalProperties` already put one there,
+/// or a union flattened beside them reads what they leave.
 /// Every other kind keeps its shape: its read form differs only in what it names.
 fn loosen(contract: &mut Provisional) {
     let ContractKind::Struct { fields } = &mut contract.kind else {

@@ -18,7 +18,7 @@ use quote::{format_ident, quote};
 use super::types::Scope;
 use crate::config::UnknownFields;
 use crate::contract::{
-    ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TagRoutes, TypeContract,
+    Capture, ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TagRoutes, TypeContract,
 };
 
 /// Whether any type takes a hand-written path, and therefore whether the support module is needed.
@@ -275,7 +275,7 @@ fn writing(contract: &TypeContract, fields: &[crate::contract::FieldContract]) -
 }
 
 /// The `Serialize` body of a struct with a capture member: every declared member as an entry,
-/// then every captured one.
+/// then every captured one, or the flattened union's.
 ///
 /// A captured entry whose key names a declared member is left out: the declared member is the
 /// type's statement about that key, and writing both would put the same key on the wire twice.
@@ -314,17 +314,28 @@ fn writing_map(
     });
     let captured = ident(&capture.rust_name);
     let deprecated = deprecated_field(capture, contract.docs().deprecated);
+    let rest = if capture.capture == Some(Capture::Union) {
+        let support = Scope::of(contract).support();
+        quote! {
+            #deprecated
+            #support::serialize_flattened(&self.#captured, &mut state, DECLARED)?;
+        }
+    } else {
+        quote! {
+            #deprecated
+            for (key, value) in &self.#captured {
+                if !DECLARED.contains(&key.as_str()) {
+                    state.serialize_entry(key, value)?;
+                }
+            }
+        }
+    };
     quote! {
         use serde::ser::SerializeMap as _;
         const DECLARED: &[&str] = &[#(#wire_names),*];
         let mut state = serializer.serialize_map(None)?;
         #(#writes)*
-        #deprecated
-        for (key, value) in &self.#captured {
-            if !DECLARED.contains(&key.as_str()) {
-                state.serialize_entry(key, value)?;
-            }
-        }
+        #rest
         state.end()
     }
 }

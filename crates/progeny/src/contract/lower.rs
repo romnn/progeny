@@ -334,12 +334,17 @@ impl Lower<'_> {
             .cloned()
             .unwrap_or_else(JsonPointer::root);
         let rendered = address.to_string();
-        let component = self.components.get(&rendered).cloned();
+        // A union flattened beside a struct's members shares the struct's address, but neither
+        // its component name nor a name the configuration gives it.
+        let component = (!key.is_branches())
+            .then(|| self.components.get(&rendered).cloned())
+            .flatten();
         let segments = self.segments(key, &rendered);
+        let configured = (!key.is_branches())
+            .then(|| self.config.name_for(component.as_deref(), &rendered))
+            .flatten();
 
-        let (ident, explicit) = if let Some(chosen) =
-            self.config.name_for(component.as_deref(), &rendered)
-        {
+        let (ident, explicit) = if let Some(chosen) = configured {
             let wanted = RustIdent::type_name(std::slice::from_ref(chosen));
             // A configured name joins the namer like any auto-derived one, so later claims step
             // around it instead of colliding into an `E0428` in source the caller never wrote.
@@ -785,6 +790,13 @@ impl Lower<'_> {
             .types
             .get(index.index())
             .map_or(UnknownFields::Ignore, |contract| contract.unknown_fields);
+        // The union beside the fields reads every member they leave, so the struct keeps them
+        // all for it whatever the caller's policy, and each branch applies its own.
+        if let Some(flattened) = &structure.flattened {
+            let member = self.flattened_member(flattened, key, index, &mut used, ctx);
+            fields.push(member);
+            return (fields, UnknownFields::Capture);
+        }
         let (captured, policy) = match &structure.extra {
             // The document says what an undeclared member may be, which is a statement the
             // caller's policy does not get to override: capturing them is the faithful reading,
@@ -824,6 +836,49 @@ impl Lower<'_> {
             });
         }
         (fields, policy)
+    }
+
+    /// The member holding the union declared beside a struct's fields, which reads every member
+    /// they leave.
+    ///
+    /// The union is named after the struct that holds it, whatever named that struct.
+    fn flattened_member(
+        &mut self,
+        flattened: &ShapeRef,
+        key: &ShapeKey,
+        index: TypeIndex,
+        used: &mut Namer,
+        ctx: &mut Ctx,
+    ) -> FieldContract {
+        let parent = self
+            .types
+            .get(index.index())
+            .map(|contract| contract.rust_name.as_str().to_owned())
+            .unwrap_or_default();
+        if let ShapeRef::Key(branches) = flattened {
+            self.hints
+                .entry(branches.clone())
+                .or_insert_with(|| vec![parent, "Variant".to_owned()]);
+        }
+        FieldContract {
+            rust_name: unique_field(used, "variant"),
+            // A flattened member has no wire name of its own: it *is* the leftovers.
+            wire_name: String::new(),
+            ty: self.reference(flattened, key, ctx),
+            presence: Presence::Required,
+            default: None,
+            skip_serializing_if: SkipRule::Never,
+            capture: Some(Capture::Union),
+            docs: Docs {
+                title: None,
+                description: Some(
+                    "The `oneOf`/`anyOf` declared beside the other members, which holds every \
+                     member they do not name."
+                        .to_owned(),
+                ),
+                deprecated: false,
+            },
+        }
     }
 
     /// The generated representation of one property's declared presence states.

@@ -32,7 +32,7 @@ use serde_json::Value;
 use super::types::{Scope, type_ref_in};
 use crate::config::{Config, UnknownFields};
 use crate::contract::{
-    ContractKind, Contracts, FieldContract, Gate, Presence, StringVariant, TagRoutes,
+    Capture, ContractKind, Contracts, FieldContract, Gate, Presence, StringVariant, TagRoutes,
     TaggedVariant, TypeContract, TypeIndex, TypeRef, VariantContract,
 };
 use crate::shape::{Docs, Format};
@@ -225,7 +225,14 @@ impl Writer<'_> {
         let mut properties = Vec::new();
         let mut required = Vec::new();
         let mut additional = None;
+        let mut flattened = None;
         for field in fields {
+            // The union beside the members holds the rest, as the document's own `allOf` of the
+            // two would say.
+            if field.capture == Some(Capture::Union) {
+                flattened = Some(self.reference(&field.ty));
+                continue;
+            }
             if field.is_capture() {
                 // The capture member is flattened: it is the members no declared field claims, so
                 // its element type is what an undeclared member may be.
@@ -266,6 +273,9 @@ impl Writer<'_> {
         }
         if let Some(additional) = additional {
             members.push(("additionalProperties", additional));
+        }
+        if let Some(flattened) = flattened {
+            members.push(("allOf", Node::Array(vec![flattened])));
         }
         Node::object(members)
     }

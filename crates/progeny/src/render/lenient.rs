@@ -211,6 +211,12 @@ fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) 
     let reads = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let deprecated = deprecated_field(field, contract.docs().deprecated);
+        if field.capture == Some(Capture::Union) {
+            return quote! {
+                #deprecated
+                #member: members.flattened(Self::SITE, report)?,
+            };
+        }
         if let Some(capture) = field.capture {
             let declared = capture == Capture::Declared;
             return quote! {

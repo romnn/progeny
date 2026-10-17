@@ -228,7 +228,29 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
         }
     }
     remove_typed_array_bounds(&mut view);
+    if key.is_branches() {
+        return branches_only(view);
+    }
     view
+}
+
+/// The union a view declares, apart from the members declared beside it.
+///
+/// Only what decides the union survives: its branches, its discriminator, and the object type
+/// that every branch of a flattened union has.
+/// Everything else belongs to the struct around it, which reports it once.
+fn branches_only(view: View) -> View {
+    View {
+        types: view.types.map(|types| {
+            types
+                .into_iter()
+                .filter(|name| *name == TypeName::Object)
+                .collect()
+        }),
+        union: view.union,
+        discriminator: view.discriminator,
+        ..View::default()
+    }
 }
 
 fn remove_typed_array_bounds(view: &mut View) {

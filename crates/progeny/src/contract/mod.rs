@@ -462,6 +462,11 @@ pub(crate) enum Capture {
     /// The read form keeps what the description never mentioned, so drift toward members the
     /// description does not declare is visible; a lenient decode reports each one.
     Undeclared,
+    /// The `oneOf`/`anyOf` declared beside the struct's members is what the others are.
+    ///
+    /// The member is that union rather than a map, read from every member the fields leave and
+    /// written back among them, so it is never iterated as entries.
+    Union,
 }
 
 /// One variant of an untagged union: a name for the reader, a type for the payload, and nothing
@@ -1100,6 +1105,36 @@ mod tests {
             "{:?}",
             fields[0].ty
         );
+    }
+
+    /// A configured name names the struct, and the union flattened beside its members is named
+    /// after the struct rather than given the same name a second time.
+    #[test_util::test]
+    fn a_configured_name_names_a_flattened_unions_struct_and_not_the_union() {
+        let mut config = Config::default();
+        config.names.insert("Image".to_owned(), "Photo".to_owned());
+        let (contracts, _) = contracts_of(
+            with_schemas(json!({
+                "Image": {
+                    "type": "object",
+                    "properties": {"detail": {"type": "string"}},
+                    "anyOf": [
+                        {"type": "object", "required": ["url"],
+                         "properties": {"url": {"type": "string"}}},
+                        {"type": "object", "required": ["fileId"],
+                         "properties": {"fileId": {"type": "string"}}},
+                    ],
+                },
+            })),
+            &config,
+        )?;
+        let names: Vec<&str> = contracts
+            .types()
+            .iter()
+            .map(|contract| contract.rust_name().as_str())
+            .collect();
+        assert!(names.contains(&"Photo"), "{names:?}");
+        assert!(names.contains(&"PhotoVariant"), "{names:?}");
     }
 
     #[test_util::test]
