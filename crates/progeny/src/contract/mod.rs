@@ -1643,4 +1643,96 @@ mod tests {
         assert_eq!(fields[0].wire_name, "name");
         assert_eq!(fields[0].rust_name.as_str(), "name");
     }
+
+    /// A union whose branches are written inline with a `title` each, as a schema exported from
+    /// Rust writes its variants.
+    ///
+    /// `detail` names a second member each, so the branches are structs rather than the keys of
+    /// a keyed union, and differs per union so that no two unions share a branch.
+    fn titled_branches(first: &str, second: &str, detail: &str) -> Value {
+        json!({"oneOf": [
+            {"title": first, "type": "object", "required": ["url"],
+             "properties": {"url": {"type": "string"}, detail: {"type": "string"}}},
+            {"title": second, "type": "object", "required": ["fileId"],
+             "properties": {"fileId": {"type": "integer"}, detail: {"type": "string"}}},
+        ]})
+    }
+
+    /// An inline branch is named after its title rather than its position, so reordering the
+    /// branches does not rename them.
+    #[test_util::test]
+    fn an_inline_schema_is_named_by_its_title() {
+        let (contracts, diagnostics) = contracts_of(
+            with_schemas(
+                json!({"ImageSource": titled_branches("UrlUserInput", "FileIdUserInput", "detail")}),
+            ),
+            &Config::default(),
+        )?;
+        let names = type_names(&contracts);
+        assert!(names.contains(&"UrlUserInput"), "{names:?}");
+        assert!(names.contains(&"FileIdUserInput"), "{names:?}");
+        assert!(!names.contains(&"ImageSource0"), "{names:?}");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    /// A title is not used where it would mislead or guess: one that takes a component's name,
+    /// which is reported, and silently a shared one, a prose one, a lowercase label, or one that
+    /// repeats its member.
+    #[test_util::test]
+    fn a_title_that_is_not_a_unique_name_keeps_the_positional_name() {
+        let (contracts, diagnostics) = contracts_of(
+            with_schemas(json!({
+                // Taken by a component, which wins whichever is lowered first.
+                "Clash": titled_branches("Taken", "Fine", "clash"),
+                "Taken": {"type": "object", "properties": {"a": {"type": "string"}}},
+                // Shared by two shapes, so it names neither.
+                "SharedOne": titled_branches("Shared", "OnlyOne", "one"),
+                "SharedTwo": titled_branches("Shared", "OnlyTwo", "two"),
+                // Two spellings of one name are one title, whichever is lowered first.
+                "Spelling": titled_branches("FooBar", "Foo_Bar", "spelling"),
+                // Prose, and a title that repeats its member's name.
+                "Labels": {"type": "object", "properties": {
+                    "prose": {"title": "A Prose Title", "type": "object",
+                              "properties": {"b": {"type": "string"}}},
+                    "member": {"title": "Member", "type": "object",
+                               "properties": {"c": {"type": "string"}}},
+                    "spelled": {"title": "SPELLED_", "type": "object",
+                                "properties": {"d": {"type": "string"}}},
+                    "label": {"title": "int64", "type": "object",
+                              "properties": {"e": {"type": "string"}}},
+                }},
+            })),
+            &Config::default(),
+        )?;
+        let names = type_names(&contracts);
+        for expected in [
+            "Clash0",
+            "Fine",
+            "SharedOne0",
+            "SharedTwo0",
+            "OnlyOne",
+            "OnlyTwo",
+        ] {
+            assert!(names.contains(&expected), "{expected}: {names:?}");
+        }
+        assert!(names.contains(&"LabelsProse"), "{names:?}");
+        assert!(names.contains(&"LabelsMember"), "{names:?}");
+        // A repeat in another case is still a repeat, and a lowercase title is a label.
+        assert!(names.contains(&"LabelsSpelled"), "{names:?}");
+        assert!(names.contains(&"LabelsLabel"), "{names:?}");
+        assert!(!names.contains(&"Shared"), "{names:?}");
+        assert!(names.contains(&"Spelling0"), "{names:?}");
+        assert!(names.contains(&"Spelling1"), "{names:?}");
+        assert!(!names.contains(&"FooBar"), "{names:?}");
+        // Only the title that would take a component's name is a finding.
+        let titled: Vec<_> = diagnostics
+            .iter()
+            .filter(|found| found.detail().contains("title asks for"))
+            .collect();
+        assert_eq!(titled.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            titled[0].location().to_string(),
+            "/components/schemas/Clash/oneOf/0"
+        );
+    }
 }
