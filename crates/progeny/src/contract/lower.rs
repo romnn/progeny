@@ -48,6 +48,9 @@ pub(crate) struct Collapse {
 pub(crate) enum CollapseKind {
     /// Optional and nullable, folded onto one `Option`.
     Presence,
+    /// Optional, and of a type that holds `null` itself: an explicit `null` is written out, and
+    /// read back as absent.
+    NullReadsAbsent,
     /// `readOnly: true` — the document says only responses carry the member.
     ReadOnly,
     /// `writeOnly: true` — the document says only requests carry the member.
@@ -552,7 +555,18 @@ impl Lower<'_> {
 
         let multipart_body = self.multipart_bodies.contains(key);
         for field in &structure.fields {
-            let nullable = matches!(self.shape_of(&field.shape), Some(Shape::Optional(_)));
+            // A member whose type reads `null` as a value of its own is nullable too, because an
+            // `Option` around it reads a present `null` as absent.
+            // A required one holds the `null` in its own type and needs no `Option`.
+            let nullable = matches!(self.shape_of(&field.shape), Some(Shape::Optional(_)))
+                || (!field.required && self.holds_null(&field.shape));
+            // What collapsing the member onto one `Option` costs: an `Option` of a type that holds
+            // `null` itself can still write one out.
+            let collapse = if self.carries_null(&field.shape) {
+                CollapseKind::NullReadsAbsent
+            } else {
+                CollapseKind::Presence
+            };
             let inner = self.reference(&field.shape, key, ctx);
             // A binary member of a multipart body is a file part, and a file part is bytes plus
             // metadata no `String` carries.
@@ -581,7 +595,7 @@ impl Lower<'_> {
                 });
             }
             let (presence, ty, skip) =
-                self.field_presence(field.required, nullable, inner, index, position);
+                self.field_presence(field.required, nullable, collapse, inner, index, position);
             let default = self.default(field, &origin, ctx);
             fields.push(FieldContract {
                 rust_name: unique_field(&mut used, &field.wire),
@@ -645,6 +659,7 @@ impl Lower<'_> {
         &mut self,
         required: bool,
         nullable: bool,
+        collapse: CollapseKind,
         inner: TypeRef,
         owner: TypeIndex,
         position: JsonPointer,
@@ -679,10 +694,84 @@ impl Lower<'_> {
                 self.collapses.push(Collapse {
                     owner,
                     at: position,
-                    kind: CollapseKind::Presence,
+                    kind: collapse,
                 });
-                (Presence::OptionalNullable, inner, SkipRule::WhenNone)
+                // A type that holds `null` itself has no `Option` from the shape yet.
+                let ty = match inner {
+                    TypeRef::Option(_) => inner,
+                    other => TypeRef::Option(Box::new(other)),
+                };
+                (Presence::OptionalNullable, ty, SkipRule::WhenNone)
             }
+        }
+    }
+
+    /// Whether a member's type reads `null`: arbitrary JSON, `null` itself, an `Option`, or an
+    /// untagged union with a branch that does, directly or through an alias.
+    fn holds_null(&self, reference: &ShapeRef) -> bool {
+        self.holds_null_within(reference, &mut BTreeSet::new())
+    }
+
+    /// Whether the value a member's `Option` holds can be `null` itself, so that the member can
+    /// still write a `null` out.
+    ///
+    /// It follows the type lowering builds: an inlined alias is its target, and a named type is
+    /// the value itself, unless an `Option` came off it so that its core could be named.
+    fn carries_null(&self, reference: &ShapeRef) -> bool {
+        let mut current = reference;
+        let mut seen: BTreeSet<&ShapeKey> = BTreeSet::new();
+        loop {
+            if let ShapeRef::Key(key) = current
+                && self.needs_name.contains(key)
+                && let Some(shape) = self.shapes.get(key)
+            {
+                let (wraps, core) = peel(shape);
+                // The field's `Option` is the outermost one, so a second keeps a `null` inside.
+                return match wraps.len() {
+                    0 => self.holds_null(current),
+                    1 => self.shape_holds_null(core, &mut BTreeSet::new()),
+                    _ => true,
+                };
+            }
+            match self.shape_of(current) {
+                Some(Shape::Optional(inner)) => return self.holds_null(inner),
+                Some(Shape::Alias(inner)) => {
+                    if let ShapeRef::Key(key) = inner
+                        && !seen.insert(key)
+                    {
+                        return false;
+                    }
+                    current = inner;
+                }
+                _ => return self.holds_null(current),
+            }
+        }
+    }
+
+    fn holds_null_within<'a>(
+        &'a self,
+        reference: &'a ShapeRef,
+        seen: &mut BTreeSet<&'a ShapeKey>,
+    ) -> bool {
+        if let ShapeRef::Key(key) = reference
+            && !seen.insert(key)
+        {
+            return false;
+        }
+        self.shape_of(reference)
+            .is_some_and(|shape| self.shape_holds_null(shape, seen))
+    }
+
+    fn shape_holds_null<'a>(&'a self, shape: &'a Shape, seen: &mut BTreeSet<&'a ShapeKey>) -> bool {
+        match shape {
+            Shape::Any | Shape::Null | Shape::Optional(_) => true,
+            Shape::Alias(inner) => self.holds_null_within(inner, seen),
+            // A tagged union reads only objects, which carry the tag.
+            Shape::Union(union) if union.tag.is_none() => union
+                .variants
+                .iter()
+                .any(|variant| self.holds_null_within(&variant.shape, seen)),
+            _ => false,
         }
     }
 

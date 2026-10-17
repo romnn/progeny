@@ -1190,6 +1190,95 @@ mod tests {
         );
     }
 
+    /// A type that reads `null` as a value of its own makes an optional member nullable too.
+    #[test_util::test]
+    fn an_optional_member_whose_type_holds_null_is_optional_and_nullable() {
+        use super::CollapseKind;
+
+        let document = with_schemas(json!({
+            "Anything": {},
+            "Wrapped": {"anyOf": [{"type": ["string", "null"]}]},
+            "Maybe": {"type": ["object", "null"], "properties": {"a": {"type": "string"}}},
+            "Doubled": {
+                "type": ["string", "null"],
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+            },
+            "Thing": {
+                "type": "object",
+                "required": ["kept"],
+                "properties": {
+                    "any": {},
+                    "named": {"$ref": "#/components/schemas/Anything"},
+                    "named_wrapped": {"$ref": "#/components/schemas/Wrapped"},
+                    "maybe": {"$ref": "#/components/schemas/Maybe"},
+                    "doubled": {"$ref": "#/components/schemas/Doubled"},
+                    "nothing": {"type": "null"},
+                    "wrapped": {"anyOf": [{"type": ["string", "null"]}]},
+                    "either": {"anyOf": [{"type": "string"}, {}]},
+                    "mixed": {"type": ["string", "integer", "null"]},
+                    "kept": {},
+                },
+            },
+        }));
+        let presence =
+            |contracts: &Contracts| -> eyre::Result<Vec<(String, super::Presence, TypeRef)>> {
+                let ContractKind::Struct { fields } = named(contracts, "Thing")?.kind() else {
+                    eyre::bail!("expected a struct");
+                };
+                Ok(fields
+                    .iter()
+                    .map(|field| (field.wire_name.clone(), field.presence, field.ty.clone()))
+                    .collect())
+            };
+
+        // By default an optional member collapses its `null` onto absent, and says so.
+        // An `Option` writes a `null` out only when the value it holds can be `null` itself.
+        let (contracts, _) = contracts_of(document.clone(), &Config::default())?;
+        let collapsed: Vec<(String, CollapseKind)> = contracts
+            .collapses()
+            .iter()
+            .map(|collapse| (collapse.at.to_string(), collapse.kind))
+            .collect();
+        let at = |name: &str| format!("/components/schemas/Thing/properties/{name}");
+        assert_eq!(
+            collapsed,
+            [
+                (at("any"), CollapseKind::NullReadsAbsent),
+                (at("doubled"), CollapseKind::NullReadsAbsent),
+                (at("either"), CollapseKind::NullReadsAbsent),
+                (at("maybe"), CollapseKind::Presence),
+                (at("mixed"), CollapseKind::NullReadsAbsent),
+                (at("named"), CollapseKind::NullReadsAbsent),
+                (at("named_wrapped"), CollapseKind::NullReadsAbsent),
+                (at("nothing"), CollapseKind::NullReadsAbsent),
+                (at("wrapped"), CollapseKind::Presence),
+            ]
+        );
+        for (wire, presence, ty) in presence(&contracts)? {
+            // A required member holds its `null` in its own type.
+            if wire == "kept" {
+                assert_eq!(presence, super::Presence::Required);
+                assert_eq!(ty, TypeRef::Value);
+            } else {
+                assert_eq!(presence, super::Presence::OptionalNullable, "{wire}");
+                assert!(matches!(ty, TypeRef::Option(_)), "{wire}: {ty:?}");
+            }
+        }
+
+        // Preserved, the member keeps `null` apart from absent.
+        let preserving = Config {
+            preserve_optional_nullable: true,
+            ..Config::default()
+        };
+        let (contracts, _) = contracts_of(document, &preserving)?;
+        assert_eq!(contracts.collapses(), []);
+        for (wire, _, ty) in presence(&contracts)? {
+            if wire != "kept" {
+                assert!(matches!(ty, TypeRef::Presence(_)), "{wire}: {ty:?}");
+            }
+        }
+    }
+
     #[test_util::test]
     fn a_default_that_cannot_be_a_value_of_the_field_is_dropped() {
         let (contracts, diagnostics) = contracts_of(
