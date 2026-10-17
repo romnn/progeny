@@ -419,6 +419,17 @@ impl Degradations {
         self.strict_refuses |= other.strict_refuses;
     }
 
+    /// Fold in another report's findings, as ones a strict decode would not have refused.
+    ///
+    /// For a value whose strict decode keeps what it cannot read in an open arm: what reading it
+    /// further tolerated is still said, but the value as a whole was never refused.
+    #[doc(hidden)]
+    pub(crate) fn merge_tolerated(&mut self, other: Self) {
+        let refused = self.strict_refuses;
+        self.merge(other);
+        self.strict_refuses = refused;
+    }
+
     /// Whether a strict decode of the payload this report describes would have failed.
     #[doc(hidden)]
     #[must_use]

@@ -621,6 +621,25 @@ fn synthesize_named(
             }
             value
         }
+        // The first variant as the wire names it: its string, or its key around its payload.
+        ContractKind::KeyedEnum { variants, .. } => {
+            let Some(variant) = variants.first() else {
+                return Err(SynthesisError::EmptyUnion {
+                    name: contract.rust_name().as_str().to_owned(),
+                });
+            };
+            match &variant.payload {
+                None => json!(variant.wire_name),
+                Some(payload) => {
+                    let mut members = Map::new();
+                    members.insert(
+                        variant.wire_name.clone(),
+                        synthesize(payload, contracts, visiting)?,
+                    );
+                    Value::Object(members)
+                }
+            }
+        }
         ContractKind::Newtype { inner } | ContractKind::Alias { target: inner } => {
             synthesize(inner, contracts, visiting)?
         }

@@ -9,6 +9,8 @@
 //! When a type takes this path it carries **no** `#[serde(...)]` attributes at all. That is forced,
 //! not stylistic: they are helper attributes of the serde derive macros, so with no derive on the
 //! item they do not resolve and the crate does not compile.
+//! A keyed enum is the one exception: its `Serialize` is still derived, so its attributes resolve
+//! against that derive, and only its `Deserialize` is written here.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -48,6 +50,14 @@ pub(super) fn one(contract: &TypeContract) -> TokenStream {
                 fallback,
             },
         ) => carried(contract, tag, variants, fallback, serialize_only),
+        // A read form's `Deserialize` is the lenient decoder's, and `Serialize` is derived in both.
+        (DeserStrategy::HandWrittenKeyed, ContractKind::KeyedEnum { variants, fallback }) => {
+            if serialize_only {
+                quote! {}
+            } else {
+                keyed(contract, variants, fallback)
+            }
+        }
         // Every other pairing is the derive's, and the eligibility function is what guarantees
         // that: a hand-written strategy on a kind with no implementation here would be a ruling
         // this module never saw.
@@ -520,6 +530,124 @@ fn carried(
             }
         }
     }
+}
+
+/// The `Deserialize` of a keyed enum: a listed string or a single-member object with a listed key
+/// picks its variant, and anything else — or a named payload its type cannot read — is kept
+/// whole in the open arm.
+///
+/// Each resolver binds its last position with a `_` arm, sound because the support `keyed` hands
+/// back only positions inside `UNITS` and `KEYS`.
+fn keyed(
+    contract: &TypeContract,
+    variants: &[crate::contract::KeyedVariant],
+    fallback: &RustIdent,
+) -> TokenStream {
+    let name = implementation_type(contract);
+    let support = Scope::of(contract).support();
+    let construct = |value: TokenStream| {
+        if contract.docs().deprecated {
+            quote! {
+                {
+                    #[expect(
+                        deprecated,
+                        reason = "the generated deserializer must construct this deprecated variant"
+                    )]
+                    let resolved = #value;
+                    resolved
+                }
+            }
+        } else {
+            value
+        }
+    };
+    // The support helper names a variant by its position among the unit or the data variants.
+    let (units, data): (Vec<_>, Vec<_>) = variants
+        .iter()
+        .partition(|variant| variant.payload.is_none());
+    let unit_names = units.iter().map(|variant| variant.wire_name.as_str());
+    let key_names = data.iter().map(|variant| variant.wire_name.as_str());
+
+    // Unit variants: a position becomes its variant.
+    // A union with none answers `None`, which the helper never asks it for.
+    let unit_values: Vec<TokenStream> = units
+        .iter()
+        .map(|variant| {
+            let member = ident(&variant.rust_name);
+            construct(quote! { Self::#member })
+        })
+        .collect();
+    let unit = match unit_values.as_slice() {
+        [] => quote! { |_| None },
+        [only] => quote! { |_| Some(#only) },
+        _ => {
+            let arms = positions(unit_values);
+            quote! { |unit| Some(match unit { #arms }) }
+        }
+    };
+
+    // Data variants: a position reads its payload type out of the member's value.
+    let read = |variant: &&crate::contract::KeyedVariant| {
+        let member = ident(&variant.rust_name);
+        let boxed = variant
+            .payload
+            .as_ref()
+            .is_some_and(super::types::enum_type_is_boxed);
+        // An unboxed variant is its own constructor, and a closure around it is a lint in the
+        // consumer's build.
+        if !boxed && !contract.docs().deprecated {
+            return quote! { serde::Deserialize::deserialize(payload).map(Self::#member) };
+        }
+        let value = if boxed {
+            quote! { Box::new(value) }
+        } else {
+            quote! { value }
+        };
+        let resolved = construct(quote! { Self::#member(#value) });
+        quote! { serde::Deserialize::deserialize(payload).map(|value| #resolved) }
+    };
+    let reads: Vec<TokenStream> = data.iter().map(read).collect();
+    let data_resolver = if let [only] = reads.as_slice() {
+        quote! { |_, payload| #only }
+    } else {
+        let arms = positions(reads);
+        quote! { |data, payload| match data { #arms } }
+    };
+
+    // The open arm, for everything else and for a payload its type refuses.
+    let fallback = ident(fallback);
+    let open = construct(quote! { Self::#fallback(Box::new(value)) });
+
+    quote! {
+        impl<'de> serde::Deserialize<'de> for #name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                const UNITS: &[&str] = &[#(#unit_names),*];
+                const KEYS: &[&str] = &[#(#key_names),*];
+                let payload: #support::Content<'de> =
+                    serde::Deserialize::deserialize(deserializer)?;
+                #support::keyed(payload, UNITS, KEYS, #unit, #data_resolver, |value| #open)
+            }
+        }
+    }
+}
+
+/// Match arms over the positions `0..bodies.len()`, with the last one bound by `_`.
+///
+/// The support helpers only ever hand back positions inside their lists, so the last arm can take
+/// the rest and the match needs no unreachable arm of its own.
+fn positions(bodies: Vec<TokenStream>) -> TokenStream {
+    let last = bodies.len().saturating_sub(1);
+    let arms = bodies.into_iter().enumerate().map(|(index, body)| {
+        if index == last {
+            quote! { _ => #body, }
+        } else {
+            quote! { #index => #body, }
+        }
+    });
+    quote! { #(#arms)* }
 }
 
 /// One `Serialize` arm per named variant of a carried-tag union.

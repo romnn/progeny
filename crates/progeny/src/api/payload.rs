@@ -25,7 +25,7 @@ use crate::diag::JsonPointer;
 use crate::doc::{MaybeRef, MediaType};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Extra, Shape, ShapeRef, Shapes, Tag, TagStyle, Union};
+use crate::shape::{Extra, Keyed, Shape, ShapeRef, Shapes, Tag, TagStyle, Union};
 
 /// One example payload, and what a faithful round trip through the generated type must produce.
 #[derive(Debug, Clone)]
@@ -372,27 +372,73 @@ impl Collect<'_> {
                 if let Some(tag) = &union.tag {
                     return self.tagged(value, union, tag, lenient);
                 }
-                for variant in &union.variants {
-                    let accepted = match &variant.shape {
-                        ShapeRef::Key(key) => self.shapes.get(key).is_some_and(|shape| {
-                            super::examples::accepts(self.shapes, value, shape)
-                        }),
-                        ShapeRef::Inline(shape) => {
-                            super::examples::accepts(self.shapes, value, shape)
-                        }
-                    };
-                    if accepted {
-                        return self.through(value, &variant.shape, lenient);
-                    }
-                }
-                // No branch accepts it. Deserializing will fail and say so, which is the finding —
-                // and it is a finding about the document, which the example check has already made.
-                Some(value.clone())
+                self.untagged(value, union, lenient)
             }
+            Shape::Keyed(keyed) => self.keyed(value, keyed, lenient),
             Shape::Null | Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => {
                 Some(value.clone())
             }
         }
+    }
+
+    /// The expectation for an untagged union: the payload pruned under the first branch that
+    /// accepts it, which is the branch serde takes.
+    fn untagged(&self, value: &Value, union: &Union, lenient: bool) -> Option<Value> {
+        for variant in &union.variants {
+            let accepted = match &variant.shape {
+                ShapeRef::Key(key) => self
+                    .shapes
+                    .get(key)
+                    .is_some_and(|shape| super::examples::accepts(self.shapes, value, shape)),
+                ShapeRef::Inline(shape) => super::examples::accepts(self.shapes, value, shape),
+            };
+            if accepted {
+                return self.through(value, &variant.shape, lenient);
+            }
+        }
+        // No branch accepts it, so the open arm keeps it whole.
+        // That is a finding about the document, which the example check has already made.
+        Some(value.clone())
+    }
+
+    /// The expectation for a keyed union.
+    ///
+    /// A string, and an object that names no variant by its one key, stay whole in the open arm.
+    /// A named payload is read the way its variant's type reads it, and one that type cannot read
+    /// leaves the envelope whole too.
+    fn keyed(&self, value: &Value, keyed: &Keyed, lenient: bool) -> Option<Value> {
+        // Anything but an object is a unit variant or the open arm, and either writes it back as
+        // it is.
+        let Some(members) = value.as_object() else {
+            return Some(value.clone());
+        };
+        // Only a single-member object whose key names a data variant reaches a payload.
+        let mut named = members.iter().filter_map(|(key, payload)| {
+            let variant = keyed.variants.iter().find(|variant| variant.name == *key)?;
+            Some((key, payload, variant.payload.as_ref()?))
+        });
+        let (Some((key, payload, shape)), None, 1) = (named.next(), named.next(), members.len())
+        else {
+            return Some(value.clone());
+        };
+        let accepted = match shape {
+            ShapeRef::Key(inner) => self
+                .shapes
+                .get(inner)
+                .is_some_and(|inner| super::examples::accepts(self.shapes, payload, inner)),
+            ShapeRef::Inline(inner) => super::examples::accepts(self.shapes, payload, inner),
+        };
+        // A payload its type cannot read leaves the envelope to the open arm.
+        // The schema's verdict stands in for the decoder's, as it does for an untagged union's
+        // branches: a value the schema accepts and its type still refuses, such as a malformed
+        // `uuid`, is predicted wrong here and in [`Self::untagged`] alike.
+        if !accepted {
+            return Some(value.clone());
+        }
+        // Otherwise the envelope is the key around the payload as its type writes it.
+        let mut out = Map::new();
+        out.insert(key.clone(), self.through(payload, shape, lenient)?);
+        Some(Value::Object(out))
     }
 
     /// The expectation for a union that names its own variant in a tag property.

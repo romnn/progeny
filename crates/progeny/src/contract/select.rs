@@ -124,6 +124,7 @@ fn attributes_describe(contract: &Provisional) -> Result<(), RejectError> {
         ContractKind::Struct { .. }
         | ContractKind::Enum { .. }
         | ContractKind::TaggedEnum { .. }
+        | ContractKind::KeyedEnum { .. }
         | ContractKind::Newtype { .. }
         | ContractKind::Tuple { .. }
         | ContractKind::Alias { .. } => return Ok(()),

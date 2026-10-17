@@ -195,7 +195,8 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
                 ContractKind::StringEnum { .. }
                 | ContractKind::Enum { .. }
                 | ContractKind::TaggedEnum { .. }
-                | ContractKind::CarriedTagEnum { .. },
+                | ContractKind::CarriedTagEnum { .. }
+                | ContractKind::KeyedEnum { .. },
             )
             | None => ParamShape::Primitive,
         },

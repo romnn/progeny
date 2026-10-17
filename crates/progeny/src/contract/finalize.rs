@@ -174,6 +174,8 @@ fn decide(
             // `untagged` needs a second type — and reading and writing the enum *as a string*
             // needs no self-describing format, so the hatch concedes nothing by taking it.
             ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
+            // The third, for the reason [`DeserStrategy::HandWrittenKeyed`] gives.
+            ContractKind::KeyedEnum { .. } => DeserStrategy::HandWrittenKeyed,
             ContractKind::Struct { .. }
             | ContractKind::Enum { .. }
             | ContractKind::TaggedEnum { .. }
@@ -193,6 +195,7 @@ fn decide(
             // union could not take the buffered path even if the measurement changed: consuming
             // the tag means one member is gone before assignment starts, a notion the buffered
             // deserializer does not have.
+            ContractKind::KeyedEnum { .. } => DeserStrategy::HandWrittenKeyed,
             ContractKind::Enum { .. }
             | ContractKind::TaggedEnum { .. }
             | ContractKind::Newtype { .. }
@@ -330,6 +333,10 @@ pub(crate) fn references(kind: &ContractKind) -> Vec<&TypeRef> {
         | ContractKind::CarriedTagEnum { variants, .. } => {
             variants.iter().map(|variant| &variant.ty).collect()
         }
+        ContractKind::KeyedEnum { variants, .. } => variants
+            .iter()
+            .filter_map(|variant| variant.payload.as_ref())
+            .collect(),
         ContractKind::StringEnum { .. } => Vec::new(),
         ContractKind::Newtype { inner } => vec![inner],
         ContractKind::Tuple { items } => items.iter().collect(),
@@ -396,7 +403,8 @@ fn holds(
         ContractKind::StringEnum { .. } => Some(TypeRef::String),
         ContractKind::Enum { .. }
         | ContractKind::TaggedEnum { .. }
-        | ContractKind::CarriedTagEnum { .. } => Some(TypeRef::Value),
+        | ContractKind::CarriedTagEnum { .. }
+        | ContractKind::KeyedEnum { .. } => Some(TypeRef::Value),
         ContractKind::Struct { .. }
         | ContractKind::Newtype { .. }
         | ContractKind::Tuple { .. }
@@ -481,6 +489,7 @@ fn defaults(contract: &Provisional, supported: &[BTreeSet<Derive>], config: &Con
         ContractKind::Enum { .. }
         | ContractKind::TaggedEnum { .. }
         | ContractKind::CarriedTagEnum { .. }
+        | ContractKind::KeyedEnum { .. }
         | ContractKind::StringEnum { .. } => false,
         ContractKind::Struct { fields } => fields
             .iter()

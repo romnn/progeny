@@ -209,6 +209,32 @@ mod tests {
         assert!(found.contains("leaves out `name`"), "{found}");
     }
 
+    /// A keyed union's example is judged by the string or key it names, and its catch-all
+    /// accepts any other string or object, a known key with an odd payload included.
+    #[test_util::test]
+    fn a_keyed_example_is_judged_by_what_it_names() {
+        let union = |open: bool| {
+            let mut branches = vec![
+                json!({"type": "string", "enum": ["ok"]}),
+                json!({"type": "object", "required": ["n"], "properties": {"n": {"type": "integer"}}}),
+            ];
+            if open {
+                branches.push(json!({"type": ["string", "object"]}));
+            }
+            json!({"oneOf": branches})
+        };
+        for fits in [json!("ok"), json!({"n": 3})] {
+            assert_eq!(complaint(union(false), fits.clone())?, None, "{fits}");
+        }
+        let found = complaint(union(false), json!({"n": "three"}))?
+            .ok_or_eyre("a payload of the wrong type should be reported")?;
+        assert!(found.contains("at `n`"), "{found}");
+        assert!(complaint(union(false), json!("later"))?.is_some());
+        for open in [json!("later"), json!({"n": "three"}), json!({"m": 1})] {
+            assert_eq!(complaint(union(true), open.clone())?, None, "{open}");
+        }
+    }
+
     #[test_util::test]
     fn an_example_outside_an_enum_is_reported() {
         let found = complaint(

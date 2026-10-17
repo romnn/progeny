@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use super::name::{self, Namer, RustIdent};
 use super::{
-    Capture, ContractKind, FieldContract, Form, Presence, SkipRule, StringVariant, TaggedVariant,
-    TypeIndex, TypeRef, VariantContract,
+    Capture, ContractKind, FieldContract, Form, KeyedVariant, Presence, SkipRule, StringVariant,
+    TaggedVariant, TypeIndex, TypeRef, VariantContract,
 };
 use crate::config::{Config, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
@@ -379,6 +379,55 @@ impl Lower<'_> {
         tokens.to_vec()
     }
 
+    /// The contract of a keyed union, with each anonymous payload named after its key.
+    fn keyed(
+        &mut self,
+        keyed: &crate::shape::Keyed,
+        key: &ShapeKey,
+        ctx: &mut Ctx,
+    ) -> ContractKind {
+        // An anonymous payload is called after the enum and the key that names it, rather
+        // than after the branch index its address holds; a named one keeps its own name.
+        let address = self
+            .shapes
+            .address(key)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let base = self.segments(key, &address);
+        for variant in &keyed.variants {
+            let Some(ShapeRef::Key(payload)) = &variant.payload else {
+                continue;
+            };
+            let mut hint = base.clone();
+            hint.push(variant.name.clone());
+            if let Some(at) = self.shapes.address(payload) {
+                self.by_address
+                    .entry(at.to_string())
+                    .or_insert_with(|| hint.clone());
+            }
+            self.hints.entry(payload.clone()).or_insert(hint);
+        }
+        // The wire name becomes the Rust name, and the open arm is named last, so a document that
+        // lists `unknown` keeps that spelling for its own variant.
+        let mut used = Namer::default();
+        let variants = keyed
+            .variants
+            .iter()
+            .map(|variant| KeyedVariant {
+                rust_name: used.unique(RustIdent::variant(&variant.name)),
+                wire_name: variant.name.clone(),
+                payload: variant
+                    .payload
+                    .as_ref()
+                    .map(|payload| self.reference(payload, key, ctx)),
+            })
+            .collect();
+        ContractKind::KeyedEnum {
+            variants,
+            fallback: fallback_variant(&mut used),
+        }
+    }
+
     /// The kind of item a named type is.
     fn kind(
         &mut self,
@@ -399,6 +448,7 @@ impl Lower<'_> {
                 let (variants, fallback) = string_variants(values);
                 ContractKind::StringEnum { variants, fallback }
             }
+            Shape::Keyed(keyed) => self.keyed(keyed, key, ctx),
             Shape::Union(union) => {
                 let variants = union
                     .variants
@@ -505,11 +555,11 @@ impl Lower<'_> {
             Shape::Optional(inner) | Shape::Alias(inner) => self.reference(inner, key, ctx),
             // `Any` is arbitrary JSON by definition.
             Shape::Any => TypeRef::Value,
-            // The three nameable shapes cannot be asked for inline: `names_needed` names every
+            // The nameable shapes cannot be asked for inline: `names_needed` names every
             // key whose peeled core is one of them, and classification only ever inlines a shape
             // as the direct inner of an `Optional` at a keyed position. The assert keeps the
             // invariant honest; arbitrary JSON is the sound answer if it ever broke in release.
-            Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) => {
+            Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) | Shape::Keyed(_) => {
                 debug_assert!(
                     false,
                     "a nameable shape reached inline(); names_needed should have named its key"
@@ -943,7 +993,7 @@ fn wrap(wraps: &[Wrap], mut ty: TypeRef) -> TypeRef {
 fn nameable(shape: &Shape) -> bool {
     matches!(
         shape,
-        Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_)
+        Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) | Shape::Keyed(_)
     )
 }
 
