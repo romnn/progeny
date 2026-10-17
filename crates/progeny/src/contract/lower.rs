@@ -101,6 +101,7 @@ pub(super) fn run(
         needs_name: BTreeSet::new(),
         collapses: Vec::new(),
         name_conflicts: Vec::new(),
+        shared_titles: BTreeSet::new(),
     };
 
     for root in shapes.roots() {
@@ -124,10 +125,11 @@ pub(super) fn run(
         }
     }
 
-    // Only a component forces a name for a shape that has an anonymous form. An inline position
-    // contributes its *name* — so a struct inside a request body is called after the operation — but
-    // a query parameter whose schema is a plain integer does not need `pub type ListPetsLimit = i64;`
-    // in the output, and emitting one is noise in every generated crate.
+    // Only a component forces a name for a shape that has an anonymous form.
+    // An inline position contributes its *name* — so a struct inside a request body is called
+    // after the operation, unless its own title names it — but a query parameter whose schema is
+    // a plain integer does not need `pub type ListPetsLimit = i64;` in the output, and emitting
+    // one is noise in every generated crate.
     let declared: BTreeSet<ShapeKey> = shapes
         .roots()
         .iter()
@@ -135,6 +137,7 @@ pub(super) fn run(
         .map(|root| root.key.clone())
         .collect();
     lower.needs_name = names_needed(shapes, &declared);
+    lower.shared_titles = shared_titles(resolved, shapes, &lower.needs_name, &declared);
     for root in shapes.roots() {
         lower.key(&root.key, ctx);
     }
@@ -161,6 +164,51 @@ pub(super) struct Lowered {
 pub(super) struct NameConflict {
     pub(super) chosen: String,
     pub(super) at: JsonPointer,
+}
+
+/// The names that the usable titles of more than one anonymous shape needing a name ask for.
+///
+/// Compared as the names they become, so `FooBar` and `Foo_Bar` are one title.
+///
+/// A title many shapes share is a label rather than a name: github inlines 461 copies of a schema
+/// titled `User`.
+/// Naming any one of them after it would hand the name to whichever is lowered first, and the
+/// name would move whenever the vendor adds a schema earlier in the document.
+fn shared_titles(
+    resolved: &ResolvedDocument,
+    shapes: &Shapes,
+    needs_name: &BTreeSet<ShapeKey>,
+    declared: &BTreeSet<ShapeKey>,
+) -> BTreeSet<RustIdent> {
+    let mut seen: BTreeSet<RustIdent> = BTreeSet::new();
+    let mut shared = BTreeSet::new();
+    for key in needs_name.difference(declared) {
+        if shapes.get(key).is_none() {
+            continue;
+        }
+        let Some(title) = usable_title(resolved, key) else {
+            continue;
+        };
+        let name = RustIdent::type_name(&[title]);
+        if !seen.insert(name.clone()) {
+            shared.insert(name);
+        }
+    }
+    shared
+}
+
+/// A shape's own title, when it reads as a type name rather than as prose or a label.
+///
+/// A type name starts with a capital: `UrlUserInput` names a type, where `Cache Control` is prose
+/// and `int64` labels a branch.
+fn usable_title(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<String> {
+    let title = crate::shape::docs_of(resolved, key).title?;
+    let title = title.trim();
+    let identifier = title.starts_with(|character: char| character.is_ascii_uppercase())
+        && title
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_');
+    identifier.then(|| title.to_owned())
 }
 
 /// Which keys have to become named types.
@@ -237,6 +285,8 @@ struct Lower<'a> {
     collapses: Vec<Collapse>,
     /// Configured names the namer could not honor; see [`Lowered::name_conflicts`].
     name_conflicts: Vec<NameConflict>,
+    /// The titles more than one shape that needs a name carries; see [`Lower::title_name`].
+    shared_titles: BTreeSet<RustIdent>,
 }
 
 /// A wrapper peeled off a shape before its core is named.
@@ -300,6 +350,10 @@ impl Lower<'_> {
                 });
             }
             (wanted, true)
+        } else if let Some(titled) =
+            self.title_name(key, component.as_deref(), &segments, &address, ctx)
+        {
+            (titled, false)
         } else {
             {
                 let named = self.namer.claim(&segments);
@@ -339,6 +393,70 @@ impl Lower<'_> {
         self.done
             .insert(key.clone(), wrap(wraps, TypeRef::Named(index)));
         index
+    }
+
+    /// The name a shape's own `title` gives it, when the title is a name and nothing has it.
+    ///
+    /// A schema exported from Rust titles every variant with its real name, and the position
+    /// would only say which branch it is, which changes meaning when the vendor reorders them.
+    /// A title is used only where it reads as an identifier, names this one shape, and says more
+    /// than the member name the position already gives.
+    /// A prose title such as `Cache Control`, a title other shapes share, or one that repeats its
+    /// member's name keeps the positional name with its parent's context.
+    /// A component's name, or one the configuration gives, is never taken by a title, whichever
+    /// is lowered first, and a title that would take one is reported and falls back to the
+    /// position too.
+    fn title_name(
+        &mut self,
+        key: &ShapeKey,
+        component: Option<&str>,
+        segments: &[String],
+        address: &JsonPointer,
+        ctx: &mut Ctx,
+    ) -> Option<RustIdent> {
+        // A component is named after itself.
+        if component.is_some() {
+            return None;
+        }
+        let title = usable_title(self.resolved, key)?;
+        if self
+            .shared_titles
+            .contains(&RustIdent::type_name(std::slice::from_ref(&title)))
+        {
+            return None;
+        }
+        // A title that only repeats the member's own name, in any case, says nothing the
+        // position does not.
+        let folded = |text: &str| {
+            text.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .map(|character| character.to_ascii_lowercase())
+                .collect::<String>()
+        };
+        if segments
+            .last()
+            .is_some_and(|last| folded(last) == folded(&title))
+        {
+            return None;
+        }
+        let wanted = RustIdent::type_name(&[title]);
+        let reserved = self
+            .components
+            .values()
+            .chain(self.config.names.values())
+            .any(|name| RustIdent::type_name(std::slice::from_ref(name)) == wanted);
+        if reserved || !self.namer.take(&wanted) {
+            // The sentence names no identifier, so the record aggregates like the positional one.
+            ctx.report(Diagnostic::new(
+                BreakageClass::CollidingTypeName,
+                Action::Warn,
+                address.clone(),
+                "the name this shape's title asks for is taken already, so it is named after its \
+                 position instead; a `names` entry in the configuration can give it a better one",
+            ));
+            return None;
+        }
+        Some(wanted)
     }
 
     /// The name segments for a shape: the root's own hint, or the nearest root's plus the way down.
