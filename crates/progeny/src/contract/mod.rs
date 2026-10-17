@@ -1407,8 +1407,15 @@ mod tests {
             .filter(|d| d.class() == crate::BreakageClass::UnsatisfiableDerive)
             .collect();
         assert_eq!(unsatisfiable.len(), 1, "{unsatisfiable:?}");
-        assert!(unsatisfiable[0].detail().contains("`Default`"), "{unsatisfiable:?}");
-        assert!(named(&contracts, "Choice")?.derives().contains(&Derive::Clone));
+        assert!(
+            unsatisfiable[0].detail().contains("`Default`"),
+            "{unsatisfiable:?}"
+        );
+        assert!(
+            named(&contracts, "Choice")?
+                .derives()
+                .contains(&Derive::Clone)
+        );
 
         // Asked of one type by name, they are accepted rather than rejecting the document.
         let by_name = Config {
