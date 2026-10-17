@@ -167,16 +167,24 @@ fn nullable(
     }
 
     let core = core(resolved, view, others.as_ref(), component_names, ctx, at);
-    // An `enum` widened with `null` is nullable too, which is how 3.0's `nullable: true` beside an
-    // enum arrives here after normalization.
-    let enum_null = view
-        .enumeration
-        .as_ref()
-        .is_some_and(|values| values.iter().any(Value::is_null));
-    if nulls || enum_null {
+    if declares_null(view) {
         return Shape::Optional(ShapeRef::Inline(Box::new(core)));
     }
     core
+}
+
+/// Whether a schema's own `type` or `enum` admits `null`, which makes its shape an `Option`.
+///
+/// An `enum` widened with `null` is nullable too, which is how 3.0's `nullable: true` beside an
+/// enum arrives here after normalization.
+fn declares_null(view: &View) -> bool {
+    view.types
+        .as_ref()
+        .is_some_and(|types| types.contains(&TypeName::Null))
+        || view
+            .enumeration
+            .as_ref()
+            .is_some_and(|values| values.iter().any(Value::is_null))
 }
 
 /// Everything but nullability.
@@ -337,9 +345,7 @@ fn array(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPoint
             // instances than any fixed-arity Rust tuple accepts, and a generated type that
             // refuses instances the document allows would be wrong about the wire; this used to
             // be dropped with no diagnostic at all.
-            if let Some(rest) = &view.items
-                && !merge::view(resolved, rest).impossible
-            {
+            if open_tuple(resolved, view) {
                 degrade(
                     ctx,
                     at,
@@ -362,6 +368,18 @@ fn array(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPoint
         return Shape::FixedArray { item, len: min };
     }
     Shape::Array { item }
+}
+
+/// Whether a view is a `prefixItems` tuple whose `items` admits more elements, which [`array`]
+/// degrades to arbitrary JSON.
+fn open_tuple(resolved: &ResolvedDocument, view: &View) -> bool {
+    view.prefix_items
+        .as_ref()
+        .is_some_and(|prefix| !prefix.is_empty())
+        && view
+            .items
+            .as_ref()
+            .is_some_and(|rest| !merge::view(resolved, rest).impossible)
 }
 
 fn string(view: &View) -> Shape {
@@ -402,30 +420,17 @@ fn union(
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
-    let mut nulls = 0;
-    let mut rest: Vec<ShapeKey> = Vec::new();
-    for branch in branches {
-        if is_null(resolved, branch) {
-            nulls += 1;
-        } else if !rest.contains(branch) {
-            rest.push(branch.clone());
-        }
-    }
-
-    let inner = match rest.len() {
-        0 => {
-            return if nulls > 0 { Shape::Null } else { Shape::Any };
+    let (reading, nullable) = Reading::of(resolved, branches);
+    let inner = match reading {
+        Reading::Empty => {
+            return if nullable { Shape::Null } else { Shape::Any };
         }
         // `anyOf: [T, {type: null}]` — the nullable-emulation pattern, and the reason to look at
         // the branches at all before treating this as a union.
-        1 => rest
-            .into_iter()
-            .next()
-            .map_or(Shape::Any, |key| Shape::Alias(ShapeRef::Key(key))),
-        _ => {
-            if let Some(values) = branch_constants(resolved, &rest) {
-                Shape::StringEnum(values)
-            } else if let Some((property, tags)) = constant_discriminator(resolved, &rest) {
+        Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
+        Reading::Strings(values) => Shape::StringEnum(values),
+        Reading::Variants(rest) => {
+            if let Some((property, tags)) = constant_discriminator(resolved, &rest) {
                 // The branches name themselves: read the tag, the way a declared discriminator
                 // is read, rather than match by shape — which would rest on the constants, and a
                 // generated string enum reads any string.
@@ -462,10 +467,46 @@ fn union(
         }
     };
 
-    if nulls > 0 {
+    if nullable {
         return Shape::Optional(ShapeRef::Inline(Box::new(inner)));
     }
     inner
+}
+
+/// What a union's branches amount to once `null` and repeated branches are set aside.
+///
+/// The one reading of a union's branches, shared by [`union`], which builds the shape, and by
+/// [`swallows_payloads_of`], which has to compare a nested union as that same shape.
+enum Reading {
+    /// No branch but `null`, or none at all.
+    Empty,
+    /// One branch, which the union is an alias or an `Option` of.
+    One(ShapeKey),
+    /// Branches that only list strings, which read as one string enum ([`folded_strings`]).
+    Strings(Vec<String>),
+    /// Two or more branches a payload has to be told apart between.
+    Variants(Vec<ShapeKey>),
+}
+
+impl Reading {
+    /// The reading of `branches`, and whether one of them was `null`.
+    fn of(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> (Self, bool) {
+        let mut nullable = false;
+        let mut rest: Vec<ShapeKey> = Vec::new();
+        for branch in branches {
+            if is_null(resolved, branch) {
+                nullable = true;
+            } else if !rest.contains(branch) {
+                rest.push(branch.clone());
+            }
+        }
+        let reading = match rest.len() {
+            0 => Self::Empty,
+            1 => rest.pop().map_or(Self::Empty, Self::One),
+            _ => folded_strings(resolved, &rest).map_or(Self::Variants(rest), Self::Strings),
+        };
+        (reading, nullable)
+    }
 }
 
 /// A union whose variants shape alone cannot tell apart: carry the tag, or give up.
@@ -547,7 +588,7 @@ fn constant_discriminator(
     if views.len() < 2
         || views
             .iter()
-            .any(|(_, view)| kind_of(view) != Some(Kind::Object))
+            .any(|(_, view)| kind_of(resolved, view) != Some(Kind::Object))
     {
         return None;
     }
@@ -702,126 +743,188 @@ fn tag_value(
 /// So the test is applied where the loss can happen and nowhere else. Being narrow here is not
 /// leniency: it is what keeps the sound cases — 754 disjoint-type `anyOf`s in the corpus — from
 /// degrading to `serde_json::Value` for a hazard that does not apply to them.
+///
+/// A plain string branch reads every string, and what it reads it admits, so a string meant for a
+/// branch after it never reaches the branches between the two.
 fn ambiguity(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<String> {
-    ambiguity_at(resolved, branches, 0)
+    let mut strings_taken = false;
+    for (index, earlier) in branches.iter().enumerate() {
+        for later in branches.iter().skip(index + 1) {
+            if strings_taken && reads_strings_only(resolved, later) {
+                continue;
+            }
+            if let Some(reason) = swallows_payloads_of(resolved, earlier, later, 0) {
+                return Some(reason);
+            }
+        }
+        strings_taken |= reads_every_string(resolved, earlier);
+    }
+    None
 }
 
-/// How far into nested arrays the ambiguity test follows a union before giving up.
+/// Whether a branch is generated as a plain `String`, which reads every string there is.
+fn reads_every_string(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
+    let Branch::Leaf(view) = Branch::of(resolved, key) else {
+        return false;
+    };
+    kind_of(resolved, &view) == Some(Kind::String)
+        && admitted_values(&view).is_none()
+        && view.format.is_none()
+        && view.content_encoding.is_none()
+        && view.content_media_type.is_none()
+}
+
+/// Whether every payload a branch is meant for is a string.
+fn reads_strings_only(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
+    let Branch::Leaf(view) = Branch::of(resolved, key) else {
+        return false;
+    };
+    kind_of(resolved, &view) == Some(Kind::String)
+}
+
+/// How far into nested arrays and unions the ambiguity test follows a branch before giving up.
 ///
 /// A union of arrays is ambiguous exactly when its element types are, so the test recurses — but a
 /// document can nest arbitrarily and a recursive schema can nest forever, so the depth is capped
 /// and the cap answers "ambiguous", which is the direction that degrades rather than guesses.
 const MAX_AMBIGUITY_DEPTH: usize = 4;
 
-fn ambiguity_at(
+/// Why the branch tried first would accept a payload meant for the later one, if it would.
+///
+/// A branch is compared as the type generated for it, which for a nested union is not the
+/// union's branches.
+/// The type generated for a union of two or more branches is open: it holds every payload none of
+/// its own branches fits, so as the earlier branch it swallows every later one.
+/// As the later branch it is only as hard to reach as its own branches, and how it tells those
+/// apart is settled where it is classified itself, so they are not compared with one another here.
+fn swallows_payloads_of(
     resolved: &ResolvedDocument,
-    branches: &[ShapeKey],
+    earlier: &ShapeKey,
+    later: &ShapeKey,
     depth: usize,
 ) -> Option<String> {
-    let mut leaves = Vec::new();
-    if let Some(reason) = flatten(resolved, branches, depth, &mut leaves) {
-        return Some(reason);
+    // One branch reached twice, directly and through a nested union, reads a payload into the same
+    // value either way, so whichever matches is the right answer.
+    if earlier == later {
+        return None;
     }
-    let mut views: Vec<View> = leaves
-        .iter()
-        .map(|branch| merge::view(resolved, branch))
-        .collect();
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return Some("its branches nest deeper than the shape comparison follows".to_owned());
+    }
+    let depth = depth.saturating_add(1);
+    let first = match Branch::of(resolved, earlier) {
+        Branch::Through(inner) => return swallows_payloads_of(resolved, &inner, later, depth),
+        Branch::Union(_) => {
+            return Some(
+                "one of its branches is itself a union and is not the last, and the type \
+                 generated for it holds every payload its own branches do not fit, so it accepts \
+                 the payloads meant for every branch after it"
+                    .to_owned(),
+            );
+        }
+        Branch::Leaf(view) => view,
+    };
+    let second = match Branch::of(resolved, later) {
+        Branch::Through(inner) => return swallows_payloads_of(resolved, earlier, &inner, depth),
+        Branch::Union(branches) => {
+            return branches
+                .iter()
+                .find_map(|branch| swallows_payloads_of(resolved, earlier, branch, depth));
+        }
+        Branch::Leaf(view) => view,
+    };
 
     // A branch that constrains nothing accepts every payload its siblings do — but an untagged
     // enum tries its variants in declaration order, so one sitting *last* is a catch-all that only
     // ever runs when everything else has failed. That is a shape real documents write on purpose
     // ("this list of things, or an untyped list"), and it loses nothing. Anywhere else the same
     // branch swallows the ones after it, which loses everything.
-    if views.last().is_some_and(|view| kind_of(view).is_none()) {
-        views.pop();
+    let Some(left) = kind_of(resolved, &first) else {
+        return Some(
+            "one of its branches says nothing about the shape of its own payload and is not the \
+             last, so it accepts the payloads meant for every branch after it"
+                .to_owned(),
+        );
+    };
+    let right = kind_of(resolved, &second)?;
+    if left != right {
+        return None;
     }
-    for (index, view) in views.iter().enumerate() {
-        if kind_of(view).is_none() {
-            return Some(
-                "one of its branches says nothing about the shape of its own payload and is not \
-                 the last, so it accepts the payloads meant for every branch after it"
-                    .to_owned(),
-            );
-        }
-        for other in views.iter().skip(index + 1) {
-            let (Some(left), Some(right)) = (kind_of(view), kind_of(other)) else {
-                continue;
+    match left {
+        Kind::Object => (!rejects(resolved, &first, &second)).then(|| {
+            "one of its branches is an object that accepts the payloads of a later one, which is \
+             tried after it and so never reached"
+                .to_owned()
+        }),
+        // Two lists are told apart by what is in them, which is the same question one level down.
+        Kind::Array => {
+            let (Some(left), Some(right)) = (&first.items, &second.items) else {
+                return Some(
+                    "two of its branches are lists and at least one does not say what is in it"
+                        .to_owned(),
+                );
             };
-            if left != right {
-                continue;
+            if left == right {
+                return None;
             }
-            match left {
-                Kind::Object => {
-                    if !rejects(resolved, view, other) {
-                        return Some(
-                            "one of its branches is an object that accepts the payloads of a \
-                             later one, which is tried after it and so never reached"
-                                .to_owned(),
-                        );
-                    }
-                }
-                // Two lists are told apart by what is in them, which is the same question one
-                // level down.
-                Kind::Array => {
-                    let (Some(left), Some(right)) = (view.items.clone(), other.items.clone())
-                    else {
-                        return Some(
-                            "two of its branches are lists and at least one does not say what is \
-                             in it"
-                                .to_owned(),
-                        );
-                    };
-                    if left != right
-                        && let Some(reason) =
-                            ambiguity_at(resolved, &[left, right], depth.saturating_add(1))
-                    {
-                        return Some(reason);
-                    }
-                }
-                // Two branches of one scalar kind read the same bytes into the same Rust type, so
-                // whichever matches first is a faithful reading and nothing is lost.
-                Kind::String | Kind::Number | Kind::Boolean | Kind::Null => {}
-            }
+            swallows_payloads_of(resolved, left, right, depth)
         }
+        // Two branches of one scalar kind read the same bytes into the same Rust type, so
+        // whichever matches first is a faithful reading and nothing is lost.
+        // That stops holding once the earlier branch lists its values.
+        // No type generated for a list enforces it: a string enum is open, and a numeric or
+        // boolean one is the plain scalar.
+        // So the earlier branch takes every value of its kind, including the ones only a later
+        // branch admits.
+        Kind::String | Kind::Number | Kind::Boolean => {
+            let listed = admitted_values(&first)?;
+            (!admitted_values(&second).is_some_and(|later| later.is_subset(&listed))).then(|| {
+                "one of its branches lists the values it admits, but the type generated for it \
+                 reads any value of its kind, so it accepts the payloads of a later one, which is \
+                 tried after it and so never reached"
+                    .to_owned()
+            })
+        }
+        Kind::Null => None,
     }
-    None
 }
 
-/// Expand every branch that is itself a union, so the comparison is between real payload shapes.
-///
-/// `oneOf: [A, {oneOf: [B, C]}]` accepts exactly what `oneOf: [A, B, C]` accepts, and serde's
-/// nested untagged enums match it that way too — so the branch that matters is the leaf, and
-/// treating the nested union as one opaque branch would report an ambiguity where the question had
-/// simply not been asked yet.
-///
-/// Duplicates are dropped rather than compared: two branches that are the same shape read a
-/// payload into the same value, so whichever matches is the right answer, and comparing a shape
-/// with itself would find no separation and call a union ambiguous for being repetitive.
-fn flatten(
-    resolved: &ResolvedDocument,
-    branches: &[ShapeKey],
-    depth: usize,
-    out: &mut Vec<ShapeKey>,
-) -> Option<String> {
-    if depth > MAX_AMBIGUITY_DEPTH {
-        return Some("its branches nest deeper than the shape comparison follows".to_owned());
-    }
-    for branch in branches {
-        let view = merge::view(resolved, branch);
-        match view.union.as_deref() {
-            Some(inner) if !inner.is_empty() => {
-                if let Some(reason) = flatten(resolved, inner, depth.saturating_add(1), out) {
-                    return Some(reason);
-                }
-            }
-            _ => {
-                if !out.contains(branch) {
-                    out.push(branch.clone());
-                }
-            }
+/// One branch of a union, as the type generated for it reads a payload.
+enum Branch {
+    /// A union of one branch and perhaps `null`, which reads exactly what that branch does.
+    Through(ShapeKey),
+    /// A union of two or more branches, which [`swallows_payloads_of`] compares by its branches.
+    Union(Vec<ShapeKey>),
+    /// Anything else, including a union of strings, which is one string enum.
+    Leaf(Box<View>),
+}
+
+impl Branch {
+    fn of(resolved: &ResolvedDocument, key: &ShapeKey) -> Self {
+        let view = merge::view(resolved, key);
+        // [`key`] gives up on these before it reads their branches, and [`kind_of`] reads them as
+        // the arbitrary JSON they become.
+        let degraded = view.impossible || view.conflict.is_some() || view.unions_collide;
+        let Some(branches) = view.union.as_deref().filter(|_| !degraded) else {
+            return Self::Leaf(Box::new(view));
+        };
+        let (reading, nullable) = Reading::of(resolved, branches);
+        match reading {
+            Reading::One(key) => Self::Through(key),
+            Reading::Strings(values) => Self::Leaf(Box::new(View {
+                types: Some(BTreeSet::from([TypeName::String])),
+                enumeration: Some(values.into_iter().map(Value::String).collect()),
+                ..View::default()
+            })),
+            Reading::Variants(branches) => Self::Union(branches),
+            // What [`union`] makes of it: `null`, or arbitrary JSON when there is not even that.
+            Reading::Empty if nullable => Self::Leaf(Box::new(View {
+                types: Some(BTreeSet::from([TypeName::Null])),
+                ..View::default()
+            })),
+            Reading::Empty => Self::Leaf(Box::default()),
         }
     }
-    None
 }
 
 /// The JSON kind a branch's payloads have, when the branch says enough to know.
@@ -839,7 +942,13 @@ enum Kind {
 ///
 /// `None` means the branch constrains nothing that decides a kind — which is the case that makes a
 /// union unmatched, so it is deliberately not folded into some default.
-fn kind_of(view: &View) -> Option<Kind> {
+fn kind_of(resolved: &ResolvedDocument, view: &View) -> Option<Kind> {
+    // The open tuple [`array`] gives up on is arbitrary JSON, for the reason the degraded views
+    // in [`declared_kind`] are.
+    declared_kind(view).filter(|&kind| kind != Kind::Array || !open_tuple(resolved, view))
+}
+
+fn declared_kind(view: &View) -> Option<Kind> {
     if view.union.is_some() {
         // A branch that is itself a union has no single kind, and unfolding it here would be a
         // second, quieter copy of this whole function.
@@ -939,47 +1048,66 @@ fn enumerated_kind(view: &View) -> Option<Kind> {
 /// Three ways an earlier branch refuses, all of which serde's untagged matching acts on:
 ///
 /// * it requires a property the later branch never declares, so no payload of the later one carries
-///   it;
+///   it — when it declares the property too, and not as nullable, since otherwise its struct reads
+///   the missing member as `None`;
 /// * it refuses members it does not declare, and every payload of the later one carries one;
-/// * a property both declare admits disjoint sets of values, which is what makes the common
-///   `const`-tagged union exact without any tagging machinery — and it is worth having precisely
-///   because so many documents write the tag as a constant *and* declare a discriminator beside it;
-/// * a property both declare holds a different *kind* of value in each — `workos` returns
+/// * a property both declare, and the later branch requires and never sets to `null`, holds a
+///   different *kind* of value in each — `workos` returns
 ///   `{message: string}` or `{message: [string], error: string}` from one status — because
 ///   deserializing an array into the earlier branch's `String` is an error, and an error is a
 ///   fall-through to the next variant. This one is easy to forget because the property has the same
 ///   name in both, which is what makes the branches *look* alike.
 ///
+/// A property both declare with disjoint sets of values is not a fourth way.
+/// The type generated for the property reads any value of its kind, so the earlier branch accepts
+/// the later one's constant and reads it as an unlisted value of its own.
+/// The `const`-tagged union that rule looks made for is read by its tag instead, in
+/// [`constant_discriminator`] or through its declared discriminator.
+///
 /// A payload the earlier branch accepts *and* the later branch validates is ambiguous in the
 /// document itself, not in this reading of it, so it is not what these rules are for.
 fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
-    let missing = |required: &BTreeSet<String>, other: &View| {
-        required
-            .iter()
-            .any(|name| !other.properties.contains_key(name))
+    // A member every payload of `view` carries and the generated struct insists on.
+    // A required member that may be `null` is an `Option`, which reads an absent member as `None`,
+    // and a required name with no declared property has no field at all.
+    let insists = |view: &View, name: &str| {
+        view.required.contains(name)
+            && view
+                .properties
+                .get(name)
+                .is_some_and(|key| !generates_option(resolved, key, 0))
     };
-    if missing(&earlier.required, later) {
+    if earlier
+        .required
+        .iter()
+        .any(|name| insists(earlier, name) && !later.properties.contains_key(name))
+    {
         return true;
     }
     // Only sound in this direction: a closed struct is the one shape that rejects a payload for
     // carrying something *extra*, so what the later branch insists on is what turns it down.
-    if earlier.additional_denied && missing(&later.required, earlier) {
+    if earlier.additional_denied
+        && later
+            .required
+            .iter()
+            .any(|name| !earlier.properties.contains_key(name))
+    {
         return true;
     }
     earlier.properties.iter().any(|(name, key)| {
         let Some(other) = later.properties.get(name) else {
             return false;
         };
-        if let (Some(here), Some(there)) = (
-            admitted_values(resolved, key),
-            admitted_values(resolved, other),
-        ) && here.is_disjoint(&there)
-        {
-            return true;
+        // Either every later payload shows the earlier struct the other kind, or the earlier
+        // struct insists on a value of its own kind and so turns down an absent or `null` one too.
+        // Without either, a later payload that leaves the member out, or sets it to `null`, never
+        // shows the earlier struct the other kind.
+        if !insists(later, name) && !insists(earlier, name) {
+            return false;
         }
         let (Some(here), Some(there)) = (
-            kind_of(&merge::view(resolved, key)),
-            kind_of(&merge::view(resolved, other)),
+            kind_of(resolved, &merge::view(resolved, key)),
+            kind_of(resolved, &merge::view(resolved, other)),
         ) else {
             return false;
         };
@@ -987,13 +1115,35 @@ fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
     })
 }
 
-/// The finite set of values a property admits, when it names one.
+/// Whether the type generated for a schema is an `Option`, which reads an absent member as `None`.
 ///
-/// Only `const` and `enum` bound a property to a finite set; everything else admits values no
-/// comparison can enumerate, and saying so is what keeps the disjointness test from claiming a
-/// separation it has not established.
-fn admitted_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<BTreeSet<String>> {
+/// Followed through a union of one branch, which is that branch's type, as far as
+/// [`MAX_AMBIGUITY_DEPTH`]; an alias chain longer than that answers yes, which is the direction
+/// that proves no separation.
+fn generates_option(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> bool {
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return true;
+    }
     let view = merge::view(resolved, key);
+    if declares_null(&view) {
+        return true;
+    }
+    let Some(branches) = view.union.as_deref() else {
+        return false;
+    };
+    match Reading::of(resolved, branches) {
+        (_, true) => true,
+        (Reading::One(inner), false) => generates_option(resolved, &inner, depth.saturating_add(1)),
+        (Reading::Empty | Reading::Strings(_) | Reading::Variants(_), false) => false,
+    }
+}
+
+/// The finite set of values a branch admits, when it names one.
+///
+/// Only `const` and `enum` bound a branch to a finite set; everything else admits values no
+/// comparison can enumerate, and saying so is what keeps the subset test from claiming a branch
+/// is covered when it is not.
+fn admitted_values(view: &View) -> Option<BTreeSet<String>> {
     let values = match (&view.enumeration, &view.constant) {
         (Some(listed), _) => listed.clone(),
         (None, Some(value)) => vec![value.clone()],
@@ -1052,17 +1202,36 @@ fn same_kind(value: &Value, against: Option<&&Value>) -> bool {
     std::mem::discriminant(value) == std::mem::discriminant(*against)
 }
 
-/// The strings a union's branches name, when every branch is a single constant string.
-fn branch_constants(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<Vec<String>> {
+/// The strings a union's branches name, when every branch lists only strings.
+///
+/// A generated string enum is open, so one enum of every listed value reads each string the way
+/// the document means it.
+/// Kept as separate variants instead, each branch's enum would read every string, the first would
+/// take them all, and the branches after it would never be reached.
+///
+/// A branch with something to report, or a union of its own, is not folded in: it is reported and
+/// read where it is classified, and folded into the enum it would never be classified at all.
+fn folded_strings(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<Vec<String>> {
     let mut values = Vec::new();
     for branch in branches {
         let view = merge::view(resolved, branch);
+        let reported = !view.uninterpreted.is_empty()
+            || !view.unknown_types.is_empty()
+            || view.conflict.is_some()
+            || view.impossible
+            || view.unions_collide
+            || view.union.is_some();
+        if reported {
+            return None;
+        }
         let declared = match (&view.enumeration, &view.constant) {
-            (Some(listed), _) if listed.len() == 1 => listed.first().cloned(),
-            (None, Some(value)) => Some(value.clone()),
-            _ => None,
-        }?;
-        values.push(declared.as_str()?.to_owned());
+            (Some(listed), _) => listed.clone(),
+            (None, Some(value)) => vec![value.clone()],
+            (None, None) => return None,
+        };
+        for value in declared {
+            values.push(value.as_str()?.to_owned());
+        }
     }
     (!values.is_empty()).then_some(unique(values))
 }
