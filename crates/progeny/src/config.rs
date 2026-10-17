@@ -692,6 +692,59 @@ pub struct Deny {
     /// Refuse any diagnostic of one of these breakage classes.
     #[serde(default)]
     pub classes: BTreeSet<BreakageClass>,
+    /// Reviewed findings the refusal lets through, written as `[[deny.accept]]`.
+    ///
+    /// This is how a vendored document with a few known degradations still fails the build on
+    /// the next one.
+    /// Each entry is matched against every occurrence before diagnostics are aggregated.
+    /// An occurrence no entry names is therefore denied, when its class or action is, however
+    /// many occurrences of its class the document has.
+    #[serde(default)]
+    pub accept: Vec<Accept>,
+}
+
+/// One finding the caller has reviewed: a breakage class and action at one document location.
+///
+/// The action is part of the finding, because one class can mean different things at one place:
+/// a `$ref` that was repaired is not the same finding as the same `$ref` left unresolved.
+/// The location is exact, so a new occurrence elsewhere, even inside the same schema, still
+/// needs its own review.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Accept {
+    /// The breakage class of the accepted finding.
+    pub class: BreakageClass,
+    /// What progeny did about it.
+    pub action: Action,
+    /// Where the finding is reported, as the JSON Pointer its diagnostic carries.
+    ///
+    /// `""` is the document root.
+    #[serde(deserialize_with = "exact_pointer")]
+    pub at: JsonPointer,
+    /// Why the finding is acceptable, for the reader of the configuration.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Read an [`Accept::at`], refusing text that only resembles a JSON Pointer.
+///
+/// [`JsonPointer::parse`] is lenient about escapes, the way `$ref` reading needs: it reads `~2`
+/// as a literal `~2`, which RFC 6901 spells `~02`.
+/// Here the pointer is kept only when it renders back to exactly the text the caller wrote, so
+/// every location has one spelling and a malformed one is a parse error.
+fn exact_pointer<'de, D>(deserializer: D) -> Result<JsonPointer, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = String::deserialize(deserializer)?;
+    JsonPointer::parse(&text)
+        .filter(|pointer| pointer.to_string() == text)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "`{text}` is not a JSON Pointer: write \"\" for the document root, or start \
+                 with `/` and escape `~` as `~0` and `/` as `~1`"
+            ))
+        })
 }
 
 /// How a configuration key names a thing in the document.
@@ -982,13 +1035,19 @@ impl Config {
     }
 
     /// The diagnostics this configuration refuses to accept.
+    ///
+    /// Pass the diagnostics generated under this same configuration.
+    /// Whether a diagnostic is accepted is settled during generation, by
+    /// [`Deny::accept`], so diagnostics generated under another configuration carry that
+    /// configuration's acceptances.
     pub fn denied<'a>(
         &'a self,
         diagnostics: &'a [Diagnostic],
     ) -> impl Iterator<Item = &'a Diagnostic> {
         diagnostics.iter().filter(|diagnostic| {
-            self.deny.actions.contains(&diagnostic.action())
-                || self.deny.classes.contains(&diagnostic.class())
+            !diagnostic.accepted()
+                && (self.deny.actions.contains(&diagnostic.action())
+                    || self.deny.classes.contains(&diagnostic.class()))
         })
     }
 }
@@ -1051,6 +1110,72 @@ mod tests {
             toml::from_str::<Config>(indoc::indoc! {r#"
                 [deny]
                 classes = ["whatever"]"#})
+            .is_err()
+        );
+    }
+
+    /// An accepted finding is read with its exact pointer, including the document root and
+    /// escaped tokens, and its reason is optional.
+    #[test_util::test]
+    fn accepted_findings_are_read_with_exact_pointers() {
+        let config: Config = toml::from_str(indoc::indoc! {r#"
+            [deny]
+            classes = ["wild-union"]
+
+            [[deny.accept]]
+            class = "wild-union"
+            action = "degrade"
+            at = "/paths/~1pets~1{id}/get"
+            reason = "reviewed"
+
+            [[deny.accept]]
+            class = "missing-final-line-break"
+            action = "repair"
+            at = ""
+        "#})?;
+        let [pets, root] = config.deny.accept.as_slice() else {
+            eyre::bail!("expected two entries, got {:?}", config.deny.accept);
+        };
+        assert_eq!(
+            pets.at,
+            JsonPointer::root()
+                .child("paths")
+                .child("/pets/{id}")
+                .child("get")
+        );
+        assert_eq!(pets.reason.as_deref(), Some("reviewed"));
+        assert!(root.at.is_root());
+        assert_eq!(root.reason, None);
+    }
+
+    /// Text that is not exactly a JSON Pointer, or an entry without its action, is refused when
+    /// the configuration is read rather than left to match nothing.
+    #[test_util::test]
+    fn a_malformed_accepted_finding_is_a_config_error() {
+        for at in [
+            "components/schemas/Pet",
+            "/components/schemas/a~2b",
+            "/trailing~",
+        ] {
+            let error = toml::from_str::<Config>(&indoc::formatdoc! {r#"
+                [[deny.accept]]
+                class = "wild-union"
+                action = "degrade"
+                at = "{at}"
+            "#})
+            .err()
+            .ok_or_eyre("a malformed pointer should be refused")?;
+            assert!(
+                error.to_string().contains("not a JSON Pointer"),
+                "{at}: {error}"
+            );
+        }
+        assert!(
+            toml::from_str::<Config>(indoc::indoc! {r#"
+                [[deny.accept]]
+                class = "wild-union"
+                at = "/components/schemas/Pet"
+            "#})
             .is_err()
         );
     }

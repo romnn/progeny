@@ -342,6 +342,8 @@ pub struct Diagnostic {
     /// invariant lives in a field the compiler carries rather than in a comment folding has to obey.
     /// Never serialized: identity is not output.
     fold: Option<String>,
+    /// Whether the caller's deny policy accepts every occurrence this record stands for.
+    accepted: bool,
 }
 
 /// How many locations an aggregated diagnostic names before it stops collecting them.
@@ -371,6 +373,7 @@ impl Diagnostic {
             related: Vec::new(),
             occurrences: NonZeroU32::MIN,
             fold: None,
+            accepted: false,
         }
     }
 
@@ -438,12 +441,24 @@ impl Diagnostic {
 
     /// How many times this finding occurred.
     ///
-    /// Always 1 for a per-occurrence class. For an aggregated one this is the whole document's
-    /// count, [`Diagnostic::location`] is the first occurrence, and [`Diagnostic::related`] holds
-    /// the next few.
+    /// Always 1 for a per-occurrence class.
+    /// For an aggregated one this is the document's count of this finding, with accepted and
+    /// unaccepted occurrences counted in separate records.
+    /// [`Diagnostic::location`] is the first occurrence, and [`Diagnostic::related`] holds the
+    /// next few.
     #[must_use]
     pub fn occurrences(&self) -> NonZeroU32 {
         self.occurrences
+    }
+
+    /// Whether the configuration's [`crate::Deny::accept`] names this finding.
+    ///
+    /// Settled per occurrence while generating, so an aggregated record is either accepted at
+    /// every location it stands for or at none of them.
+    /// An accepted diagnostic is still returned, and is never denied.
+    #[must_use]
+    pub fn accepted(&self) -> bool {
+        self.accepted
     }
 
     /// Fold another occurrence of the same finding into this record.
@@ -485,6 +500,10 @@ impl Diagnostic {
             }
             out.push(']');
         }
+        // Last, and only when set, so a run without acceptances renders as it always has.
+        if self.accepted {
+            out.push_str(",\"accepted\":true");
+        }
         out.push('}');
         out
     }
@@ -517,6 +536,9 @@ impl fmt::Display for Diagnostic {
                 write!(f, " (see also {})", related.join(", "))?;
             }
             more => write!(f, " (and {more} more locations)")?,
+        }
+        if self.accepted {
+            f.write_str(" (accepted by the configuration)")?;
         }
         Ok(())
     }
@@ -664,12 +686,55 @@ pub(crate) struct Ctx {
     /// Keyed by the sentence as well as the class: two different findings of one class stay two
     /// records, which is what keeps "`description` should be a string" from being merged with
     /// "`url` should be a string" just because both are malformed members.
-    aggregated: BTreeMap<(BreakageClass, Action, String), usize>,
+    ///
+    /// Keyed by acceptance too, so an occurrence the caller has not accepted never folds into a
+    /// record that is accepted.
+    aggregated: BTreeMap<(BreakageClass, Action, String, bool), usize>,
+    /// The findings the caller accepts, in the order the caller listed them.
+    accepts: Vec<Acceptance>,
+}
+
+/// One accepted finding, and whether any occurrence has matched it yet.
+#[derive(Debug)]
+struct Acceptance {
+    finding: Accepted,
+    matched: bool,
+}
+
+/// One finding the caller accepts: a class and action at one exact location.
+#[derive(Debug)]
+pub(crate) struct Accepted {
+    pub(crate) class: BreakageClass,
+    pub(crate) action: Action,
+    pub(crate) at: JsonPointer,
 }
 
 impl Ctx {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// This context, marking each occurrence of one of `accepts` as accepted.
+    #[must_use]
+    pub(crate) fn accepting(mut self, accepts: impl IntoIterator<Item = Accepted>) -> Self {
+        self.accepts = accepts
+            .into_iter()
+            .map(|finding| Acceptance {
+                finding,
+                matched: false,
+            })
+            .collect();
+        self
+    }
+
+    /// The positions, in the list given to [`Ctx::accepting`], of the entries no occurrence
+    /// matched.
+    pub(crate) fn unmatched_accepts(&self) -> impl Iterator<Item = usize> + '_ {
+        self.accepts
+            .iter()
+            .enumerate()
+            .filter(|(_, acceptance)| !acceptance.matched)
+            .map(|(index, _)| index)
     }
 
     /// The location of `token` within the node currently being read.
@@ -695,7 +760,20 @@ impl Ctx {
     /// Aggregation happens here rather than in a pass afterwards so that a caller cannot
     /// accidentally emit 16,100 lines by reporting at the wrong level: the class decides, and
     /// every report site goes through this one function.
-    pub(crate) fn report(&mut self, diagnostic: Diagnostic) {
+    pub(crate) fn report(&mut self, mut diagnostic: Diagnostic) {
+        // Matched while the diagnostic is still one occurrence, so neither folding nor the cap on
+        // related locations decides what the deny policy sees.
+        // Every matching entry is marked, so a duplicate entry is not reported as matching nothing.
+        for acceptance in &mut self.accepts {
+            let finding = &acceptance.finding;
+            if finding.class == diagnostic.class
+                && finding.action == diagnostic.action
+                && finding.at == diagnostic.location
+            {
+                acceptance.matched = true;
+                diagnostic.accepted = true;
+            }
+        }
         if diagnostic.class.aggregation() == Aggregation::PerOccurrence {
             self.diagnostics.push(diagnostic);
             return;
@@ -707,6 +785,7 @@ impl Ctx {
             diagnostic.class,
             diagnostic.action,
             diagnostic.fold_key().to_owned(),
+            diagnostic.accepted,
         );
         if let Some(&index) = self.aggregated.get(&key)
             && let Some(existing) = self.diagnostics.get_mut(index)
@@ -739,7 +818,9 @@ impl Ctx {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind};
+    use super::{
+        Accepted, Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind,
+    };
     use color_eyre::eyre::{self, OptionExt as _, WrapErr as _};
 
     /// `ALL` really is all of them, by serde's own count.
@@ -932,6 +1013,91 @@ mod tests {
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].occurrences().get(), 2);
         assert_eq!(diagnostics[1].occurrences().get(), 1);
+    }
+
+    /// One accepted location among eight occurrences of an aggregated class, the case where the
+    /// cap on related locations would otherwise hide which occurrences the caller reviewed.
+    #[test_util::test]
+    fn an_accepted_occurrence_never_folds_with_one_that_is_not() {
+        let accepted_at = JsonPointer::root().child("p").child("3");
+        let mut ctx = Ctx::new().accepting([Accepted {
+            class: BreakageClass::PresenceCollapse,
+            action: Action::Degrade,
+            at: accepted_at.clone(),
+        }]);
+        for index in 0..8 {
+            let location = JsonPointer::root().child("p").child(index.to_string());
+            ctx.report(Diagnostic::new(
+                BreakageClass::PresenceCollapse,
+                Action::Degrade,
+                location,
+                "collapsed",
+            ));
+        }
+        assert_eq!(ctx.unmatched_accepts().count(), 0);
+        let diagnostics = ctx.into_diagnostics();
+
+        // The seven unreviewed occurrences stay one unaccepted record, and the reviewed one is a
+        // record of its own.
+        assert_eq!(diagnostics.len(), 2);
+        let unaccepted = diagnostics
+            .iter()
+            .find(|diagnostic| !diagnostic.accepted())
+            .ok_or_eyre("the unreviewed occurrences should have a record")?;
+        assert_eq!(unaccepted.occurrences().get(), 7);
+        let accepted = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.accepted())
+            .ok_or_eyre("the reviewed occurrence should have a record")?;
+        assert_eq!(accepted.occurrences().get(), 1);
+        assert_eq!(accepted.location(), &accepted_at);
+
+        // Only the accepted record says so, and it says so last.
+        assert!(
+            accepted.to_json_line().ends_with(r#","accepted":true}"#),
+            "{}",
+            accepted.to_json_line()
+        );
+        assert!(!unaccepted.to_json_line().contains("accepted"));
+    }
+
+    /// An entry matches its own action only, and reports matching nothing otherwise.
+    #[test_util::test]
+    fn an_accepted_repair_does_not_accept_a_degradation_at_the_same_place() {
+        let at = JsonPointer::root().child("components").child("schemas");
+        let mut ctx = Ctx::new().accepting([Accepted {
+            class: BreakageClass::DanglingRef,
+            action: Action::Repair,
+            at: at.clone(),
+        }]);
+        ctx.report(Diagnostic::new(
+            BreakageClass::DanglingRef,
+            Action::Degrade,
+            at,
+            "unresolved",
+        ));
+        assert_eq!(ctx.unmatched_accepts().collect::<Vec<_>>(), [0]);
+        assert!(!ctx.into_diagnostics()[0].accepted());
+    }
+
+    /// Two entries naming one finding both count as matched, and an entry for a per-occurrence
+    /// class, which skips folding, is matched all the same.
+    #[test_util::test]
+    fn every_entry_naming_an_occurrence_is_matched() {
+        let entry = || Accepted {
+            class: BreakageClass::DiscriminatorEdgeCase,
+            action: Action::Degrade,
+            at: JsonPointer::root(),
+        };
+        let mut ctx = Ctx::new().accepting([entry(), entry()]);
+        ctx.report(Diagnostic::new(
+            BreakageClass::DiscriminatorEdgeCase,
+            Action::Degrade,
+            JsonPointer::root(),
+            "skipped",
+        ));
+        assert_eq!(ctx.unmatched_accepts().count(), 0);
+        assert!(ctx.into_diagnostics()[0].accepted());
     }
 
     #[test_util::test]

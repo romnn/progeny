@@ -59,7 +59,8 @@ impl Invocation {
               -V, --version        the version that would generate the output
 
             Exits non-zero when a diagnostic is denied by the configuration, so a build can refuse \
-            to proceed on, say, any degradation.",
+            to proceed on, say, any degradation, and when an entry the configuration accepts no \
+            longer occurs.",
             name = self.name()
         }
     }
@@ -133,22 +134,51 @@ fn run(invocation: Invocation, argv: impl Iterator<Item = String>) -> Result<Exi
         return Err("generated files but no --out-dir to write them to".to_owned());
     }
 
-    let denied: Vec<_> = config.denied(&output.diagnostics).collect();
-    if denied.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+    let refusal = refusal(&config, &output);
+    for line in &refusal {
+        eprintln!("{line}");
     }
-    eprintln!(
-        "{}",
-        indoc::formatdoc! {"
+    if refusal.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Why the build stops, as lines for standard error, or nothing when it proceeds.
+///
+/// The build stops on a diagnostic the configuration denies, and on an accepted finding that no
+/// longer occurs, because a leftover entry would let the same finding back in, unreviewed, if it
+/// ever returned.
+fn refusal(config: &Config, output: &Output) -> Vec<String> {
+    let mut lines = Vec::new();
+    let denied: Vec<_> = config.denied(&output.diagnostics).collect();
+    if !denied.is_empty() {
+        lines.push(indoc::formatdoc! {"
 
             {} diagnostics are denied by the configuration:",
             denied.len()
-        }
-    );
-    for diagnostic in denied {
-        eprintln!("  {diagnostic}");
+        });
+        lines.extend(denied.iter().map(|diagnostic| format!("  {diagnostic}")));
     }
-    Ok(ExitCode::FAILURE)
+    if !output.unmatched_accepts.is_empty() {
+        lines.push(indoc::formatdoc! {"
+
+            {} accepted findings no longer occur; remove them from the configuration:",
+            output.unmatched_accepts.len()
+        });
+        // Written in the entry's own TOML, so it can be found in the file.
+        // The pointer is quoted by `toml` itself, so a quote or backslash in it stays unambiguous.
+        lines.extend(output.unmatched_accepts.iter().map(|accept| {
+            format!(
+                "  class = \"{}\", action = \"{}\", at = {}",
+                accept.class,
+                accept.action,
+                toml::Value::String(accept.at.to_string())
+            )
+        }));
+    }
+    lines
 }
 
 fn report(output: &Output) {
@@ -283,7 +313,7 @@ impl Arguments {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arguments, Decoding, Invocation};
+    use super::{Arguments, Config, Decoding, Invocation, refusal};
     use color_eyre::eyre::{self, OptionExt as _};
 
     fn parse(arguments: &[&str]) -> Result<Arguments, String> {
@@ -386,6 +416,73 @@ mod tests {
             Invocation::CargoSubcommand
                 .usage()
                 .contains("\n  cargo progeny <description>")
+        );
+    }
+
+    /// The exit decision over one document with two findings of a denied class, under baselines
+    /// that accept both, one, or both plus a finding the document does not have.
+    #[test_util::test]
+    fn the_build_stops_on_a_new_finding_or_a_leftover_acceptance() {
+        let document = indoc::indoc! {r#"
+            {"openapi":"3.1.0","paths":{},"components":{"schemas":{"Thing":{
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string", "pattern": "^a"},
+                    "b": {"type": "string", "pattern": "^b"}
+                }
+            }}}}"#};
+        // Each pointer is written as the TOML string the configuration holds.
+        let gate = |accepted: &[&str]| -> eyre::Result<Vec<String>> {
+            let entries: String = accepted
+                .iter()
+                .map(|at| {
+                    indoc::formatdoc! {r#"
+                        [[deny.accept]]
+                        class = "unsupported-construct"
+                        action = "degrade"
+                        at = {at}
+                    "#}
+                })
+                .collect();
+            let config: Config = toml::from_str(&indoc::formatdoc! {r#"
+                [deny]
+                classes = ["unsupported-construct"]
+
+                {entries}"#})?;
+            let output = progeny::generate(document.as_bytes(), &config)?;
+            Ok(refusal(&config, &output))
+        };
+        let a = r#""/components/schemas/Thing/properties/a""#;
+        let b = r#""/components/schemas/Thing/properties/b""#;
+
+        // Both findings reviewed: the build proceeds.
+        assert_eq!(gate(&[a, b])?, Vec::<String>::new());
+
+        // One finding unreviewed: it alone is denied.
+        let new_finding = gate(&[a])?;
+        assert_eq!(new_finding.len(), 2, "{new_finding:#?}");
+        assert!(
+            new_finding[0].contains("1 diagnostics are denied"),
+            "{new_finding:#?}"
+        );
+        assert!(
+            new_finding[1].contains("/components/schemas/Thing/properties/b"),
+            "{new_finding:#?}"
+        );
+
+        // A leftover entry alone stops the build, and its pointer is quoted as a TOML string, so
+        // the quote inside it stays unambiguous.
+        let leftover = gate(&[a, b, r#""/components/schemas/Gone\"x""#])?;
+        assert_eq!(
+            leftover,
+            [
+                indoc::indoc! {"
+
+                    1 accepted findings no longer occur; remove them from the configuration:"}
+                .to_owned(),
+                r#"  class = "unsupported-construct", action = "degrade", at = '/components/schemas/Gone"x'"#
+                    .to_owned(),
+            ]
         );
     }
 }

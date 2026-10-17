@@ -87,9 +87,9 @@ use std::collections::BTreeMap;
 use camino::Utf8PathBuf;
 
 pub use crate::config::{
-    BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit, ExtraDerives,
-    Formats, JsonSchemaImpls, MapKind, Package, Packaging, Pagination, SchemaType, SerdeAttributes,
-    SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
+    Accept, BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit,
+    ExtraDerives, Formats, JsonSchemaImpls, MapKind, Package, Packaging, Pagination, SchemaType,
+    SerdeAttributes, SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
@@ -112,6 +112,12 @@ pub struct Output {
     pub files: BTreeMap<Utf8PathBuf, String>,
     /// Every deviation from the input document, in the order they were found.
     pub diagnostics: Vec<Diagnostic>,
+    /// The configuration's [`Deny::accept`] entries that no diagnostic matched.
+    ///
+    /// An entry left over once the document improves would accept the same finding again,
+    /// unreviewed, if it ever came back, so a gate should refuse these as it refuses
+    /// [`Config::denied`] diagnostics.
+    pub unmatched_accepts: Vec<Accept>,
 }
 
 /// Read a document and generate from it.
@@ -141,7 +147,12 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
     {
         return Err(RejectError::new(RejectKind::UnsatisfiableConfig, reason));
     }
-    let mut ctx = diag::Ctx::new();
+    let mut ctx =
+        diag::Ctx::new().accepting(config.deny.accept.iter().map(|accept| diag::Accepted {
+            class: accept.class,
+            action: accept.action,
+            at: accept.at.clone(),
+        }));
     let loaded = load::load(input, &mut ctx)?;
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
     let mut parsed = doc::parse::document(normalized, &mut ctx);
@@ -155,9 +166,14 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
     // entitled to them.
     let api = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
 
+    let unmatched_accepts = ctx
+        .unmatched_accepts()
+        .filter_map(|index| config.deny.accept.get(index).cloned())
+        .collect();
     Ok(Output {
         files: render::run(&contracts, &api, config),
         diagnostics: ctx.into_diagnostics(),
+        unmatched_accepts,
     })
 }
 
@@ -387,6 +403,81 @@ mod tests {
             .collect();
         assert_eq!(dialects.len(), 1, "{dialects:#?}");
         assert_eq!(dialects[0].occurrences().get(), 1, "{dialects:#?}");
+    }
+
+    /// The deny gate with a reviewed baseline, end to end: eight occurrences of one aggregated
+    /// finding, seven of them accepted, is one denied occurrence, and an entry for a finding the
+    /// document no longer has is handed back.
+    #[test_util::test]
+    fn an_accepted_baseline_denies_only_the_new_occurrence() {
+        let properties: Vec<String> = (0..8)
+            .map(|index| format!(r#""p{index}": {{"type": "string", "pattern": "^a"}}"#))
+            .collect();
+        let document = indoc::formatdoc! {r#"
+            {{"openapi":"3.1.0","paths":{{}},"components":{{"schemas":{{"Thing":{{
+                "type": "object",
+                "properties": {{{properties}}}
+            }}}}}}}}"#,
+            properties = properties.join(",")
+        };
+        let mut accepts: Vec<String> = (0..7)
+            .map(|index| {
+                indoc::formatdoc! {r#"
+                    [[deny.accept]]
+                    class = "unsupported-construct"
+                    action = "degrade"
+                    at = "/components/schemas/Thing/properties/p{index}"
+                "#}
+            })
+            .collect();
+        accepts.push(
+            indoc::indoc! {r#"
+                [[deny.accept]]
+                class = "unsupported-construct"
+                action = "degrade"
+                at = "/components/schemas/Gone"
+            "#}
+            .to_owned(),
+        );
+        let config: Config = toml::from_str(&indoc::formatdoc! {r#"
+            [deny]
+            classes = ["unsupported-construct"]
+
+            {accepts}"#,
+            accepts = accepts.concat()
+        })?;
+        let output = generate(document.as_bytes(), &config)?;
+
+        // The one unreviewed occurrence is denied on its own, although the class has more
+        // occurrences than an aggregated record names.
+        let denied: Vec<_> = config.denied(&output.diagnostics).collect();
+        assert_eq!(denied.len(), 1, "{denied:#?}");
+        assert_eq!(
+            denied[0].location().to_string(),
+            "/components/schemas/Thing/properties/p7"
+        );
+        assert_eq!(denied[0].occurrences().get(), 1);
+
+        // The reviewed occurrences are still reported, as accepted.
+        let accepted: u32 = output
+            .diagnostics
+            .iter()
+            .filter(|found| found.accepted())
+            .map(|found| found.occurrences().get())
+            .sum();
+        assert_eq!(accepted, 7, "{:#?}", output.diagnostics);
+
+        // The entry for a schema the document does not have matched nothing.
+        assert_eq!(output.unmatched_accepts.len(), 1);
+        assert_eq!(
+            output.unmatched_accepts[0].at.to_string(),
+            "/components/schemas/Gone"
+        );
+
+        // Acceptance is policy only: the generated files are the same without it.
+        let unconfigured = generate(document.as_bytes(), &Config::default())?;
+        assert_eq!(output.files, unconfigured.files);
+        assert_eq!(unconfigured.unmatched_accepts, []);
     }
 
     /// `emit.types = false` used to return an empty `files` map with a success code — the silent
