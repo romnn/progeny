@@ -6,8 +6,10 @@
 //! Losslessness is defined on the loaded value, not on the source text: key order and
 //! whitespace carry no meaning, so the round-trip property compares values. Number *literals*
 //! do carry meaning — `1` and `1.0` are different defaults to render — so they are preserved
-//! exactly, which is why the value type enables arbitrary-precision numbers.
+//! exactly under the `exact-numbers` feature, which enables arbitrary-precision numbers.
+//! Without it, a number the model cannot hold as written is reported, never rounded silently.
 
+mod number;
 mod yaml;
 
 use serde_json::Value;
@@ -45,6 +47,9 @@ pub(crate) fn load(input: &[u8], ctx: &mut Ctx) -> Result<Loaded, RejectError> {
 
     let json_error = match serde_json::from_slice::<Value>(input) {
         Ok(value) => {
+            // With arbitrary precision every literal is exact, so only a build without it looks.
+            #[cfg(not(feature = "exact-numbers"))]
+            number::report_rounded_json(input, ctx);
             return Ok(Loaded {
                 value,
                 #[cfg(any(feature = "harness", test))]
@@ -112,6 +117,30 @@ mod tests {
         "})?;
         assert_eq!(format, SourceFormat::Yaml);
         assert_eq!(value, json!({"openapi": "3.1.0", "info": {"title": "x"}}));
+    }
+
+    /// Without arbitrary precision a JSON number the model holds only roughly is reported at
+    /// its pointer, escapes and array positions included.
+    #[test_util::test]
+    fn a_rounded_json_number_is_reported_where_it_sits() {
+        if super::number::arbitrary_precision() {
+            return Ok(());
+        }
+        let mut ctx = Ctx::new();
+        let input = r#"{"a/b": [1, {"x~y": 18446744073709551616}], "exact": 1e2}"#;
+        load(input.as_bytes(), &mut ctx)?;
+        let found: Vec<_> = ctx
+            .into_diagnostics()
+            .iter()
+            .map(|found| (found.class(), found.location().to_string()))
+            .collect();
+        assert_eq!(
+            found,
+            [(
+                crate::diag::BreakageClass::InexactNumber,
+                "/a~1b/1/x~0y".to_owned()
+            )]
+        );
     }
 
     #[test_util::test]

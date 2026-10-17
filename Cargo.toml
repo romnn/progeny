@@ -61,9 +61,9 @@ struct_excessive_bools = "allow"
 progeny = { path = "crates/progeny" }
 
 serde = { version = "1", features = ["derive"] }
-# `arbitrary_precision` keeps number literals byte-exact through the model
-# (`1.0` stays `1.0`, 128-bit decimals survive), which the round-trip property needs.
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+# No features here, because cargo unifies them into every crate that depends on progeny.
+# progeny's own `exact-numbers` feature turns on `arbitrary_precision` where it is wanted.
+serde_json = "1"
 # YAML event parser. Chosen over the pure-Rust YAML 1.2 parsers by running the corpus
 # through both: they reject `netbird`, whose `enum: [` closes its flow sequence at the
 # key's own indentation — strictly at fault, universally accepted, and refusing a

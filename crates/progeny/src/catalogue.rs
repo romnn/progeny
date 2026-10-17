@@ -203,6 +203,10 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::DynamicScoping => Wiring::Fixture(document(json!({
             "Thing": {"type": "object", "properties": {"self": {"$dynamicRef": "#node"}}},
         }))),
+        BreakageClass::InexactNumber => Wiring::Arrives(
+            "a number literal the model rounds, which only a build without `exact-numbers` \
+             produces; the corpus is generated with the feature, so the loader's own tests hold it",
+        ),
         BreakageClass::NonFiniteNumber => Wiring::Arrives(
             "a YAML `.inf` / `.nan` scalar, which the loader produces; the corpus holds none, so \
              the fixture lives with the loader's own tests rather than being a document here",

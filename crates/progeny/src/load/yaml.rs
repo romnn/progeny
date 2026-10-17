@@ -9,8 +9,10 @@
 //!   `y` and another a JWK field named `n`, so a 1.1 loader turns `required: [x, y]` into
 //!   `required: [x, true]`.
 //! * **What a number's literal was.** `1` and `1.0` are different defaults to render into
-//!   generated code, so the raw scalar text is preserved instead of being routed through
-//!   `f64`.
+//!   generated code, so the raw scalar text is kept with the `exact-numbers` feature instead of
+//!   being routed through `f64`.
+//!   Without it, a number the model holds only roughly is reported, and one beyond an `f64` is
+//!   dropped and reported.
 //! * **Which keys are strings.** YAML permits non-string mapping keys and real documents rely
 //!   on it constantly — `200:` under `responses` is an integer key. Scalar keys are
 //!   stringified with their canonical JSON rendering, silently, because the OpenAPI meaning is
@@ -37,6 +39,7 @@ use std::collections::BTreeMap;
 use libyaml_safer::{EventData, ScalarStyle};
 use serde_json::{Map, Number, Value};
 
+use super::number::{self, Held};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind};
 
 /// How deeply a document may nest.
@@ -101,6 +104,9 @@ enum Frame {
     Sequence {
         anchor: Option<String>,
         items: Vec<Value>,
+        /// How many elements were dropped, so a location names the element where the document
+        /// has it rather than where the kept ones put it.
+        dropped: usize,
     },
     Mapping {
         anchor: Option<String>,
@@ -118,7 +124,7 @@ struct Loader<'a> {
     ctx: &'a mut Ctx,
     frames: Vec<Frame>,
     /// Completed nodes by anchor name, for aliases to copy.
-    anchors: BTreeMap<String, Value>,
+    anchors: BTreeMap<String, Anchored>,
     root: Option<Value>,
     /// Whether the final line break had to be supplied.
     supplied_break: bool,
@@ -178,6 +184,7 @@ impl Loader<'_> {
                 self.frames.push(Frame::Sequence {
                     anchor,
                     items: Vec::new(),
+                    dropped: 0,
                 });
             }
             EventData::MappingStart { anchor, .. } => {
@@ -208,29 +215,64 @@ impl Loader<'_> {
         tag: Option<&str>,
     ) {
         self.last_scalar_was_block = matches!(style, ScalarStyle::Literal | ScalarStyle::Folded);
-        match resolve(text, style, tag) {
-            Resolved::Value(value) => {
-                self.remember(anchor, &value);
-                if self.expecting_key() {
-                    self.begin_key(key_name(&value, text), text, style, tag);
-                } else {
-                    self.place(value);
+        // What the scalar is, and so what an alias of it is again.
+        let anchored = match resolve(text, style, tag) {
+            Resolved::Value(value) => Anchored::Node {
+                key: Some(key_name(&value, text)),
+                value,
+            },
+            Resolved::Rounded(number) => {
+                let value = Value::Number(number);
+                Anchored::Rounded {
+                    key: key_name(&value, text),
+                    literal: text.to_owned(),
+                    value,
                 }
             }
-            Resolved::NonFinite => {
-                if self.expecting_key() {
-                    // A key is a member name, not a quantity; the literal text is its name and
-                    // nothing about it is unrepresentable.
-                    self.begin_key(text.to_owned(), text, style, tag);
-                } else {
-                    self.drop_non_finite(text);
-                }
+            Resolved::NonFinite => Anchored::Dropped {
+                key: text.to_owned(),
+                literal: text.to_owned(),
+                why: NOT_JSON,
+            },
+            // Named the way it is when the model holds it, so the key is the same either way.
+            Resolved::BeyondRange => Anchored::Dropped {
+                key: canonical_json_number(text).map_or_else(
+                    || text.to_owned(),
+                    |canonical| number::key_spelling(&canonical),
+                ),
+                literal: text.to_owned(),
+                why: BEYOND_RANGE,
+            },
+        };
+        if let Some(anchor) = anchor {
+            self.anchors.insert(anchor, anchored.clone());
+        }
+        if self.expecting_key() {
+            // A key is a member name, not a quantity, so nothing about it is rounded or
+            // unrepresentable: it is named after what the document wrote.
+            let name = anchored.key().unwrap_or_else(|| text.to_owned());
+            self.begin_key(name, text, style, tag);
+        } else {
+            self.place_anchored(anchored);
+        }
+    }
+
+    /// Place a scalar's value, or an alias's, reporting a rounded number and dropping one the
+    /// model cannot hold wherever it lands.
+    fn place_anchored(&mut self, anchored: Anchored) {
+        match anchored {
+            Anchored::Node { value, .. } => self.place(value),
+            Anchored::Rounded { value, literal, .. } => {
+                let location = self.location();
+                self.ctx.report(number::rounded(location, &literal, &value));
+                self.place(value);
             }
+            Anchored::Dropped { literal, why, .. } => self.drop_unrepresentable(&literal, why),
         }
     }
 
     fn alias(&mut self, anchor: &str) -> Result<(), RejectError> {
-        let Some(value) = self.anchors.get(anchor).cloned() else {
+        let Some(anchored) = self.anchors.get(anchor).cloned() else {
             return Err(RejectError::new(
                 RejectKind::Unparsable,
                 format!("`*{anchor}` aliases an anchor that was never defined"),
@@ -238,17 +280,17 @@ impl Loader<'_> {
             .at(self.location()));
         };
         if self.expecting_key() {
-            if value.is_array() || value.is_object() {
+            // Only a scalar has a member name.
+            let Some(name) = anchored.key() else {
                 return Err(RejectError::new(
                     RejectKind::NonScalarKey,
                     "a mapping key aliases a collection, so it has no member name",
                 )
                 .at(self.location()));
-            }
-            let name = key_name(&value, "");
+            };
             self.begin_key(name, "", ScalarStyle::Plain, None);
         } else {
-            self.place(value);
+            self.place_anchored(anchored);
         }
         Ok(())
     }
@@ -324,16 +366,23 @@ impl Loader<'_> {
         }
     }
 
+    /// Remember a collection an anchor names.
     fn remember(&mut self, anchor: Option<String>, value: &Value) {
         if let Some(anchor) = anchor {
-            self.anchors.insert(anchor, value.clone());
+            self.anchors.insert(
+                anchor,
+                Anchored::Node {
+                    value: value.clone(),
+                    key: None,
+                },
+            );
         }
     }
 
     /// Finish the innermost collection.
     fn close_frame(&mut self) -> (Option<String>, Value) {
         match self.frames.pop() {
-            Some(Frame::Sequence { anchor, items }) => (anchor, Value::Array(items)),
+            Some(Frame::Sequence { anchor, items, .. }) => (anchor, Value::Array(items)),
             Some(Frame::Mapping {
                 anchor,
                 entries,
@@ -386,8 +435,11 @@ impl Loader<'_> {
         }
     }
 
-    /// Drop a value that JSON cannot hold, and say so.
-    fn drop_non_finite(&mut self, literal: &str) {
+    /// Drop a value the model cannot hold, and say so.
+    ///
+    /// `why` finishes the sentence about `literal`, so `.inf` and a number beyond an `f64` say
+    /// what each is.
+    fn drop_unrepresentable(&mut self, literal: &str, why: &str) {
         let keyword = self.enclosing_key().map(ToOwned::to_owned);
         let validation = keyword
             .as_deref()
@@ -397,14 +449,14 @@ impl Loader<'_> {
             (
                 Action::Degrade,
                 format!(
-                    "`{literal}` is not representable in JSON; ignored the constraint, so the \
-                     generated type accepts values the document excludes"
+                    "`{literal}` {why}; ignored the constraint, so the generated type accepts \
+                     values the document excludes"
                 ),
             )
         } else {
             (
                 Action::Repair,
-                format!("`{literal}` is not representable in JSON; dropped the value"),
+                format!("`{literal}` {why}; dropped the value"),
             )
         };
         self.ctx.report(Diagnostic::new(
@@ -418,7 +470,7 @@ impl Loader<'_> {
         // element, and a lone scalar document becomes empty.
         match self.frames.last_mut() {
             None => self.root = Some(Value::Null),
-            Some(Frame::Sequence { .. }) => {}
+            Some(Frame::Sequence { dropped, .. }) => *dropped += 1,
             Some(Frame::Mapping {
                 pending_key,
                 pending_is_merge,
@@ -435,7 +487,9 @@ impl Loader<'_> {
         let mut pointer = JsonPointer::root();
         for frame in &self.frames {
             match frame {
-                Frame::Sequence { items, .. } => pointer.push(items.len().to_string()),
+                Frame::Sequence { items, dropped, .. } => {
+                    pointer.push((items.len() + dropped).to_string());
+                }
                 Frame::Mapping {
                     pending_key: Some(key),
                     ..
@@ -462,21 +516,68 @@ impl Loader<'_> {
 }
 
 /// A scalar's canonical JSON rendering as a member name.
+///
+/// A number is named by its canonical literal rather than by the value it was read as, so `1.50`
+/// stays `1.50` whether or not the model holds the literal exactly, spelled the way arbitrary
+/// precision renders it.
 fn key_name(value: &Value, raw: &str) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Null => "null".to_owned(),
         Value::Bool(flag) => flag.to_string(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => canonical_json_number(raw).map_or_else(
+            || number.to_string(),
+            |canonical| number::key_spelling(&canonical),
+        ),
         // Collections never reach here; callers reject them first.
         Value::Array(_) | Value::Object(_) => raw.to_owned(),
     }
 }
 
+/// What an anchor names, so an alias of it is the same thing again, reported the same way.
+#[derive(Clone)]
+enum Anchored {
+    /// A collection, or a scalar held as written, with the member name a scalar has as a key.
+    Node { value: Value, key: Option<String> },
+    /// A number the model holds only as this nearest value.
+    Rounded {
+        value: Value,
+        literal: String,
+        key: String,
+    },
+    /// A number the model cannot hold at all, for the reason `why` gives.
+    Dropped {
+        key: String,
+        literal: String,
+        why: &'static str,
+    },
+}
+
+impl Anchored {
+    /// The member name the node has as a key, or `None` for a collection, which has none.
+    fn key(&self) -> Option<String> {
+        match self {
+            Self::Node { key, .. } => key.clone(),
+            Self::Rounded { key, .. } | Self::Dropped { key, .. } => Some(key.clone()),
+        }
+    }
+}
+
+/// Why `.inf` and `.nan` are dropped.
+const NOT_JSON: &str = "is not representable in JSON";
+
+/// Why a number beyond an `f64` is dropped.
+const BEYOND_RANGE: &str =
+    "is beyond the numbers progeny holds without the `exact-numbers` feature";
+
 enum Resolved {
     Value(Value),
     /// A number JSON cannot hold: `.inf`, `-.inf`, `.nan`.
     NonFinite,
+    /// A number beyond the range the model holds without arbitrary precision.
+    BeyondRange,
+    /// A number the model holds only as this nearest value.
+    Rounded(Number),
 }
 
 /// The tag prefix the YAML core schema's own tags share.
@@ -496,9 +597,7 @@ fn resolve(text: &str, style: ScalarStyle, tag: Option<&str>) -> Resolved {
                 parse_bool(text).map_or_else(|| Value::String(text.to_owned()), Value::Bool),
             ),
             "int" | "float" if non_finite(text) => Resolved::NonFinite,
-            "int" | "float" => Resolved::Value(
-                parse_number(text).map_or_else(|| Value::String(text.to_owned()), Value::Number),
-            ),
+            "int" | "float" => number_or_text(text),
             // `!!str`, `!!merge`, `!!value` and anything else: the text, verbatim.
             _ => Resolved::Value(Value::String(text.to_owned())),
         };
@@ -519,9 +618,7 @@ fn resolve(text: &str, style: ScalarStyle, tag: Option<&str>) -> Resolved {
     if non_finite(text) {
         return Resolved::NonFinite;
     }
-    Resolved::Value(
-        parse_number(text).map_or_else(|| Value::String(text.to_owned()), Value::Number),
-    )
+    number_or_text(text)
 }
 
 fn parse_bool(text: &str) -> Option<bool> {
@@ -537,12 +634,16 @@ fn non_finite(text: &str) -> bool {
     matches!(magnitude, ".inf" | ".Inf" | ".INF") || matches!(text, ".nan" | ".NaN" | ".NAN")
 }
 
-/// Parse a YAML core-schema number, keeping its literal form wherever JSON can express it.
-fn parse_number(text: &str) -> Option<Number> {
-    let canonical = canonical_json_number(text)?;
-    match serde_json::from_str::<Value>(&canonical) {
-        Ok(Value::Number(number)) => Some(number),
-        _ => None,
+/// A YAML core-schema number, keeping its literal form wherever the model can, or the text when
+/// it is not a number at all.
+fn number_or_text(text: &str) -> Resolved {
+    let Some(canonical) = canonical_json_number(text) else {
+        return Resolved::Value(Value::String(text.to_owned()));
+    };
+    match number::hold(&canonical) {
+        Held::Exact(number) => Resolved::Value(Value::Number(number)),
+        Held::Rounded(number) => Resolved::Rounded(number),
+        Held::Unrepresentable => Resolved::BeyondRange,
     }
 }
 
@@ -710,8 +811,13 @@ mod tests {
         assert_eq!(yaml("change: =\n")?, json!({"change": "="}));
     }
 
+    /// Spelling survives only with arbitrary precision; without it the value does, which
+    /// `numbers_the_model_rounds_are_reported` covers.
     #[test_util::test]
     fn number_literals_survive_exactly() {
+        if !super::number::arbitrary_precision() {
+            return Ok(());
+        }
         // Every digit is kept: `1.0` does not collapse to `1`, `1.00` does not collapse to `1.0`,
         // and a float that only `f64` round-tripping would mangle keeps all seventeen digits. The
         // one thing that is normalized is the exponent's sign, which the value type writes
@@ -727,6 +833,102 @@ mod tests {
         assert_eq!(
             text,
             r#"{"a":1,"b":1.0,"c":1.00,"d":1e+3,"e":0.30000000000000004}"#
+        );
+    }
+
+    /// Without arbitrary precision a number the model holds only roughly is reported where it
+    /// sits, one too large to hold at all is dropped and reported, and a value it holds exactly,
+    /// however spelled, is neither.
+    /// An alias of either is reported again where it lands, even when the anchor is a key.
+    #[test_util::test]
+    fn numbers_the_model_rounds_are_reported() {
+        if super::number::arbitrary_precision() {
+            return Ok(());
+        }
+        let (value, diagnostics) = yaml_with_diagnostics(indoc::indoc! {"
+            exact: 1.00
+            spelled: 1e3
+            long: 0.30000000000000000000001
+            huge: 1e400
+            keys:
+              &big 18446744073709551617: anchored
+              &far 1e400: anchored
+            reused: *big
+            again: *far
+        "})?;
+        assert_eq!(
+            value,
+            json!({
+                "exact": 1.0,
+                "spelled": 1000.0,
+                "long": 0.3,
+                "keys": {"18446744073709551617": "anchored", "1e+400": "anchored"},
+                "reused": 18_446_744_073_709_551_617.0_f64,
+            })
+        );
+        let classes: Vec<_> = diagnostics
+            .iter()
+            .map(|found| {
+                let related: Vec<String> =
+                    found.related().iter().map(ToString::to_string).collect();
+                (found.class(), found.location().to_string(), related)
+            })
+            .collect();
+        // Each finding aggregates, so an alias's occurrence is a related location of the first.
+        assert_eq!(
+            classes,
+            [
+                (
+                    BreakageClass::InexactNumber,
+                    "/long".to_owned(),
+                    vec!["/reused".to_owned()]
+                ),
+                (
+                    BreakageClass::NonFiniteNumber,
+                    "/huge".to_owned(),
+                    vec!["/again".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    /// A dropped element still takes its place in the document, so a later finding names the
+    /// element where the document has it.
+    #[test_util::test]
+    fn a_dropped_element_keeps_later_locations() {
+        let (value, diagnostics) = yaml_with_diagnostics("x: [.inf, 1.5, .nan]\n")?;
+        assert_eq!(value, json!({"x": [1.5]}));
+        let locations: Vec<String> = diagnostics
+            .iter()
+            .flat_map(|found| {
+                std::iter::once(found.location().to_string())
+                    .chain(found.related().iter().map(ToString::to_string))
+            })
+            .collect();
+        // The `.nan` is the third element, though only one element survives before it.
+        assert!(locations.contains(&"/x/2".to_owned()), "{locations:?}");
+    }
+
+    /// A number used as a key is a member name, so it keeps its spelling, through an alias
+    /// too, with or without arbitrary precision.
+    #[test_util::test]
+    fn a_number_key_keeps_its_spelling() {
+        let value = yaml(indoc::indoc! {"
+            1.50: plain
+            first: &spelled 2.50
+            *spelled : aliased
+            1e2: exponent
+        "})?;
+        assert_eq!(
+            value
+                .as_object()
+                .map(|members| members.keys().cloned().collect::<Vec<_>>()),
+            Some(vec![
+                "1.50".to_owned(),
+                "1e+2".to_owned(),
+                "2.50".to_owned(),
+                "first".to_owned()
+            ])
         );
     }
 
