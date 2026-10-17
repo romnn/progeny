@@ -494,3 +494,38 @@ fn members_beside_a_union_round_trip_through_the_flattened_union() {
         hand::types::LocatedVariant::Unknown(_)
     ));
 }
+
+/// A union whose branches name themselves reads each payload by its tag, the branch with a union
+/// flattened beside its members included, and writes the same members back under both
+/// strategies.
+#[test_util::test]
+fn a_self_naming_union_reads_a_branch_with_a_flattened_union_by_its_tag() {
+    for payload in [
+        r#"{"type":"text","text":"hi"}"#,
+        r#"{"type":"image","uri":"https://x","detail":"high"}"#,
+        r#"{"type":"image","blob":"f1"}"#,
+        r#"{"type":"localAudio","path":"/a.wav"}"#,
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::UserInput, hand::types::UserInput>(payload)?;
+        assert_eq!(left, right, "{payload}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&left)?,
+            serde_json::from_str::<serde_json::Value>(payload)?,
+            "{payload}"
+        );
+    }
+    // The tag decides the branch, so a payload no earlier branch could hold is never mistaken
+    // for the image.
+    let audio = serde_json::from_str::<hand::types::UserInput>(
+        r#"{"type":"localAudio","path":"/a.wav"}"#,
+    )?;
+    assert!(matches!(audio, hand::types::UserInput::LocalAudio(_)));
+    let image = serde_json::from_str::<hand::types::UserInput>(
+        r#"{"type":"image","uri":"u","detail":"high"}"#,
+    )?;
+    let hand::types::UserInput::Image(image) = image else {
+        bail!("the image payload is not the image variant");
+    };
+    assert_eq!(image.detail.as_deref(), Some("high"));
+}
