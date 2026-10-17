@@ -1828,6 +1828,161 @@ mod tests {
         }
     }
 
+    /// A branch whose members sit beside a union of its own is a struct, so it names itself by a
+    /// constant among its members like any other, and the union around it reads that as its tag.
+    #[test_util::test]
+    fn a_branch_with_a_flattened_union_names_itself_by_its_own_constant() {
+        let constant = |value: &str| json!({"type": "string", "enum": [value]});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "UserInput": {"oneOf": [
+                {"$ref": "#/components/schemas/TextUserInput"},
+                {"$ref": "#/components/schemas/ImageUserInput"},
+                {"$ref": "#/components/schemas/LocalAudioUserInput"},
+            ]},
+            "TextUserInput": {"type": "object", "required": ["text", "type"], "properties": {
+                "text": {"type": "string"}, "type": constant("text"),
+            }},
+            "ImageUserInput": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {"detail": {"type": "string"}, "type": constant("image")},
+                "anyOf": [
+                    {"type": "object", "required": ["url"],
+                     "properties": {"url": {"type": "string"}}},
+                    {"type": "object", "required": ["fileId"],
+                     "properties": {"fileId": {"type": "string"}}},
+                ],
+            },
+            "LocalAudioUserInput": {"type": "object", "required": ["path", "type"], "properties": {
+                "path": {"type": "string"}, "type": constant("localAudio"),
+            }},
+        })))?;
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.class() == BreakageClass::WildUnion),
+            "{diagnostics:?}"
+        );
+        let Shape::Union(input) = shape_of(&shapes, "UserInput")? else {
+            eyre::bail!("not a union: {:?}", shape_of(&shapes, "UserInput")?);
+        };
+        assert_eq!(
+            input.tag.as_ref().map(|tag| tag.property.as_str()),
+            Some("type")
+        );
+        let tags: Vec<Option<&str>> = input
+            .variants
+            .iter()
+            .map(|variant| variant.tag.as_deref())
+            .collect();
+        assert_eq!(tags, [Some("text"), Some("image"), Some("localAudio")]);
+        // The image branch keeps its union flattened beside what is left of its own members.
+        let Shape::Struct(image) = shape_of(&shapes, "ImageUserInput")? else {
+            eyre::bail!("not a struct");
+        };
+        assert!(image.flattened.is_some());
+    }
+
+    /// A struct with a union flattened beside its members reads a payload as the open struct of
+    /// those members, so a union matched by shape tells it from a sibling it cannot hold and
+    /// refuses one it would swallow.
+    #[test_util::test]
+    fn a_branch_with_a_flattened_union_is_matched_by_its_own_members() {
+        let flattening = |member: Value, required: &[&str]| {
+            json!({
+                "type": "object",
+                "required": required,
+                "properties": member,
+                "anyOf": [
+                    {"type": "object", "required": ["url"],
+                     "properties": {"url": {"type": "string"}}},
+                    {"type": "object", "required": ["fileId"],
+                     "properties": {"fileId": {"type": "string"}}},
+                ],
+            })
+        };
+        let counted = json!({"type": "object", "required": ["count"],
+                             "properties": {"count": {"type": "integer"}}});
+        let either = json!({"oneOf": [
+            {"$ref": "#/components/schemas/Image"},
+            {"$ref": "#/components/schemas/Counted"},
+        ]});
+        // A required member the sibling never carries tells the two apart.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Image": flattening(json!({"name": {"type": "string"}}), &["name"]),
+            "Counted": counted.clone(),
+            "Either": either.clone(),
+        })))?;
+        assert!(
+            matches!(shape_of(&shapes, "Either")?, Shape::Union(union) if union.tag.is_none()),
+            "{diagnostics:?}"
+        );
+        // Optional members alone admit the sibling's payload, which the earlier branch would
+        // swallow.
+        assert!(degrades_as_wild_union(
+            json!({
+                "Image": flattening(json!({"note": {"type": "string"}}), &[]),
+                "Counted": counted,
+                "Either": either,
+            }),
+            "Either",
+        )?);
+        // As the later branch its union may carry what the earlier one requires, here `x`, so
+        // `{"x": …, "y": …}` would be read by the earlier one and lose `y`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": {"type": "object", "required": ["x"],
+                      "properties": {"x": {"type": "string"}}},
+                "B": {
+                    "type": "object",
+                    "required": ["y"],
+                    "properties": {"y": {"type": "string"}},
+                    "anyOf": [
+                        {"type": "object", "required": ["x"],
+                         "properties": {"x": {"type": "string"}}},
+                        {"type": "object", "required": ["z"],
+                         "properties": {"z": {"type": "string"}}},
+                    ],
+                },
+                "Outer": {"anyOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+            }),
+            "Outer",
+        )?);
+    }
+
+    /// A schema that degrades to arbitrary JSON before its union is read flattens nothing, so a
+    /// member typed by it accepts a sibling's string and cannot tell the branches apart.
+    #[test_util::test]
+    fn a_degraded_schema_beside_a_union_is_no_object_to_match_by() {
+        let union = json!({"anyOf": [
+            {"type": "object", "required": ["url"], "properties": {"url": {"type": "string"}}},
+            {"type": "object", "required": ["fileId"],
+             "properties": {"fileId": {"type": "string"}}},
+        ]});
+        assert!(degrades_as_wild_union(
+            json!({
+                // Two parts each declaring a union collide, so this is arbitrary JSON.
+                "Bad": {
+                    "type": "object",
+                    "properties": {"detail": {"type": "string"}},
+                    "allOf": [union.clone(), union],
+                },
+                "A": {"type": "object", "properties": {"x": {"$ref": "#/components/schemas/Bad"}}},
+                "B": {"type": "object", "required": ["x", "b"], "properties": {
+                    "x": {"type": "string"}, "b": {"type": "string"},
+                }},
+                "Either": {"oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+            }),
+            "Either",
+        )?);
+    }
+
     /// A discriminator the branches inherit names its member as surely as a property, so a
     /// struct declaring that member beside them does not flatten them.
     #[test_util::test]

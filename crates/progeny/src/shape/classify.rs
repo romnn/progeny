@@ -545,6 +545,27 @@ fn flattened(
     key: &ShapeKey,
     branches: &[ShapeKey],
 ) -> Option<Shape> {
+    if !flattens(resolved, view, branches) {
+        return None;
+    }
+    let Shape::Struct(mut structure) = object(view) else {
+        return None;
+    };
+    structure.flattened = Some(ShapeRef::Key(key.branches()));
+    Some(Shape::Struct(structure))
+}
+
+/// Whether [`flattened`] reads a view's members and its union `branches` as a struct, by the
+/// rules it lists.
+///
+/// A branch's own kind is asked only of a branch that declares no union, so two schemas whose
+/// unions name each other never ask each other.
+/// A view [`key`] degrades before it reads the union flattens nothing, because it becomes
+/// arbitrary JSON.
+fn flattens(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> bool {
+    if view.impossible || view.conflict.is_some() || view.unions_collide {
+        return false;
+    }
     let own: BTreeSet<&str> = view
         .properties
         .keys()
@@ -570,9 +591,9 @@ fn flattened(
         || describes_others
         || own_tag
     {
-        return None;
+        return false;
     }
-    for branch in branches {
+    branches.iter().all(|branch| {
         let branch_view = merge::view(resolved, branch);
         let object = branch_view.union.is_none()
             && !names_its_subtypes(resolved, &branch_view, branch)
@@ -585,15 +606,8 @@ fn flattened(
             .chain(&branch_view.required)
             .chain(branch_view.discriminator.iter().map(|declared| &declared.property))
             .any(|name| own.contains(name.as_str()));
-        if !object || shares {
-            return None;
-        }
-    }
-    let Shape::Struct(mut structure) = object(view) else {
-        return None;
-    };
-    structure.flattened = Some(ShapeRef::Key(key.branches()));
-    Some(Shape::Struct(structure))
+        object && !shares
+    })
 }
 
 /// The union's shape, or arbitrary JSON when that shape would drop members declared beside it.
@@ -1441,16 +1455,17 @@ fn swallows_payloads_of(
                     .to_owned(),
             );
         }
-        Branch::Leaf(view) => view,
+        Branch::Leaf(view) | Branch::Flattened(view) => view,
     };
-    let second = match Branch::of(resolved, later) {
+    let (second, flattened) = match Branch::of(resolved, later) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, earlier, &inner, depth),
         Branch::Union(branches) => {
             return branches
                 .iter()
                 .find_map(|branch| swallows_payloads_of(resolved, earlier, branch, depth));
         }
-        Branch::Leaf(view) => view,
+        Branch::Leaf(view) => (view, false),
+        Branch::Flattened(view) => (view, true),
     };
 
     // A branch that constrains nothing accepts every payload its siblings do — but an untagged
@@ -1470,6 +1485,14 @@ fn swallows_payloads_of(
         return None;
     }
     match left {
+        // The members a later flattened union may carry are not in its view, so an earlier object
+        // is never shown to refuse its payloads.
+        Kind::Object if flattened => Some(
+            "one of its branches is an object, and a later one has a union beside its members \
+             whose branches may carry the members the earlier one requires, so the earlier one \
+             may accept its payloads"
+                .to_owned(),
+        ),
         Kind::Object => (!rejects(resolved, &first, &second)).then(|| {
             "one of its branches is an object that accepts the payloads of a later one, which is \
              tried after it and so never reached"
@@ -1516,11 +1539,26 @@ enum Branch {
     Union(Vec<ShapeKey>),
     /// Anything else, including a union of strings, which is one string enum.
     Leaf(Box<View>),
+    /// A struct with a union flattened beside its members, as the view of those members alone.
+    ///
+    /// As the earlier branch it reads a payload as the open struct of its members does, because
+    /// the union's fallback keeps whatever its branches do not.
+    /// As the later branch its payloads may also carry any member its union's branches declare,
+    /// which its view does not list, so no earlier object is shown to refuse them.
+    Flattened(Box<View>),
 }
 
 impl Branch {
     fn of(resolved: &ResolvedDocument, key: &ShapeKey) -> Self {
-        let view = merge::view(resolved, key);
+        let mut view = merge::view(resolved, key);
+        if view
+            .union
+            .as_deref()
+            .is_some_and(|branches| flattens(resolved, &view, branches))
+        {
+            view.union = None;
+            return Self::Flattened(Box::new(view));
+        }
         // [`key`] gives up on these before it reads their branches, and [`kind_of`] reads them as
         // the arbitrary JSON they become.
         let degraded = view.impossible || view.conflict.is_some() || view.unions_collide;
@@ -1562,6 +1600,14 @@ enum Kind {
 /// `None` means the branch constrains nothing that decides a kind — which is the case that makes a
 /// union unmatched, so it is deliberately not folded into some default.
 fn kind_of(resolved: &ResolvedDocument, view: &View) -> Option<Kind> {
+    // Members beside a union no branch names are a struct, whatever the union holds.
+    if view
+        .union
+        .as_deref()
+        .is_some_and(|branches| flattens(resolved, view, branches))
+    {
+        return Some(Kind::Object);
+    }
     // The open tuple [`array`] gives up on is arbitrary JSON, for the reason the degraded views
     // in [`declared_kind`] are.
     declared_kind(view).filter(|&kind| kind != Kind::Array || !open_tuple(resolved, view))
