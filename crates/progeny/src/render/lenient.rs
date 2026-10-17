@@ -15,7 +15,7 @@ use super::types::{Scope, enum_type_is_boxed, type_ref_in};
 use crate::config::{Config, UnknownFields};
 use crate::contract::{
     Capture, ContractKind, Contracts, FieldContract, Form, Presence, RustIdent, SkipRule,
-    TypeContract, TypeRef,
+    TagRoutes, TypeContract, TypeRef,
 };
 
 /// Every impl a contract's form asks for beyond its serde ones.
@@ -132,14 +132,29 @@ fn decoder(
             variants,
             fallback,
         } => tagged_body(
-            contract, tag, variants, fallback, true, contracts, config, scope,
+            contract,
+            tag,
+            variants,
+            fallback,
+            TagMember::Consumed,
+            contracts,
+            config,
+            scope,
         ),
         ContractKind::CarriedTagEnum {
             tag,
             variants,
+            routes,
             fallback,
         } => tagged_body(
-            contract, tag, variants, fallback, false, contracts, config, scope,
+            contract,
+            tag,
+            variants,
+            fallback,
+            TagMember::Carried(*routes),
+            contracts,
+            config,
+            scope,
         ),
         ContractKind::KeyedEnum { variants, fallback } => {
             keyed_body(contract, variants, fallback, contracts, config, scope)
@@ -294,6 +309,15 @@ fn untagged_body(
     }
 }
 
+/// Who owns a tagged union's tag member, as its decoder reads it.
+#[derive(Clone, Copy)]
+enum TagMember {
+    /// The union, which takes the member off before the variant reads the rest.
+    Consumed,
+    /// The variants, with the variants a missing or `null` member names.
+    Carried(TagRoutes),
+}
+
 /// A tagged union: the variant the tag names, read leniently, or the open arm.
 #[expect(
     clippy::too_many_arguments,
@@ -305,38 +329,46 @@ fn tagged_body(
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
     fallback: &RustIdent,
-    consumed: bool,
+    member: TagMember,
     contracts: &Contracts,
     config: &Config,
     scope: Scope,
 ) -> TokenStream {
     let support = scope.support();
     let literal_name = contract.rust_name().as_str();
-    let wire_names: Vec<&str> = variants
-        .iter()
-        .map(|variant| variant.tag_value.as_str())
-        .collect();
+    let routes = match member {
+        TagMember::Consumed => TagRoutes::default(),
+        TagMember::Carried(routes) => routes,
+    };
+    let table = super::serde_impl::TagTable::of(variants, routes);
+    let wire_names = &table.names;
+    let (absent, null) = (table.absent(), table.null());
     // A consumed tag is the union's member, not the variant's: taken off before the variant
     // reads the rest, or it would be reported as a member the variant never declared.
-    let payload = if consumed {
-        quote! { #support::lenient::Members::of(content, #literal_name)?.without(TAG) }
-    } else {
-        quote! { content }
-    };
-    let arms = variants.iter().enumerate().map(|(index, variant)| {
-        let name = ident(&variant.rust_name);
-        let ty = type_ref_in(&variant.ty, contracts, config, scope);
-        let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
-        quote! {
-            Some(#index) => <#ty as #support::Lenient<'de>>::lenient(#payload, site, report)
-                .map(|value| #wrap),
+    let payload = match member {
+        TagMember::Consumed => {
+            quote! { #support::lenient::Members::of(content, #literal_name)?.without(TAG) }
         }
-    });
+        TagMember::Carried(_) => quote! { content },
+    };
+    let arms = variants
+        .iter()
+        .zip(&table.patterns)
+        .map(|(variant, pattern)| {
+            let name = ident(&variant.rust_name);
+            let ty = type_ref_in(&variant.ty, contracts, config, scope);
+            let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
+            // Every position of a spelling of the variant's tag
+            quote! {
+                Some(#pattern) => <#ty as #support::Lenient<'de>>::lenient(#payload, site, report)
+                    .map(|value| #wrap),
+            }
+        });
     let unknown = unknown_arm(contract, fallback);
     quote! {
         const TAG: &str = #tag;
         const VARIANTS: &[&str] = &[#(#wire_names),*];
-        match #support::lenient::tag_choice(&content, TAG, VARIANTS)? {
+        match #support::lenient::tag_choice(&content, TAG, VARIANTS, #absent, #null)? {
             #(#arms)*
             _ => {
                 let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);

@@ -25,6 +25,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Spike"
+  /tools:
+    post:
+      operationId: postTool
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Tool"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tool"
 components:
   schemas:
     Spike:
@@ -73,3 +88,50 @@ components:
     Empty:
       type: object
       properties: {}
+    # A union whose branches name themselves by `type`, the way anthropic's tool list does: the
+    # search tool lists a dated name and an alias, a payload without `type` is the custom tool,
+    # and one whose `type` is `null` is the nullish tool.
+    # The alias comes first, so a route is a position among every spelling rather than a branch's
+    # index.
+    Tool:
+      oneOf:
+        - $ref: "#/components/schemas/SearchTool"
+        - $ref: "#/components/schemas/CustomTool"
+        - $ref: "#/components/schemas/NullishTool"
+        - $ref: "#/components/schemas/BashTool"
+    SearchTool:
+      type: object
+      required: [type, name]
+      properties:
+        type:
+          type: string
+          enum: [search_v2, search]
+        name:
+          type: string
+    CustomTool:
+      type: object
+      required: [name]
+      properties:
+        type:
+          type: string
+          const: custom
+        name:
+          type: string
+    NullishTool:
+      type: object
+      required: [type, name]
+      properties:
+        type:
+          type: [string, "null"]
+          enum: [nullish, null]
+        name:
+          type: string
+    BashTool:
+      type: object
+      required: [type, name]
+      properties:
+        type:
+          type: string
+          const: bash
+        name:
+          type: string

@@ -32,8 +32,8 @@ use serde_json::Value;
 use super::types::{Scope, type_ref_in};
 use crate::config::{Config, UnknownFields};
 use crate::contract::{
-    ContractKind, Contracts, FieldContract, Gate, Presence, StringVariant, TaggedVariant,
-    TypeContract, TypeIndex, TypeRef, VariantContract,
+    ContractKind, Contracts, FieldContract, Gate, Presence, StringVariant, TagRoutes,
+    TaggedVariant, TypeContract, TypeIndex, TypeRef, VariantContract,
 };
 use crate::shape::{Docs, Format};
 
@@ -205,7 +205,12 @@ impl Writer<'_> {
             ContractKind::Struct { fields } => self.structure(contract, fields),
             ContractKind::Enum { variants, .. } => self.untagged(variants),
             ContractKind::TaggedEnum { tag, variants, .. } => self.tagged(tag, variants),
-            ContractKind::CarriedTagEnum { tag, variants, .. } => self.carried(tag, variants),
+            ContractKind::CarriedTagEnum {
+                tag,
+                variants,
+                routes,
+                ..
+            } => self.carried(tag, variants, *routes),
             ContractKind::KeyedEnum { variants, .. } => self.keyed(variants),
             ContractKind::StringEnum { variants, .. } => strings(variants),
             ContractKind::Newtype { inner } => self.reference(inner),
@@ -317,16 +322,20 @@ impl Writer<'_> {
     ///
     /// Beside the variant's schema rather than inside it, because the variant declares the tag
     /// member itself, so even one that forbids undeclared members accepts it.
-    fn carried(&self, tag: &str, variants: &[TaggedVariant]) -> Node {
+    fn carried(&self, tag: &str, variants: &[TaggedVariant], routes: TagRoutes) -> Node {
         let mut arms: Vec<Node> = variants
             .iter()
-            .map(|variant| {
+            .enumerate()
+            .map(|(index, variant)| {
+                let member = carried_tag_member(
+                    tag,
+                    variant,
+                    routes.absent == Some(index),
+                    routes.null == Some(index),
+                );
                 Node::object([(
                     "allOf",
-                    Node::Array(vec![
-                        Node::json(tag_member(tag, &variant.tag_value)),
-                        self.reference(&variant.ty),
-                    ]),
+                    Node::Array(vec![Node::json(member), self.reference(&variant.ty)]),
                 )])
             })
             .collect();
@@ -475,6 +484,31 @@ fn tag_member(tag: &str, value: &str) -> Value {
         "properties": {tag: {"const": value}},
         "required": [tag],
     })
+}
+
+/// The tag member of one variant of a carried-tag union: every spelling that names it, and the
+/// absent or `null` member where that names it too.
+fn carried_tag_member(tag: &str, variant: &TaggedVariant, absent: bool, null: bool) -> Value {
+    let mut values: Vec<Value> = variant
+        .spellings()
+        .map(|spelling| Value::String(spelling.to_owned()))
+        .collect();
+    if null {
+        values.push(Value::Null);
+    }
+    let constraint = match values.as_slice() {
+        [one] => serde_json::json!({"const": one}),
+        _ => serde_json::json!({"enum": values}),
+    };
+    if absent {
+        serde_json::json!({"type": "object", "properties": {tag: constraint}})
+    } else {
+        serde_json::json!({
+            "type": "object",
+            "properties": {tag: constraint},
+            "required": [tag],
+        })
+    }
 }
 
 /// An open enum of strings: the values the description lists, and any other string, which the

@@ -271,21 +271,18 @@ impl<'a> Fit<'a> {
         let Value::Object(members) = value else {
             return Some(self.not_an_object(value));
         };
-        let Some(named) = members.get(&tag.property).and_then(Value::as_str) else {
-            return Some(format!(
-                "{} carries no `{}` naming which branch of the union it is",
-                self.subject, tag.property
-            ));
-        };
-        let Some(variant) = union
-            .variants
-            .iter()
-            .find(|variant| variant.tag.as_deref() == Some(named))
-        else {
-            return Some(format!(
-                "{} names `{named}` in `{}`, which no branch of the union is tagged",
-                self.subject, tag.property
-            ));
+        let member = members.get(&tag.property);
+        let Some(variant) = union.tagged_variant(member) else {
+            return Some(match member.and_then(Value::as_str) {
+                Some(named) => format!(
+                    "{} names `{named}` in `{}`, which no branch of the union is tagged",
+                    self.subject, tag.property
+                ),
+                None => format!(
+                    "{} carries no `{}` naming which branch of the union it is",
+                    self.subject, tag.property
+                ),
+            });
         };
         match tag.style {
             TagStyle::Consumed => {

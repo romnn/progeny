@@ -452,24 +452,40 @@ impl Collect<'_> {
     /// and written back by the union on the way out, so it survives the round trip even though no
     /// variant declares it. Pruning under the variant alone would leave it out of the expectation
     /// and report the union writing its own tag as an invention.
+    /// A [`TagStyle::Carried`] tag the variant's field let go of is written back for the same
+    /// reason.
     fn tagged(&self, value: &Value, union: &Union, tag: &Tag, lenient: bool) -> Option<Value> {
-        // A payload that names no variant does not deserialize at all, which the generated test
-        // reports against the document — the same verdict the untagged fallback leaves it.
-        let Some(named) = value.get(&tag.property).and_then(Value::as_str) else {
+        // A payload that names no variant is kept whole in the open arm, so it comes back as it
+        // went in.
+        let Value::Object(members) = value else {
             return Some(value.clone());
         };
-        let Some(variant) = union
-            .variants
-            .iter()
-            .find(|variant| variant.tag.as_deref() == Some(named))
-        else {
+        let member = members.get(&tag.property);
+        let Some(position) = union.tagged_position(member) else {
             return Some(value.clone());
         };
+        let variant = union.variants.get(position)?;
         let mut pruned = self.through(value, &variant.shape, lenient)?;
-        if tag.style == TagStyle::Consumed {
-            pruned
-                .as_object_mut()?
-                .insert(tag.property.clone(), Value::String(named.to_owned()));
+        let object = pruned.as_object_mut()?;
+        match tag.style {
+            // A consumed tag is always one of the listed strings, because a union that reads any
+            // other tag leaves it on its variants.
+            TagStyle::Consumed => {
+                if let Some(named) = member {
+                    object.insert(tag.property.clone(), named.clone());
+                }
+            }
+            // A carried tag the variant type let go of, as a `null` its field reads as absent,
+            // is written back as the variant's own name unless a missing tag names it too,
+            // because the wire has to name the arm the payload was read as.
+            TagStyle::Carried => {
+                if !object.contains_key(&tag.property)
+                    && tag.absent != Some(position)
+                    && let Some(name) = &variant.tag
+                {
+                    object.insert(tag.property.clone(), Value::String(name.clone()));
+                }
+            }
         }
         Some(pruned)
     }
@@ -748,6 +764,38 @@ mod tests {
             found[0].expected,
             json!({"factorType": "sms", "phone": "+1-555-415-1337"})
         );
+    }
+
+    /// A `null` tag names the one branch that admits it, and the variant reads it as an absent
+    /// member, so the union writes the branch's own name back in its place.
+    /// Absence names no branch here, because both branches leave the tag out.
+    #[test_util::test]
+    fn a_carried_tag_the_variant_let_go_of_is_expected_back_as_its_name() {
+        let found = payloads_of(json!({
+            "openapi": "3.1.0",
+            "paths": {"/pets": {"get": {
+                "operationId": "listPets",
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Pet"},
+                    "example": {"type": null, "size": 3},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Pet": {"oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+                "A": {"type": "object", "properties": {
+                    "type": {"enum": ["a", null]},
+                    "size": {"type": "integer"},
+                }},
+                "B": {"type": "object", "properties": {
+                    "type": {"enum": ["b"]},
+                    "size": {"type": "integer"},
+                }},
+            }},
+        }))?;
+        assert_eq!(found[0].expected, json!({"type": "a", "size": 3}));
     }
 
     #[test_util::test]

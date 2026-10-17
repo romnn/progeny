@@ -446,7 +446,8 @@ pub(crate) fn unknown_union<'de>(
     Deserialize::deserialize(ContentDeserializer::<'de, Problem>::new(content))
 }
 
-/// Which variant a tagged union's payload names, by position in `variants`, or `None`.
+/// Which variant a tagged union's payload names, by position in `variants`, or `None`, with a
+/// missing or `null` tag read the way `choice` reads it.
 ///
 /// # Errors
 ///
@@ -456,8 +457,10 @@ pub(crate) fn tag_choice(
     content: &Content<'_>,
     tag: &'static str,
     variants: &'static [&'static str],
+    absent: Option<usize>,
+    null: Option<usize>,
 ) -> Result<Option<usize>, Problem> {
-    choice(content, tag, variants)
+    choice(content, tag, variants, absent, null)
 }
 
 /// The tag member's text, for the report's sample when it names no variant.
@@ -1418,7 +1421,7 @@ mod tests {
         ) -> Result<Self, super::Problem> {
             const TAG: &str = "kind";
             const VARIANTS: &[&str] = &["hired", "moved"];
-            match super::tag_choice(&content, TAG, VARIANTS)? {
+            match super::tag_choice(&content, TAG, VARIANTS, None, None)? {
                 Some(0) => {
                     Employment::lenient(Members::of(content, "Event")?.without(TAG), site, report)
                         .map(Self::Hired)

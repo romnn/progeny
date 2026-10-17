@@ -214,7 +214,22 @@ fn evaluate(
             continue;
         }
 
-        match refuse_consumption(shapes, &borrowed, &claimed, &named, property) {
+        // A union that reads a tag it would not write back, an alias or an absent or `null` tag,
+        // cannot consume it, because consuming means the union writes its one value.
+        let refusal = if union
+            .tag
+            .as_ref()
+            .is_some_and(|tag| tag.reads_more_than_it_writes(union))
+        {
+            Some(
+                "some payloads name their variant by a spelling the union would not write back, \
+                 or by leaving the tag out"
+                    .to_owned(),
+            )
+        } else {
+            refuse_consumption(shapes, &borrowed, &claimed, &named, property)
+        };
+        match refusal {
             None => {
                 for (variant, _) in &named {
                     if !declares(shapes, variant, property) {

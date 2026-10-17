@@ -216,6 +216,13 @@ pub(crate) struct Variant {
     /// explicit mapping where there is one and from the variant's component name otherwise, which
     /// is the resolution order OpenAPI defines.
     pub(crate) tag: Option<String>,
+    /// Other values of the tag property that name this variant too, which the union reads and
+    /// never writes in place of [`Variant::tag`].
+    ///
+    /// Set only for a union whose branches name themselves, where one branch lists several
+    /// spellings of its own name, as `tool_search_tool_bm25` beside
+    /// `tool_search_tool_bm25_20251119`.
+    pub(crate) aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +236,31 @@ pub(crate) struct Union {
     /// itself, and carrying it costs every variant a member the builder of a value must fill in.
     /// Paying either when the shapes already distinguish the variants would be a loss for nothing.
     pub(crate) tag: Option<Tag>,
+}
+
+impl Union {
+    /// The variant a tagged payload is, from its tag member: `None` for the member being absent,
+    /// and otherwise its value.
+    ///
+    /// A missing or `null` member is the variant [`Tag::absent`] or [`Tag::null`] names, a string
+    /// is the variant whose tag or alias it is, and any other value names no variant.
+    pub(crate) fn tagged_variant(&self, member: Option<&Value>) -> Option<&Variant> {
+        self.variants.get(self.tagged_position(member)?)
+    }
+
+    /// The position of the variant [`Union::tagged_variant`] finds.
+    pub(crate) fn tagged_position(&self, member: Option<&Value>) -> Option<usize> {
+        let tag = self.tag.as_ref()?;
+        match member {
+            None => tag.absent,
+            Some(Value::Null) => tag.null,
+            Some(Value::String(named)) => self.variants.iter().position(|variant| {
+                variant.tag.as_deref() == Some(named.as_str())
+                    || variant.aliases.iter().any(|alias| alias == named)
+            }),
+            Some(_) => None,
+        }
+    }
 }
 
 /// A union whose branches are listed strings and single-member objects, each named on the wire.
@@ -261,6 +293,40 @@ pub(crate) struct Tag {
     /// The property the payload names its own variant in.
     pub(crate) property: String,
     pub(crate) style: TagStyle,
+    /// The position of the one variant a payload without the tag property is.
+    ///
+    /// Set where exactly one branch leaves the property optional and every other branch requires
+    /// it, so a payload that omits it can only be that branch.
+    pub(crate) absent: Option<usize>,
+    /// The position of the one variant a payload whose tag property is `null` is.
+    ///
+    /// Set where exactly one branch admits `null` there, for the same reason.
+    pub(crate) null: Option<usize>,
+}
+
+impl Tag {
+    /// A tag every payload carries as one of the variants' listed values.
+    pub(crate) fn consumed(property: impl Into<String>) -> Self {
+        Self {
+            property: property.into(),
+            style: TagStyle::Consumed,
+            absent: None,
+            null: None,
+        }
+    }
+
+    /// Whether some payload names its variant other than by the one value the union writes.
+    ///
+    /// Such a union has to leave the tag on its variants, because a union that consumes the tag
+    /// writes it back as that one value, which would change an alias and fill in an absent tag.
+    pub(crate) fn reads_more_than_it_writes(&self, union: &Union) -> bool {
+        self.absent.is_some()
+            || self.null.is_some()
+            || union
+                .variants
+                .iter()
+                .any(|variant| !variant.aliases.is_empty())
+    }
 }
 
 /// Which side of a tagged union owns the tag property.
@@ -275,8 +341,10 @@ pub(crate) enum TagStyle {
     Consumed,
     /// Every variant type declares the property and keeps it: the union reads it to pick a
     /// variant, then replays the whole payload — tag included — into that variant's type, and
-    /// serializing writes the variant as it is, which already carries its tag. Settled when
-    /// consuming would take the property off a type that carries it somewhere else on the wire.
+    /// serializing writes the variant with the tag that names it.
+    /// Settled when consuming would take the property off a type that carries it somewhere else
+    /// on the wire, and when the union reads a tag it would not write back — an alias, or a
+    /// missing or `null` tag — because only the variant can remember which of those it had.
     Carried,
 }
 
@@ -486,7 +554,7 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
-    use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Tag, TagStyle, classify};
+    use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Tag, TagStyle, Union, classify};
     use crate::diag::{BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
     use crate::{normalize, resolve};
@@ -591,6 +659,8 @@ mod tests {
             Some(Tag {
                 property: "petType".to_owned(),
                 style: TagStyle::Consumed,
+                absent: None,
+                null: None,
             }),
             vec![Some("cat".to_owned()), Some("dog".to_owned())],
         );
@@ -909,6 +979,8 @@ mod tests {
             Some(Tag {
                 property: "kind".to_owned(),
                 style: TagStyle::Consumed,
+                absent: None,
+                null: None,
             })
         );
         let tags: Vec<Option<&str>> = either
@@ -994,6 +1066,249 @@ mod tests {
         assert_eq!(names, ["shared"]);
     }
 
+    /// anthropic's tool list in miniature: a custom tool whose `type` may be left out or be
+    /// `null`, a built-in tool named by one constant, and one that lists a dated name and an
+    /// alias.
+    /// Each payload still names one branch, so the union is read by its tag, and because the
+    /// union could not write an alias or an absent tag back, the variants keep the property.
+    #[test_util::test]
+    fn a_branch_may_leave_its_tag_out_or_spell_it_more_than_one_way() {
+        let tool = |kind: Value, required: Value| {
+            json!({
+                "type": "object",
+                "required": required,
+                "properties": {"type": kind, "name": {"type": "string"}},
+                "additionalProperties": false,
+            })
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Custom": tool(
+                json!({"anyOf": [{"type": "null"}, {"const": "custom", "type": "string"}]}),
+                json!(["name"]),
+            ),
+            "Bash": tool(json!({"const": "bash", "type": "string"}), json!(["name", "type"])),
+            "Search": tool(
+                json!({"enum": ["search_20251119", "search"], "type": "string"}),
+                json!(["name", "type"]),
+            ),
+            "Tool": {"oneOf": [
+                {"$ref": "#/components/schemas/Custom"},
+                {"$ref": "#/components/schemas/Bash"},
+                {"$ref": "#/components/schemas/Search"},
+            ]},
+        })))?;
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|found| found.class() == BreakageClass::WildUnion),
+            "{diagnostics:?}"
+        );
+        let Shape::Union(union) = shape_of(&shapes, "Tool")? else {
+            panic!("expected a union");
+        };
+
+        // The custom tool is what a payload without a tag, or with a `null` one, is.
+        assert_eq!(
+            union.tag,
+            Some(Tag {
+                property: "type".to_owned(),
+                style: TagStyle::Carried,
+                absent: Some(0),
+                null: Some(0),
+            })
+        );
+        // Each branch writes its first spelling and reads the rest.
+        let spellings: Vec<(Option<&str>, &[String])> = union
+            .variants
+            .iter()
+            .map(|variant| (variant.tag.as_deref(), variant.aliases.as_slice()))
+            .collect();
+        assert_eq!(
+            spellings,
+            [
+                (Some("custom"), &[][..]),
+                (Some("bash"), &[][..]),
+                (Some("search_20251119"), &["search".to_owned()][..]),
+            ]
+        );
+        // The variants keep the property, which holds the spelling or the absence.
+        for name in ["Custom", "Bash", "Search"] {
+            let Shape::Struct(tool) = shape_of(&shapes, name)? else {
+                panic!("expected a struct");
+            };
+            assert!(
+                tool.fields.iter().any(|field| field.wire == "type"),
+                "{name}"
+            );
+        }
+
+        // The one lookup reads a payload's tag member the way the generated decoder does.
+        let named = |member: Option<Value>| {
+            union
+                .tagged_variant(member.as_ref())
+                .and_then(|variant| variant.tag.clone())
+        };
+        assert_eq!(named(None), Some("custom".to_owned()));
+        assert_eq!(named(Some(Value::Null)), Some("custom".to_owned()));
+        assert_eq!(
+            named(Some(json!("search"))),
+            Some("search_20251119".to_owned())
+        );
+        assert_eq!(named(Some(json!("bash"))), Some("bash".to_owned()));
+        assert_eq!(named(Some(json!(7))), None);
+        assert_eq!(named(Some(json!("other"))), None);
+    }
+
+    /// A `null` tag names a branch only where every constraint on its tag admits it — its `enum`,
+    /// its `type` and a union beside them — because a payload has to satisfy all of them.
+    #[test_util::test]
+    fn a_null_tag_names_only_a_branch_whose_whole_domain_admits_it() {
+        let tool = |kind: Value| {
+            json!({
+                "type": "object",
+                "required": ["type"],
+                "properties": {"type": kind, "size": {"type": "integer"}},
+            })
+        };
+        for (kind, null) in [
+            (json!({"type": ["string", "null"], "enum": ["a"]}), None),
+            (json!({"type": "string", "enum": ["a", null]}), None),
+            (
+                json!({"type": ["string", "null"], "enum": ["a", null]}),
+                Some(0),
+            ),
+            (json!({"enum": ["a", null]}), Some(0)),
+            // A union beside the type, or beside the list, has to admit `null` as well.
+            (
+                json!({"type": "string", "anyOf": [{"const": "a"}, {"type": "null"}]}),
+                None,
+            ),
+            (
+                json!({"enum": ["a", null], "anyOf": [{"const": "a"}, {"const": "z"}]}),
+                None,
+            ),
+            (
+                json!({"anyOf": [{"const": "a"}, {"type": "null"}]}),
+                Some(0),
+            ),
+        ] {
+            let (shapes, _) = shapes_of(with_schemas(json!({
+                "A": tool(kind.clone()),
+                "B": tool(json!({"const": "b"})),
+                "Union": {"oneOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+            })))?;
+            let Shape::Union(union) = shape_of(&shapes, "Union")? else {
+                panic!("expected a union");
+            };
+            let tag = union.tag.as_ref().ok_or_eyre("the constants are the tag")?;
+            assert_eq!(tag.null, null, "{kind}");
+        }
+    }
+
+    /// A union that has to carry its tag shares a variant with one that could consume it.
+    /// Consuming would take the tag off the shared variant, where the first union still reads it,
+    /// so both carry it, whichever of the two is settled first.
+    #[test_util::test]
+    fn a_union_forced_to_carry_its_tag_keeps_it_on_a_variant_another_union_shares() {
+        let named = |constant: Value| {
+            json!({
+                "type": "object",
+                "required": ["kind"],
+                "properties": {"kind": constant, "size": {"type": "integer"}},
+            })
+        };
+        let refs = |names: [&str; 2]| json!({"oneOf": names.map(|name| json!({"$ref": format!("#/components/schemas/{name}")}))});
+        // The forced union first in proposal order, then second.
+        for (forced, consuming) in [("AForced", "BConsuming"), ("BForced", "AConsuming")] {
+            let mut schemas = serde_json::Map::new();
+            schemas.insert("Shared".to_owned(), named(json!({"const": "shared"})));
+            schemas.insert(
+                "Aliased".to_owned(),
+                named(json!({"enum": ["aliased", "alias"]})),
+            );
+            schemas.insert("Plain".to_owned(), named(json!({"const": "plain"})));
+            schemas.insert(forced.to_owned(), refs(["Shared", "Aliased"]));
+            schemas.insert(consuming.to_owned(), refs(["Shared", "Plain"]));
+            let (shapes, _) = shapes_of(with_schemas(Value::Object(schemas)))?;
+            for name in [forced, consuming] {
+                let Shape::Union(union) = shape_of(&shapes, name)? else {
+                    panic!("{name}: expected a union");
+                };
+                assert_eq!(
+                    union.tag.as_ref().map(|tag| tag.style),
+                    Some(TagStyle::Carried),
+                    "{name}"
+                );
+            }
+            // The shared variant keeps the property both unions read.
+            let Shape::Struct(shared) = shape_of(&shapes, "Shared")? else {
+                panic!("expected a struct");
+            };
+            assert!(
+                shared.fields.iter().any(|field| field.wire == "kind"),
+                "{forced} first"
+            );
+        }
+    }
+
+    /// A tag that does not decide every payload is not read as one where it would guess.
+    #[test_util::test]
+    fn a_missing_tag_two_branches_could_take_or_an_open_tag_names_no_branch() {
+        let tool = |kind: Value, required: Value| {
+            json!({
+                "type": "object",
+                "required": required,
+                "properties": {"type": kind, "size": {"type": "integer"}},
+            })
+        };
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "A": tool(json!({"enum": ["a", null]}), json!([])),
+            "B": tool(json!({"enum": ["b", null]}), json!([])),
+            "TwoOptional": {"oneOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/B"},
+            ]},
+            "Open": tool(json!({"anyOf": [{"const": "open"}, {"type": "string"}]}), json!(["type"])),
+            "Closed": tool(json!({"const": "closed"}), json!(["type"])),
+            "OpenTag": {"oneOf": [
+                {"$ref": "#/components/schemas/Open"},
+                {"$ref": "#/components/schemas/Closed"},
+            ]},
+            "Shared": tool(json!({"enum": ["c", "d"]}), json!(["type"])),
+            "Clash": tool(json!({"const": "d"}), json!(["type"])),
+            "SharedTag": {"oneOf": [
+                {"$ref": "#/components/schemas/Shared"},
+                {"$ref": "#/components/schemas/Clash"},
+            ]},
+        })))?;
+
+        // Both branches may leave the tag out or set it to `null`, so neither names the branch.
+        let Shape::Union(two) = shape_of(&shapes, "TwoOptional")? else {
+            panic!("expected a union");
+        };
+        let tag = two
+            .tag
+            .as_ref()
+            .ok_or_eyre("the constants are still the tag")?;
+        assert_eq!((tag.absent, tag.null), (None, None));
+        assert!(two.tagged_variant(None).is_none());
+
+        // A branch whose tag takes any string does not name itself, so nothing is a tag.
+        // A spelling two branches share does not either.
+        for name in ["OpenTag", "SharedTag"] {
+            assert!(
+                !matches!(
+                    shape_of(&shapes, name)?,
+                    Shape::Union(Union { tag: Some(_), .. })
+                ),
+                "{name}"
+            );
+        }
+    }
+
     #[test_util::test]
     fn a_variant_used_outside_its_union_keeps_its_tag_property_and_the_union_carries_the_tag() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
@@ -1021,6 +1336,8 @@ mod tests {
             Some(Tag {
                 property: "kind".to_owned(),
                 style: TagStyle::Carried,
+                absent: None,
+                null: None,
             })
         );
         let Shape::Struct(a) = shape_of(&shapes, "A")? else {
@@ -1087,6 +1404,8 @@ mod tests {
             Some(Tag {
                 property: "kind".to_owned(),
                 style: TagStyle::Consumed,
+                absent: None,
+                null: None,
             })
         );
     }
@@ -1123,6 +1442,8 @@ mod tests {
                 Some(Tag {
                     property: "kind".to_owned(),
                     style: TagStyle::Carried,
+                    absent: None,
+                    null: None,
                 }),
                 "{union_name}"
             );
@@ -2286,6 +2607,8 @@ mod tests {
             Some(Tag {
                 property: "kind".to_owned(),
                 style: TagStyle::Carried,
+                absent: None,
+                null: None,
             })
         );
     }
@@ -2350,6 +2673,8 @@ mod tests {
             Some(Tag {
                 property: "kind".to_owned(),
                 style: TagStyle::Consumed,
+                absent: None,
+                null: None,
             })
         );
         // And the variant gave the property up, because nothing else carries it.
