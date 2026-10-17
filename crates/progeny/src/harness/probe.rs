@@ -568,6 +568,13 @@ fn synthesize_named(
         ContractKind::Struct { fields } => {
             let mut members = Map::new();
             for field in fields {
+                // A flattened union's members sit among the struct's own.
+                if field.capture == Some(crate::contract::Capture::Union) {
+                    if let Value::Object(flattened) = synthesize(&field.ty, contracts, visiting)? {
+                        members.extend(flattened);
+                    }
+                    continue;
+                }
                 // The capture member is the landing place for undeclared members, and the probe
                 // sends none.
                 if field.is_capture() {

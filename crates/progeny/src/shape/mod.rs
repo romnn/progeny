@@ -25,6 +25,11 @@
 //! is by far the most common reference form in the corpus, and if a description forced a merge,
 //! every one of those would become a distinct anonymous type instead of a reference to `Pet`.
 //! Documentation is read at the position that carries it and travels with the field.
+//!
+//! One key is not a set of schemas alone: [`ShapeKey::branches`] is the union a set of schemas
+//! declares, apart from the members declared beside it.
+//! No schema states that union on its own, but a struct holding those members flattens it as a
+//! type of its own, so it needs a key to be named and settled by.
 
 mod classify;
 mod discriminate;
@@ -55,17 +60,28 @@ const MAX_FIXED_ARRAY: u32 = 32;
 /// Sorted and deduplicated, so that two documents writing the same `allOf` in different orders
 /// produce one key and therefore one type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ShapeKey(Vec<SchemaId>);
+pub(crate) struct ShapeKey {
+    parts: Vec<SchemaId>,
+    /// Whether the key stands for only the `oneOf`/`anyOf` its schemas declare, without the
+    /// members they declare beside it.
+    ///
+    /// No schema in the document states that union on its own, but a struct holding those members
+    /// flattens it as a type of its own, which has to be named and settled like any other.
+    branches: bool,
+}
 
 impl ShapeKey {
     fn new(mut parts: Vec<SchemaId>) -> Self {
         parts.sort_unstable();
         parts.dedup();
-        Self(parts)
+        Self {
+            parts,
+            branches: false,
+        }
     }
 
     pub(crate) fn parts(&self) -> &[SchemaId] {
-        &self.0
+        &self.parts
     }
 
     /// The schema that gives this shape its address: the first part, in id order.
@@ -73,7 +89,20 @@ impl ShapeKey {
     /// Ids are assigned in document order, so this is the earliest-written schema of the set — a
     /// deterministic choice that does not depend on which position reached the key first.
     pub(crate) fn anchor(&self) -> Option<SchemaId> {
-        self.0.first().copied()
+        self.parts.first().copied()
+    }
+
+    /// The key of the `oneOf`/`anyOf` these schemas declare, apart from their own members.
+    pub(crate) fn branches(&self) -> Self {
+        Self {
+            parts: self.parts.clone(),
+            branches: true,
+        }
+    }
+
+    /// Whether this key stands for a union apart from the members declared beside it.
+    pub(crate) fn is_branches(&self) -> bool {
+        self.branches
     }
 }
 
@@ -179,6 +208,13 @@ pub(crate) struct Struct {
     pub(crate) fields: Vec<Field>,
     /// What a property the document did not name may be.
     pub(crate) extra: Extra,
+    /// The union declared beside the fields, which holds every member they do not name.
+    ///
+    /// `{properties: P, anyOf: [A, B]}` is `P` and one of `A` or `B`, so the fields read `P`'s
+    /// members and the union reads the rest.
+    /// Set only where no branch names a member of `P`, so each member has exactly one reader, and
+    /// [`Struct::extra`] is then [`Extra::Open`].
+    pub(crate) flattened: Option<ShapeRef>,
 }
 
 /// The policy for properties the schema does not name.
@@ -517,6 +553,9 @@ fn children(shape: &Shape, out: &mut Vec<ShapeKey>) {
             }
             if let Extra::Typed(extra) = &structure.extra {
                 push(extra);
+            }
+            if let Some(flattened) = &structure.flattened {
+                push(flattened);
             }
         }
         Shape::Map { value } | Shape::Array { item: value } => {
@@ -1637,33 +1676,221 @@ mod tests {
         Ok(reported && shape_of(&shapes, name)? == &Shape::Any)
     }
 
-    /// A struct with a `#[serde(flatten)]` enum member, as `schemars` exports it.
+    /// The `ImageUserInput` of issue #26, with its union under `keyword` and `branch` as the
+    /// second branch.
+    fn image(keyword: &str, branch: &Value) -> Value {
+        json!({
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": {"type": "string", "enum": ["image"]},
+                "detail": {"type": "string"},
+            },
+            keyword: [
+                {"type": "object", "required": ["url"],
+                 "properties": {"url": {"type": "string"}}},
+                branch,
+            ],
+        })
+    }
+
+    /// A struct with a `#[serde(flatten)]` enum member, as `schemars` exports it, is that
+    /// struct again: the members beside the union are its fields, and the union, a type of its
+    /// own, reads the rest.
     #[test_util::test]
-    fn members_beside_a_union_that_a_branch_drops_degrade_the_union() {
+    fn members_beside_a_union_no_branch_names_are_a_struct_with_the_union_flattened() {
+        let file_id = json!({"type": "object", "required": ["fileId"],
+                             "properties": {"fileId": {"type": "string"}}});
         for keyword in ["anyOf", "oneOf"] {
-            let image = json!({
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["image"]},
-                    "detail": {"type": "string"},
-                },
-                keyword: [
-                    {"type": "object", "required": ["url"],
-                     "properties": {"url": {"type": "string"}}},
-                    {"type": "object", "required": ["fileId"],
-                     "properties": {"fileId": {"type": "string"}}},
-                ],
-            });
+            let (shapes, diagnostics) = shapes_of(with_schemas(
+                json!({ "ImageUserInput": image(keyword, &file_id) }),
+            ))?;
+            let Shape::Struct(structure) = shape_of(&shapes, "ImageUserInput")? else {
+                eyre::bail!("{keyword}: not a struct");
+            };
+            let wires: Vec<&str> = structure
+                .fields
+                .iter()
+                .map(|field| field.wire.as_str())
+                .collect();
+            assert_eq!(wires, ["detail", "type"], "{keyword}");
+            assert_eq!(structure.extra, Extra::Open, "{keyword}");
+            // The union is keyed apart from the struct, and holds both branches.
+            let Some(ShapeRef::Key(branches)) = &structure.flattened else {
+                eyre::bail!("{keyword}: no flattened union");
+            };
+            assert!(branches.is_branches(), "{keyword}");
+            let variants = match shapes.get(branches) {
+                Some(Shape::Union(union)) => union.variants.len(),
+                Some(Shape::Keyed(keyed)) => keyed.variants.len(),
+                other => eyre::bail!("{keyword}: the flattened key is {other:?}"),
+            };
+            assert_eq!(variants, 2, "{keyword}");
+            // Nothing is lost, so nothing is reported.
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| d.class() == BreakageClass::UnsupportedConstruct),
+                "{keyword}: {diagnostics:?}"
+            );
+        }
+    }
+
+    /// A member both the struct and a branch could read, or one a closed struct would refuse,
+    /// keeps the union degraded, because the flattened struct would give it to one reader.
+    #[test_util::test]
+    fn members_beside_a_union_a_branch_also_names_still_degrade_the_union() {
+        // A branch that redeclares `detail` would never see it: the struct's field takes it first.
+        let redeclares = json!({"type": "object", "required": ["fileId"], "properties": {
+            "fileId": {"type": "string"}, "detail": {"type": "string"},
+        }});
+        // A branch that only requires `type` names it too.
+        let requires = json!({"type": "object", "required": ["fileId", "type"],
+                              "properties": {"fileId": {"type": "string"}}});
+        for branch in [redeclares, requires] {
             assert!(
                 degrades_for_members_beside(
-                    json!({ "ImageUserInput": image }),
+                    json!({ "ImageUserInput": image("anyOf", &branch) }),
                     "ImageUserInput",
                     "`detail`, `type`",
                 )?,
-                "{keyword}"
+                "{branch}"
             );
         }
+        // A closed struct says nothing of the branches' members, so they are its undeclared ones.
+        let mut closed = image(
+            "anyOf",
+            &json!({"type": "object", "required": ["fileId"],
+                    "properties": {"fileId": {"type": "string"}}}),
+        );
+        if let Some(object) = closed.as_object_mut() {
+            object.insert("additionalProperties".to_owned(), json!(false));
+        }
+        assert!(degrades_for_members_beside(
+            json!({ "ImageUserInput": closed }),
+            "ImageUserInput",
+            "`detail`, `type`",
+        )?);
+        // Patterns describe other members too, even ones that do not agree on a single type.
+        let mut patterned = image(
+            "anyOf",
+            &json!({"type": "object", "required": ["fileId"],
+                    "properties": {"fileId": {"type": "string"}}}),
+        );
+        if let Some(object) = patterned.as_object_mut() {
+            object.insert(
+                "patternProperties".to_owned(),
+                json!({"^x-": {"type": "string"}, "^n-": {"type": "integer"}}),
+            );
+        }
+        assert!(degrades_for_members_beside(
+            json!({ "ImageUserInput": patterned }),
+            "ImageUserInput",
+            "`detail`, `type`",
+        )?);
+        // A branch that is not an object has no members to sit beside the struct's, and one that
+        // may be `null` is not always one.
+        for branch in [
+            json!({"type": "string"}),
+            json!({"type": ["object", "null"], "required": ["fileId"],
+                   "properties": {"fileId": {"type": "string"}}}),
+        ] {
+            assert!(
+                degrades_for_members_beside(
+                    json!({ "ImageUserInput": image("anyOf", &branch) }),
+                    "ImageUserInput",
+                    "`detail`, `type`",
+                )?,
+                "{branch}"
+            );
+        }
+        // One branch is an alias rather than a union, and stays a reported degradation, however
+        // many times it is listed.
+        let url = json!({"type": "object", "required": ["url"],
+                         "properties": {"url": {"type": "string"}}});
+        let mut single = image("anyOf", &url);
+        if let Some(branches) = single.get_mut("anyOf").and_then(Value::as_array_mut) {
+            branches.truncate(1);
+        }
+        let mut repeated = image("anyOf", &json!({"$ref": "#/components/schemas/Url"}));
+        if let Some(first) = repeated.pointer_mut("/anyOf/0") {
+            *first = json!({"$ref": "#/components/schemas/Url"});
+        }
+        for schema in [single, repeated] {
+            assert!(
+                degrades_for_members_beside(
+                    json!({ "ImageUserInput": schema.clone(), "Url": url.clone() }),
+                    "ImageUserInput",
+                    "`detail`, `type`",
+                )?,
+                "{schema}"
+            );
+        }
+    }
+
+    /// A discriminator the branches inherit names its member as surely as a property, so a
+    /// struct declaring that member beside them does not flatten them.
+    #[test_util::test]
+    fn an_inherited_discriminator_naming_a_member_beside_the_union_keeps_it_unflattened() {
+        let branch = |own: &str| {
+            json!({"allOf": [
+                {"$ref": "#/components/schemas/Base"},
+                {"type": "object", "required": ["x"], "properties": {
+                    "x": {"type": "string"}, own: {"type": "string"},
+                }},
+            ]})
+        };
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "Base": {"discriminator": {"propertyName": "kind"}},
+            "Holder": {
+                "type": "object",
+                "properties": {"kind": {"type": "string"}, "detail": {"type": "string"}},
+                "oneOf": [branch("a"), branch("b")],
+            },
+        })))?;
+        assert!(
+            !matches!(
+                shape_of(&shapes, "Holder")?,
+                Shape::Struct(structure) if structure.flattened.is_some()
+            ),
+            "{:?}",
+            shape_of(&shapes, "Holder")?
+        );
+    }
+
+    /// A union a mapping names beside its schema's members is reported once, by the schema,
+    /// though the struct flattens it as a type of its own.
+    #[test_util::test]
+    fn an_inheritance_union_flattened_beside_members_is_reported_once() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Base": {
+                "type": "object",
+                "properties": {"detail": {"type": "string"}},
+                "discriminator": {"propertyName": "kind", "mapping": {
+                    "a": "#/components/schemas/A", "b": "#/components/schemas/B",
+                }},
+            },
+            "A": {"type": "object", "required": ["kind", "a"], "properties": {
+                "kind": {"type": "string"}, "a": {"type": "string"},
+            }},
+            "B": {"type": "object", "required": ["kind", "b"], "properties": {
+                "kind": {"type": "string"}, "b": {"type": "string"},
+            }},
+        })))?;
+        let repairs: Vec<&Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| d.class() == BreakageClass::InheritanceDiscriminator)
+            .collect();
+        assert_eq!(repairs.len(), 1, "{diagnostics:?}");
+        assert!(repairs.iter().all(|d| d.related().is_empty()), "{repairs:?}");
+        assert!(
+            matches!(
+                shape_of(&shapes, "Base")?,
+                Shape::Struct(structure) if structure.flattened.is_some()
+            ),
+            "{:?}",
+            shape_of(&shapes, "Base")?
+        );
     }
 
     #[test_util::test]

@@ -1323,6 +1323,246 @@ impl<M: serde::ser::SerializeMap> serde::ser::SerializeMap for TaggedMap<M> {
     }
 }
 
+/// Write a flattened member's entries into the map a struct is writing.
+///
+/// The member is the union declared beside the struct's own members, and every variant of it is an
+/// object, so its entries sit among the struct's the way the derive's `flatten` writes them.
+/// An entry whose key a declared member writes is left out, which is the rule the capture map
+/// follows too: the declared member is the type's statement about that key, and writing both
+/// would put the same key on the wire twice.
+pub(crate) fn serialize_flattened<M, T>(
+    value: &T,
+    map: &mut M,
+    declared: &'static [&'static str],
+) -> Result<(), M::Error>
+where
+    M: serde::ser::SerializeMap,
+    T: serde::Serialize + ?Sized,
+{
+    value.serialize(Flattened { map, declared })
+}
+
+/// Serializes one value as entries of a map underway, which only an object can be.
+struct Flattened<'a, M> {
+    map: &'a mut M,
+    declared: &'static [&'static str],
+}
+
+/// The entries of one flattened object, written into the map underway and never ending it.
+struct FlattenedMap<'a, M> {
+    map: &'a mut M,
+    declared: &'static [&'static str],
+    /// Set between a key a declared member writes and its value, which is left out with it.
+    skipping: bool,
+}
+
+impl<'a, M: serde::ser::SerializeMap> serde::Serializer for Flattened<'a, M> {
+    type Ok = ();
+    type Error = M::Error;
+    type SerializeSeq = serde::ser::Impossible<(), M::Error>;
+    type SerializeTuple = serde::ser::Impossible<(), M::Error>;
+    type SerializeTupleStruct = serde::ser::Impossible<(), M::Error>;
+    type SerializeTupleVariant = serde::ser::Impossible<(), M::Error>;
+    type SerializeMap = FlattenedMap<'a, M>;
+    type SerializeStruct = FlattenedMap<'a, M>;
+    type SerializeStructVariant = serde::ser::Impossible<(), M::Error>;
+
+    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        Ok(FlattenedMap {
+            map: self.map,
+            declared: self.declared,
+            skipping: false,
+        })
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        self.serialize_map(None)
+    }
+
+    fn serialize_newtype_struct<T: serde::Serialize + ?Sized>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error> {
+        value.serialize(self)
+    }
+
+    fn serialize_some<T: serde::Serialize + ?Sized>(
+        self,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error> {
+        value.serialize(self)
+    }
+
+    /// A keyed union's variant is an object with one member, its key, holding its payload.
+    fn serialize_newtype_variant<T: serde::Serialize + ?Sized>(
+        self,
+        _name: &'static str,
+        _index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error> {
+        if self.declared.contains(&variant) {
+            return Ok(());
+        }
+        self.map.serialize_entry(variant, value)
+    }
+
+    // Everything below is a value that is not an object, which the generator never flattens:
+    // every branch of a flattened union is an object, and its fallback holds the object it read.
+    // A fallback built by hand around anything else is refused out loud rather than dropped.
+    fn serialize_bool(self, _value: bool) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_i8(self, _value: i8) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_i16(self, _value: i16) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_i32(self, _value: i32) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_i64(self, _value: i64) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_u8(self, _value: u8) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_u16(self, _value: u16) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_u32(self, _value: u32) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_u64(self, _value: u64) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_f32(self, _value: f32) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_f64(self, _value: f64) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_char(self, _value: char) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_str(self, _value: &str) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _index: u32,
+        _variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Err(not_flattenable())
+    }
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Err(not_flattenable())
+    }
+}
+
+fn not_flattenable<E: serde::ser::Error>() -> E {
+    E::custom("a flattened member must serialize as an object")
+}
+
+impl<M: serde::ser::SerializeMap> serde::ser::SerializeMap for FlattenedMap<'_, M> {
+    type Ok = ();
+    type Error = M::Error;
+
+    fn serialize_key<T: serde::Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
+        self.skipping = key
+            .serialize(TextProbe {
+                names: self.declared,
+                null: false,
+            })
+            .unwrap_or(false);
+        if self.skipping {
+            return Ok(());
+        }
+        self.map.serialize_key(key)
+    }
+
+    fn serialize_value<T: serde::Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        if std::mem::replace(&mut self.skipping, false) {
+            return Ok(());
+        }
+        self.map.serialize_value(value)
+    }
+
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl<M: serde::ser::SerializeMap> serde::ser::SerializeStruct for FlattenedMap<'_, M> {
+    type Ok = ();
+    type Error = M::Error;
+
+    fn serialize_field<T: serde::Serialize + ?Sized>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        if self.declared.contains(&key) {
+            return Ok(());
+        }
+        self.map.serialize_entry(key, value)
+    }
+
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 /// Answers whether a value serializes as exactly one of `names`, or as `null` where `null` is set.
 ///
 /// Read for a map's keys, to find the tag among them, and for a kept tag's value.
@@ -1493,6 +1733,89 @@ impl serde::Serializer for TextProbe<'_> {
 #[cfg(test)]
 mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
+
+    /// A struct beside a flattened union, written the way the renderer writes one: its own
+    /// members as entries, then the union's into the same map.
+    struct Image<U> {
+        detail: &'static str,
+        source: U,
+    }
+
+    impl<U: serde::Serialize> serde::Serialize for Image<U> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap as _;
+            const DECLARED: &[&str] = &["detail"];
+            let mut state = serializer.serialize_map(None)?;
+            state.serialize_entry("detail", self.detail)?;
+            super::serialize_flattened(&self.source, &mut state, DECLARED)?;
+            state.end()
+        }
+    }
+
+    /// Every way a union writes an object lands among the struct's members, and a key the struct
+    /// declares is written once, by the struct.
+    #[test_util::test]
+    fn a_flattened_union_writes_its_members_beside_the_structs() {
+        #[derive(serde::Serialize)]
+        struct Url {
+            url: &'static str,
+        }
+        #[derive(serde::Serialize)]
+        #[serde(untagged)]
+        enum Untagged {
+            Url(Url),
+        }
+        #[derive(serde::Serialize)]
+        #[serde(tag = "kind")]
+        enum Tagged {
+            #[serde(rename = "url")]
+            Url(Url),
+        }
+        #[derive(serde::Serialize)]
+        enum Keyed {
+            #[serde(rename = "fileId")]
+            FileId(&'static str),
+        }
+        let untagged = Image {
+            detail: "high",
+            source: Untagged::Url(Url { url: "u" }),
+        };
+        assert_eq!(
+            serde_json::to_string(&untagged)?,
+            r#"{"detail":"high","url":"u"}"#
+        );
+        let tagged = Image {
+            detail: "high",
+            source: Tagged::Url(Url { url: "u" }),
+        };
+        assert_eq!(
+            serde_json::to_string(&tagged)?,
+            r#"{"detail":"high","kind":"url","url":"u"}"#
+        );
+        let keyed = Image {
+            detail: "high",
+            source: Keyed::FileId("f"),
+        };
+        assert_eq!(
+            serde_json::to_string(&keyed)?,
+            r#"{"detail":"high","fileId":"f"}"#
+        );
+        // A fallback holding the object it read writes it back, less what the struct declares.
+        let fallback = Image {
+            detail: "high",
+            source: serde_json::json!({"detail": "stale", "path": "/a"}),
+        };
+        assert_eq!(
+            serde_json::to_string(&fallback)?,
+            r#"{"detail":"high","path":"/a"}"#
+        );
+        // Anything that is not an object has no members to sit beside the struct's.
+        let scalar = Image {
+            detail: "high",
+            source: 3,
+        };
+        assert!(serde_json::to_string(&scalar).is_err());
+    }
 
     #[test]
     fn a_carried_tag_is_written_whatever_the_payload_holds() {

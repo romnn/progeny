@@ -169,6 +169,17 @@ impl<'a> Fit<'a> {
                 return Some(format!("at `{}`, {reason}", field.wire));
             }
         }
+        // The union beside the members reads every other member, as one object of its own.
+        if let Some(flattened) = &structure.flattened {
+            let rest: serde_json::Map<String, Value> = object
+                .iter()
+                .filter(|(key, _)| !structure.fields.iter().any(|field| field.wire == **key))
+                .map(|(key, member)| (key.clone(), member.clone()))
+                .collect();
+            if let Some(reason) = self.through(&Value::Object(rest), flattened) {
+                return Some(reason);
+            }
+        }
         // `additionalProperties: false` lowers to a deserializer that refuses a member the schema
         // did not name, so an object carrying one is certainly not a value of this shape. The
         // untagged unions the payload gate prunes against turn on exactly this: `github`'s

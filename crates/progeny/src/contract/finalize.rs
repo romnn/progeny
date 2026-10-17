@@ -185,9 +185,9 @@ fn decide(
         },
         SerdeImpl::HandWrittenWhereEligible => match kind {
             ContractKind::StringEnum { .. } => DeserStrategy::HandWrittenFieldless,
-            // The one flattened member a struct can have is its capture map, and the buffer is
-            // the natural place to fill it from: once the declared names are taken, what is left
-            // is exactly what the map holds.
+            // The one flattened member a struct can have is its capture map or the union beside
+            // its members, and the buffer is the natural place to fill either from: once the
+            // declared names are taken, what is left is exactly what that member holds.
             ContractKind::Struct { .. } => DeserStrategy::HandWrittenBuffered {
                 unknown: unknown_fields,
             },

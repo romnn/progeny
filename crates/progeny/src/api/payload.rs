@@ -503,6 +503,20 @@ impl Collect<'_> {
                 self.through_typed(present, &field.shape, ty, lenient)?,
             );
         }
+        if let Some(flattened) = &structure.flattened {
+            // The union beside the members reads every other member as one object, and writes
+            // back what it keeps among them.
+            let rest: Map<String, Value> = members
+                .iter()
+                .filter(|(key, _)| !structure.fields.iter().any(|field| field.wire == **key))
+                .map(|(key, member)| (key.clone(), member.clone()))
+                .collect();
+            let Value::Object(kept) = self.through(&Value::Object(rest), flattened, lenient)? else {
+                return None;
+            };
+            out.extend(kept);
+            return Some(Value::Object(out));
+        }
         if lenient {
             // The read form keeps every member the description did not declare, verbatim.
             for (key, member) in members {
