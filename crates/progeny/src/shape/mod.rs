@@ -2071,6 +2071,86 @@ mod tests {
         assert_eq!(diagnostics[0].action(), crate::Action::Repair);
     }
 
+    /// A lower bound of zero is what an unsigned integer expresses, so it is not a degradation.
+    #[test_util::test]
+    fn a_zero_lower_bound_on_an_unsigned_integer_is_not_reported() {
+        struct Case {
+            /// Text, because `json!` would read `1e-400` as `0.0` before progeny sees it.
+            schema: &'static str,
+            shape: Option<Shape>,
+            bound_reported: bool,
+        }
+        let unsigned = || Shape::Scalar(Scalar::Integer { signed: false });
+        let case = |schema, shape, bound_reported| Case {
+            schema,
+            shape,
+            bound_reported,
+        };
+        let cases = [
+            // Expressed by the unsigned integer
+            case(
+                r#"{"type": "integer", "minimum": 0}"#,
+                Some(unsigned()),
+                false,
+            ),
+            case(
+                r#"{"type": ["integer", "null"], "format": "uint32", "minimum": 0}"#,
+                Some(Shape::Optional(ShapeRef::Inline(Box::new(unsigned())))),
+                false,
+            ),
+            case(
+                r#"{"allOf": [{"type": "integer"}, {"minimum": 0}, {"minimum": -3}]}"#,
+                Some(unsigned()),
+                false,
+            ),
+            case(r#"{"enum": [0, 1], "minimum": 0}"#, Some(unsigned()), false),
+            // Narrower than the unsigned integer
+            case(
+                r#"{"type": "integer", "minimum": 1}"#,
+                Some(unsigned()),
+                true,
+            ),
+            case(
+                r#"{"type": "integer", "exclusiveMinimum": 0}"#,
+                Some(unsigned()),
+                true,
+            ),
+            case(
+                r#"{"allOf": [{"type": "integer", "minimum": 0}, {"minimum": 2}]}"#,
+                Some(unsigned()),
+                true,
+            ),
+            case(
+                r#"{"type": "integer", "minimum": 1e-400}"#,
+                Some(unsigned()),
+                true,
+            ),
+            // Not an unsigned integer at all
+            case(r#"{"type": "number", "minimum": 0}"#, None, true),
+            case(
+                r#"{"type": "integer", "minimum": 0, "anyOf": [{"type": "integer"}]}"#,
+                None,
+                true,
+            ),
+        ];
+        for Case {
+            schema,
+            shape,
+            bound_reported,
+        } in cases
+        {
+            let parsed: Value = serde_json::from_str(schema)?;
+            let (shapes, diagnostics) = shapes_of(with_schemas(json!({ "Bounded": parsed })))?;
+            let reported = diagnostics
+                .iter()
+                .any(|found| found.class() == BreakageClass::UnsupportedConstruct);
+            assert_eq!(reported, bound_reported, "{schema}: {diagnostics:#?}");
+            if let Some(shape) = shape {
+                assert_eq!(shape_of(&shapes, "Bounded")?, &shape, "{schema}");
+            }
+        }
+    }
+
     #[test_util::test]
     fn integers_take_their_sign_from_bounds_and_never_their_width() {
         let (shapes, _) = shapes_of(with_schemas(json!({

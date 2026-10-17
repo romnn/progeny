@@ -63,10 +63,11 @@ pub(crate) fn key(
         return Shape::Any;
     }
     report_unknown_types(&mut view, ctx, &at);
-    report_uninterpreted(&view, ctx, &at);
     inheritance_union(resolved, &mut view, key, ctx, &at);
 
-    nullable(resolved, &view, component_names, ctx, &at)
+    let shape = nullable(resolved, &view, component_names, ctx, &at);
+    report_uninterpreted(&view, &shape, ctx, &at);
+    shape
 }
 
 /// The inheritance spelling of a discriminated union, turned into the union it describes.
@@ -1281,15 +1282,28 @@ fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {
     }
 }
 
-fn report_uninterpreted(view: &View, ctx: &mut Ctx, at: &JsonPointer) {
-    if view.uninterpreted.is_empty() {
-        return;
-    }
+/// Report the keywords the shape does not express.
+///
+/// It runs once the shape is chosen, because only the chosen type says what is expressed.
+/// An unsigned integer holds every integer from zero up, so a lower bound that admits zero and
+/// nothing below it narrows nothing.
+fn report_uninterpreted(view: &View, shape: &Shape, ctx: &mut Ctx, at: &JsonPointer) {
+    let unsigned =
+        |shape: &Shape| matches!(shape, Shape::Scalar(Scalar::Integer { signed: false }));
+    let bound_expressed = !view.bound_above_zero
+        && match shape {
+            Shape::Optional(ShapeRef::Inline(inner)) => unsigned(inner),
+            other => unsigned(other),
+        };
     let keywords: Vec<String> = view
         .uninterpreted
         .iter()
+        .filter(|&&keyword| !(bound_expressed && matches!(keyword, "minimum" | "exclusiveMinimum")))
         .map(|keyword| format!("`{keyword}`"))
         .collect();
+    if keywords.is_empty() {
+        return;
+    }
     let verb = if keywords.len() == 1 {
         "narrows"
     } else {
