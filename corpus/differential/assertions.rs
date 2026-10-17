@@ -411,3 +411,13 @@ fn a_self_naming_union_read_form_routes_the_same_way() {
         assert_eq!(serde_json::to_string(&right.value)?, payload);
     }
 }
+
+/// A member and an enum value named by edition 2024's reserved `gen` compile and round-trip.
+#[test_util::test]
+fn a_name_edition_2024_reserves_is_escaped_and_round_trips() {
+    let payload = r#"{"gen":"x","kind":"gen"}"#;
+    let left = serde_json::from_str::<derived::types::Keywords>(payload)?;
+    let right = serde_json::from_str::<hand::types::Keywords>(payload)?;
+    assert_eq!(serde_json::to_string(&left)?, payload);
+    assert_eq!(serde_json::to_string(&right)?, payload);
+}

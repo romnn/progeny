@@ -141,9 +141,11 @@ fn capitalize(word: &str) -> String {
 
 /// Every word Rust will not accept as an identifier.
 ///
-/// The 2015, 2018 and 2021 keyword sets together, plus the reserved-for-future-use ones: a name
-/// that compiles today and breaks on an edition bump is not a name worth emitting. `self`, `crate`
-/// and `super` are in the list and are exactly why the rule is a suffix rather than `r#`.
+/// The keyword sets of every edition through 2024 together, `gen` among them, plus the
+/// reserved-for-future-use ones: a name that compiles today and breaks on an edition bump is not
+/// a name worth emitting.
+/// `self`, `crate` and `super` are in the list and are exactly why the rule is a suffix rather
+/// than `r#`.
 const RESERVED: [&str; 51] = [
     "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate",
     "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl",

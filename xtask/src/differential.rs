@@ -121,27 +121,30 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> eyre::Re
         "},
     )?;
     std::fs::write(directory.join("tests/differential.rs"), assertions)?;
-    // The edition and dependency lines restate what `render/manifest.rs` writes for a shipped
-    // crate, and they have to keep restating it: this gate certifies "the derive and the
-    // hand-written path agree", and a crate compiled under a different edition than any shipped
-    // configuration would quietly make that claim about something nobody ships.
+    // The edition and dependency lines match what `render/manifest.rs` writes for a shipped
+    // crate: this gate certifies "the derive and the hand-written path agree", and a crate
+    // compiled under a different edition than any shipped configuration would quietly make that
+    // claim about something nobody ships.
+    // The edition is the workspace's, which a test in `render/manifest.rs` pins the generated
+    // crates to.
+    let edition = paths::workspace_edition()?;
     std::fs::write(
         directory.join("Cargo.toml"),
-        indoc::indoc! {r#"
+        indoc::formatdoc! {r#"
             # Assembled by `cargo xtask differential`.
             [package]
             name = "differential"
             version = "0.0.0"
-            edition = "2021"
+            edition = "{edition}"
             publish = false
 
             [dependencies]
-            serde = { version = "1", features = ["derive"] }
+            serde = {{ version = "1", features = ["derive"] }}
             serde_json = "1"
 
             [dev-dependencies]
             color-eyre = "0.6"
-            test-util = { path = "../../crates/test-util" }
+            test-util = {{ path = "../../crates/test-util" }}
 
             [workspace]
         "#},
@@ -262,17 +265,18 @@ fn assemble_single(directory: &Utf8Path, document: &[u8], strategy: SerdeImpl) -
     std::fs::create_dir_all(directory.join("src"))
         .wrap_err_with(|| format!("creating {directory}/src"))?;
     std::fs::write(directory.join("src/lib.rs"), render(document, strategy)?)?;
+    let edition = paths::workspace_edition()?;
     std::fs::write(
         directory.join("Cargo.toml"),
-        indoc::indoc! {r#"
+        indoc::formatdoc! {r#"
             [package]
             name = "bodies"
             version = "0.0.0"
-            edition = "2021"
+            edition = "{edition}"
             publish = false
 
             [dependencies]
-            serde = { version = "1", features = ["derive"] }
+            serde = {{ version = "1", features = ["derive"] }}
             serde_json = "1"
 
             [workspace]

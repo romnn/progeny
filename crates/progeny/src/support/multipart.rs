@@ -419,8 +419,6 @@ fn text(value: &Value, content_type: Option<&str>) -> Part {
 fn file(value: &Value, content_type: Option<&str>) -> Part {
     // The object form is what an `Upload` serializes to: the content as real bytes, and the part
     // metadata — `filename`, the part's own `Content-Type` — that no schema property carries.
-    // Written without a let-chain: this file ships into generated crates, whose manifests say
-    // edition 2021, where the chain does not parse.
     let upload = match value {
         Value::Object(members) => match members.get("bytes") {
             Some(Value::String(encoded)) => {

@@ -588,6 +588,9 @@ pub enum Packaging {
     /// published after it.
     Workspace,
     /// One file to `include!` from a build script or to check in.
+    ///
+    /// The file is edition 2024 source, like the generated crates, so the crate that includes it
+    /// has to be on edition 2024 and Rust 1.88 or later too.
     Module,
 }
 
