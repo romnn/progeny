@@ -61,10 +61,12 @@ pub(super) fn run(
             derives.push(Derive::Default);
         }
         for &derive in requested {
+            // A request the type already meets, such as one of the base derives, is satisfied.
+            if derives.contains(&derive) {
+                continue;
+            }
             if available.contains(&derive) {
-                if !derives.contains(&derive) {
-                    derives.push(derive);
-                }
+                derives.push(derive);
                 continue;
             }
             if explicit {

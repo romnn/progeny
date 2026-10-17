@@ -1380,6 +1380,47 @@ mod tests {
         );
     }
 
+    /// Every type derives `Clone` and `Debug`, so asking for them is never unsatisfiable.
+    #[test_util::test]
+    fn asking_for_a_base_derive_is_always_satisfied() {
+        use crate::config::Derive;
+
+        let document = with_schemas(json!({
+            "Path": {"type": "string"},
+            "Pet": {"type": "object", "required": ["name"], "properties": {
+                "name": {"type": "string"}
+            }},
+            "Choice": {"type": "string", "enum": ["a", "b"]},
+        }));
+
+        // Asked of every type, the base derives raise nothing, while `Default` on an enum is
+        // still a real finding.
+        let crate_wide = Config {
+            derives: [Derive::Clone, Derive::Debug, Derive::Default]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let (contracts, diagnostics) = contracts_of(document.clone(), &crate_wide)?;
+        let unsatisfiable: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.class() == crate::BreakageClass::UnsatisfiableDerive)
+            .collect();
+        assert_eq!(unsatisfiable.len(), 1, "{unsatisfiable:?}");
+        assert!(unsatisfiable[0].detail().contains("`Default`"), "{unsatisfiable:?}");
+        assert!(named(&contracts, "Choice")?.derives().contains(&Derive::Clone));
+
+        // Asked of one type by name, they are accepted rather than rejecting the document.
+        let by_name = Config {
+            type_derives: [("Pet".to_owned(), [Derive::Clone, Derive::Debug].into())].into(),
+            ..Config::default()
+        };
+        let (contracts, diagnostics) = contracts_of(document, &by_name)?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let pet = named(&contracts, "Pet")?.derives();
+        assert!(pet.contains(&Derive::Clone) && pet.contains(&Derive::Debug));
+    }
+
     #[test_util::test]
     fn default_is_configurable_and_propagates_only_through_defaultable_members() {
         let config = Config {
