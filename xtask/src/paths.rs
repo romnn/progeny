@@ -33,6 +33,23 @@ pub fn convergence_root() -> Utf8PathBuf {
     corpus_root().join("convergence")
 }
 
+/// The workspace's own edition, which progeny writes into every generated crate too.
+///
+/// Read from the root manifest rather than restated, so a harness that assembles a crate by hand
+/// compiles it under the edition the generated crates use.
+pub fn workspace_edition() -> color_eyre::eyre::Result<String> {
+    let manifest = workspace_root().join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)?;
+    let parsed: toml::Table = toml::from_str(&text)?;
+    parsed
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(|package| package.get("edition"))
+        .and_then(toml::Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| color_eyre::eyre::eyre!("{manifest} sets no `workspace.package.edition`"))
+}
+
 pub fn library_root() -> Utf8PathBuf {
     workspace_root().join("crates/progeny")
 }

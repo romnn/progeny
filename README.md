@@ -340,9 +340,9 @@ edge carries a bridge — `server::http_method` to `axum::http::Method`, `client
 middleware. The router registers every template *through* `Route::X.path()` as an inline `const`,
 so the reflection and the server cannot drift apart, and the wire probe drives every route through
 the generated router and checks that `Route::from_matched` names the one it drove. The accessors are
-`const fn`s reading a `static` table, a 1.83 compiler; every generated manifest declares the
-floor the emitted source stands on, `rust-version = "1.87"`, which the shipped support runtime
-already needed.
+`const fn`s reading a `static` table, a 1.83 compiler; every generated crate is edition 2024 and
+declares the floor the emitted source stands on, `rust-version = "1.88"`, so the shipped support
+runtime may use `let` chains.
 
 ## Packaging large APIs
 

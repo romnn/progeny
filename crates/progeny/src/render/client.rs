@@ -351,14 +351,14 @@ fn client_struct(
                 operation: operations::Operation,
                 response: ResponseValue<T>,
             ) -> ResponseValue<T> {
-                if let ::std::option::Option::Some(observer) = &self.observer {
-                    if response.is_degraded() {
-                        observer.notify(Degraded {
-                            operation,
-                            status: response.status(),
-                            degradations: response.degradations(),
-                        });
-                    }
+                if let ::std::option::Option::Some(observer) = &self.observer
+                    && response.is_degraded()
+                {
+                    observer.notify(Degraded {
+                        operation,
+                        status: response.status(),
+                        degradations: response.degradations(),
+                    });
                 }
                 response
             }

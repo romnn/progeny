@@ -799,7 +799,6 @@ where
         return Ok(KeyedChoice::Other);
     };
     // A listed key written twice, wherever the two sit.
-    // Written without `let` chains: this file ships into crates on the 2021 edition.
     for (index, (key, _)) in members.iter().enumerate() {
         let Some(listed) = keys.iter().find(|listed| key.as_str() == Some(**listed)) else {
             continue;
@@ -1052,24 +1051,19 @@ impl<M: serde::ser::SerializeMap> TaggedMap<M> {
     /// Finish the map, writing the first name when the payload had no tag and leaving it out
     /// names another variant.
     fn finish(mut self) -> Result<M::Ok, M::Error> {
-        // Spelled without a let-chain, which the 2021 edition of a generated crate cannot read.
-        let missing = match self.entry {
-            TagEntry::Kept {
-                spellings,
-                seen: false,
-            } if !spellings.absent => Some(spellings.names.first()),
-            TagEntry::Dropped | TagEntry::Kept { .. } => None,
-        };
-        match missing {
-            // The payload had no tag, and leaving it out names another variant
-            Some(Some(name)) => self.inner.serialize_entry(self.tag, name)?,
-            Some(None) => {
+        // The payload had no tag, and leaving it out names another variant
+        if let TagEntry::Kept {
+            spellings,
+            seen: false,
+        } = self.entry
+            && !spellings.absent
+        {
+            let Some(name) = spellings.names.first() else {
                 return Err(serde::ser::Error::custom(
                     "a carried tag has no name to write",
                 ));
-            }
-            // The tag was written already, or leaving it out names this variant
-            None => {}
+            };
+            self.inner.serialize_entry(self.tag, name)?;
         }
         self.inner.end()
     }

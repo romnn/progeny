@@ -135,3 +135,13 @@ components:
           const: bash
         name:
           type: string
+    # A member and a value named by `gen`, which edition 2024 reserves, so the generated names
+    # have to escape it.
+    Keywords:
+      type: object
+      properties:
+        gen:
+          type: string
+        kind:
+          type: string
+          enum: [gen, async]

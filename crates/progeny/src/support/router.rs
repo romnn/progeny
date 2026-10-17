@@ -293,8 +293,6 @@ pub fn respond_json<T: ::serde::Serialize>(
             // The declared spelling is the wire contract; `axum::Json` writes the plain
             // `application/json`, which is only the common case. A spelling that is not a
             // legal header value stays the plain one rather than aborting the response.
-            // Written without a let-chain: this file ships into generated crates, whose
-            // manifests say edition 2021, where the chain does not parse.
             let declared = match content_type {
                 "application/json" => None,
                 other => ::axum::http::HeaderValue::from_str(other).ok(),
