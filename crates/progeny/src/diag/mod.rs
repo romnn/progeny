@@ -69,8 +69,13 @@ pub enum BreakageClass {
     /// break is supplied, which is the only way to read the document at all, and clip chomping
     /// then keeps one newline the document did not write.
     MissingFinalLineBreak,
-    /// A number the document states cannot be represented in JSON (YAML `.inf` / `.nan`).
+    /// A number the document states that the model cannot hold at all: YAML `.inf` / `.nan`,
+    /// or, without the `exact-numbers` feature, one beyond the range of an `f64`.
     NonFiniteNumber,
+    /// A number the model holds only as the nearest value it can, without the `exact-numbers`
+    /// feature: an integer beyond 64 bits, a decimal an `f64` does not hold, or an integer
+    /// literal held as a float.
+    InexactNumber,
     /// A `$schema` naming a dialect progeny does not implement. Carried losslessly and
     /// interpreted as 2020-12.
     UnsupportedDialect,
@@ -171,10 +176,11 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
+        Self::InexactNumber,
         Self::UnsupportedDialect,
         Self::DynamicScoping,
         Self::DanglingRef,
@@ -211,6 +217,7 @@ impl BreakageClass {
             Self::MalformedMember => "malformed-member",
             Self::MissingFinalLineBreak => "missing-final-line-break",
             Self::NonFiniteNumber => "non-finite-number",
+            Self::InexactNumber => "inexact-number",
             Self::UnsupportedDialect => "unsupported-dialect",
             Self::DynamicScoping => "dynamic-scoping",
             Self::DanglingRef => "dangling-ref",
@@ -259,6 +266,7 @@ impl BreakageClass {
             // Scale classes: the count is the finding.
             Self::MalformedMember
             | Self::NonFiniteNumber
+            | Self::InexactNumber
             | Self::UnsupportedDialect
             | Self::DynamicScoping
             | Self::DanglingRef

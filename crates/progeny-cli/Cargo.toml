@@ -12,7 +12,8 @@ categories.workspace = true
 
 [dependencies]
 indoc.workspace = true
-progeny.workspace = true
+# The CLI is its own binary, so it keeps every literal exactly at no cost to anyone else.
+progeny = { workspace = true, features = ["exact-numbers"] }
 # Reading a `progeny.toml` is the front end's job: the library takes a `Config`, never a file.
 toml.workspace = true
 

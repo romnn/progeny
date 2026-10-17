@@ -421,8 +421,15 @@ mod tests {
         );
     }
 
+    /// Spelling survives only with arbitrary precision, which the round trip keeps here.
     #[test_util::test]
     fn number_literals_are_preserved() {
+        // Checked at run time, not by feature: another crate can turn arbitrary precision on.
+        let precise = serde_json::from_str::<serde_json::Number>("18446744073709551616")
+            .is_ok_and(|number| number.to_string() == "18446744073709551616");
+        if !precise {
+            return Ok(());
+        }
         let original: Value =
             serde_json::from_str(r#"{"maximum": 1.0, "minimum": 1, "multipleOf": 1e2}"#)?;
         let text = serde_json::to_string(&round_trip(original)?)?;

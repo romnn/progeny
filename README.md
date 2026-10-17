@@ -64,6 +64,15 @@ write it where it likes.
 progeny = "0.0.3"
 ```
 
+The library leaves `serde_json`'s features alone, because Cargo unifies features across a build:
+a library that turned on `arbitrary_precision` would change how every crate beside it parses
+numbers.
+Without it, a number keeps its value but not always its spelling (`1.00` reads as `1.0`).
+A number the model holds only as a nearest value — an integer beyond 64 bits, or a decimal an
+`f64` does not render back — is reported as `inexact-number` rather than rounded silently, and
+one beyond an `f64`'s range is dropped and reported as `non-finite-number`.
+The `exact-numbers` feature keeps every literal as the document wrote it; the CLI turns it on.
+
 `progeny-cli` is the front end for the checked-in-output workflow, and the only part that touches
 the filesystem. It ships the same shell under two names: `progeny`, and `cargo progeny` for the
 consumers who would rather not remember a second one.

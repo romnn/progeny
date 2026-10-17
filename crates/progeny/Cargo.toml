@@ -12,6 +12,12 @@ categories.workspace = true
 
 [features]
 default = []
+# Keeps every number literal exactly as the document wrote it (`1.0` stays `1.0`, 128-bit
+# decimals survive), by turning on `serde_json`'s `arbitrary_precision`.
+# Off by default because cargo unifies the feature into every crate that uses `serde_json`, which
+# changes how they parse numbers; without it a number the model cannot hold exactly is reported
+# as `inexact-number` rather than rounded silently.
+exact-numbers = ["serde_json/arbitrary_precision"]
 # The front end exposed for the conformance corpus runner and the fuzz targets. Not public
 # API: no semver, no stability, and never enabled by a consumer of the generator.
 harness = []
