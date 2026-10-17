@@ -233,7 +233,7 @@ fn a_struct_with_no_members_round_trips_through_both() {
 
 #[test_util::test]
 fn a_fieldless_enum_reads_and_writes_the_same_bytes() {
-    for payload in [r#""in-progress""#, r#""done""#] {
+    for payload in [r#""in-progress""#, r#""done""#, r#""unknown""#] {
         let left = serde_json::from_str::<derived::types::State>(payload)
             .and_then(|value| serde_json::to_string(&value))
             ?;
@@ -258,6 +258,16 @@ fn an_unknown_variant_is_kept_the_same_way() {
     assert_eq!(left.as_str(), "nonsense");
     assert_eq!(serde_json::to_string(&left)?, payload);
     assert_eq!(serde_json::to_string(&right)?, payload);
+}
+
+/// A declared `unknown` is a declared value, not the fallback, under both strategies.
+#[test_util::test]
+fn a_declared_unknown_value_is_not_the_fallback() {
+    let payload = r#""unknown""#;
+    let left = serde_json::from_str::<derived::types::State>(payload)?;
+    let right = serde_json::from_str::<hand::types::State>(payload)?;
+    assert!(matches!(left, derived::types::State::Unknown_));
+    assert!(matches!(right, hand::types::State::Unknown_));
 }
 
 /// The read form under both strategies: the same value out of a drifted payload, the same

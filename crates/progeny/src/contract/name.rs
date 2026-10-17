@@ -43,6 +43,27 @@ impl RustIdent {
         Self(guard(&name.to_upper_camel_case(), "Variant", Case::Upper))
     }
 
+    /// The name of a variant an enum declares, which is never the name of its fallback.
+    ///
+    /// A declared value that would be named [`FALLBACK_VARIANT`] takes the trailing underscore a
+    /// reserved word takes, so `unknown` is `Unknown_`.
+    /// `Unknown` is then the fallback in every generated enum, whatever the enum declares.
+    /// A declared name moves only when another value of the enum spells it the same way, such as
+    /// `UNKNOWN` beside `unknown`, which take a suffix between them.
+    pub(crate) fn declared_variant(name: &str) -> Self {
+        let mut variant = Self::variant(name);
+        if variant.0 == FALLBACK_VARIANT {
+            variant.0.push('_');
+        }
+        variant
+    }
+
+    /// The name of every enum's fallback variant, which holds a value the document does not
+    /// declare.
+    pub(crate) fn fallback_variant() -> Self {
+        Self(FALLBACK_VARIANT.to_owned())
+    }
+
     /// The upper-camel stem every generated item of an operation is built from.
     ///
     /// For the method name `get_me`: `GetMeParams`, `GetMeRequest`, `GetMeResponse`, and
@@ -89,6 +110,12 @@ impl std::fmt::Display for RustIdent {
         f.write_str(&self.0)
     }
 }
+
+/// The name every generated enum gives its fallback variant.
+///
+/// No declared variant takes it, because a suffix only lengthens a name and
+/// [`RustIdent::declared_variant`] escapes the one spelling that would.
+const FALLBACK_VARIANT: &str = "Unknown";
 
 /// Which shape of identifier a name is being made into.
 ///
@@ -286,6 +313,26 @@ mod tests {
         assert_eq!(RustIdent::field("petName").as_str(), "pet_name");
         assert_eq!(RustIdent::field("pet-name").as_str(), "pet_name");
         assert_eq!(RustIdent::variant("in-progress").as_str(), "InProgress");
+    }
+
+    /// A declared value spelled like the fallback steps aside, however the document writes it,
+    /// and only that spelling does.
+    #[test]
+    fn a_declared_variant_never_takes_the_fallbacks_name() {
+        for (declared, named) in [
+            ("unknown", "Unknown_"),
+            ("UNKNOWN", "Unknown_"),
+            ("unknown_", "Unknown_"),
+            ("unknown-value", "UnknownValue"),
+            ("known", "Known"),
+        ] {
+            assert_eq!(
+                RustIdent::declared_variant(declared).as_str(),
+                named,
+                "{declared}"
+            );
+        }
+        assert_eq!(RustIdent::fallback_variant().as_str(), "Unknown");
     }
 
     #[test]

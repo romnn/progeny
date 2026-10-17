@@ -1102,20 +1102,60 @@ mod tests {
         }
     }
 
-    /// A document that enumerates `unknown` itself keeps that spelling; the fallback steps
-    /// aside with the suffix every other collision takes, so the document's value stays API.
+    /// A document that declares something named `unknown` gets `Unknown_` for it, and the
+    /// fallback stays `Unknown`, in every kind of enum.
     #[test_util::test]
-    fn a_documents_own_unknown_value_keeps_its_name_and_the_fallback_steps_aside() {
+    fn a_documents_own_unknown_value_steps_aside_for_the_fallback() {
+        let tagged = |tag: &str| {
+            json!({"type": "object", "required": ["kind"], "properties": {
+                "kind": {"type": "string", "const": tag},
+            }})
+        };
         let rendered = types(
             with_schemas(json!({
-                "Kind": {"type": "string", "enum": ["known", "unknown"]},
+                "Kind": {"type": "string", "enum": ["known", "unknown", "UNKNOWN"]},
+                "Source": {"oneOf": [
+                    {"type": "string", "enum": ["cli", "unknown"]},
+                    {"type": "object", "required": ["custom"], "properties": {
+                        "custom": {"type": "string"},
+                    }, "additionalProperties": false},
+                ]},
+                "Unknown": tagged("Unknown"),
+                "Known": tagged("Known"),
+                "Event": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/Unknown"},
+                        {"$ref": "#/components/schemas/Known"},
+                    ],
+                    "discriminator": {"propertyName": "kind"},
+                },
+                "Either": {"oneOf": [
+                    {"$ref": "#/components/schemas/Unknown"},
+                    {"type": "integer"},
+                ]},
             })),
             &Config::default(),
         )?;
-        assert!(rendered.contains("Unknown,"), "{rendered}");
-        assert!(rendered.contains("Unknown2(String),"), "{rendered}");
+        // Each enum by itself, so one enum's names cannot satisfy another's assertions.
+        let body = |name: &str| -> eyre::Result<&str> {
+            let start = rendered
+                .find(&format!("pub enum {name} {{"))
+                .ok_or_eyre("the enum is rendered")?;
+            let rest = rendered.get(start..).unwrap_or_default();
+            Ok(rest.get(..rest.find("\n}").unwrap_or(rest.len())).unwrap_or_default())
+        };
+        // A string, keyed, tagged and untagged enum each keep `Unknown` for their one fallback,
+        // and give the declared value, or the variant holding the `Unknown` type, `Unknown_`.
+        for name in ["Kind", "Source", "Event", "Either"] {
+            let body = body(name)?;
+            assert!(body.contains("Unknown_"), "{name}: {body}");
+            assert_eq!(body.matches("Unknown(").count(), 1, "{name}: {body}");
+            assert!(!body.contains("Unknown2"), "{name}: {body}");
+        }
+        // Two declared spellings of one name still take a suffix between themselves.
+        assert!(body("Kind")?.contains("Unknown_2,"), "{rendered}");
         assert!(
-            rendered.contains(r#""unknown" => Some(Self::Unknown)"#),
+            rendered.contains(r#""unknown" => Some(Self::Unknown_)"#),
             "{rendered}"
         );
     }

@@ -316,13 +316,16 @@ pub(crate) enum DeserStrategy {
 
 /// What kind of Rust item a type is.
 ///
-/// **Every enum kind is open.** Each carries a `fallback` variant that holds a value the
-/// description does not list: the raw string for a string enum, the raw JSON for a union whose
-/// tag names no variant or whose payload fits no variant's shape. A closed enum turns one
-/// unexpected value into the failure of the whole payload that holds it, and the value was
-/// already on the wire; keeping it and writing it back unchanged is the only reading that loses
-/// nothing. The fallback is named through the same namer as the declared variants, so a
-/// document that enumerates `unknown` itself keeps that spelling and the fallback steps aside.
+/// **Every enum kind is open.**
+/// Each carries a `fallback` variant that holds a value the description does not list: the raw
+/// string for a string enum, the raw JSON for a union whose tag names no variant or whose payload
+/// fits no variant's shape.
+/// A closed enum turns one unexpected value into the failure of the whole payload that holds it,
+/// and the value was already on the wire; keeping it and writing it back unchanged is the only
+/// reading that loses nothing.
+/// The fallback is always `Unknown`, and a declared value spelled `unknown` is `Unknown_` instead
+/// ([`name::RustIdent::declared_variant`]), so the fallback's name never moves when the document
+/// declares or drops a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContractKind {
     Struct {
