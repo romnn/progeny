@@ -3386,6 +3386,55 @@ mod tests {
         )?);
     }
 
+    /// A listed integer branch is the plain integer, which refuses a number that is not whole, so
+    /// a later branch that lists only such numbers is still reached.
+    #[test_util::test]
+    fn an_integer_branch_refuses_the_fractions_a_later_branch_lists() {
+        // `2.5` is no `i64`, and `-1` is no `u64`.
+        let typed = [
+            json!({"oneOf": [
+                {"type": "integer", "enum": [1]},
+                {"type": "number", "enum": [2.5]},
+            ]}),
+            json!({"oneOf": [{"enum": [1]}, {"enum": [2.5, 3.5]}]}),
+            json!({"oneOf": [
+                {"type": "integer", "minimum": 0, "enum": [1]},
+                {"type": "integer", "enum": [-1]},
+            ]}),
+        ];
+        for schema in typed {
+            let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": schema.clone()})))?;
+            assert!(diagnostics.is_empty(), "{schema}: {diagnostics:?}");
+            assert!(
+                matches!(shape_of(&shapes, "Code")?, Shape::Union(_)),
+                "{schema} should stay typed"
+            );
+        }
+
+        // The integer reads `2` as well, which `2.0` admits by the same value, and a number
+        // branch reads every number.
+        let degraded = [
+            json!({"oneOf": [
+                {"type": "integer", "enum": [1]},
+                {"type": "number", "enum": [2, 2.5]},
+            ]}),
+            json!({"oneOf": [
+                {"type": "integer", "enum": [1]},
+                {"type": "number", "enum": [2.0]},
+            ]}),
+            json!({"oneOf": [
+                {"type": "number", "enum": [1.5]},
+                {"type": "number", "enum": [2.5]},
+            ]}),
+        ];
+        for schema in degraded {
+            assert!(
+                degrades_as_wild_union(json!({"Code": schema.clone()}), "Code")?,
+                "{schema} should degrade"
+            );
+        }
+    }
+
     #[test_util::test]
     fn a_bare_numeric_enum_is_a_number_rather_than_arbitrary_json() {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
