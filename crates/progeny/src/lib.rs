@@ -63,6 +63,7 @@
 //! crate depends on `futures-core` and `futures-util` only when some operation declared pagination.
 
 mod api;
+mod bundle;
 mod catalogue;
 mod config;
 mod contract;
@@ -91,6 +92,7 @@ pub use crate::config::{
     ExtraDerives, Formats, JsonSchemaImpls, MapKind, Package, Packaging, Pagination, SchemaType,
     SerdeAttributes, SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
 };
+pub use crate::bundle::{Direction, SchemaInput, SchemaRoot};
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 
 /// The version of the generator, for a front end to report.
@@ -131,6 +133,41 @@ pub struct Output {
 /// does not implement, no operations at all. Rejection is a last resort and it is total: there is
 /// no partial rejection, so anything short of it produces output plus diagnostics.
 pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
+    let mut ctx = context(config)?;
+    let loaded = load::load(input, &mut ctx)?;
+    let normalized = normalize::normalize(loaded.value, &mut ctx)?;
+    let parsed = doc::parse::document(normalized, &mut ctx);
+    run(parsed, config, ctx)
+}
+
+/// Read a JSON Schema bundle and generate the types its roots reach.
+///
+/// A bundle is a document of schemas with no operations: draft-07 `definitions`, 2020-12 `$defs`,
+/// or namespaces nested in them, as JSON-RPC protocols and `schemars` export them.
+/// Each namespace member is a named type, a `$ref` reaches it in whichever spelling the bundle
+/// uses, and only what [`SchemaInput::roots`] reach is generated.
+/// A root's [`Direction`] stands in for the request or response position an operation would give
+/// it, so a collapse is priced by the way the type travels, and under lenient decoding a received
+/// type gets a read form.
+/// A bundle declaring draft-07 or earlier is read by that draft's rules where they differ.
+///
+/// # Errors
+///
+/// Returns [`RejectError`] for an unusable bundle or configuration, as [`generate`] does, and when
+/// a namespace is not an object in the bundle or a root names no type it defines.
+pub fn generate_schemas(
+    input: &[u8],
+    schemas: &SchemaInput,
+    config: &Config,
+) -> Result<Output, RejectError> {
+    let mut ctx = context(config)?;
+    let loaded = load::load(input, &mut ctx)?;
+    let parsed = bundle::read(loaded.value, schemas, &mut ctx)?;
+    run(parsed, config, ctx)
+}
+
+/// The diagnostic context for one run, once the configuration is known to be satisfiable.
+fn context(config: &Config) -> Result<diag::Ctx, RejectError> {
     // Everything else depends on the type layer, so `types = false` asks for nothing at all —
     // and an empty `files` map with a success code is the silent no-op this crate forbids.
     if !config.emit.types {
@@ -147,15 +184,21 @@ pub fn generate(input: &[u8], config: &Config) -> Result<Output, RejectError> {
     {
         return Err(RejectError::new(RejectKind::UnsatisfiableConfig, reason));
     }
-    let mut ctx =
+    Ok(
         diag::Ctx::new().accepting(config.deny.accept.iter().map(|accept| diag::Accepted {
             class: accept.class,
             action: accept.action,
             at: accept.at.clone(),
-        }));
-    let loaded = load::load(input, &mut ctx)?;
-    let normalized = normalize::normalize(loaded.value, &mut ctx)?;
-    let mut parsed = doc::parse::document(normalized, &mut ctx);
+        })),
+    )
+}
+
+/// Generate from a parsed document, whichever kind of input it was parsed from.
+fn run(
+    mut parsed: doc::ParsedDocument,
+    config: &Config,
+    mut ctx: diag::Ctx,
+) -> Result<Output, RejectError> {
     overrides::apply(&mut parsed, config)?;
     let resolved = resolve::resolve(parsed, &mut ctx);
     let shapes = shape::classify(&resolved, &mut ctx);

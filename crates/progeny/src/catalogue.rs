@@ -203,6 +203,10 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::DynamicScoping => Wiring::Fixture(document(json!({
             "Thing": {"type": "object", "properties": {"self": {"$dynamicRef": "#node"}}},
         }))),
+        BreakageClass::LegacyRefSiblings | BreakageClass::LegacyDependencies => Wiring::Arrives(
+            "a draft-07 JSON Schema bundle, which `generate_schemas` reads and an OpenAPI document \
+             never is; the bundle reader's own tests hold it",
+        ),
         BreakageClass::InexactNumber => Wiring::Arrives(
             "a number literal the model rounds, which only a build without `exact-numbers` \
              produces; the corpus is generated with the feature, so the loader's own tests hold it",

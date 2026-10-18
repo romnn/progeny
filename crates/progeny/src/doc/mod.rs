@@ -33,6 +33,14 @@ pub(crate) struct ParsedDocument {
     /// Whether the document declared 3.0, carried for the one rewrite that cannot happen before
     /// resolution: a schema at a position nothing parsed, proven to be one by a `$ref`.
     pub(crate) dialect_30: bool,
+    /// The types a JSON Schema bundle's caller exchanges, which are its wire in place of
+    /// operations; empty for an OpenAPI document.
+    pub(crate) roots: Vec<crate::bundle::Selected>,
+    /// For a JSON Schema bundle, whether it declares draft-07 or an earlier draft, for the
+    /// schemas only a `$ref` proves are schemas; `None` for an OpenAPI document.
+    pub(crate) bundle_dialect: Option<bool>,
+    /// Each position normalization moved, so a `$ref` to it as written reaches what is there.
+    pub(crate) moves: Vec<crate::normalize::Move>,
 }
 
 /// Either a reference to a component or the component itself.
