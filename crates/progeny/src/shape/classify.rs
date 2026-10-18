@@ -1572,24 +1572,35 @@ fn swallows_payloads_of(
             }
             swallows_payloads_of(resolved, left, right, depth)
         }
-        // Two branches of one scalar kind read the same bytes into the same Rust type, so
-        // whichever matches first is a faithful reading and nothing is lost.
-        // That stops holding once the earlier branch lists its values.
-        // No type generated for a list enforces it: a string enum is open, and a numeric or
-        // boolean one is the plain scalar.
-        // So the earlier branch takes every value of its kind, including the ones only a later
-        // branch admits.
-        Kind::String | Kind::Number | Kind::Boolean => {
-            let listed = admitted_values(&first)?;
-            (!admitted_values(&second).is_some_and(|later| later.is_subset(&listed))).then(|| {
-                "one of its branches lists the values it admits, but the type generated for it \
-                 reads any value of its kind, so it accepts the payloads of a later one, which is \
-                 tried after it and so never reached"
-                    .to_owned()
-            })
-        }
+        Kind::String | Kind::Number | Kind::Boolean => scalar_swallows(&first, &second),
         Kind::Null => None,
     }
+}
+
+/// Why an earlier scalar branch would take a later one's payloads, if it would.
+///
+/// Two branches of one scalar kind read the same bytes into the same Rust type, so whichever
+/// matches first is a faithful reading and nothing is lost.
+/// That stops holding once the earlier branch lists its values.
+/// No type generated for a list enforces it: a string enum is open, and a numeric or boolean one
+/// is the plain scalar.
+/// So the earlier branch takes every value of its kind, including the ones only a later branch
+/// admits.
+/// A later value the earlier type cannot hold at all, such as `2.5` against an integer, still
+/// reaches the later branch.
+fn scalar_swallows(first: &View, second: &View) -> Option<String> {
+    let listed = admitted_values(first)?;
+    let reached = |later: Vec<Value>| {
+        later
+            .iter()
+            .all(|value| listed.contains(&value.to_string()) || integer_refuses(first, value))
+    };
+    (!listed_values(second).is_some_and(reached)).then(|| {
+        "one of its branches lists the values it admits, but the type generated for it reads any \
+         value of its kind, so it accepts the payloads of a later one, which is tried after it and \
+         so never reached"
+            .to_owned()
+    })
 }
 
 /// One branch of a union, as the type generated for it reads a payload.
@@ -2135,12 +2146,47 @@ fn generates_option(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -
 /// comparison can enumerate, and saying so is what keeps the subset test from claiming a branch
 /// is covered when it is not.
 fn admitted_values(view: &View) -> Option<BTreeSet<String>> {
-    let values = match (&view.enumeration, &view.constant) {
-        (Some(listed), _) => listed.clone(),
-        (None, Some(value)) => vec![value.clone()],
-        (None, None) => return None,
+    Some(
+        listed_values(view)?
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    )
+}
+
+/// The values a branch's `enum` or `const` lists, as the document spells them.
+fn listed_values(view: &View) -> Option<Vec<Value>> {
+    match (&view.enumeration, &view.constant) {
+        (Some(listed), _) => Some(listed.clone()),
+        (None, Some(value)) => Some(vec![value.clone()]),
+        (None, None) => None,
+    }
+}
+
+/// Whether the type generated for a branch is an integer that cannot hold `value`.
+///
+/// A branch is an integer where its `type` says so, or where it names no type and lists whole
+/// numbers alone, the way [`core`] reads it.
+/// The integer refuses a number with a fractional part, and an unsigned one also refuses a
+/// negative number.
+/// A whole number spelled `2.0` is not refused, because the schema admits `2` by the same value,
+/// and the integer reads that.
+/// A whole number too large for the integer is not counted, which is the direction that degrades.
+fn integer_refuses(view: &View, value: &Value) -> bool {
+    let named: Vec<&TypeName> = view
+        .types
+        .iter()
+        .flatten()
+        .filter(|name| **name != TypeName::Null)
+        .collect();
+    let integer = match named.as_slice() {
+        [TypeName::Integer] => true,
+        [] => integral(view),
+        _ => false,
     };
-    Some(values.iter().map(ToString::to_string).collect())
+    let fractional = value.as_f64().is_some_and(|number| number.fract() != 0.0);
+    let negative = value.as_f64().is_some_and(|number| number < 0.0);
+    integer && value.is_number() && (fractional || (view.unsigned && negative))
 }
 
 /// Whether a branch is the `null` type and nothing else.
