@@ -311,6 +311,34 @@ where
         }
     }
 
+    /// A string, and only a string, as the format itself reads one.
+    ///
+    /// Forwarding to [`Self::deserialize_any`] would hand a sequence to a visitor that also reads
+    /// one: a `uuid` codec reads its compact form from an array of numbers, so a string branch of
+    /// a union would take a list meant for a later branch.
+    /// `serde_json` refuses anything but a string here, so the replay does too.
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, E>
+    where
+        V: Visitor<'de>,
+    {
+        match self.content {
+            Content::Str(_) | Content::String(_) | Content::Bytes(_) | Content::ByteBuf(_) => {
+                self.deserialize_any(visitor)
+            }
+            Content::Some(inner) | Content::Newtype(inner) => {
+                ContentDeserializer::<E>::new(*inner).deserialize_str(visitor)
+            }
+            other => Err(de::Error::invalid_type(other.unexpected(), &visitor)),
+        }
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, E>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
     fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, E>
     where
         V: Visitor<'de>,
@@ -348,7 +376,7 @@ where
     }
 
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char bytes byte_buf
         unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
 }
@@ -1733,6 +1761,51 @@ impl serde::Serializer for TextProbe<'_> {
 #[cfg(test)]
 mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
+
+    /// A value read the way a `uuid` codec reads one: a string, or its compact form as a sequence
+    /// of numbers, through `deserialize_str`.
+    #[derive(Debug, PartialEq)]
+    struct Codec(String);
+
+    impl<'de> serde::Deserialize<'de> for Codec {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Either;
+            impl<'de> serde::de::Visitor<'de> for Either {
+                type Value = Codec;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("a string or a sequence")
+                }
+                fn visit_str<E>(self, value: &str) -> Result<Codec, E> {
+                    Ok(Codec(value.to_owned()))
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Codec, A::Error> {
+                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                    Ok(Codec("sequence".to_owned()))
+                }
+            }
+            deserializer.deserialize_str(Either)
+        }
+    }
+
+    /// A buffered value replayed for a string is read only if it is one, as `serde_json` reads it,
+    /// so a codec that also reads a sequence cannot take a list meant for a later branch.
+    #[test_util::test]
+    fn a_replayed_string_is_only_ever_a_string() {
+        let replay = |content: super::Content<'static>| {
+            serde::Deserialize::deserialize(super::ContentDeserializer::<serde_json::Error>::new(
+                content,
+            ))
+        };
+        let read: Codec = replay(super::Content::String("abc".to_owned()))?;
+        assert_eq!(read, Codec("abc".to_owned()));
+        let sequence = super::Content::Seq(vec![super::Content::U64(1), super::Content::U64(2)]);
+        assert!(replay(sequence).map(|_: Codec| ()).is_err());
+        // The same answer the format gives.
+        assert!(serde_json::from_str::<Codec>("[1, 2]").is_err());
+    }
 
     /// A struct beside a flattened union, written the way the renderer writes one: its own
     /// members as entries, then the union's into the same map.

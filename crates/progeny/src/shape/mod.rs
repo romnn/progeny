@@ -2217,6 +2217,37 @@ mod tests {
         }
     }
 
+    /// A base its discriminator's mapping makes a union is a union as a branch of another, so it
+    /// swallows what a later branch is meant to read.
+    #[test_util::test]
+    fn a_base_that_names_its_subtypes_is_a_union_as_a_branch() {
+        let subtype = |own: &str| {
+            json!({"allOf": [{"$ref": "#/components/schemas/Base"}, {
+                "properties": {own: {"type": "string"}},
+            }]})
+        };
+        assert!(degrades_as_wild_union(
+            json!({
+                "Base": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": {"kind": {"type": "string"}},
+                    "discriminator": {"propertyName": "kind", "mapping": {
+                        "c": "#/components/schemas/C", "e": "#/components/schemas/E",
+                    }},
+                },
+                "C": subtype("c"),
+                "E": subtype("e"),
+                "D": {"type": "object", "required": ["d"], "properties": {"d": {"type": "string"}}},
+                "Either": {"oneOf": [
+                    {"$ref": "#/components/schemas/Base"},
+                    {"$ref": "#/components/schemas/D"},
+                ]},
+            }),
+            "Either",
+        )?);
+    }
+
     /// A discriminator the branches inherit names its member as surely as a property, so a
     /// struct declaring that member beside them does not flatten them.
     #[test_util::test]
