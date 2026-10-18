@@ -236,3 +236,66 @@ components:
         type:
           type: string
           enum: [localAudio]
+    # Branches told apart one level down, by a shared member whose closed objects each require a
+    # member the other lacks.
+    MultiSelect:
+      anyOf:
+        - $ref: "#/components/schemas/UntitledMultiSelect"
+        - $ref: "#/components/schemas/TitledMultiSelect"
+    UntitledMultiSelect:
+      type: object
+      required: [items]
+      properties:
+        items:
+          $ref: "#/components/schemas/UntitledItems"
+    TitledMultiSelect:
+      type: object
+      required: [items]
+      properties:
+        items:
+          $ref: "#/components/schemas/TitledItems"
+    UntitledItems:
+      type: object
+      additionalProperties: false
+      required: [enum]
+      properties:
+        enum:
+          type: array
+          items:
+            type: string
+    TitledItems:
+      type: object
+      additionalProperties: false
+      required: [anyOf]
+      properties:
+        anyOf:
+          type: array
+          items:
+            type: string
+    # A closed earlier branch that reads what it accepts whole, before a later one it overlaps.
+    EnumSchema:
+      anyOf:
+        - $ref: "#/components/schemas/UntitledEnum"
+        - $ref: "#/components/schemas/LegacyEnum"
+    UntitledEnum:
+      type: object
+      additionalProperties: false
+      required: [enum]
+      properties:
+        enum:
+          type: array
+          items:
+            type: string
+    LegacyEnum:
+      type: object
+      additionalProperties: false
+      required: [enum]
+      properties:
+        enum:
+          type: array
+          items:
+            type: string
+        enumNames:
+          type: array
+          items:
+            type: string

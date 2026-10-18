@@ -1983,6 +1983,222 @@ mod tests {
         )?);
     }
 
+    /// Two open branches whose shared member is an object of each side's own, closed and
+    /// requiring a member the other lacks, are told apart one level down, as issue #16's
+    /// `MultiSelect` is.
+    #[test_util::test]
+    fn branches_told_apart_by_a_shared_members_own_members_are_matched_by_shape() {
+        let strings = json!({"type": "array", "items": {"type": "string"}});
+        let closed = |required: &str, member: Value| {
+            json!({"type": "object", "additionalProperties": false, "required": [required],
+                   "properties": {required: member}})
+        };
+        // Open at the top, so only the members one level down can tell the branches apart.
+        let open = |items: &str| {
+            json!({"type": "object", "required": ["items"], "properties": {
+                "items": {"$ref": format!("#/components/schemas/{items}")},
+            }})
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "MultiSelect": {"anyOf": [
+                {"$ref": "#/components/schemas/Untitled"},
+                {"$ref": "#/components/schemas/Titled"},
+            ]},
+            "Untitled": open("UntitledItems"),
+            "Titled": open("TitledItems"),
+            "UntitledItems": closed("enum", strings.clone()),
+            "TitledItems": closed("anyOf", strings),
+        })))?;
+        assert!(
+            matches!(shape_of(&shapes, "MultiSelect")?, Shape::Union(union) if union.variants.len() == 2),
+            "{diagnostics:?}"
+        );
+        // Members alike one level down tell nothing apart.
+        assert!(degrades_as_wild_union(
+            json!({
+                "Either": {"anyOf": [
+                    {"$ref": "#/components/schemas/First"},
+                    {"$ref": "#/components/schemas/Second"},
+                ]},
+                "First": open("Items"),
+                "Second": open("Items"),
+                "Items": {"type": "object", "properties": {"x": {"type": "string"}}},
+            }),
+            "Either",
+        )?);
+    }
+
+    /// A map may hold any member, so a member an earlier branch requires tells it from no map,
+    /// one level down or at the top.
+    #[test_util::test]
+    fn a_map_is_not_shown_to_lack_a_member_it_does_not_declare() {
+        let required_x = json!({"type": "object", "required": ["x"],
+                                "properties": {"x": {"type": "string"}}});
+        let map = json!({"type": "object", "additionalProperties": {"type": "string"}});
+        let holder = |member: &Value| json!({"type": "object", "required": ["payload"], "properties": {"payload": member}});
+        for (earlier, later) in [
+            (holder(&required_x), holder(&map)),
+            (required_x.clone(), map.clone()),
+        ] {
+            assert!(
+                degrades_as_wild_union(
+                    json!({
+                        "A": earlier,
+                        "B": later.clone(),
+                        "Either": {"anyOf": [
+                            {"$ref": "#/components/schemas/A"},
+                            {"$ref": "#/components/schemas/B"},
+                        ]},
+                    }),
+                    "Either",
+                )?,
+                "{later}"
+            );
+        }
+        // A map whose every member is a number cannot hold the string an earlier branch insists
+        // on, so the two are told apart.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": required_x,
+            "B": {"type": "object", "additionalProperties": {"type": "number"}},
+            "Either": {"anyOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/B"},
+            ]},
+        })))?;
+        assert!(
+            matches!(shape_of(&shapes, "Either")?, Shape::Union(_)),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A member typed by a discriminator's base is the union its mapping names, which holds more
+    /// than the base declares, so it tells no branch apart, one level down or by its kind.
+    #[test_util::test]
+    fn a_shared_member_that_names_its_subtypes_tells_nothing_apart() {
+        let subtype = |own: &str| {
+            json!({"allOf": [{"$ref": "#/components/schemas/Base"}, {
+                "type": "object", "properties": {own: {"type": "string"}},
+            }]})
+        };
+        let schemas = json!({
+                "Base": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": {"kind": {"type": "string"}},
+                    "discriminator": {"propertyName": "kind", "mapping": {
+                        "c": "#/components/schemas/C", "d": "#/components/schemas/D",
+                    }},
+                },
+                "C": subtype("c"),
+                "D": subtype("d"),
+                "A": {"type": "object", "required": ["body"], "properties": {
+                    "body": {"$ref": "#/components/schemas/Base"},
+                }},
+                "B": {"type": "object", "required": ["body", "extra"], "properties": {
+                    "body": {"type": "object", "required": ["y"],
+                             "properties": {"y": {"type": "string"}}},
+                    "extra": {"type": "string"},
+                }},
+                // The base's union also holds a number, so neither a number nor a map of them is
+                // told apart from it.
+                "Numbered": {"type": "object", "required": ["body", "extra"], "properties": {
+                    "body": {"type": "integer"}, "extra": {"type": "string"},
+                }},
+                "Counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+                "Either": {"anyOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+                "ByKind": {"anyOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/Numbered"},
+                ]},
+                "ByCatchAll": {"anyOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/Counts"},
+                ]},
+        });
+        for name in ["Either", "ByKind", "ByCatchAll"] {
+            assert!(degrades_as_wild_union(schemas.clone(), name)?, "{name}");
+        }
+    }
+
+    /// A closed earlier branch that keeps every part of what it reads loses nothing by reading a
+    /// payload a later branch could also read, as issue #16's `EnumSchema` is; one that could lose
+    /// a member, or a `null`, still degrades.
+    #[test_util::test]
+    fn a_closed_earlier_branch_that_reads_payloads_whole_may_come_first() {
+        let strings = json!({"type": "array", "items": {"type": "string"}});
+        let either = json!({"anyOf": [
+            {"$ref": "#/components/schemas/Untitled"},
+            {"$ref": "#/components/schemas/Legacy"},
+        ]});
+        let legacy = json!({"type": "object", "additionalProperties": false, "required": ["enum"],
+            "properties": {"enum": strings.clone(), "enumNames": strings.clone()}});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "EnumSchema": either.clone(),
+            "Untitled": {"type": "object", "additionalProperties": false, "required": ["enum"],
+                         "properties": {"enum": strings.clone()}},
+            "Legacy": legacy.clone(),
+        })))?;
+        assert!(
+            matches!(shape_of(&shapes, "EnumSchema")?, Shape::Union(union) if union.variants.len() == 2),
+            "{diagnostics:?}"
+        );
+        for (case, untitled) in [
+            // Open, so it reads past `enumNames`.
+            (
+                "open",
+                json!({"type": "object", "required": ["enum"], "properties": {
+                    "enum": strings.clone(),
+                }}),
+            ),
+            // Closed, but an open object inside it reads past what it does not declare.
+            (
+                "open inside",
+                json!({"type": "object", "additionalProperties": false, "properties": {
+                    "enum": {"type": "array", "items": {
+                        "type": "object", "properties": {"a": {"type": "string"}},
+                    }},
+                }}),
+            ),
+            // Closed, but an optional member reads `null` as absent, whether or not it admits it.
+            (
+                "nullable",
+                json!({"type": "object", "additionalProperties": false, "properties": {
+                    "enum": {"type": ["array", "null"], "items": {"type": "string"}},
+                }}),
+            ),
+            (
+                "optional",
+                json!({"type": "object", "additionalProperties": false, "properties": {
+                    "enum": strings.clone(),
+                }}),
+            ),
+            // Closed, but a required `null` member writes an absent one back as `null`.
+            (
+                "required nullable",
+                json!({"type": "object", "additionalProperties": false, "required": ["enum"],
+                       "properties": {"enum": {"type": ["array", "null"],
+                                               "items": {"type": "string"}}}}),
+            ),
+            // Closed, but a `number` rounds an integer too large for an `f64`.
+            (
+                "float",
+                json!({"type": "object", "additionalProperties": false, "required": ["enum"],
+                       "properties": {"enum": {"type": "array", "items": {"type": "number"}}}}),
+            ),
+        ] {
+            assert!(
+                degrades_as_wild_union(
+                    json!({"EnumSchema": either.clone(), "Untitled": untitled, "Legacy": legacy.clone()}),
+                    "EnumSchema",
+                )?,
+                "{case}"
+            );
+        }
+    }
+
     /// A discriminator the branches inherit names its member as surely as a property, so a
     /// struct declaring that member beside them does not flatten them.
     #[test_util::test]
@@ -2037,7 +2253,10 @@ mod tests {
             .filter(|d| d.class() == BreakageClass::InheritanceDiscriminator)
             .collect();
         assert_eq!(repairs.len(), 1, "{diagnostics:?}");
-        assert!(repairs.iter().all(|d| d.related().is_empty()), "{repairs:?}");
+        assert!(
+            repairs.iter().all(|d| d.related().is_empty()),
+            "{repairs:?}"
+        );
         assert!(
             matches!(
                 shape_of(&shapes, "Base")?,

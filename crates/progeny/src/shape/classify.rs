@@ -152,7 +152,15 @@ fn nullable(
         return Shape::Null;
     }
 
-    let core = core(resolved, view, key, others.as_ref(), component_names, ctx, at);
+    let core = core(
+        resolved,
+        view,
+        key,
+        others.as_ref(),
+        component_names,
+        ctx,
+        at,
+    );
     if declares_null(view) {
         return Shape::Optional(ShapeRef::Inline(Box::new(core)));
     }
@@ -604,7 +612,12 @@ fn flattens(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> 
             .properties
             .keys()
             .chain(&branch_view.required)
-            .chain(branch_view.discriminator.iter().map(|declared| &declared.property))
+            .chain(
+                branch_view
+                    .discriminator
+                    .iter()
+                    .map(|declared| &declared.property),
+            )
             .any(|name| own.contains(name.as_str()));
         object && !shares
     })
@@ -1485,6 +1498,15 @@ fn swallows_payloads_of(
         return None;
     }
     match left {
+        // A closed earlier branch that keeps every part of what it reads loses nothing by taking a
+        // payload a later one could also read, so first match is a faithful reading.
+        // A base its discriminator's mapping makes a union is not the struct its view describes.
+        Kind::Object
+            if !names_its_subtypes(resolved, &first, earlier)
+                && reads_whole(resolved, &first, 0) =>
+        {
+            None
+        }
         // The members a later flattened union may carry are not in its view, so an earlier object
         // is never shown to refuse its payloads.
         Kind::Object if flattened => Some(
@@ -1493,7 +1515,7 @@ fn swallows_payloads_of(
              may accept its payloads"
                 .to_owned(),
         ),
-        Kind::Object => (!rejects(resolved, &first, &second)).then(|| {
+        Kind::Object => (!rejects(resolved, &first, &second, 0)).then(|| {
             "one of its branches is an object that accepts the payloads of a later one, which is \
              tried after it and so never reached"
                 .to_owned()
@@ -1731,7 +1753,7 @@ fn enumerated_kind(view: &View) -> Option<Kind> {
 ///
 /// A payload the earlier branch accepts *and* the later branch validates is ambiguous in the
 /// document itself, not in this reading of it, so it is not what these rules are for.
-fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
+fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usize) -> bool {
     // A member every payload of `view` carries and the generated struct insists on.
     // A required member that may be `null` is an `Option`, which reads an absent member as `None`,
     // and a required name with no declared property has no field at all.
@@ -1742,10 +1764,35 @@ fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
                 .get(name)
                 .is_some_and(|key| !generates_option(resolved, key, 0))
     };
+    // A member the later branch does not declare is absent from its payloads only where nothing
+    // else holds members: a map or a typed catch-all may carry any name.
+    let lists_its_members = later.additional.is_none()
+        && later.uniform_pattern.is_none()
+        && (!later.properties.is_empty() || later.additional_denied);
+    let kind = |key: &ShapeKey| member_kind(resolved, &merge::view(resolved, key), key);
+    let missing = |name: &String| {
+        if later.properties.contains_key(name) {
+            return false;
+        }
+        if lists_its_members {
+            return true;
+        }
+        // A catch-all gives the member its own kind, and a pattern may not match the name at all.
+        let catch_all = later
+            .additional
+            .as_ref()
+            .filter(|_| later.uniform_pattern.is_none());
+        catch_all
+            .zip(earlier.properties.get(name))
+            .is_some_and(|(value, own)| match (kind(own), kind(value)) {
+                (Some(own), Some(value)) => own != value,
+                _ => false,
+            })
+    };
     if earlier
         .required
         .iter()
-        .any(|name| insists(earlier, name) && !later.properties.contains_key(name))
+        .any(|name| insists(earlier, name) && missing(name))
     {
         return true;
     }
@@ -1770,14 +1817,91 @@ fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
         if !insists(later, name) && !insists(earlier, name) {
             return false;
         }
+        let (here_view, there_view) = (merge::view(resolved, key), merge::view(resolved, other));
         let (Some(here), Some(there)) = (
-            kind_of(resolved, &merge::view(resolved, key)),
-            kind_of(resolved, &merge::view(resolved, other)),
+            member_kind(resolved, &here_view, key),
+            member_kind(resolved, &there_view, other),
         ) else {
             return false;
         };
-        here != there
+        if here != there {
+            return true;
+        }
+        // Two objects are told apart by their own members, the same question one level down.
+        // A member with a declared union may carry members its view does not list, so it is not
+        // shown to refuse anything.
+        here == Kind::Object
+            && depth < MAX_AMBIGUITY_DEPTH
+            && here_view.union.is_none()
+            && there_view.union.is_none()
+            && rejects(resolved, &here_view, &there_view, depth.saturating_add(1))
     })
+}
+
+/// The kind of the type generated for a member, by [`kind_of`], or none for a base its
+/// discriminator's mapping makes a union.
+///
+/// That union holds whatever none of its subtypes fits, so its payloads have no one kind, though
+/// its view describes an object.
+fn member_kind(resolved: &ResolvedDocument, view: &View, key: &ShapeKey) -> Option<Kind> {
+    if names_its_subtypes(resolved, view, key) {
+        return None;
+    }
+    kind_of(resolved, view)
+}
+
+/// Whether the type generated for a view keeps every part of each payload it accepts.
+///
+/// An earlier branch like that loses nothing by reading a payload a later one could also read:
+/// what it accepts it writes back whole, and what it cannot hold whole it refuses.
+/// That takes a closed struct, because an open one reads past what it does not declare, and
+/// members that keep everything too, as far as [`MAX_AMBIGUITY_DEPTH`]:
+///
+/// - a boolean, an integer, or a string with no `format` or content keywords to re-spell it;
+/// - a list or map of such values;
+/// - a closed struct of them whose every member is required and not `null`, because an `Option`
+///   reads an explicit `null` and an absent member alike, and writes back only one of them;
+/// - arbitrary JSON, which keeps anything.
+///
+/// A `number` is an `f64`, which rounds an integer too large for it.
+/// A union keeps what its branches keep, which is a question this does not follow, so it answers
+/// no, and so does a schema whose discriminator's mapping makes it one.
+fn reads_whole(resolved: &ResolvedDocument, view: &View, depth: usize) -> bool {
+    if depth > MAX_AMBIGUITY_DEPTH || view.union.is_some() {
+        return false;
+    }
+    let member = |key: &ShapeKey| {
+        let view = merge::view(resolved, key);
+        !names_its_subtypes(resolved, &view, key) && reads_whole(resolved, &view, depth + 1)
+    };
+    match kind_of(resolved, view) {
+        // Nothing decides a kind, so the type is arbitrary JSON.
+        None => !(view.impossible || view.conflict.is_some() || view.unions_collide),
+        Some(Kind::String) => {
+            view.format.is_none()
+                && view.content_encoding.is_none()
+                && view.content_media_type.is_none()
+        }
+        Some(Kind::Number) => view.types.as_ref().is_some_and(|types| {
+            types.contains(&TypeName::Integer) && !types.contains(&TypeName::Number)
+        }),
+        Some(Kind::Boolean | Kind::Null) => true,
+        Some(Kind::Array) => view.prefix_items.is_none() && view.items.as_ref().is_none_or(member),
+        // A map keeps every member, as whole as its values are.
+        Some(Kind::Object) if view.properties.is_empty() && !view.additional_denied => view
+            .additional
+            .as_ref()
+            .or(view.uniform_pattern.as_ref())
+            .is_none_or(member),
+        Some(Kind::Object) => {
+            view.additional_denied
+                && view.properties.iter().all(|(name, key)| {
+                    view.required.contains(name)
+                        && !generates_option(resolved, key, 0)
+                        && member(key)
+                })
+        }
+    }
 }
 
 /// Whether the type generated for a schema is an `Option`, which reads an absent member as `None`.
