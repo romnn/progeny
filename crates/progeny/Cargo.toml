@@ -47,6 +47,8 @@ axum.workspace = true
 color-eyre.workspace = true
 reqwest.workspace = true
 test-util.workspace = true
+# The one crate the shipped `support/rfc3339.rs` names, so that file compiles and is tested here too.
+time.workspace = true
 # `Config` is what a `progeny.toml` deserializes into, and its own tests read one. A *dev*
 # dependency because reading the file is `progeny-cli`'s job: keeping TOML out of the library's
 # dependency graph is half of why that package exists.

@@ -94,7 +94,9 @@ pub(super) fn workspace_readme(config: &Config, client: bool, server: bool) -> S
     }
 }
 
-pub(super) fn types_crate(contracts: &Contracts, config: &Config) -> String {
+/// The types crate's manifest, which depends on `time` whenever it ships `support::Rfc3339`,
+/// including for an edge crate's `time` parameter that no type holds.
+pub(super) fn types_crate(contracts: &Contracts, config: &Config, rfc3339: bool) -> String {
     let mut out = package(&package_name(config, "types"), &config.package.version);
     let gates = gate_features(contracts);
     if !gates.is_empty() {
@@ -107,7 +109,9 @@ pub(super) fn types_crate(contracts: &Contracts, config: &Config) -> String {
     out.push_str("[dependencies]\n");
     out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
-    for line in dependency_lines(Some(contracts), None, config) {
+    let mut named = crates_named(Some(contracts), None, config);
+    named.time |= rfc3339;
+    for line in dependency_lines(named) {
         let _ = writeln!(out, "{line}");
     }
     out.extend(schemars_dependency(contracts));
@@ -184,7 +188,7 @@ pub(super) fn client_crate(api: &ApiModel, config: &Config, streams: bool) -> St
     if client_uses_bytes(api, config) {
         out.push_str("bytes = \"1\"\n");
     }
-    for line in dependency_lines(None, Some(api), config) {
+    for line in dependency_lines(crates_named(None, Some(api), config)) {
         let _ = writeln!(out, "{line}");
     }
     out
@@ -210,7 +214,7 @@ pub(super) fn server_crate(api: &ApiModel, config: &Config) -> String {
     if server_uses_bytes(api, config) {
         out.push_str("bytes = \"1\"\n");
     }
-    for line in dependency_lines(None, Some(api), config) {
+    for line in dependency_lines(crates_named(None, Some(api), config)) {
         let _ = writeln!(out, "{line}");
     }
     out
@@ -426,7 +430,7 @@ fn crate_package(config: &Config) -> String {
 
 /// The dependencies the rendered surface actually names.
 fn extra_dependencies(contracts: &Contracts, api: &ApiModel, config: &Config) -> Vec<String> {
-    dependency_lines(Some(contracts), Some(api), config)
+    dependency_lines(crates_named(Some(contracts), Some(api), config))
 }
 
 /// The crates the rendered surface names beyond serde, which is one question asked twice: the
@@ -478,18 +482,16 @@ pub(super) fn crates_named(
     }
 }
 
-fn dependency_lines(
-    contracts: Option<&Contracts>,
-    api: Option<&ApiModel>,
-    config: &Config,
-) -> Vec<String> {
-    let named = crates_named(contracts, api, config);
+fn dependency_lines(named: LeafUse) -> Vec<String> {
     let mut lines = Vec::new();
     if named.chrono {
         lines.push("chrono = { version = \"0.4\", features = [\"serde\"] }".to_owned());
     }
     if named.time {
-        lines.push("time = { version = \"0.3\", features = [\"serde\"] }".to_owned());
+        // Not `serde`: `support::Rfc3339` holds the value and reads and writes its text with these.
+        lines.push(
+            "time = { version = \"0.3\", features = [\"formatting\", \"parsing\"] }".to_owned(),
+        );
     }
     if named.jiff {
         lines.push("jiff = { version = \"0.2\", features = [\"serde\"] }".to_owned());

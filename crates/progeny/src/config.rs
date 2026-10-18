@@ -370,7 +370,11 @@ pub enum DateTimeCrate {
     String,
     /// `chrono::DateTime<chrono::Utc>`, `chrono::NaiveDate`, `chrono::NaiveTime`.
     Chrono,
-    /// `time::OffsetDateTime`, `time::Date`, `time::Time`.
+    /// `time::OffsetDateTime`, `time::Date`, `time::Time`, each held in the generated crate's
+    /// `support::Rfc3339`.
+    ///
+    /// `time`'s own serde impls read and write a tuple of numbers, not RFC 3339 text, so the
+    /// wrapper's impls are the ones a payload goes through.
     Time,
     /// `jiff::Timestamp`, `jiff::civil::Date`, `jiff::civil::Time`.
     Jiff,

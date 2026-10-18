@@ -91,28 +91,8 @@ pub(crate) fn run(
             modules.push((name, body.clone()));
         }
     }
-    // Emitted only when something calls into it: an unused module is compile time the consumer did
-    // not ask for. An upload field counts — the types module spells `support::Upload` even when
-    // no hand-written serde and no edge asked for the module.
-    if http
-        || serves
-        || serde_impl::needed(contracts)
-        || contracts.uses_upload()
-        || contracts.uses_presence()
-        || decoding.is_lenient()
-    {
-        modules.push((
-            "support",
-            crate::support::tokens(
-                http,
-                serves,
-                config.packaging == Packaging::Crate,
-                config.body_limit,
-                contracts.uses_presence().into(),
-                decoding,
-                (http && !api.schemes().is_empty()).into(),
-            ),
-        ));
+    if let Some(support) = support_module(contracts, api, config, http, serves, decoding) {
+        modules.push(("support", support));
     }
 
     match config.packaging {
@@ -159,6 +139,46 @@ pub(crate) fn run(
         }
     }
     files
+}
+
+/// The support module of a one-crate or module rendering, when anything calls into it.
+///
+/// Emitted only when something calls into it: an unused module is compile time the consumer did
+/// not ask for. An upload field counts — the types module spells `support::Upload` even when
+/// no hand-written serde and no edge asked for the module.
+/// A `time` value anywhere, a type or the API surface, is spelled `support::Rfc3339`.
+fn support_module(
+    contracts: &Contracts,
+    api: &ApiModel,
+    config: &Config,
+    http: bool,
+    serves: bool,
+    decoding: crate::support::Decoding,
+) -> Option<TokenStream> {
+    let rfc3339 = manifest::crates_named(Some(contracts), Some(api), config).time;
+    let needed = http
+        || serves
+        || serde_impl::needed(contracts)
+        || contracts.uses_upload()
+        || contracts.uses_presence()
+        || decoding.is_lenient()
+        || rfc3339;
+    if !needed {
+        return None;
+    }
+    let mut support = crate::support::tokens(
+        http,
+        serves,
+        config.packaging == Packaging::Crate,
+        config.body_limit,
+        contracts.uses_presence().into(),
+        decoding,
+        (http && !api.schemes().is_empty()).into(),
+    );
+    if rfc3339 {
+        support.extend(crate::support::rfc3339_tokens());
+    }
+    Some(support)
 }
 
 /// The one-crate root: a declaration per module, the two edges behind their features and the
@@ -213,11 +233,12 @@ fn workspace_files(
         contracts,
         config,
         decoding,
+        // The edge crates spell a `time` value in their API surface from the types crate too.
+        manifest::crates_named(Some(contracts), Some(api), config).time,
         types_body,
         operations_body,
     );
-    let types_name = format!("{}-types", config.package.name);
-    let types_crate = quote::format_ident!("{}", types_name.replace('-', "_"));
+    let types_crate = types_crate_ident(config);
     // Both edge crates re-export the reflection beside `types`, so `super::operations::…`
     // resolves in the server module exactly as it does in the other two packagings.
     let reflection = operations_body.map(|_| {
@@ -281,18 +302,24 @@ fn decoding(contracts: &Contracts, api: &ApiModel, config: &Config) -> crate::su
     }
 }
 
+/// The types crate of a workspace, as the path segment its edge crates name it by.
+fn types_crate_ident(config: &Config) -> syn::Ident {
+    quote::format_ident!("{}_types", config.package.name.replace('-', "_"))
+}
+
 fn insert_types_crate(
     files: &mut BTreeMap<Utf8PathBuf, String>,
     contracts: &Contracts,
     config: &Config,
     decoding: crate::support::Decoding,
+    rfc3339: bool,
     body: &TokenStream,
     operations_body: Option<&TokenStream>,
 ) {
     let directory = Utf8PathBuf::from(format!("{}-types", config.package.name));
     files.insert(
         directory.join("Cargo.toml"),
-        manifest::types_crate(contracts, config),
+        manifest::types_crate(contracts, config, rfc3339),
     );
     // `pub` for the same reason the one-crate packaging makes it public: an upload body field is
     // `support::Upload`, and a consumer who has to fill that field has to be able to name the
@@ -300,7 +327,8 @@ fn insert_types_crate(
     let needed = serde_impl::needed(contracts)
         || contracts.uses_upload()
         || contracts.uses_presence()
-        || decoding.is_lenient();
+        || decoding.is_lenient()
+        || rfc3339;
     let support = needed.then(|| {
         quote! {
             #[doc(hidden)]
@@ -326,13 +354,11 @@ fn insert_types_crate(
         files.insert(directory.join("src/operations.rs"), source(operations));
     }
     if needed {
-        files.insert(
-            directory.join("src/support.rs"),
-            source(&crate::support::types_tokens(
-                contracts.uses_presence(),
-                decoding,
-            )),
-        );
+        let mut support = crate::support::types_tokens(contracts.uses_presence(), decoding);
+        if rfc3339 {
+            support.extend(crate::support::rfc3339_tokens());
+        }
+        files.insert(directory.join("src/support.rs"), source(&support));
     }
 }
 
@@ -3549,6 +3575,112 @@ mod tests {
         let types = &rendered[camino::Utf8Path::new("src/types.rs")];
         assert!(types.contains("pub payload: String"), "{types}");
         assert!(!types.contains("pub payload: ::bytes::Bytes"), "{types}");
+    }
+
+    /// A `time` value is held in the shipped `Rfc3339`, whose serde impls are RFC 3339 text, and
+    /// the support module carrying it ships even when nothing else would call for one.
+    #[test_util::test]
+    fn time_values_are_held_in_the_shipped_rfc3339_wrapper() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {"schemas": {
+                "Event": {
+                    "type": "object",
+                    "required": ["at"],
+                    "properties": {
+                        "at": {"type": "string", "format": "date-time"},
+                        "days": {"type": "array", "items": {"type": "string", "format": "date"}},
+                    },
+                },
+            }},
+        });
+        let config = Config {
+            emit: crate::config::Emit {
+                types: true,
+                client: false,
+                server: false,
+            },
+            serde_impl: crate::config::SerdeImpl::DeriveAlways,
+            decoding: crate::config::Decoding::Strict,
+            formats: crate::config::Formats {
+                date_time: crate::config::DateTimeCrate::Time,
+                ..crate::config::Formats::default()
+            },
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        assert!(
+            types.contains("pub at: super::support::Rfc3339<time::OffsetDateTime>"),
+            "{types}"
+        );
+        assert!(
+            types.contains("Vec<super::support::Rfc3339<time::Date>>"),
+            "{types}"
+        );
+        let support = &rendered[camino::Utf8Path::new("src/support.rs")];
+        assert!(support.contains("pub struct Rfc3339<T>"), "{support}");
+        // `time`'s own serde impls are not the ones a payload goes through, so its `serde`
+        // feature is not asked for; the wrapper formats and parses with these two.
+        let manifest = &rendered[camino::Utf8Path::new("Cargo.toml")];
+        assert!(
+            manifest
+                .contains(r#"time = { version = "0.3", features = ["formatting", "parsing"] }"#),
+            "{manifest}"
+        );
+    }
+
+    /// A workspace's client spells a `time` parameter with the types crate's wrapper, so a date a
+    /// response carried is the same type a request takes.
+    #[test_util::test]
+    fn a_workspace_edge_reaches_the_types_crate_for_the_rfc3339_wrapper() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/events": {"get": {
+                "operationId": "listEvents",
+                "parameters": [{
+                    "name": "since",
+                    "in": "query",
+                    "schema": {"type": "string", "format": "date"},
+                }],
+                "responses": {"204": {"description": "none"}},
+            }}},
+        });
+        let config = Config {
+            packaging: Packaging::Workspace,
+            emit: crate::config::Emit {
+                types: true,
+                client: true,
+                server: false,
+            },
+            formats: crate::config::Formats {
+                date_time: crate::config::DateTimeCrate::Time,
+                ..crate::config::Formats::default()
+            },
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+        let client = &rendered[camino::Utf8Path::new("api-client/src/client.rs")];
+        assert!(
+            client.contains("::api_types::support::Rfc3339<time::Date>"),
+            "{client}"
+        );
+        // The one definition is the types crate's, which has a support module for it alone.
+        let types_root = &rendered[camino::Utf8Path::new("api-types/src/lib.rs")];
+        assert!(types_root.contains("pub mod support;"), "{types_root}");
+        let types_support = &rendered[camino::Utf8Path::new("api-types/src/support.rs")];
+        assert!(
+            types_support.contains("pub struct Rfc3339<T>"),
+            "{types_support}"
+        );
+        let types_manifest = &rendered[camino::Utf8Path::new("api-types/Cargo.toml")];
+        assert!(types_manifest.contains("time = "), "{types_manifest}");
+        let client_support = &rendered[camino::Utf8Path::new("api-client/src/support.rs")];
+        assert!(
+            !client_support.contains("struct Rfc3339"),
+            "{client_support}"
+        );
     }
 
     #[test_util::test]
