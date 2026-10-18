@@ -1003,6 +1003,39 @@ mod tests {
         );
     }
 
+    /// String enums in a union, one of which lists `null` too, are one optional enum of every
+    /// value, as the 3.0 `nullable` spelling of each branch says.
+    #[test_util::test]
+    fn a_union_of_string_enums_that_lists_null_is_an_optional_enum() {
+        for six in [
+            json!({"oneOf": [{"enum": ["a", null]}, {"enum": ["b"]}]}),
+            json!({"oneOf": [
+                {"type": ["string", "null"], "enum": ["a", null]},
+                {"type": "string", "enum": ["b"]},
+            ]}),
+        ] {
+            let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Six": six})))?;
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Six")? else {
+                panic!("expected an optional: {:?}", shape_of(&shapes, "Six")?);
+            };
+            assert_eq!(
+                **inner,
+                Shape::StringEnum(StringEnum::listed(vec!["a".to_owned(), "b".to_owned()]))
+            );
+        }
+
+        // A `null` the branch's own `type` forbids is no value of it, so the enum stays required.
+        let (shapes, _) = shapes_of(with_schemas(json!({"Six": {"oneOf": [
+            {"type": "string", "enum": ["a", null]},
+            {"type": "string", "enum": ["b"]},
+        ]}})))?;
+        assert_eq!(
+            shape_of(&shapes, "Six")?,
+            &Shape::StringEnum(StringEnum::listed(vec!["a".to_owned(), "b".to_owned()]))
+        );
+    }
+
     #[test_util::test]
     fn a_nullable_enum_is_an_optional_fieldless_enum() {
         // How 3.0's `nullable: true` beside an `enum` arrives after normalization.
