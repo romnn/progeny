@@ -25,7 +25,18 @@ pub fn scratch_root() -> Utf8PathBuf {
 
 /// A shared target directory, so the dependencies are compiled once rather than once per document.
 pub fn shared_target() -> Utf8PathBuf {
-    scratch_root().join("target")
+    target_for(0)
+}
+
+/// The target directory of one worker slot of a gate that compiles several crates at once.
+///
+/// Cargo locks a target directory for a whole build, so two compiles sharing one take turns.
+/// Each slot has its own, and slot 0 is the one every serial gate shares.
+pub fn target_for(slot: usize) -> Utf8PathBuf {
+    match slot {
+        0 => scratch_root().join("target"),
+        _ => scratch_root().join(format!("target-{slot}")),
+    }
 }
 
 /// A cargo invocation over a generated crate, set up the way every gate here needs it.
@@ -41,12 +52,17 @@ pub fn shared_target() -> Utf8PathBuf {
 /// about which gate is asking, and a gate added later would otherwise reintroduce the failure by
 /// omission.
 pub fn cargo(directory: &Utf8Path) -> Command {
+    cargo_in(directory, 0)
+}
+
+/// [`cargo`], building into the target directory of one worker slot ([`target_for`]).
+pub fn cargo_in(directory: &Utf8Path, slot: usize) -> Command {
     let mut command = Command::new("cargo");
     command
         .current_dir(directory)
-        // The shared dependency cache: `serde`, `reqwest` and `axum` are compiled once for the
-        // whole corpus rather than once per document.
-        .env("CARGO_TARGET_DIR", shared_target())
+        // The shared dependency cache: `serde`, `reqwest` and `axum` are compiled once per slot
+        // for the whole corpus rather than once per document.
+        .env("CARGO_TARGET_DIR", target_for(slot))
         .env("CARGO_BUILD_JOBS", "1")
         // The generated crate is checked as itself, not through this workspace's lint policy.
         .env_remove("RUSTFLAGS");
@@ -150,9 +166,9 @@ pub struct Compiled {
     pub complaint: String,
 }
 
-/// `cargo check` a generated crate.
-pub fn check(directory: &Utf8Path, clippy: bool) -> eyre::Result<Compiled> {
-    let mut command = cargo(directory);
+/// `cargo check` a generated crate, in the target directory of a worker slot.
+pub fn check(directory: &Utf8Path, clippy: bool, slot: usize) -> eyre::Result<Compiled> {
+    let mut command = cargo_in(directory, slot);
     command
         .arg(if clippy { "clippy" } else { "check" })
         .arg("--all-targets")

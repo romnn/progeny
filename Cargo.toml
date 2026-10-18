@@ -113,3 +113,5 @@ ureq = "3"
 # "upstream republished" apart from "we regressed" for documents that are fetched, not committed.
 sha2 = "0.11.0"
 nix = { version = "0.31", features = ["resource"] }
+# The corpus gates check documents on a pool of a few threads, and hand results back in order.
+rayon = "1"

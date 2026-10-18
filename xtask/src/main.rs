@@ -9,6 +9,7 @@ mod corpus;
 mod differential;
 mod example;
 mod generated;
+mod jobs;
 mod layers;
 mod paths;
 mod payloads;
