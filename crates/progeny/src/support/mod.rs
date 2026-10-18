@@ -48,6 +48,9 @@ mod http;
     reason = "compiled to be type-checked and linted, not called"
 )]
 mod router;
+// It names `time`, which progeny depends on only to compile and test this file.
+#[cfg(test)]
+mod rfc3339;
 // Its tests call into it, but sending a request needs a server they do not have.
 #[cfg(test)]
 #[expect(
@@ -69,6 +72,9 @@ const PRESENCE: &str = include_str!("presence.rs");
 
 /// The file-part payload type multipart bodies hold.
 const UPLOAD: &str = include_str!("upload.rs");
+
+/// The RFC 3339 wrapper the `time` crate's date and time types are held in.
+const RFC3339: &str = include_str!("rfc3339.rs");
 
 /// Parameter serialization, one function per style row.
 const STYLE: &str = include_str!("style.rs");
@@ -367,6 +373,11 @@ pub(crate) fn types_tokens(presence: bool, decoding: Decoding) -> proc_macro2::T
     }
 }
 
+/// The RFC 3339 wrapper, for the support module of the crate whose types hold `time` values.
+pub(crate) fn rfc3339_tokens() -> proc_macro2::TokenStream {
+    source_items(RFC3339)
+}
+
 /// How the support module reads responses: strictly, or leniently against the given leaves.
 ///
 /// The configuration's choice, joined with the one fact the lenient decoder needs from the
@@ -434,7 +445,11 @@ fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
         });
     }
     if leaves.time {
-        leaf_types.push(quote::quote! { time::OffsetDateTime, time::Date, time::Time });
+        leaf_types.push(quote::quote! {
+            super::Rfc3339<time::OffsetDateTime>,
+            super::Rfc3339<time::Date>,
+            super::Rfc3339<time::Time>
+        });
     }
     if leaves.jiff {
         leaf_types.push(quote::quote! { jiff::Timestamp, jiff::civil::Date, jiff::civil::Time });

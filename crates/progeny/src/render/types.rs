@@ -13,7 +13,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::api::{ApiModel, BodyContract, ResponseBody};
-use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
+use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, Packaging, UuidCrate};
 use crate::contract::{
     ContractKind, Contracts, DeserStrategy, FieldContract, Form, Gate, RustIdent, SkipRule,
     TypeContract, TypeRef,
@@ -970,7 +970,7 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope)
         TypeRef::U64 => quote! { u64 },
         TypeRef::F64 => quote! { f64 },
         TypeRef::String => quote! { String },
-        TypeRef::Format(format) => format_type(*format, config),
+        TypeRef::Format(format) => format_type(*format, config, scope),
         // The types module and the support module are siblings in every packaging, whether
         // they live in one crate or the types crate carries both; `read` is one level further in.
         TypeRef::Upload => quote! { #support::Upload },
@@ -1013,28 +1013,32 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope)
 
 /// The type a format renders as, which is the caller's choice.
 ///
+/// A `time` value is held in the shipped `Rfc3339`, because `time`'s own serde impls read and
+/// write a tuple of numbers rather than the RFC 3339 text the format names.
+///
 /// `Base64` and `Binary` are `String` whatever the byte representation is set to, and that is not an
 /// omission: inside a JSON payload a base64 or binary property *is* a string, and turning it into
 /// bytes needs a codec the generated crate does not have. The byte representation applies to a raw
 /// binary request or response body, which is the API model's business.
-fn format_type(format: Format, config: &Config) -> TokenStream {
+fn format_type(format: Format, config: &Config, scope: Scope) -> TokenStream {
+    let rfc3339 = rfc3339_path(config, scope);
     match format {
         Format::DateTime => match config.formats.date_time {
             DateTimeCrate::String => quote! { String },
             DateTimeCrate::Chrono => quote! { chrono::DateTime<chrono::Utc> },
-            DateTimeCrate::Time => quote! { time::OffsetDateTime },
+            DateTimeCrate::Time => quote! { #rfc3339<time::OffsetDateTime> },
             DateTimeCrate::Jiff => quote! { jiff::Timestamp },
         },
         Format::Date => match config.formats.date_time {
             DateTimeCrate::String => quote! { String },
             DateTimeCrate::Chrono => quote! { chrono::NaiveDate },
-            DateTimeCrate::Time => quote! { time::Date },
+            DateTimeCrate::Time => quote! { #rfc3339<time::Date> },
             DateTimeCrate::Jiff => quote! { jiff::civil::Date },
         },
         Format::Time => match config.formats.date_time {
             DateTimeCrate::String => quote! { String },
             DateTimeCrate::Chrono => quote! { chrono::NaiveTime },
-            DateTimeCrate::Time => quote! { time::Time },
+            DateTimeCrate::Time => quote! { #rfc3339<time::Time> },
             DateTimeCrate::Jiff => quote! { jiff::civil::Time },
         },
         Format::Uuid => match config.formats.uuid {
@@ -1046,6 +1050,20 @@ fn format_type(format: Format, config: &Config) -> TokenStream {
         Format::Ipv6 => quote! { ::std::net::Ipv6Addr },
         Format::Base64 | Format::Binary => quote! { String },
     }
+}
+
+/// The path to the RFC 3339 wrapper from here.
+///
+/// It lives in the support module beside the types.
+/// A workspace's edge crate reaches into the types crate for it rather than carrying its own copy,
+/// which would be a second type: a date read from a response could not be sent back as a parameter.
+fn rfc3339_path(config: &Config, scope: Scope) -> TokenStream {
+    if scope == Scope::Edge && config.packaging == Packaging::Workspace {
+        let types_crate = super::types_crate_ident(config);
+        return quote! { ::#types_crate::support::Rfc3339 };
+    }
+    let support = scope.support();
+    quote! { #support::Rfc3339 }
 }
 
 fn bytes_type(config: &Config) -> TokenStream {

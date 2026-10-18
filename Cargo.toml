@@ -94,6 +94,9 @@ axum = { version = "0.8", default-features = false, features = ["json"] }
 # The runtime features a consumer gets (`charset`, `http2`, `rustls`) change behaviour, not
 # types, and compiling a TLS stack to type-check a file would be minutes bought for nothing.
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
+# To compile and test the shipped `support/rfc3339.rs`, with the two features it calls, which are
+# the ones a generated crate's manifest asks for.
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 color-eyre = "0.6"
