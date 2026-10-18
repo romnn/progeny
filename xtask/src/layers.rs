@@ -52,6 +52,8 @@ const LAYERS: &[(&str, u32)] = &[
     ("normalize", 20),
     ("schema", 30),
     ("doc", 40),
+    // A JSON Schema bundle is read into the parsed model `doc` defines, and `resolve` reads it.
+    ("bundle", 41),
     ("overrides", 42),
     ("resolve", 45),
     ("shape", 50),

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer, RejectError, RejectKind};
-use crate::doc::{Components, Document, ParsedDocument};
+use crate::doc::{Components, Direction, Document, ParsedDocument, Selected};
 use crate::schema::{SchemaId, SchemaStore};
 
 /// What [`crate::generate_schemas`] reads out of a bundle: where its types are, and which of
@@ -43,35 +43,6 @@ pub struct SchemaRoot {
     /// Which way the type travels, which stands in for the request or response position an
     /// operation would give it.
     pub direction: Direction,
-}
-
-/// Which way a type travels between the caller and its peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// The caller builds and sends it, as it would a request.
-    Sent,
-    /// The caller receives and reads it, as it would a response.
-    Received,
-    /// Both.
-    Both,
-}
-
-impl Direction {
-    pub(crate) fn sent(self) -> bool {
-        matches!(self, Self::Sent | Self::Both)
-    }
-
-    pub(crate) fn received(self) -> bool {
-        matches!(self, Self::Received | Self::Both)
-    }
-}
-
-/// A root, as the schema that defines it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Selected {
-    pub(crate) id: SchemaId,
-    pub(crate) name: String,
-    pub(crate) direction: Direction,
 }
 
 /// The namespaces a bundle holds its types in when the caller names none.
@@ -493,9 +464,10 @@ mod tests {
             !classes
                 .iter()
                 .any(|(class, _)| *class == BreakageClass::PresenceCollapse
-                    && output.diagnostics.iter().any(|found| found
-                        .detail()
-                        .contains("no operation"))),
+                    && output
+                        .diagnostics
+                        .iter()
+                        .any(|found| found.detail().contains("no operation"))),
             "{classes:?}"
         );
     }
@@ -536,7 +508,10 @@ mod tests {
 
     fn received(namespaces: &[&str]) -> SchemaInput {
         SchemaInput {
-            namespaces: namespaces.iter().map(|&namespace| namespace.to_owned()).collect(),
+            namespaces: namespaces
+                .iter()
+                .map(|&namespace| namespace.to_owned())
+                .collect(),
             roots: vec![SchemaRoot {
                 name: "Root".to_owned(),
                 direction: Direction::Received,
@@ -563,7 +538,10 @@ mod tests {
         let output = generated(&bundle, &received(&[]))?;
         let source = types(&output);
         assert!(source.contains("pub node: Option<Node>"), "{source}");
-        assert!(source.contains("pub children: Option<Vec<Node>>"), "{source}");
+        assert!(
+            source.contains("pub children: Option<Vec<Node>>"),
+            "{source}"
+        );
         assert!(
             !output
                 .diagnostics
@@ -601,7 +579,10 @@ mod tests {
         ] {
             let output = generated(&bundle, &received(&namespaces))?;
             let source = types(&output);
-            assert!(source.contains("pub item: Option<Item>"), "{namespaces:?}: {source}");
+            assert!(
+                source.contains("pub item: Option<Item>"),
+                "{namespaces:?}: {source}"
+            );
         }
     }
 
@@ -625,7 +606,10 @@ mod tests {
         }});
         let source = types(&generated(&bundle, &received(&[]))?);
         assert!(source.contains("pub enum Root"), "{source}");
-        assert!(source.contains("Cat(") && source.contains("Dog("), "{source}");
+        assert!(
+            source.contains("Cat(") && source.contains("Dog("),
+            "{source}"
+        );
     }
 
     /// A draft-07 bundle's rules reach a schema only a `$ref` proves is one, and a schema that
@@ -660,8 +644,14 @@ mod tests {
             })
             .collect();
         // The helper is draft-07 like its bundle, and `Modern` is 2020-12 by its own `$schema`.
-        assert!(dropped.contains(&"/helpers/helper".to_owned()), "{dropped:?}");
-        assert!(!dropped.contains(&"/definitions/Modern".to_owned()), "{dropped:?}");
+        assert!(
+            dropped.contains(&"/helpers/helper".to_owned()),
+            "{dropped:?}"
+        );
+        assert!(
+            !dropped.contains(&"/definitions/Modern".to_owned()),
+            "{dropped:?}"
+        );
     }
 
     /// A position the draft-07 rewrite moves is still what a `$ref` to it reaches, and a schema
@@ -890,7 +880,11 @@ mod tests {
             ..Config::default()
         };
         let output = generate_schemas(bundle.to_string().as_bytes(), &input, &strict)?;
-        assert!(!types(&output).contains("pub mod read"), "{}", types(&output));
+        assert!(
+            !types(&output).contains("pub mod read"),
+            "{}",
+            types(&output)
+        );
     }
 
     /// A root that names no type, or a namespace the bundle does not hold, is refused rather

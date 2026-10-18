@@ -94,7 +94,7 @@ const MAX_CHAIN: usize = 32;
 impl ResolvedDocument {
     /// The types a JSON Schema bundle's caller exchanges, which are its wire in place of
     /// operations; empty for an OpenAPI document.
-    pub(crate) fn bundle_roots(&self) -> &[crate::bundle::Selected] {
+    pub(crate) fn bundle_roots(&self) -> &[crate::doc::Selected] {
         &self.parsed.roots
     }
 
