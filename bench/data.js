@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792358676786,
+  "lastUpdate": 1792364691706,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -195,6 +195,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 332.78125,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "446662525ad7ccf2461444247df783ec2295bde4",
+          "message": "fix(shape): reach a union's catch-all past branches that read values their schema refuses (#62)\n\nA last branch that admits every value of its kind, `{}`, `{type: object}` or\n`{type: array}`, is reached only by what the branches before it refuse. An\nearlier branch whose type accepts what its own schema refuses, such as an\nunlisted enum value or a member union's fallback, took the catch-all's\npayloads, so the union now degrades there instead. An open earlier struct of\nplain members still stays typed, as does an unconstrained object or list\ncatch-all, which degraded before.\n\nA later branch is taken to carry only the members it declares, now written\ndown on `rejects`. Judging an open later branch by every payload it validates\ninstead degrades about 200 more unions across the corpus.\n\nPart of #22.",
+          "timestamp": "2026-10-19T00:59:06+02:00",
+          "tree_id": "cd1e5c6d135234a4cd85c8f0ac0dff412b28a320",
+          "url": "https://github.com/romnn/progeny/commit/446662525ad7ccf2461444247df783ec2295bde4"
+        },
+        "date": 1792364690775,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 29.847318666666666,
+            "range": "± 0.26",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3010.950520515442,
+            "range": "± 3.9",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.062881666666668,
+            "range": "± 0.13",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.727864265442,
+            "range": "± 2.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.745753,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 332.65625,
             "range": "± 1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
