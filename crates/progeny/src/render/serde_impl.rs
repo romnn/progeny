@@ -41,9 +41,12 @@ pub(super) fn one(contract: &TypeContract) -> TokenStream {
         (DeserStrategy::HandWrittenBuffered { unknown }, ContractKind::Struct { fields }) => {
             buffered(contract, fields, unknown, serialize_only)
         }
-        (DeserStrategy::HandWrittenFieldless, ContractKind::StringEnum { variants, fallback }) => {
-            fieldless(contract, variants, fallback)
-        }
+        (
+            DeserStrategy::HandWrittenFieldless,
+            ContractKind::StringEnum {
+                variants, fallback, ..
+            },
+        ) => fieldless(contract, variants, fallback),
         (
             DeserStrategy::HandWrittenCarriedTag,
             ContractKind::CarriedTagEnum {

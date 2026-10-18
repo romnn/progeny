@@ -544,6 +544,7 @@ mod tests {
                 &ContractKind::StringEnum {
                     variants: Vec::new(),
                     fallback: RustIdent::variant("Unknown"),
+                    any_other: false,
                 },
                 UnknownFields::Ignore,
                 &escape,
@@ -588,6 +589,7 @@ mod tests {
                 wire_name: "a".to_owned(),
             }],
             fallback: RustIdent::variant("Unknown"),
+            any_other: false,
         };
         assert_eq!(
             decide(&strings, UnknownFields::Ignore, &hand_written(), false),

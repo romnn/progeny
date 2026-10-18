@@ -117,6 +117,26 @@ pub(crate) enum ShapeRef {
     Inline(Box<Shape>),
 }
 
+/// The strings a string enum names, and whether the document admits any other string too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StringEnum {
+    pub(crate) values: Vec<String>,
+    /// The document admits any other string beside the values it names, as
+    /// `anyOf: [{enum: [small, large]}, {type: string}]` does, so an unlisted value is one it
+    /// allows rather than drift.
+    pub(crate) any_other: bool,
+}
+
+impl StringEnum {
+    /// The values a document lists and nothing else.
+    pub(crate) fn listed(values: Vec<String>) -> Self {
+        Self {
+            values,
+            any_other: false,
+        }
+    }
+}
+
 /// What one schema is, as far as the type layer is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Shape {
@@ -126,7 +146,7 @@ pub(crate) enum Shape {
     /// A string whose `format` progeny gives a type of its own.
     Format(Format),
     /// An `enum` or `const` of strings: a fieldless enum, and the serde path with no buffering.
-    StringEnum(Vec<String>),
+    StringEnum(StringEnum),
     Struct(Struct),
     /// An object with no declared property names.
     Map {
@@ -611,7 +631,9 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
-    use super::{Extra, Scalar, Shape, ShapeRef, Shapes, Tag, TagStyle, Union, classify};
+    use super::{
+        Extra, Scalar, Shape, ShapeRef, Shapes, StringEnum, Tag, TagStyle, Union, classify,
+    };
     use crate::diag::{BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
     use crate::{normalize, resolve};
@@ -970,11 +992,14 @@ mod tests {
         })))?;
         assert_eq!(
             shape_of(&shapes, "Colour")?,
-            &Shape::StringEnum(vec!["red".to_owned(), "green".to_owned()])
+            &Shape::StringEnum(StringEnum::listed(vec![
+                "red".to_owned(),
+                "green".to_owned()
+            ]))
         );
         assert_eq!(
             shape_of(&shapes, "Direction")?,
-            &Shape::StringEnum(vec!["up".to_owned(), "down".to_owned()])
+            &Shape::StringEnum(StringEnum::listed(vec!["up".to_owned(), "down".to_owned()]))
         );
     }
 
@@ -987,7 +1012,10 @@ mod tests {
         let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Colour")? else {
             panic!("expected an optional");
         };
-        assert_eq!(**inner, Shape::StringEnum(vec!["red".to_owned()]));
+        assert_eq!(
+            **inner,
+            Shape::StringEnum(StringEnum::listed(vec!["red".to_owned()]))
+        );
     }
 
     #[test_util::test]
@@ -2850,40 +2878,57 @@ mod tests {
         let values = ["auto", "concise", "detailed", "none"].map(ToOwned::to_owned);
         assert_eq!(
             shape_of(&shapes, "Effort")?,
-            &Shape::StringEnum(values.to_vec())
+            &Shape::StringEnum(StringEnum::listed(values.to_vec()))
         );
     }
 
+    /// Known values beside any string are one string enum that admits every other string, in
+    /// whichever order the document lists the branches: `anyOf` is a set, and the union of its
+    /// branches is any string with some of them named.
     #[test_util::test]
-    fn listed_strings_before_any_string_are_not_matched_by_shape() {
-        // The open enum reads `"custom"` as an unlisted value of its own, where the document means
-        // the plain string after it.
-        assert!(degrades_as_wild_union(
-            json!({"Model": {"anyOf": [
-                {"type": "string", "enum": ["small", "large"]},
-                {"type": "string"},
-            ]}}),
-            "Model",
-        )?);
+    fn known_values_or_any_string_are_one_enum_that_admits_the_rest() {
+        let admits = |values: &[&str]| {
+            Shape::StringEnum(StringEnum {
+                values: values.iter().map(|&value| value.to_owned()).collect(),
+                any_other: true,
+            })
+        };
+        for branches in [
+            json!([{"type": "string", "enum": ["small", "large"]}, {"type": "string"}]),
+            json!([{"type": "string"}, {"type": "string", "enum": ["small", "large"]}]),
+            // `anthropic` names its models as a plain string then one constant per model.
+            json!([{"type": "string"}, {"const": "small"}, {"const": "large"}]),
+        ] {
+            let (shapes, diagnostics) =
+                shapes_of(with_schemas(json!({"Model": {"anyOf": branches}})))?;
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert_eq!(shape_of(&shapes, "Model")?, &admits(&["small", "large"]));
+        }
 
-        // After any string, the listed ones are payloads the plain string already admits, so the
-        // document itself does not say which branch they are.
-        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Model": {"anyOf": [
-            {"type": "string"},
-            {"type": "string", "enum": ["small", "large"]},
-        ]}})))?;
-        assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(matches!(shape_of(&shapes, "Model")?, Shape::Union(_)));
+        // A catch-all that admits `null` too makes the enum optional, in either order.
+        for branches in [
+            json!([{"type": "string", "enum": ["small", "large"]}, {"type": ["string", "null"]}]),
+            json!([{"type": ["string", "null"]}, {"type": "string", "enum": ["small", "large"]}]),
+        ] {
+            let (shapes, diagnostics) =
+                shapes_of(with_schemas(json!({"Model": {"anyOf": branches}})))?;
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Model")? else {
+                panic!("expected an optional: {:?}", shape_of(&shapes, "Model")?);
+            };
+            assert_eq!(**inner, admits(&["small", "large"]));
+        }
 
-        // Behind a plain string no string reaches the constants, so they are never compared with
-        // one another. `anthropic` names its models this way.
-        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Model": {"anyOf": [
-            {"type": "string"},
-            {"const": "small"},
-            {"const": "large"},
+        // A string with a format is a different type, so it is no catch-all for the enum.
+        let (shapes, _) = shapes_of(with_schemas(json!({"Model": {"anyOf": [
+            {"type": "string", "enum": ["small"]},
+            {"type": "string", "format": "uuid"},
         ]}})))?;
-        assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(matches!(shape_of(&shapes, "Model")?, Shape::Union(_)));
+        assert!(
+            !matches!(shape_of(&shapes, "Model")?, Shape::StringEnum(_)),
+            "{:?}",
+            shape_of(&shapes, "Model")?
+        );
     }
 
     #[test_util::test]
@@ -3146,7 +3191,7 @@ mod tests {
         })))?;
         assert_eq!(
             shape_of(&shapes, "Repeats")?,
-            &Shape::StringEnum(vec!["a".to_owned(), "b".to_owned()])
+            &Shape::StringEnum(StringEnum::listed(vec!["a".to_owned(), "b".to_owned()]))
         );
     }
 

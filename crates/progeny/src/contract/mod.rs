@@ -393,6 +393,9 @@ pub(crate) enum ContractKind {
         variants: Vec<StringVariant>,
         /// The variant holding a string the description does not list, verbatim.
         fallback: RustIdent,
+        /// The description admits any other string, so a value in the fallback is one it allows
+        /// rather than drift a lenient decode reports.
+        any_other: bool,
     },
     /// A wrapper with an identity of its own.
     Newtype {
@@ -1407,6 +1410,45 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|d| d.class() == crate::BreakageClass::InvalidDefault)
+        );
+    }
+
+    /// An enum that admits any other string takes an unlisted default as one of its values, where
+    /// an enum that lists every value it allows drops it.
+    #[test_util::test]
+    fn an_unlisted_default_fits_only_the_enum_that_admits_any_other_string() {
+        let (contracts, diagnostics) = contracts_of(
+            with_schemas(json!({
+                "Request": {
+                    "type": "object",
+                    "properties": {
+                        "open": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["small", "large"]},
+                                {"type": "string"},
+                            ],
+                            "default": "custom",
+                        },
+                        "shut": {"type": "string", "enum": ["small", "large"], "default": "custom"},
+                    },
+                },
+            })),
+            &Config::default(),
+        )?;
+        let ContractKind::Struct { fields } = named(&contracts, "Request")?.kind() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(fields[0].wire_name, "open");
+        assert_eq!(fields[0].default, Some(json!("custom")));
+        assert_eq!(fields[1].default, None);
+        let dropped: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| d.class() == crate::BreakageClass::InvalidDefault)
+            .map(|d| d.location().to_string())
+            .collect();
+        assert_eq!(
+            dropped,
+            ["/components/schemas/Request/properties/shut/default"]
         );
     }
 
