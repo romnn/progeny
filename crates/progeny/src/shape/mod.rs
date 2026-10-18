@@ -3170,6 +3170,195 @@ mod tests {
         assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
     }
 
+    /// A last branch that admits anything is reached only by what every earlier branch refuses.
+    #[test_util::test]
+    fn a_last_catch_all_follows_only_branches_that_admit_what_they_read() {
+        let listed = |closed: bool| {
+            json!({
+                "type": "object", "required": ["kind"], "additionalProperties": !closed,
+                "properties": {"kind": {"type": "string", "enum": ["a"]}},
+            })
+        };
+        // The open enum reads `{"kind": "b", "keep": 7}` as its own unlisted value, though only
+        // the catch-all admits it.
+        // A closed struct keeps `"b"` whole, but as the wrong variant.
+        let degraded = [
+            json!({"oneOf": [listed(false), {}]}),
+            json!({"oneOf": [listed(true), {}]}),
+            json!({"oneOf": [
+                {"type": "array", "items": listed(false)},
+                {"type": "array", "items": {}},
+            ]}),
+            json!({"oneOf": [
+                {"type": "object", "properties": {"n": {"type": "integer", "enum": [1, 2]}}},
+                {},
+            ]}),
+            // A whole branch that lists its values reads `"b"` as its own.
+            json!({"oneOf": [{"type": "string", "enum": ["a"]}, {}]}),
+            // A member union's fallback reads `{"v": true}`, which neither of its branches admits.
+            json!({"oneOf": [
+                {"type": "object", "required": ["v"], "properties": {"v": {"oneOf": [
+                    {"type": "string"},
+                    {"type": "integer"},
+                ]}}},
+                {},
+            ]}),
+            // A required member that may be `null` is an `Option`, which reads `{"keep": 7}`.
+            json!({"oneOf": [
+                {"type": "object", "required": ["id"],
+                 "properties": {"id": {"type": ["string", "null"]}}},
+                {},
+            ]}),
+            // A member that only requires names is arbitrary JSON, which reads `{"v": {}}`.
+            json!({"oneOf": [
+                {"type": "object", "required": ["v"],
+                 "properties": {"v": {"required": ["id"]}}},
+                {},
+            ]}),
+            // A member whose `type` names two kinds is arbitrary JSON, which reads `{"v": true}`.
+            json!({"oneOf": [
+                {"type": "object", "required": ["v"],
+                 "properties": {"v": {"type": ["string", "integer"]}}},
+                {},
+            ]}),
+            // Values listed beside a member's union are not in the string it reads as.
+            json!({"oneOf": [
+                {"type": "object", "required": ["v"], "properties": {"v": {
+                    "enum": ["a"],
+                    "anyOf": [{"const": "a"}, {"type": "string"}],
+                }}},
+                {},
+            ]}),
+            // The same for a whole branch, which reads `"b"` too.
+            json!({"oneOf": [
+                {"enum": ["a"], "anyOf": [{"const": "a"}, {"type": "string"}]},
+                {},
+            ]}),
+            // A list with no prefix whose items admit nothing is no tuple, and reads `[7]`.
+            json!({"oneOf": [{"type": "array", "prefixItems": [], "items": false}, {}]}),
+            // A constant beside both booleans admits one of them.
+            json!({"oneOf": [{"type": "boolean", "enum": [true, false], "const": true}, {}]}),
+            // An `Option` of both booleans reads `null`, which the list or the `type` leaves out.
+            json!({"oneOf": [{"type": ["boolean", "null"], "enum": [true, false]}, {}]}),
+            json!({"oneOf": [{"type": "boolean", "enum": [true, false, null]}, {}]}),
+            // A catch-all for objects alone is reached only by what the earlier branch refuses.
+            json!({"oneOf": [listed(false), {"type": "object"}]}),
+        ];
+        for schema in degraded {
+            assert!(
+                degrades_as_wild_union(json!({"Either": schema.clone()}), "Either")?,
+                "{schema} should degrade"
+            );
+        }
+
+        // An open struct of plain members admits every payload it reads, and drops the members
+        // it does not declare as every struct does.
+        // A catch-all for objects or lists alone is the same catch-all for that kind.
+        // An enum that admits any other string refuses nothing its schema admits either.
+        let named = json!({
+            "type": "object", "required": ["name"], "properties": {"name": {"type": "string"}},
+        });
+        let typed = [
+            json!({"oneOf": [named, {}]}),
+            json!({"oneOf": [named, {"type": "object"}]}),
+            json!({"oneOf": [named, {"type": "object", "additionalProperties": {}}]}),
+            json!({"oneOf": [
+                {"type": "array", "items": named},
+                {"type": "array"},
+            ]}),
+            // A tuple whose tail admits nothing refuses `[7]` and `["a", 7]`.
+            json!({"oneOf": [
+                {"type": "array", "prefixItems": [{"type": "string"}], "items": false},
+                {},
+            ]}),
+            // Both booleans listed are every boolean.
+            json!({"oneOf": [{"type": "boolean", "enum": [true, false]}, {}]}),
+            json!({"oneOf": [
+                {"type": "object", "properties": {"size": {"anyOf": [
+                    {"type": "string", "enum": ["small"]},
+                    {"type": "string"},
+                ]}}},
+                {},
+            ]}),
+        ];
+        for schema in typed {
+            let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Either": schema.clone()})))?;
+            assert!(diagnostics.is_empty(), "{schema}: {diagnostics:?}");
+            assert!(
+                matches!(shape_of(&shapes, "Either")?, Shape::Union(_)),
+                "{schema} should stay typed"
+            );
+        }
+    }
+
+    /// A later branch's payloads carry the members it declares, so a member the earlier branch
+    /// insists on and the later one never declares tells them apart, even where an open later
+    /// object could carry it.
+    #[test_util::test]
+    fn a_later_branch_is_taken_to_carry_only_the_members_it_declares() {
+        // `{"id": "b", "x": "keep"}` validates only against the second branch, and reads as the
+        // first with `id` unlisted; `{"x": "keep"}` lacks `id` and reaches the second.
+        // Each branch has a second member, so the union is not read by a single key.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Either": {"oneOf": [
+            {"type": "object", "required": ["id"], "properties": {
+                "id": {"type": "string", "enum": ["a"]},
+                "note": {"type": "string"},
+            }},
+            {"type": "object", "required": ["x"], "properties": {
+                "x": {"type": "string"},
+                "note": {"type": "string"},
+            }},
+        ]}})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
+    }
+
+    /// A closed branch that keeps whole what it reads still takes the wrong variant when what it
+    /// reads is a value it does not admit.
+    #[test_util::test]
+    fn a_closed_branch_does_not_take_an_unlisted_value_meant_for_a_later_one() {
+        let closed = |member: Value| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["a"],
+                "properties": {"a": member},
+            })
+        };
+        // `{"a": "zzz"}` is the second branch's, and the first reads it as `Unknown("zzz")`.
+        assert!(degrades_as_wild_union(
+            json!({"Either": {"oneOf": [
+                closed(json!({"type": "string", "enum": ["x"]})),
+                closed(json!({"type": "string"})),
+            ]}}),
+            "Either",
+        )?);
+    }
+
+    /// A branch that admits `null` beside its strings is compared with the branches before it,
+    /// though a plain string branch already reads every string it is meant for.
+    #[test_util::test]
+    fn a_nullable_string_branch_is_not_skipped_after_a_plain_string() {
+        // The middle union's fallback reads `null` before the last branch is tried, whether that
+        // branch lists `null` itself or is a union of strings and `null`.
+        let last = [
+            json!({"type": ["string", "null"], "enum": ["a", null]}),
+            json!({"anyOf": [{"const": "a"}, {"const": "b"}, {"type": "null"}]}),
+            json!({"anyOf": [{"enum": ["a", null]}, {"enum": ["b"]}]}),
+        ];
+        for last in last {
+            assert!(
+                degrades_as_wild_union(
+                    json!({"Either": {"oneOf": [
+                        {"type": "string"},
+                        {"anyOf": [{"type": "integer"}, {"type": "boolean"}]},
+                        last.clone(),
+                    ]}}),
+                    "Either",
+                )?,
+                "{last}"
+            );
+        }
+    }
+
     #[test_util::test]
     fn a_member_the_earlier_struct_insists_on_tells_objects_apart_by_kind() {
         // The later `p` may be `null`, but the earlier one is a required `String`, which turns down
