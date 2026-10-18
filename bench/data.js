@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792358318938,
+  "lastUpdate": 1792358676786,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -130,6 +130,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 332.8776035308838,
             "range": "± 1.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "afed8d215e7327b9f78c622f0d0f663ab62b40bf",
+          "message": "feat(shape): read string enums in a union that lists null as one optional enum (#59)\n\n* feat(xtask): check corpus documents in parallel with --jobs\n\n`corpus`, `regen-snapshots` and `payloads` take `--jobs N`, defaulting to the smallest of four,\nthe cores, and what the free memory covers at about 4 GiB per document generated, 10 GiB per\ncrate compiled and 15 GiB per crate compiled through the derive. Documents run on a rayon pool\nand report in manifest order, so output and snapshots are the same whatever N is. Each worker\ncompiles in a cargo target directory of its own, because cargo locks one for a whole build, and\na document selected twice is checked once. CI keeps its compile and payload steps at `--jobs 1`.\n\n* feat(shape): read string enums in a union that lists null as one optional enum\n\n`oneOf: [{enum: [\"a\", null]}, {enum: [\"b\"]}]`, the 3.0 `nullable` spelling of each branch, is\n`Option` of one enum of every listed string, where it used to degrade to arbitrary JSON. A\nlisted `null` counts only where the branch's own `type` admits it.",
+          "timestamp": "2026-10-18T23:15:38+02:00",
+          "tree_id": "4eda0ceb77473c1be5295d714fbc59e9709d0169",
+          "url": "https://github.com/romnn/progeny/commit/afed8d215e7327b9f78c622f0d0f663ab62b40bf"
+        },
+        "date": 1792358676033,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 27.345729000000002,
+            "range": "± 0.54",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3011.171875,
+            "range": "± 4.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.232153666666667,
+            "range": "± 0.12",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1250.6119785308838,
+            "range": "± 1.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7443779999999999,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 332.78125,
+            "range": "± 1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
