@@ -979,6 +979,26 @@ impl Config {
         Self::keyed(&self.names, component, address)
     }
 
+    /// Whether the configuration names this type, in a per-type table or in a rule's selector,
+    /// which makes it one the caller talks about.
+    pub(crate) fn configures_type(&self, component: Option<&str>, address: &str) -> bool {
+        let selected = self
+            .extra_derives
+            .iter()
+            .map(|rule| &rule.types)
+            .chain(self.json_schema.iter().map(|schemas| &schemas.types))
+            .any(|selection| match selection {
+                TypeSelection::All => false,
+                TypeSelection::Only(keys) => keys
+                    .iter()
+                    .any(|key| Selector::parse(key).address.names(component, address)),
+            });
+        selected
+            || Self::keyed(&self.names, component, address).is_some()
+            || Self::keyed(&self.type_derives, component, address).is_some()
+            || Self::keyed(&self.type_unknown_fields, component, address).is_some()
+    }
+
     /// Look a type up by component name first, then by address.
     ///
     /// The [`Address`] grammar, with the name spelling given priority when both keys are present:

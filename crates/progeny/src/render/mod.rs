@@ -1199,6 +1199,175 @@ mod tests {
         assert!(rendered.contains("Integer(Box<i64>)"), "{rendered}");
     }
 
+    /// Self-naming tagged unions whose branches each carry a title: two carry only their tag, and
+    /// one carries a member beside it.
+    fn tag_only_branches() -> Value {
+        let tag_only = |title: &str, tag: &str| {
+            json!({"title": title, "type": "object", "required": ["type"], "properties": {
+                "type": {"enum": [tag], "type": "string"},
+            }})
+        };
+        with_schemas(json!({
+            "ThreadStatus": {"oneOf": [
+                tag_only("IdleThreadStatus", "idle"),
+                {"title": "ActiveThreadStatus", "type": "object", "required": ["type", "since"],
+                 "properties": {"type": {"enum": ["active"], "type": "string"},
+                                "since": {"type": "integer"}}},
+            ]},
+            "PatchChangeKind": {"oneOf": [
+                tag_only("AddPatchChangeKind", "add"),
+                tag_only("DeletePatchChangeKind", "delete"),
+            ]},
+        }))
+    }
+
+    /// A branch that carries only the tag its union consumes is a unit variant, so no empty type
+    /// exists to be shared across unions under one branch's title.
+    #[test_util::test]
+    fn a_branch_that_carries_only_its_tag_is_a_unit_variant() {
+        let rendered = types(tag_only_branches(), &Config::default())?;
+        for unit in ["Idle,", "Add,", "Delete,"] {
+            assert!(rendered.contains(unit), "{unit}: {rendered}");
+        }
+        assert!(
+            rendered.contains("Active(Box<ActiveThreadStatus>)"),
+            "{rendered}"
+        );
+        for empty in [
+            "IdleThreadStatus",
+            "AddPatchChangeKind",
+            "DeletePatchChangeKind",
+        ] {
+            assert!(!rendered.contains(empty), "{empty}: {rendered}");
+        }
+    }
+
+    /// Under a policy that denies undeclared members, an empty payload reads differently from a
+    /// unit variant, so it stays a struct, and each branch's keeps the name its own title gives it.
+    #[test_util::test]
+    fn a_tag_only_branch_that_denies_unknown_members_keeps_its_own_titled_struct() {
+        let config = Config {
+            unknown_fields: crate::config::UnknownFields::Deny,
+            ..Config::default()
+        };
+        let rendered = types(tag_only_branches(), &config)?;
+        for variant in [
+            "Idle(Box<IdleThreadStatus>)",
+            "Add(Box<AddPatchChangeKind>)",
+            "Delete(Box<DeletePatchChangeKind>)",
+        ] {
+            assert!(rendered.contains(variant), "{variant}: {rendered}");
+        }
+    }
+
+    /// A tag-only branch read only from responses keeps its read form's capture map under lenient
+    /// decoding, so a member the description never declared is still kept and written back.
+    /// Strict decoding has no read form, so the same branch is a unit variant there.
+    #[test_util::test]
+    fn a_tag_only_branch_read_only_from_responses_keeps_what_it_captures() {
+        let mut document = tag_only_branches();
+        document["paths"] = json!({"/status": {"get": {
+            "operationId": "getStatus",
+            "responses": {"200": {"description": "ok", "content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/ThreadStatus"},
+            }}}},
+        }}});
+        let lenient = types(document.clone(), &Config::default())?;
+        assert!(lenient.contains("Idle(Box<IdleThreadStatus>)"), "{lenient}");
+        assert!(lenient.contains("pub struct IdleThreadStatus"), "{lenient}");
+        // The other union is reached by no operation, so its branches are still unit variants.
+        assert!(lenient.contains("Add,"), "{lenient}");
+
+        let config = Config {
+            decoding: crate::config::Decoding::Strict,
+            ..Config::default()
+        };
+        let strict = types(document, &config)?;
+        assert!(strict.contains("Idle,"), "{strict}");
+        assert!(!strict.contains("IdleThreadStatus"), "{strict}");
+    }
+
+    /// A tag-only branch that is a component of its own stays that component: the document named
+    /// it, so it is a type a caller can name whichever union holds it.
+    #[test_util::test]
+    fn a_tag_only_branch_that_is_a_component_keeps_its_type() {
+        let rendered = types(
+            with_schemas(json!({
+                "Idle": {"type": "object", "required": ["type"], "properties": {
+                    "type": {"enum": ["idle"], "type": "string"},
+                }},
+                "Busy": {"type": "object", "required": ["type", "since"], "properties": {
+                    "type": {"enum": ["busy"], "type": "string"},
+                    "since": {"type": "integer"},
+                }},
+                "Status": {"oneOf": [
+                    {"$ref": "#/components/schemas/Idle"},
+                    {"$ref": "#/components/schemas/Busy"},
+                ], "discriminator": {"propertyName": "type"}},
+            })),
+            &Config::default(),
+        )?;
+        assert!(rendered.contains("pub struct Idle"), "{rendered}");
+        assert!(rendered.contains("Box<Idle>"), "{rendered}");
+    }
+
+    /// A tag-only branch the configuration addresses is a type the caller talks about, so it stays
+    /// one, and the entry still matches something.
+    #[test_util::test]
+    fn a_tag_only_branch_the_configuration_addresses_keeps_its_type() {
+        let config = Config {
+            type_derives: std::collections::BTreeMap::from([(
+                "/components/schemas/PatchChangeKind/oneOf/0".to_owned(),
+                std::collections::BTreeSet::from([crate::config::Derive::Hash]),
+            )]),
+            ..Config::default()
+        };
+        let rendered = types(tag_only_branches(), &config)?;
+        assert!(
+            rendered.contains("Add(Box<AddPatchChangeKind>)"),
+            "{rendered}"
+        );
+        // The branch the configuration says nothing about is still a unit variant.
+        assert!(rendered.contains("Delete,"), "{rendered}");
+
+        // A rule's selector addresses a type as surely as a per-type table does.
+        let config = Config {
+            json_schema: Some(crate::config::JsonSchemaImpls {
+                types: crate::config::TypeSelection::Only(vec![
+                    "/components/schemas/PatchChangeKind/oneOf/1".to_owned(),
+                ]),
+                feature: None,
+            }),
+            ..Config::default()
+        };
+        let rendered = types(tag_only_branches(), &config)?;
+        assert!(
+            rendered.contains("Delete(Box<DeletePatchChangeKind>)"),
+            "{rendered}"
+        );
+    }
+
+    /// Two inline shapes alike in every member but named by different titles stay two types, the
+    /// way two alike components do: a merge would put one's name on the other.
+    #[test_util::test]
+    fn alike_shapes_named_by_their_titles_do_not_merge() {
+        let reference = |title: &str| {
+            json!({"title": title, "type": "object", "required": ["id"],
+                   "properties": {"id": {"type": "string"}}})
+        };
+        let rendered = types(
+            with_schemas(json!({
+                "Membership": {"type": "object", "required": ["user", "team"], "properties": {
+                    "user": reference("UserRef"),
+                    "team": reference("TeamRef"),
+                }},
+            })),
+            &Config::default(),
+        )?;
+        assert!(rendered.contains("pub user: UserRef"), "{rendered}");
+        assert!(rendered.contains("pub team: TeamRef"), "{rendered}");
+    }
+
     #[test_util::test]
     fn a_union_that_shape_cannot_decide_renders_its_tag() {
         let rendered = types(

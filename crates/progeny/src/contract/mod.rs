@@ -22,6 +22,7 @@ mod name;
 mod reach;
 mod select;
 mod twin;
+mod unit;
 
 use std::collections::BTreeMap;
 
@@ -739,28 +740,39 @@ pub(crate) fn build(
             ),
         ));
     }
-    let mut deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
+    let deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
     // Which direction each type travels is a fact about the document, read here so the forms
     // exist before anything is frozen; under strict decoding every type keeps its one form.
-    let twinned = match config.decoding {
-        crate::config::Decoding::Lenient => {
-            let reach = reach::run(
-                resolved,
-                &lowered.by_shape,
-                |index| {
-                    let mut reached = Vec::new();
-                    if let Some(contract) = deduped.get(index.index()) {
-                        for ty in contract.kind.references() {
-                            ty.named(&mut reached);
-                        }
+    let mut reach = match config.decoding {
+        crate::config::Decoding::Lenient => Some(reach::run(
+            resolved,
+            &lowered.by_shape,
+            |index| {
+                let mut reached = Vec::new();
+                if let Some(contract) = deduped.get(index.index()) {
+                    for ty in contract.kind.references() {
+                        ty.named(&mut reached);
                     }
-                    reached
-                },
-                deduped.len(),
-            );
-            twin::run(&mut deduped, &reach)
-        }
-        crate::config::Decoding::Strict => twin::Twinned::default(),
+                }
+                reached
+            },
+            deduped.len(),
+        )),
+        crate::config::Decoding::Strict => None,
+    };
+    // Before the forms, because a tag-only branch is a unit variant only where no read form would
+    // give its payload something to hold.
+    let mut deduped = unit::run(
+        deduped,
+        config,
+        &mut lowered.by_shape,
+        &mut lowered.collapses,
+        &lowered.tag_branches,
+        reach.as_mut(),
+    );
+    let twinned = match &reach {
+        Some(reach) => twin::run(&mut deduped, reach),
+        None => twin::Twinned::default(),
     };
     let mut contracts = finalize::run(deduped, config, ctx)?;
     contracts.by_shape = lowered.by_shape;

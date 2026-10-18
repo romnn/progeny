@@ -605,10 +605,15 @@ fn tagged_enum(
     let with_serde = contract.deser() == DeserStrategy::Derive;
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         let wire = &variant.tag_value;
         let rename =
             (with_serde && variant_ident != *wire).then(|| quote! { #[serde(rename = #wire)] });
+        // A branch that carries only its tag is a unit variant, which serde reads from and
+        // writes as an object holding the tag alone.
+        if variant.ty == TypeRef::Unit {
+            return quote! { #rename #variant_ident, };
+        }
+        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         quote! { #rename #variant_ident(#ty), }
     });
     // serde tries every tagged variant first and falls through to an untagged one only when
