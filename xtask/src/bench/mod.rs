@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
 use clap::Args as ClapArgs;
-use color_eyre::eyre;
+use color_eyre::eyre::{self, WrapErr as _, bail};
 
 use measure::Summary;
 use plan::{Target, key_of};
@@ -126,6 +126,11 @@ pub struct Args {
     /// How much worse than the baseline counts as a regression, in percent.
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
+
+    /// Also write the measurements here, in the `customSmallerIsBetter` format that
+    /// `github-action-benchmark` keeps a per-commit history of.
+    #[arg(long, value_name = "PATH", conflicts_with = "generate_only")]
+    json: Option<Utf8PathBuf>,
 
     /// Internal: run one command in this fresh process and report what it cost.
     #[arg(
@@ -234,6 +239,11 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     report_workspaces(&subjects, &summaries);
     report_packaging(&subjects, &summaries);
     compare(&subjects, &summaries);
+    if let Some(path) = &args.json {
+        let entries = history_entries(&summaries, &rustc_version())?;
+        std::fs::write(path, serde_json::to_string_pretty(&entries)?)
+            .wrap_err_with(|| format!("writing {path}"))?;
+    }
     // Writing or checking a baseline without naming one means the checked-in one: the point of a
     // baseline is that everybody compares against the same file.
     let path = args.baseline.clone().or_else(|| {
@@ -249,6 +259,74 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         return baseline::baseline(&path, &scopes, &summaries, args);
     }
     Ok(())
+}
+
+/// The measurements as `github-action-benchmark` entries: CPU seconds and peak resident set size
+/// per variant, which a shared runner reports more steadily than wall clock.
+///
+/// A variant that kept fewer than two repetitions fails the run.
+/// One sample is a point whose noise nobody can see, and the next commit is compared against it.
+/// The range beside each mean is half the spread of what was kept.
+fn history_entries(
+    summaries: &BTreeMap<String, Summary>,
+    rustc: &str,
+) -> eyre::Result<serde_json::Value> {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let mut entries = Vec::new();
+    for (key, summary) in summaries {
+        let kept = summary.kept.len();
+        let (Some(cpu), Some(rss)) = (summary.mean_cpu(), summary.mean_rss()) else {
+            bail!("{key} kept no repetition, so there is nothing to record for it");
+        };
+        if kept < 2 {
+            bail!("{key} kept {kept} repetition, and a point in the history needs two");
+        }
+        let cpu_samples = summary.kept.iter().map(|sample| sample.cpu_seconds);
+        let rss_samples = summary
+            .kept
+            .iter()
+            .map(|sample| as_f64(sample.peak_rss_bytes) / MIB);
+        // The compiler is named beside each point because a toolchain update moves every one.
+        let extra = format!(
+            "{kept} kept, {} discarded, {rustc}",
+            summary.discarded + summary.pressured
+        );
+        entries.push(serde_json::json!({
+            "name": format!("{key} cpu"),
+            "unit": "s",
+            "value": cpu,
+            "range": format!("± {:.2}", half_spread(cpu_samples)),
+            "extra": extra,
+        }));
+        entries.push(serde_json::json!({
+            "name": format!("{key} peak rss"),
+            "unit": "MiB",
+            "value": as_f64(rss) / MIB,
+            "range": format!("± {:.1}", half_spread(rss_samples)),
+            "extra": extra,
+        }));
+    }
+    if entries.is_empty() {
+        bail!("nothing was measured, so there is nothing to record");
+    }
+    Ok(serde_json::Value::Array(entries))
+}
+
+/// Half the distance between the smallest and the largest value.
+fn half_spread(values: impl Iterator<Item = f64> + Clone) -> f64 {
+    let low = values.clone().fold(f64::INFINITY, f64::min);
+    let high = values.fold(f64::NEG_INFINITY, f64::max);
+    (high - low) / 2.0
+}
+
+/// The compiler the measurements were taken with, or a placeholder when it cannot be asked.
+fn rustc_version() -> String {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "rustc unknown".to_owned(), |text| text.trim().to_owned())
 }
 
 fn ordered_targets(targets: &[Target], rep: usize) -> Vec<&Target> {
@@ -526,8 +604,14 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use color_eyre::eyre;
+
+    use super::measure::{Sample, Summary};
     use super::{
-        HAND_WRITTEN, Target, format_bytes, ordered_targets, percent, selected_strategies,
+        HAND_WRITTEN, Target, format_bytes, history_entries, ordered_targets, percent,
+        selected_strategies,
     };
 
     fn target(strategy: &str, member: &str) -> Target {
@@ -584,6 +668,66 @@ mod tests {
                 "derive.server",
             ]
         );
+    }
+
+    fn kept(cpu_seconds: f64, peak_rss_bytes: u64) -> Sample {
+        Sample {
+            cpu_seconds,
+            peak_rss_bytes,
+            load_before: 0.0,
+            load_after: 0.0,
+            wall_seconds: cpu_seconds,
+            pressured: false,
+        }
+    }
+
+    /// Each variant is two points in the history, its mean CPU time and its mean peak, named so a
+    /// chart per point lines up commit after commit.
+    #[test_util::test]
+    fn a_variant_is_recorded_as_its_cpu_time_and_peak() {
+        let summary = Summary {
+            kept: vec![kept(6.0, 1024 * 1024 * 1024), kept(8.0, 1024 * 1024 * 1024)],
+            discarded: 1,
+            ..Summary::default()
+        };
+        let summaries = BTreeMap::from([("oxide.hand-written".to_owned(), summary)]);
+        let entries = history_entries(&summaries, "rustc 1.99.0")?;
+        assert_eq!(
+            entries,
+            serde_json::json!([
+                {
+                    "name": "oxide.hand-written cpu",
+                    "unit": "s",
+                    "value": 7.0,
+                    "range": "± 1.00",
+                    "extra": "2 kept, 1 discarded, rustc 1.99.0",
+                },
+                {
+                    "name": "oxide.hand-written peak rss",
+                    "unit": "MiB",
+                    "value": 1024.0,
+                    "range": "± 0.0",
+                    "extra": "2 kept, 1 discarded, rustc 1.99.0",
+                },
+            ])
+        );
+    }
+
+    /// A variant that kept fewer than two repetitions fails the run rather than recording a point
+    /// whose noise cannot be seen.
+    #[test]
+    fn a_variant_with_fewer_than_two_kept_is_an_error() {
+        for kept_samples in [vec![], vec![kept(6.0, 1024)]] {
+            let summary = Summary {
+                kept: kept_samples,
+                discarded: 2,
+                ..Summary::default()
+            };
+            let summaries = BTreeMap::from([("okta.hand-written".to_owned(), summary)]);
+            assert!(history_entries(&summaries, "rustc 1.99.0").is_err());
+        }
+        // Nothing measured at all, as with no repetitions, is no history either.
+        assert!(history_entries(&BTreeMap::new(), "rustc 1.99.0").is_err());
     }
 
     #[test]
