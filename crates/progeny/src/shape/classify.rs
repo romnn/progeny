@@ -1573,6 +1573,12 @@ enum Branch {
 impl Branch {
     fn of(resolved: &ResolvedDocument, key: &ShapeKey) -> Self {
         let mut view = merge::view(resolved, key);
+        // A base its discriminator's mapping makes a union is that union, whose fallback holds
+        // whatever none of its subtypes fits, however much its view looks like one object.
+        let subtypes = subtypes(resolved, &view, key).branches;
+        if subtypes.len() >= 2 {
+            return Self::Union(subtypes);
+        }
         if view
             .union
             .as_deref()
