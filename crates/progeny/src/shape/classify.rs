@@ -1431,11 +1431,13 @@ fn reads_every_string(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
 }
 
 /// Whether every payload a branch is meant for is a string.
+///
+/// A branch that also admits `null` is meant for a payload no string branch reads.
 fn reads_strings_only(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
     let Branch::Leaf(view) = Branch::of(resolved, key) else {
         return false;
     };
-    kind_of(resolved, &view) == Some(Kind::String)
+    kind_of(resolved, &view) == Some(Kind::String) && !declares_null(&view)
 }
 
 /// How far into nested arrays and unions the ambiguity test follows a branch before giving up.
@@ -1468,7 +1470,15 @@ fn swallows_payloads_of(
         return Some("its branches nest deeper than the shape comparison follows".to_owned());
     }
     let depth = depth.saturating_add(1);
-    let first = match Branch::of(resolved, earlier) {
+    if lists_beside_its_union(resolved, earlier) {
+        return Some(
+            "one of its branches lists values beside a union of its own, and the type generated \
+             for that union reads values the list leaves out, so it may accept the payloads of a \
+             later branch"
+                .to_owned(),
+        );
+    }
+    let (first, first_flattened) = match Branch::of(resolved, earlier) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, &inner, later, depth),
         Branch::Union(_) => {
             return Some(
@@ -1478,7 +1488,8 @@ fn swallows_payloads_of(
                     .to_owned(),
             );
         }
-        Branch::Leaf(view) | Branch::Flattened(view) => view,
+        Branch::Leaf(view) => (view, false),
+        Branch::Flattened(view) => (view, true),
     };
     let (second, flattened) = match Branch::of(resolved, later) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, earlier, &inner, depth),
@@ -1493,9 +1504,10 @@ fn swallows_payloads_of(
 
     // A branch that constrains nothing accepts every payload its siblings do — but an untagged
     // enum tries its variants in declaration order, so one sitting *last* is a catch-all that only
-    // ever runs when everything else has failed. That is a shape real documents write on purpose
-    // ("this list of things, or an untyped list"), and it loses nothing. Anywhere else the same
-    // branch swallows the ones after it, which loses everything.
+    // ever runs when everything else has failed.
+    // That is a shape real documents write on purpose ("this list of things, or an untyped
+    // list"), and behind branches that admit what they read it loses nothing.
+    // Anywhere else the same branch swallows the ones after it, which loses everything.
     let Some(left) = kind_of(resolved, &first) else {
         return Some(
             "one of its branches says nothing about the shape of its own payload and is not the \
@@ -1503,17 +1515,34 @@ fn swallows_payloads_of(
                 .to_owned(),
         );
     };
-    let right = kind_of(resolved, &second)?;
-    if left != right {
+    // A later branch that admits every payload of the earlier one's kind is a catch-all, reached
+    // only by what every branch before it refuses, and it declares no members an earlier branch
+    // could drop.
+    // An earlier branch whose type accepts a payload its own schema refuses takes one of the
+    // catch-all's, such as an unlisted value of an enum it lists.
+    let right = kind_of(resolved, &second);
+    if right.is_none_or(|right| right == left && !flattened && admits_its_kind(resolved, &second)) {
+        let overreaches = first_flattened || view_overreaches(resolved, &first, 0);
+        return overreaches.then(|| {
+            "one of its branches reads values its schema does not admit, such as an unlisted \
+             value of an enum, so it accepts payloads meant for a later branch that admits every \
+             value of its kind"
+                .to_owned()
+        });
+    }
+    if right != Some(left) {
         return None;
     }
     match left {
         // A closed earlier branch that keeps every part of what it reads loses nothing by taking a
         // payload a later one could also read, so first match is a faithful reading.
+        // That holds only for payloads it admits: one with a member's unlisted value is a later
+        // branch's, however whole the earlier one keeps it.
         // A base its discriminator's mapping makes a union is not the struct its view describes.
         Kind::Object
             if !names_its_subtypes(resolved, &first, earlier)
-                && reads_whole(resolved, &first, 0) =>
+                && reads_whole(resolved, &first, 0)
+                && !view_overreaches(resolved, &first, 0) =>
         {
             None
         }
@@ -1607,8 +1636,13 @@ impl Branch {
         match reading {
             Reading::One(key) => Self::Through(key),
             // An enum that admits any other string reads every string, as a bare string does.
+            // A `null` among them makes the enum optional, which reads `null` as well.
             Reading::Strings(strings) => Self::Leaf(Box::new(View {
-                types: Some(BTreeSet::from([TypeName::String])),
+                types: Some(if nullable {
+                    BTreeSet::from([TypeName::String, TypeName::Null])
+                } else {
+                    BTreeSet::from([TypeName::String])
+                }),
                 enumeration: (!strings.any_other)
                     .then(|| strings.values.into_iter().map(Value::String).collect()),
                 ..View::default()
@@ -1771,6 +1805,17 @@ fn enumerated_kind(view: &View) -> Option<Kind> {
 ///
 /// A payload the earlier branch accepts *and* the later branch validates is ambiguous in the
 /// document itself, not in this reading of it, so it is not what these rules are for.
+///
+/// A later branch's payloads are the ones its declared members describe.
+/// A member it never declares is taken to be absent, although an open object may carry it.
+/// So `{"id": "b", "x": "keep"}` against `[{id: enum[a]}, {x}]` reads as the first branch, with
+/// `id` an unlisted value of its open enum, and `x` is dropped as any undeclared member is.
+/// That payload carries the first branch's whole shape, and reading it so is the forward
+/// compatibility the open enum is for.
+/// Judging an open later branch by every payload it validates instead degrades about 200 unions
+/// across the corpus, mostly ones whose branches only their required members tell apart.
+/// A later branch that declares no members is a catch-all, which [`swallows_payloads_of`] judges
+/// by what the earlier branch's own schema admits instead.
 fn rejects(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usize) -> bool {
     // A member every payload of `view` carries and the generated struct insists on.
     // A required member that may be `null` is an `Option`, which reads an absent member as `None`,
@@ -1919,6 +1964,145 @@ fn reads_whole(resolved: &ResolvedDocument, view: &View, depth: usize) -> bool {
                         && member(key)
                 })
         }
+    }
+}
+
+/// Whether the type generated for a branch accepts a payload its own schema refuses.
+///
+/// A payload like that is not the branch's, so when a later branch admits it, the later one is
+/// the branch it was meant for, and taking it first reads it as the wrong variant.
+/// The over-acceptance that decides this under progeny's types is a listed value: a string enum
+/// keeps an unlisted string as its `Unknown`, and a numeric or boolean list is the plain scalar.
+/// So does a union, which holds what none of its branches fits in its fallback, a branch
+/// generated as arbitrary JSON because progeny cannot express its schema, and a required member
+/// whose field is an `Option`, which reads its absence as `None`.
+///
+/// Validation keywords such as `pattern` or `minimum` are never enforced, so they do not count.
+/// Neither does an optional member reading an explicit `null` as absent: a payload that sends
+/// `null` for a member it may leave out is read as the branch that declares the member, which is
+/// the reading every struct gives it.
+/// Every declared member counts, required or not, and so do a list's items and a map's values,
+/// as far as [`MAX_AMBIGUITY_DEPTH`]; a branch deeper than that answers yes.
+fn overreaches(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> bool {
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return true;
+    }
+    if lists_beside_its_union(resolved, key) {
+        return true;
+    }
+    match Branch::of(resolved, key) {
+        Branch::Through(inner) => overreaches(resolved, &inner, depth.saturating_add(1)),
+        Branch::Union(_) | Branch::Flattened(_) => true,
+        Branch::Leaf(view) => view_overreaches(resolved, &view, depth),
+    }
+}
+
+/// [`overreaches`] for a branch already read as one view, which is neither a union nor a struct
+/// with a union flattened beside its members.
+fn view_overreaches(resolved: &ResolvedDocument, view: &View, depth: usize) -> bool {
+    // What [`key`] gives up on is arbitrary JSON, which accepts what the schema meant to refuse.
+    if view.impossible || view.conflict.is_some() || view.unions_collide {
+        return true;
+    }
+    let member = |key: &ShapeKey| overreaches(resolved, key, depth.saturating_add(1));
+    match kind_of(resolved, view) {
+        // A list of `null` alone is the unit type, which reads nothing else.
+        Some(Kind::Null) => false,
+        // A list of both booleans admits every boolean, unless a constant beside it admits one.
+        // A `null` in the `type` or the list makes the field an `Option`, which reads `null`
+        // although the schema admits it only where both do.
+        Some(Kind::Boolean)
+            if view.constant.is_none()
+                && admitted_values(view).is_some_and(|values| {
+                    let typed_null = view
+                        .types
+                        .as_ref()
+                        .is_none_or(|types| types.contains(&TypeName::Null));
+                    values.contains("true")
+                        && values.contains("false")
+                        && (!declares_null(view) || (typed_null && values.contains("null")))
+                }) =>
+        {
+            false
+        }
+        Some(_) if admitted_values(view).is_some() => true,
+        Some(Kind::String | Kind::Number | Kind::Boolean) => false,
+        // A tuple whose tail admits nothing reads its prefix alone and refuses a longer list.
+        // With no prefix there is no tuple, and the list reads its items as they are generated.
+        Some(Kind::Array) => view
+            .items
+            .iter()
+            .filter(|key| {
+                view.prefix_items.as_ref().is_none_or(Vec::is_empty)
+                    || !merge::view(resolved, key).impossible
+            })
+            .chain(view.prefix_items.iter().flatten())
+            .any(member),
+        // A required name is enforced only by a field that is not an `Option`, which reads an
+        // absent member as `None`.
+        Some(Kind::Object) => {
+            view.required.iter().any(|name| {
+                view.properties
+                    .get(name)
+                    .is_none_or(|key| generates_option(resolved, key, 0))
+            }) || view
+                .properties
+                .values()
+                .chain(&view.additional)
+                .chain(&view.uniform_pattern)
+                .any(member)
+        }
+        // An open tuple, which [`kind_of`] reads as arbitrary JSON although it describes a list.
+        None if declared_kind(view).is_some() => true,
+        // A `type` that names several kinds is arbitrary JSON, which reads the kinds it does not
+        // name too, and so are required names with nothing to say they belong to an object.
+        // A branch that constrains nothing refuses nothing, and neither does its type.
+        None => {
+            admitted_values(view).is_some()
+                || !view.required.is_empty()
+                || view
+                    .types
+                    .iter()
+                    .flatten()
+                    .any(|name| *name != TypeName::Null)
+        }
+    }
+}
+
+/// Whether a schema lists values beside a union of its own.
+///
+/// The list is not in the branch [`Branch::of`] reads the schema as, and the type generated for
+/// the union reads values the list leaves out.
+fn lists_beside_its_union(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
+    let view = merge::view(resolved, key);
+    view.union.is_some() && admitted_values(&view).is_some()
+}
+
+/// Whether a branch admits every value of its kind, as an object or a list that says nothing
+/// about its members, and so is generated as a map or list of arbitrary JSON.
+fn admits_its_kind(resolved: &ResolvedDocument, view: &View) -> bool {
+    // A member, item or value schema that says nothing about its payloads, and is no union.
+    let unconstrained = |key: &ShapeKey| match Branch::of(resolved, key) {
+        Branch::Leaf(view) => {
+            kind_of(resolved, &view).is_none() && admitted_values(&view).is_none()
+        }
+        Branch::Through(_) | Branch::Union(_) | Branch::Flattened(_) => false,
+    };
+    if admitted_values(view).is_some() {
+        return false;
+    }
+    match kind_of(resolved, view) {
+        Some(Kind::Object) => {
+            view.properties.is_empty()
+                && view.required.is_empty()
+                && !view.additional_denied
+                && view.uniform_pattern.is_none()
+                && view.additional.as_ref().is_none_or(unconstrained)
+        }
+        Some(Kind::Array) => {
+            view.prefix_items.is_none() && view.items.as_ref().is_none_or(unconstrained)
+        }
+        _ => false,
     }
 }
 
