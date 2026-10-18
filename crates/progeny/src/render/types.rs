@@ -349,28 +349,16 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
                 #body
             }
         }
-        ContractKind::StringEnum { variants, fallback } => {
-            // Never a serde attribute here: an open string enum is hand-written under both
-            // strategies, because no derive encoding keeps an unlisted string verbatim.
-            let arms = variants.iter().map(|variant| {
-                let variant_ident = ident(&variant.rust_name);
-                quote! { #variant_ident, }
-            });
-            let fallback_ident = ident(fallback);
-            let accessor = string_enum_accessor(contract, variants, fallback);
+        ContractKind::StringEnum {
+            variants,
+            fallback,
+            any_other,
+        } => {
+            let body = string_enum(variants, fallback, *any_other, contract);
             quote! {
                 #docs
                 #derives
-                pub enum #name {
-                    #(#arms)*
-                    /// A value the description does not list, kept exactly as it arrived.
-                    ///
-                    /// Written back unchanged, so a value round-trips whether or not the
-                    /// description knows it, and a request can carry one the description has
-                    /// not caught up with.
-                    #fallback_ident(String),
-                }
-                #accessor
+                #body
             }
         }
         ContractKind::Newtype { inner } => {
@@ -494,6 +482,50 @@ fn data_enum(
             #(#arms)*
             #fallback
         }
+    }
+}
+
+/// A string enum: a unit variant per listed value, the fallback holding any other, and the accessor
+/// that reads the wire string back.
+///
+/// Never a serde attribute here: an open string enum is hand-written under both strategies,
+/// because no derive encoding keeps an unlisted string verbatim.
+fn string_enum(
+    variants: &[crate::contract::StringVariant],
+    fallback: &RustIdent,
+    any_other: bool,
+    contract: &TypeContract,
+) -> TokenStream {
+    let name = ident(contract.rust_name());
+    let arms = variants.iter().map(|variant| {
+        let variant_ident = ident(&variant.rust_name);
+        quote! { #variant_ident, }
+    });
+    let fallback_ident = ident(fallback);
+    let accessor = string_enum_accessor(contract, variants, fallback);
+    // A value the description allows, or one it does not list.
+    let fallback_docs = if any_other {
+        quote! {
+            /// Any other value, which the description allows beside the ones it names.
+            ///
+            /// Kept exactly as it arrived and written back unchanged.
+        }
+    } else {
+        quote! {
+            /// A value the description does not list, kept exactly as it arrived.
+            ///
+            /// Written back unchanged, so a value round-trips whether or not the
+            /// description knows it, and a request can carry one the description has
+            /// not caught up with.
+        }
+    };
+    quote! {
+        pub enum #name {
+            #(#arms)*
+            #fallback_docs
+            #fallback_ident(String),
+        }
+        #accessor
     }
 }
 

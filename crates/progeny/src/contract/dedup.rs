@@ -243,8 +243,13 @@ fn fingerprint(contract: &Provisional) -> String {
             }
             let _ = write!(out, "|?{fallback}");
         }
-        ContractKind::StringEnum { variants, fallback } => {
-            out.push_str("strings");
+        ContractKind::StringEnum {
+            variants,
+            fallback,
+            any_other,
+        } => {
+            // Admitting any other string changes what a lenient decode reports, so it is identity.
+            out.push_str(if *any_other { "strings+" } else { "strings" });
             for variant in variants {
                 let _ = write!(out, "|{}={}", variant.rust_name, variant.wire_name);
             }

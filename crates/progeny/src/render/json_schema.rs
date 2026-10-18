@@ -212,7 +212,11 @@ impl Writer<'_> {
                 ..
             } => self.carried(tag, variants, *routes),
             ContractKind::KeyedEnum { variants, .. } => self.keyed(variants),
-            ContractKind::StringEnum { variants, .. } => strings(variants),
+            ContractKind::StringEnum {
+                variants,
+                any_other,
+                ..
+            } => strings(variants, *any_other),
             ContractKind::Newtype { inner } => self.reference(inner),
             ContractKind::Tuple { items } => self.tuple(items),
             ContractKind::Alias { .. } => return None,
@@ -523,13 +527,17 @@ fn carried_tag_member(tag: &str, variant: &TaggedVariant, absent: bool, null: bo
 
 /// An open enum of strings: the values the description lists, and any other string, which the
 /// fallback variant keeps.
-fn strings(variants: &[StringVariant]) -> Node {
+fn strings(variants: &[StringVariant], any_other: bool) -> Node {
     let listed: Vec<Value> = variants
         .iter()
         .map(|variant| Value::String(variant.wire_name.clone()))
         .collect();
     let unlisted = serde_json::json!({
-        "description": "A value the description does not list, kept exactly as it arrived.",
+        "description": if any_other {
+            "Any other value, which the description allows beside the ones it names."
+        } else {
+            "A value the description does not list, kept exactly as it arrived."
+        },
     });
     let arms = if listed.is_empty() {
         vec![unlisted]

@@ -123,6 +123,11 @@ fn decoder(
     let name = implementation_type(contract);
     let body = match contract.kind() {
         ContractKind::Struct { fields } => struct_body(contract, fields, scope),
+        // A value the description allows is no drift, so an enum that admits any other string
+        // reads the way its strict form does.
+        ContractKind::StringEnum {
+            any_other: true, ..
+        } => quote! { #support::lenient::open_string(content, site, report, |_| None) },
         ContractKind::StringEnum { fallback, .. } => string_enum_body(contract, fallback, scope),
         ContractKind::Enum { variants, fallback } => {
             untagged_body(contract, variants, fallback, contracts, config, scope)

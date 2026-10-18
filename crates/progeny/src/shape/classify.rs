@@ -17,7 +17,7 @@ use serde_json::Value;
 use super::merge::{self, Discriminated, View};
 use super::{
     Docs, Extra, Field, Format, Keyed, KeyedVariant, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey,
-    ShapeRef, Struct, Tag, TagStyle, Union, Variant,
+    ShapeRef, StringEnum, Struct, Tag, TagStyle, Union, Variant,
 };
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
@@ -200,7 +200,7 @@ fn core(
         return keep_own_members(resolved, view, shape, ctx, at);
     }
     if let Some(values) = string_values(view, ctx, at) {
-        return Shape::StringEnum(values);
+        return Shape::StringEnum(StringEnum::listed(values));
     }
 
     let mut named = types.into_iter().flatten();
@@ -432,7 +432,7 @@ fn union(
         // `anyOf: [T, {type: null}]` — the nullable-emulation pattern, and the reason to look at
         // the branches at all before treating this as a union.
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
-        Reading::Strings(values) => Shape::StringEnum(values),
+        Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::Variants(rest) => {
             if let Some(keyed) = keyed(resolved, view, &rest) {
                 Shape::Keyed(keyed)
@@ -835,8 +835,9 @@ enum Reading {
     Empty,
     /// One branch, which the union is an alias or an `Option` of.
     One(ShapeKey),
-    /// Branches that only list strings, which read as one string enum ([`folded_strings`]).
-    Strings(Vec<String>),
+    /// Branches that only list strings, or read any string, which read as one string enum
+    /// ([`folded_strings`]).
+    Strings(StringEnum),
     /// Two or more branches a payload has to be told apart between.
     Variants(Vec<ShapeKey>),
 }
@@ -856,7 +857,14 @@ impl Reading {
         let reading = match rest.len() {
             0 => Self::Empty,
             1 => rest.pop().map_or(Self::Empty, Self::One),
-            _ => folded_strings(resolved, &rest).map_or(Self::Variants(rest), Self::Strings),
+            _ => match folded_strings(resolved, &rest) {
+                // A catch-all `type: [string, null]` admits `null` as surely as a `null` branch.
+                Some((strings, null)) => {
+                    nullable |= null;
+                    Self::Strings(strings)
+                }
+                None => Self::Variants(rest),
+            },
         };
         (reading, nullable)
     }
@@ -1237,11 +1245,13 @@ fn union_constants(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option
             }
             listed_constants(&inner)?
         }
-        Reading::Strings(values) => TagConstants {
-            values,
+        // A tag reads one of the values it lists, so a union that admits any other string is not
+        // one.
+        Reading::Strings(strings) if !strings.any_other => TagConstants {
+            values: strings.values,
             null: false,
         },
-        Reading::Empty | Reading::Variants(_) => return None,
+        Reading::Empty | Reading::Strings(_) | Reading::Variants(_) => return None,
     };
     constants.null |= nullable;
     Some(constants)
@@ -1596,9 +1606,11 @@ impl Branch {
         let (reading, nullable) = Reading::of(resolved, branches);
         match reading {
             Reading::One(key) => Self::Through(key),
-            Reading::Strings(values) => Self::Leaf(Box::new(View {
+            // An enum that admits any other string reads every string, as a bare string does.
+            Reading::Strings(strings) => Self::Leaf(Box::new(View {
                 types: Some(BTreeSet::from([TypeName::String])),
-                enumeration: Some(values.into_iter().map(Value::String).collect()),
+                enumeration: (!strings.any_other)
+                    .then(|| strings.values.into_iter().map(Value::String).collect()),
                 ..View::default()
             })),
             Reading::Variants(branches) => Self::Union(branches),
@@ -1997,17 +2009,29 @@ fn same_kind(value: &Value, against: Option<&&Value>) -> bool {
     std::mem::discriminant(value) == std::mem::discriminant(*against)
 }
 
-/// The strings a union's branches name, when every branch lists only strings.
+/// The strings a union's branches name, when every branch lists only strings or reads any string.
 ///
 /// A generated string enum is open, so one enum of every listed value reads each string the way
 /// the document means it.
 /// Kept as separate variants instead, each branch's enum would read every string, the first would
 /// take them all, and the branches after it would never be reached.
 ///
+/// A branch that reads any string, the `{type: string}` beside `{enum: [small, large]}` a document
+/// writes for "known values, or any other", names no value of its own.
+/// It makes every other string one the document allows, whichever order the branches come in.
+/// At least one branch has to list a value, or there is no enum.
+/// The second half of the answer says whether such a branch admits `null` too, which the enum then
+/// has to keep.
+///
 /// A branch with something to report, or a union of its own, is not folded in: it is reported and
 /// read where it is classified, and folded into the enum it would never be classified at all.
-fn folded_strings(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<Vec<String>> {
+fn folded_strings(
+    resolved: &ResolvedDocument,
+    branches: &[ShapeKey],
+) -> Option<(StringEnum, bool)> {
     let mut values = Vec::new();
+    let mut any_other = false;
+    let mut null = false;
     for branch in branches {
         let view = merge::view(resolved, branch);
         let reported = !view.uninterpreted.is_empty()
@@ -2022,13 +2046,33 @@ fn folded_strings(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<
         let declared = match (&view.enumeration, &view.constant) {
             (Some(listed), _) => listed.clone(),
             (None, Some(value)) => vec![value.clone()],
+            (None, None) if reads_any_string(resolved, &view) => {
+                any_other = true;
+                null |= declares_null(&view);
+                continue;
+            }
             (None, None) => return None,
         };
         for value in declared {
             values.push(value.as_str()?.to_owned());
         }
     }
-    (!values.is_empty()).then_some(unique(values))
+    (!values.is_empty()).then(|| {
+        let strings = StringEnum {
+            values: unique(values),
+            any_other,
+        };
+        (strings, null)
+    })
+}
+
+/// Whether a branch is a string and nothing more: no listed values, structure, format or encoding.
+fn reads_any_string(resolved: &ResolvedDocument, view: &View) -> bool {
+    kind_of(resolved, view) == Some(Kind::String)
+        && declares_no_structure(view)
+        && view.format.is_none()
+        && view.content_encoding.is_none()
+        && view.content_media_type.is_none()
 }
 
 /// The listed values with repeats dropped, in the order the document wrote them.

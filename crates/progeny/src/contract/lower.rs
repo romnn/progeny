@@ -575,9 +575,13 @@ impl Lower<'_> {
                 }
                 ContractKind::Struct { fields }
             }
-            Shape::StringEnum(values) => {
-                let (variants, fallback) = string_variants(values);
-                ContractKind::StringEnum { variants, fallback }
+            Shape::StringEnum(strings) => {
+                let (variants, fallback) = string_variants(&strings.values);
+                ContractKind::StringEnum {
+                    variants,
+                    fallback,
+                    any_other: strings.any_other,
+                }
             }
             Shape::Keyed(keyed) => self.keyed(keyed, key, ctx),
             Shape::Union(union) => {

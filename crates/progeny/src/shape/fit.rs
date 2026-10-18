@@ -59,7 +59,7 @@ impl<'a> Fit<'a> {
             // Only reached when every listed value is a string — a mixed `enum` degrades to `Any`
             // long before this — so the generated type is a unit-variant enum that reads from a
             // string and nothing else. A non-string here is as certainly wrong as a wrong spelling.
-            Shape::StringEnum(values) => {
+            Shape::StringEnum(strings) => {
                 let Some(text) = value.as_str() else {
                     return Some(format!(
                         "the schema says a string, {} is {}",
@@ -67,10 +67,12 @@ impl<'a> Fit<'a> {
                         kind(value)
                     ));
                 };
-                (!values.iter().any(|allowed| allowed == text)).then(|| {
+                // An enum that admits any other string fits every string.
+                let listed = strings.values.iter().any(|allowed| allowed == text);
+                (!listed && !strings.any_other).then(|| {
                     format!(
                         "`{text}` is not one of the {} values the enum allows",
-                        values.len()
+                        strings.values.len()
                     )
                 })
             }

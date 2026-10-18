@@ -1347,6 +1347,34 @@ mod tests {
         );
     }
 
+    /// Known values beside any string read an unlisted value as one the description allows: its
+    /// fallback says so, and a lenient decode does not report it.
+    #[test_util::test]
+    fn an_enum_that_admits_any_other_string_reports_no_unlisted_value() {
+        let mut document = with_schemas(json!({
+            "Model": {"anyOf": [
+                {"type": "string", "enum": ["small", "large"]},
+                {"type": "string"},
+            ]},
+        }));
+        document["paths"] = json!({"/model": {"get": {
+            "operationId": "getModel",
+            "responses": {"200": {"description": "ok", "content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/Model"},
+            }}}},
+        }}});
+        let rendered = types(document, &Config::default())?;
+        assert!(rendered.contains("pub enum Model"), "{rendered}");
+        assert!(
+            rendered.contains("Any other value, which the description allows"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("open_string(content, site, report, |_| None)"),
+            "{rendered}"
+        );
+    }
+
     /// Two inline shapes alike in every member but named by different titles stay two types, the
     /// way two alike components do: a merge would put one's name on the other.
     #[test_util::test]
