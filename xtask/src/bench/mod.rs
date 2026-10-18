@@ -261,6 +261,19 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
+/// One point of the history, in `github-action-benchmark`'s `customSmallerIsBetter` format.
+#[derive(Debug, serde::Serialize)]
+struct HistoryEntry {
+    /// The chart the point belongs to, the same from commit to commit.
+    name: String,
+    unit: &'static str,
+    value: f64,
+    /// Shown beside the value; half the spread of the repetitions kept.
+    range: String,
+    /// Shown in the point's tooltip.
+    extra: String,
+}
+
 /// The measurements as `github-action-benchmark` entries: CPU seconds and peak resident set size
 /// per variant, which a shared runner reports more steadily than wall clock.
 ///
@@ -270,7 +283,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
 fn history_entries(
     summaries: &BTreeMap<String, Summary>,
     rustc: &str,
-) -> eyre::Result<serde_json::Value> {
+) -> eyre::Result<Vec<HistoryEntry>> {
     const MIB: f64 = 1024.0 * 1024.0;
     let mut entries = Vec::new();
     for (key, summary) in summaries {
@@ -291,25 +304,25 @@ fn history_entries(
             "{kept} kept, {} discarded, {rustc}",
             summary.discarded + summary.pressured
         );
-        entries.push(serde_json::json!({
-            "name": format!("{key} cpu"),
-            "unit": "s",
-            "value": cpu,
-            "range": format!("± {:.2}", half_spread(cpu_samples)),
-            "extra": extra,
-        }));
-        entries.push(serde_json::json!({
-            "name": format!("{key} peak rss"),
-            "unit": "MiB",
-            "value": as_f64(rss) / MIB,
-            "range": format!("± {:.1}", half_spread(rss_samples)),
-            "extra": extra,
-        }));
+        entries.push(HistoryEntry {
+            name: format!("{key} cpu"),
+            unit: "s",
+            value: cpu,
+            range: format!("± {:.2}", half_spread(cpu_samples)),
+            extra: extra.clone(),
+        });
+        entries.push(HistoryEntry {
+            name: format!("{key} peak rss"),
+            unit: "MiB",
+            value: as_f64(rss) / MIB,
+            range: format!("± {:.1}", half_spread(rss_samples)),
+            extra,
+        });
     }
     if entries.is_empty() {
         bail!("nothing was measured, so there is nothing to record");
     }
-    Ok(serde_json::Value::Array(entries))
+    Ok(entries)
 }
 
 /// Half the distance between the smallest and the largest value.
@@ -691,7 +704,8 @@ mod tests {
             ..Summary::default()
         };
         let summaries = BTreeMap::from([("oxide.hand-written".to_owned(), summary)]);
-        let entries = history_entries(&summaries, "rustc 1.99.0")?;
+        // Compared as JSON, because the JSON is what the action reads.
+        let entries = serde_json::to_value(history_entries(&summaries, "rustc 1.99.0")?)?;
         assert_eq!(
             entries,
             serde_json::json!([
