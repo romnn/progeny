@@ -362,6 +362,21 @@ fn tagged_body(
         .zip(&table.patterns)
         .map(|(variant, pattern)| {
             let name = ident(&variant.rust_name);
+            // A unit variant reads an object holding its tag, and reports any other member as one
+            // it never declared, as the empty struct it stands for would.
+            if variant.ty == TypeRef::Unit {
+                let unit = unit_variant(contract.docs().deprecated, &name);
+                return quote! {
+                    Some(#pattern) => #support::lenient::tag_only(
+                        content,
+                        #literal_name,
+                        TAG,
+                        Self::SITE,
+                        report,
+                    )
+                    .map(|()| #unit),
+                };
+            }
             let ty = type_ref_in(&variant.ty, contracts, config, scope);
             let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
             // Every position of a spelling of the variant's tag
@@ -459,6 +474,24 @@ fn keyed_body(
                     .map(#unknown)
             }
         }
+    }
+}
+
+/// A unit variant, with the expectation a deprecated one needs to be constructed.
+fn unit_variant(deprecated: bool, variant: &proc_macro2::Ident) -> TokenStream {
+    if deprecated {
+        quote! {
+            {
+                #[expect(
+                    deprecated,
+                    reason = "the generated decoder must construct this deprecated variant"
+                )]
+                let resolved = Self::#variant;
+                resolved
+            }
+        }
+    } else {
+        quote! { Self::#variant }
     }
 }
 
@@ -569,7 +602,7 @@ fn from_strict(
                 .iter()
                 .zip(strict_variants)
                 .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
-            variant_conversions(pairs, fallback, &strict_name, contracts)
+            variant_conversions(pairs, fallback, &strict_name, contracts, Units::Payloads)
         }
         (
             ContractKind::TaggedEnum {
@@ -591,7 +624,7 @@ fn from_strict(
                 .iter()
                 .zip(strict_variants)
                 .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
-            variant_conversions(pairs, fallback, &strict_name, contracts)
+            variant_conversions(pairs, fallback, &strict_name, contracts, Units::Variants)
         }
         (
             ContractKind::KeyedEnum { variants, fallback },
@@ -665,6 +698,15 @@ fn struct_conversion(
     quote! { Self { #(#members)* } }
 }
 
+/// What a `()` payload is in a union's variants.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Units {
+    /// A payload like any other: an untagged union's `null` branch holds `()`.
+    Payloads,
+    /// A unit variant: a tagged union's branch that carries only its tag holds nothing.
+    Variants,
+}
+
 /// A union's conversion: each variant's payload converted where its type twins, and the open
 /// arm carried over as it is.
 fn variant_conversions<'a>(
@@ -672,9 +714,13 @@ fn variant_conversions<'a>(
     fallback: &RustIdent,
     strict_name: &TokenStream,
     contracts: &Contracts,
+    units: Units,
 ) -> TokenStream {
     let arms = pairs.map(|(name, read, strict)| {
         let name = ident(name);
+        if units == Units::Variants && *strict == TypeRef::Unit {
+            return quote! { #strict_name::#name => Self::#name, };
+        }
         let converted = boxed_convert(strict, read, contracts);
         quote! { #strict_name::#name(value) => Self::#name(#converted), }
     });

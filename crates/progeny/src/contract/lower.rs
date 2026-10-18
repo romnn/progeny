@@ -65,8 +65,10 @@ pub(super) struct Provisional {
     pub(super) kind: ContractKind,
     pub(super) unknown_fields: UnknownFields,
     pub(super) origin: JsonPointer,
-    /// The document gave this shape a name of its own, so it must not merge with another type that
-    /// also has one: two named components evolve independently, whatever they look like today.
+    /// The document gave this shape a name of its own, as a component or by the title it is named
+    /// after, so it must not merge with another type that also has one.
+    /// Two named types evolve independently, whatever they look like today, and a merge would put
+    /// one's name on the other.
     pub(super) declared: bool,
     /// The caller named it, which is a declaration of identity and blocks merging outright.
     pub(super) explicit: bool,
@@ -99,6 +101,7 @@ pub(super) fn run(
         by_address: BTreeMap::new(),
         components: BTreeMap::new(),
         needs_name: BTreeSet::new(),
+        tag_branches: BTreeSet::new(),
         collapses: Vec::new(),
         name_conflicts: Vec::new(),
         shared_titles: BTreeSet::new(),
@@ -145,6 +148,7 @@ pub(super) fn run(
         types: lower.types,
         by_shape: lower.done,
         collapses: lower.collapses,
+        tag_branches: lower.tag_branches,
         name_conflicts: lower.name_conflicts,
     }
 }
@@ -154,6 +158,8 @@ pub(super) struct Lowered {
     pub(super) types: Vec<Provisional>,
     pub(super) by_shape: BTreeMap<ShapeKey, TypeRef>,
     pub(super) collapses: Vec<Collapse>,
+    /// The branches of every union that consumes its tag, by shape.
+    pub(super) tag_branches: BTreeSet<ShapeKey>,
     /// Configured type names that could not be honored because the identifier was already
     /// handed out. A name the caller asked for by name cannot be suffixed behind their back,
     /// so [`super::build`] rejects the run instead.
@@ -281,6 +287,8 @@ struct Lower<'a> {
     components: BTreeMap<String, String>,
     /// Every key that has to become a named type.
     needs_name: BTreeSet<ShapeKey>,
+    /// See [`Lowered::tag_branches`].
+    tag_branches: BTreeSet<ShapeKey>,
     /// Properties whose optional-and-nullable distinction was collapsed, awaiting a position.
     collapses: Vec<Collapse>,
     /// Configured names the namer could not honor; see [`Lowered::name_conflicts`].
@@ -344,7 +352,8 @@ impl Lower<'_> {
             .then(|| self.config.name_for(component.as_deref(), &rendered))
             .flatten();
 
-        let (ident, explicit) = if let Some(chosen) = configured {
+        // Whether the document named the shape, by its component name or by its own title.
+        let (ident, explicit, titled) = if let Some(chosen) = configured {
             let wanted = RustIdent::type_name(std::slice::from_ref(chosen));
             // A configured name joins the namer like any auto-derived one, so later claims step
             // around it instead of colliding into an `E0428` in source the caller never wrote.
@@ -354,11 +363,11 @@ impl Lower<'_> {
                     at: address.clone(),
                 });
             }
-            (wanted, true)
+            (wanted, true, false)
         } else if let Some(titled) =
             self.title_name(key, component.as_deref(), &segments, &address, ctx)
         {
-            (titled, false)
+            (titled, false, true)
         } else {
             {
                 let named = self.namer.claim(&segments);
@@ -375,7 +384,7 @@ impl Lower<'_> {
                          one",
                     ));
                 }
-                (named.ident, false)
+                (named.ident, false, false)
             }
         };
 
@@ -390,7 +399,7 @@ impl Lower<'_> {
                 .config
                 .unknown_fields_for(component.as_deref(), &rendered),
             origin: address,
-            declared: component.is_some(),
+            declared: component.is_some() || titled,
             explicit,
             component,
             form: Form::Strict { twin: None },
@@ -572,10 +581,19 @@ impl Lower<'_> {
             }
             Shape::Keyed(keyed) => self.keyed(keyed, key, ctx),
             Shape::Union(union) => {
+                let consumed = union
+                    .tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.style == TagStyle::Consumed);
                 let variants = union
                     .variants
                     .iter()
                     .map(|variant| {
+                        // Whether a consumed-tag branch's payload is left with nothing to hold is
+                        // decided once its direction is known; see [`super::unit`].
+                        if let (true, ShapeRef::Key(branch)) = (consumed, &variant.shape) {
+                            self.tag_branches.insert(branch.clone());
+                        }
                         (
                             self.reference(&variant.shape, key, ctx),
                             variant.tag.clone(),

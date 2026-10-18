@@ -622,7 +622,12 @@ fn synthesize_named(
                     name: contract.rust_name().as_str().to_owned(),
                 });
             };
-            let mut value = synthesize(&variant.ty, contracts, visiting)?;
+            // A unit variant is its tag alone.
+            let mut value = if variant.ty == TypeRef::Unit {
+                json!({})
+            } else {
+                synthesize(&variant.ty, contracts, visiting)?
+            };
             if let Value::Object(members) = &mut value {
                 members.insert(tag.clone(), json!(variant.tag_value));
             }

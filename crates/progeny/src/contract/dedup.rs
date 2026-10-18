@@ -6,7 +6,7 @@
 //!
 //! | may merge | must not merge |
 //! | --- | --- |
-//! | an inline shape with another inline shape | two types the document named — names are API, and they evolve independently |
+//! | an inline shape with another inline shape | two types the document named, by component or by the title a type is named after — names are API, and they evolve independently |
 //! | an inline shape with a named type, the inline use becoming a reference | types differing in any contract field, doc-invisible ones included |
 //! | — | types the caller named explicitly, which is a declaration of identity |
 //!

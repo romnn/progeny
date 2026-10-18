@@ -401,6 +401,27 @@ impl<'de> Members<'de> {
     }
 }
 
+/// Read a tagged union's unit variant: an object holding the tag the union already matched.
+///
+/// Every other member is reported as one the variant never declared, which is what the empty
+/// struct the variant stands for reports.
+///
+/// # Errors
+///
+/// Returns a [`Problem`] when the payload is not an object.
+pub(crate) fn tag_only(
+    content: Content<'_>,
+    union: &'static str,
+    tag: &str,
+    site: Site,
+    report: &mut Degradations,
+) -> Result<(), Problem> {
+    let mut members = Members::of(content, union)?;
+    members.members.retain(|(key, _)| key.as_str() != Some(tag));
+    members.report_rest(site, report, false);
+    Ok(())
+}
+
 /// What a struct expected, for an `invalid type` message.
 struct StructName {
     name: &'static str,
@@ -968,6 +989,43 @@ mod tests {
             "{:?}",
             entry.samples
         );
+    }
+
+    /// A tagged union's variant that carries only its tag, decoded the way the renderer writes
+    /// one once the tag has chosen it.
+    #[derive(Debug, PartialEq)]
+    struct Idle;
+
+    impl Idle {
+        const SITE: Site = Site::new("ThreadStatus", "/components/schemas/ThreadStatus", None);
+    }
+
+    impl<'de> Lenient<'de> for Idle {
+        const ROOT: Site = Self::SITE;
+
+        fn lenient(
+            content: Content<'de>,
+            _site: Site,
+            report: &mut Degradations,
+        ) -> Result<Self, super::Problem> {
+            super::tag_only(content, "ThreadStatus", "type", Self::SITE, report).map(|()| Self)
+        }
+    }
+
+    /// A unit variant reads its tag alone silently, reports any other member as undeclared, and
+    /// refuses a payload that is not an object.
+    #[test_util::test]
+    fn a_unit_variant_reports_every_member_but_its_tag() {
+        let (value, report) = decode::<Idle>(r#"{"type":"idle"}"#)?;
+        assert_eq!(value, Idle);
+        assert!(report.is_empty(), "{report}");
+
+        let (_, report) = decode::<Idle>(r#"{"type":"idle","note":"x"}"#)?;
+        let entry = only(&report, Idle::SITE)?;
+        assert_eq!(entry.kind, DegradationKind::UndeclaredMember);
+        assert_eq!(entry.samples, ["note"]);
+
+        assert!(decode::<Idle>(r#""idle""#).is_err());
     }
 
     /// Undeclared members are kept, written back, and reported by name.
