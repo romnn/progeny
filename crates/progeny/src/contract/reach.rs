@@ -1,8 +1,8 @@
 //! Which direction each type travels: out with a request, back in a response, both, or neither.
 //!
 //! Decided from the document's own positions — request bodies, parameters, and the JSON
-//! response arms of every operation — and closed over the type graph, because a body
-//! names one type and that type names others.
+//! response arms of every operation, or a JSON Schema bundle's roots — and closed over the type
+//! graph, because a body names one type and that type names others.
 //! The answer is what tells a type apart by the rules it is decoded under: a request is
 //! data the caller built, a response is whatever the vendor sent.
 //!
@@ -109,6 +109,17 @@ pub(super) fn run(
                     seed(key, &mut responses);
                 }
             }
+        }
+    }
+
+    // A bundle's roots, each in the direction the caller exchanges it, in place of operations.
+    for root in resolved.bundle_roots() {
+        let key = crate::shape::key_of(resolved, root.id);
+        if root.direction.sent() {
+            seed(key.clone(), &mut requests);
+        }
+        if root.direction.received() {
+            seed(key, &mut responses);
         }
     }
 

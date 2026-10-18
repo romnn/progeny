@@ -33,8 +33,46 @@ pub(crate) struct Normalized {
     /// Whether the document declared 3.0, kept because one rewrite happens after this phase:
     /// a schema at a position nothing parsed is normalized when a `$ref` proves it is one.
     dialect_30: bool,
+    /// Each position a rewrite moved, as written and as rewritten.
+    moves: Vec<Move>,
     #[cfg(any(feature = "harness", test))]
     version: Version,
+}
+
+/// A position a rewrite moved: what the document wrote there now sits at `to`.
+///
+/// Kept so a `$ref` to the position as written still reaches the one schema that is there,
+/// rather than a copy read again from the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Move {
+    pub(crate) from: JsonPointer,
+    pub(crate) to: JsonPointer,
+}
+
+/// Where normalization put what the document wrote at `pointer`, when a rewrite moved it.
+///
+/// A move inside a moved position is recorded where the position ended up, after the move that
+/// put it there, so the moves apply one after another in that order.
+pub(crate) fn moved_address(pointer: &JsonPointer, moves: &[Move]) -> Option<String> {
+    let mut tokens: Vec<String> = pointer.tokens().to_vec();
+    let mut changed = false;
+    // In the order the rewrites ran, each at most once: a tuple's tail moves to `items` after
+    // the tuple left it, and must not then follow the tuple to `prefixItems`.
+    for found in moves {
+        if !tokens.starts_with(found.from.tokens()) {
+            continue;
+        }
+        let rest = tokens.split_off(found.from.tokens().len());
+        tokens = found.to.tokens().to_vec();
+        tokens.extend(rest);
+        changed = true;
+    }
+    changed.then(|| {
+        tokens
+            .into_iter()
+            .fold(JsonPointer::root(), |at, token| at.child(token))
+            .to_string()
+    })
 }
 
 impl Normalized {
@@ -49,6 +87,10 @@ impl Normalized {
 
     pub(crate) fn dialect_30(&self) -> bool {
         self.dialect_30
+    }
+
+    pub(crate) fn moves(&self) -> &[Move] {
+        &self.moves
     }
 
     #[cfg(any(feature = "harness", test))]
@@ -116,16 +158,21 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
     }
 
     let dialect_30 = version.minor == 0;
-    Walk {
+    let mut walk = Walk {
         ctx,
         at: JsonPointer::root(),
         dialect_30,
-    }
-    .document(&mut root);
+        legacy: false,
+        bundle: false,
+        moves: Vec::new(),
+    };
+    walk.document(&mut root);
+    let moves = walk.moves;
 
     Ok(Normalized {
         value: Value::Object(root),
         dialect_30,
+        moves,
         #[cfg(any(feature = "harness", test))]
         version,
     })
@@ -138,13 +185,57 @@ pub(crate) fn normalize(value: Value, ctx: &mut Ctx) -> Result<Normalized, Rejec
 /// example payloads get corrupted. A `$ref` addressing a position outside those is the evidence
 /// that turns the guess into a fact: something reads that node as a schema, so it is one, and
 /// [`crate::resolve`] normalizes it here before parsing it.
-pub(crate) fn schema_at(value: &mut Value, dialect_30: bool, at: JsonPointer, ctx: &mut Ctx) {
-    Walk {
+///
+/// Returns each position a rewrite moved.
+pub(crate) fn schema_at(
+    value: &mut Value,
+    dialect_30: bool,
+    at: JsonPointer,
+    ctx: &mut Ctx,
+) -> Vec<Move> {
+    let mut walk = Walk {
         ctx,
         at,
         dialect_30,
-    }
-    .schema(value);
+        legacy: false,
+        bundle: false,
+        moves: Vec::new(),
+    };
+    walk.schema(value);
+    walk.moves
+}
+
+/// Rewrite one schema of a JSON Schema bundle, which no OpenAPI dialect applies to.
+///
+/// `legacy` is whether the bundle declares draft-07 or an earlier draft, whose `$ref` replaces
+/// the schema it sits in and whose `dependencies` 2020-12 splits in two.
+/// A schema that declares its own `$schema` is read by that draft instead, and so is everything
+/// inside it.
+///
+/// Returns each position a rewrite moved.
+pub(crate) fn bundle_schema_at(
+    value: &mut Value,
+    legacy: bool,
+    at: JsonPointer,
+    ctx: &mut Ctx,
+) -> Vec<Move> {
+    let mut walk = Walk {
+        ctx,
+        at,
+        dialect_30: false,
+        legacy,
+        bundle: true,
+        moves: Vec::new(),
+    };
+    walk.schema(value);
+    walk.moves
+}
+
+/// Whether a `$schema` URI names draft-07 or an earlier draft.
+pub(crate) fn declares_legacy_draft(uri: &str) -> bool {
+    ["draft-03", "draft-04", "draft-06", "draft-07"]
+        .iter()
+        .any(|draft| uri.contains(draft))
 }
 
 fn version(root: &Map<String, Value>) -> Result<Version, RejectError> {
@@ -263,6 +354,14 @@ struct Walk<'a> {
     /// Whether the document declares 3.0, in which case the dialect rows apply and their
     /// rewriting is the documented normalization rather than a finding worth reporting.
     dialect_30: bool,
+    /// Whether the schemas are a JSON Schema bundle's in draft-07 or earlier, where a `$ref`
+    /// replaces its schema and `dependencies` is one keyword.
+    legacy: bool,
+    /// Whether the schemas are a JSON Schema bundle's, where a schema's own `$schema` sets the
+    /// draft it and its subschemas are read by.
+    bundle: bool,
+    /// Each position a rewrite moved, in the order the walk moved them.
+    moves: Vec<Move>,
 }
 
 impl Walk<'_> {
@@ -449,6 +548,25 @@ impl Walk<'_> {
         let Value::Object(map) = value else {
             return;
         };
+        // A bundle's schema resource that names its own draft is read by it, and so is what it
+        // holds; the draft around it comes back once it is done.
+        let outer = self.legacy;
+        if self.bundle
+            && let Some(Value::String(uri)) = map.get("$schema")
+        {
+            self.legacy = declares_legacy_draft(uri);
+            // The walk applies what that draft reads differently, so the member has said all it
+            // has to say, and the parser would report it as a dialect read as 2020-12.
+            if self.legacy {
+                map.remove("$schema");
+            }
+        }
+        self.schema_object(map);
+        self.legacy = outer;
+    }
+
+    /// Rewrite one schema object under the current dialect and descend into its subschemas.
+    fn schema_object(&mut self, map: &mut Map<String, Value>) {
         // A schema may declare its own dialect (`$schema`); that member is read and reported by
         // the schema parser, which is the layer that stores it. Reporting it here too once made
         // one member into two records.
@@ -462,6 +580,10 @@ impl Walk<'_> {
         } else {
             self.repair_exclusive_bounds(map);
             self.repair_string_format(map);
+        }
+        if self.legacy {
+            self.repair_ref_siblings(map);
+            self.repair_dependencies(map);
         }
         self.repair_tuple_items(map);
         self.repair_required_flags(map);
@@ -528,6 +650,97 @@ impl Walk<'_> {
         }
     }
 
+    /// Keywords beside a `$ref` in a draft-07 or earlier schema, which that draft ignores.
+    ///
+    /// Before 2019-09 a `$ref` replaces the schema it sits in, so `{$ref: A, type: string}` means
+    /// `A` and nothing else, where 2020-12 would read both.
+    /// Only what constrains a value is dropped: annotations say nothing about the value, and a
+    /// `definitions` map is still a place a pointer can address.
+    fn repair_ref_siblings(&mut self, map: &mut Map<String, Value>) {
+        /// The members a draft-07 `$ref` leaves standing.
+        const KEPT: [&str; 13] = [
+            "$ref",
+            "$id",
+            "$schema",
+            "$comment",
+            "$defs",
+            "definitions",
+            "title",
+            "description",
+            "default",
+            "examples",
+            "deprecated",
+            "readOnly",
+            "writeOnly",
+        ];
+        if !map.contains_key("$ref") {
+            return;
+        }
+        let dropped: Vec<String> = map
+            .keys()
+            .filter(|key| !KEPT.contains(&key.as_str()) && !is_extension(key))
+            .cloned()
+            .collect();
+        if dropped.is_empty() {
+            return;
+        }
+        for key in &dropped {
+            map.remove(key);
+        }
+        let named: Vec<String> = dropped.iter().map(|key| format!("`{key}`")).collect();
+        let location = self.at.clone();
+        self.report(
+            BreakageClass::LegacyRefSiblings,
+            location,
+            &format!(
+                "{} beside `$ref` constrain nothing in draft-07, where a `$ref` replaces the \
+                 schema it sits in, so they were dropped rather than read as 2020-12 reads them",
+                named.join(", ")
+            ),
+        );
+    }
+
+    /// draft-07's `dependencies`, which 2020-12 splits into `dependentSchemas` and
+    /// `dependentRequired`.
+    ///
+    /// A member that names a schema is a schema dependency, and one that lists names is a
+    /// property dependency, so each lands under the keyword that says the same.
+    fn repair_dependencies(&mut self, map: &mut Map<String, Value>) {
+        // A schema writing both spellings is saying two different things; rewriting would discard
+        // one of them, so it is left as written.
+        if map.contains_key("dependentSchemas") || map.contains_key("dependentRequired") {
+            return;
+        }
+        let Some(Value::Object(dependencies)) = map.remove("dependencies") else {
+            return;
+        };
+        let mut schemas = Map::new();
+        let mut required = Map::new();
+        for (name, dependency) in dependencies {
+            if dependency.is_array() {
+                required.insert(name, dependency);
+            } else {
+                self.moves.push(Move {
+                    from: self.at.child("dependencies").child(name.clone()),
+                    to: self.at.child("dependentSchemas").child(name.clone()),
+                });
+                schemas.insert(name, dependency);
+            }
+        }
+        for (keyword, entries) in [("dependentSchemas", schemas), ("dependentRequired", required)] {
+            if !entries.is_empty() {
+                map.insert(keyword.to_owned(), Value::Object(entries));
+            }
+        }
+        let location = self.at.child("dependencies");
+        self.report(
+            BreakageClass::LegacyDependencies,
+            location,
+            "`dependencies` is draft-07's keyword for both kinds of dependency; rewrote each \
+             member as `dependentSchemas` or `dependentRequired`, which 2020-12 reads",
+        );
+    }
+
     /// The draft-04 tuple form, in a document of any version.
     ///
     /// `items: [A, B]` constrains an array positionally; 2020-12 spells that `prefixItems`, and
@@ -546,11 +759,19 @@ impl Walk<'_> {
         let location = self.at.child("items");
         if let Some(tuple) = map.remove("items") {
             map.insert("prefixItems".to_owned(), tuple);
+            self.moves.push(Move {
+                from: self.at.child("items"),
+                to: self.at.child("prefixItems"),
+            });
         }
         // draft-04's `additionalItems` constrains the elements past the tuple, which is exactly
         // what 2020-12's `items` means once `prefixItems` is present.
         if let Some(rest) = map.remove("additionalItems") {
             map.insert("items".to_owned(), rest);
+            self.moves.push(Move {
+                from: self.at.child("additionalItems"),
+                to: self.at.child("items"),
+            });
         }
         self.report(
             BreakageClass::LegacyTupleItems,
@@ -882,6 +1103,42 @@ mod tests {
     fn normalized(value: Value) -> eyre::Result<Value> {
         let mut ctx = Ctx::new();
         Ok(normalize(value, &mut ctx)?.into_value())
+    }
+
+    /// A draft-07 bundle's schema is read by its own draft: a `$ref` keeps only annotations
+    /// beside it, and `dependencies` splits into the two keywords 2020-12 reads.
+    /// A bundle of a later draft is left as written.
+    #[test_util::test]
+    fn a_legacy_bundle_schema_is_read_by_its_own_draft() {
+        let written = json!({
+            "type": "object",
+            "dependencies": {"a": ["b"], "c": {"required": ["d"]}},
+            "properties": {"r": {"$ref": "#/x", "type": "integer", "description": "kept"}},
+        });
+        let mut ctx = Ctx::new();
+        let mut legacy = written.clone();
+        super::bundle_schema_at(&mut legacy, true, crate::diag::JsonPointer::root(), &mut ctx);
+        assert_eq!(
+            legacy,
+            json!({
+                "type": "object",
+                "dependentRequired": {"a": ["b"]},
+                "dependentSchemas": {"c": {"required": ["d"]}},
+                "properties": {"r": {"$ref": "#/x", "description": "kept"}},
+            })
+        );
+        let classes: Vec<BreakageClass> = ctx
+            .into_diagnostics()
+            .iter()
+            .map(crate::diag::Diagnostic::class)
+            .collect();
+        assert_eq!(
+            classes,
+            [BreakageClass::LegacyDependencies, BreakageClass::LegacyRefSiblings]
+        );
+        let mut current = written.clone();
+        super::bundle_schema_at(&mut current, false, crate::diag::JsonPointer::root(), &mut Ctx::new());
+        assert_eq!(current, written);
     }
 
     /// A 3.0 document with one schema at `components.schemas.S`.

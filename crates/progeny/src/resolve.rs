@@ -92,6 +92,12 @@ pub struct Counts {
 const MAX_CHAIN: usize = 32;
 
 impl ResolvedDocument {
+    /// The types a JSON Schema bundle's caller exchanges, which are its wire in place of
+    /// operations; empty for an OpenAPI document.
+    pub(crate) fn bundle_roots(&self) -> &[crate::bundle::Selected] {
+        &self.parsed.roots
+    }
+
     pub(crate) fn document(&self) -> &Document {
         &self.parsed.document
     }
@@ -188,8 +194,17 @@ component_reader!(
 
 /// Resolve every reference in the document.
 pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocument {
-    let materialized = materialize(&mut parsed, ctx);
-    let index = Index::build(&parsed.schemas);
+    let Materialized {
+        schemas: materialized,
+        aliases,
+    } = materialize(&mut parsed, ctx);
+    let mut index = Index::build(&parsed.schemas);
+    // A position normalization moved is the schema it moved, one identity under both pointers.
+    for (written, rewritten) in aliases {
+        if let Some(&id) = index.addresses.get(&rewritten) {
+            index.addresses.insert(written, id);
+        }
+    }
     let mut counts = Counts::default();
     let mut targets = BTreeMap::new();
     let mut edges = Vec::new();
@@ -249,7 +264,7 @@ pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocu
         }
     }
 
-    let discriminator_targets = discriminator_targets(&index, &parsed.schemas);
+    let discriminator_targets = discriminator_targets(&index, &parsed);
 
     let mut walk = Walk {
         components: parsed.document.components.as_ref(),
@@ -286,9 +301,16 @@ pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocu
 /// A mapping value that names nothing is left out rather than reported here: what a broken mapping
 /// costs depends on whether the union it belongs to is carried by its tag at all, which only the
 /// shape layer knows.
-fn discriminator_targets(index: &Index, store: &SchemaStore) -> BTreeMap<String, SchemaId> {
+fn discriminator_targets(index: &Index, parsed: &ParsedDocument) -> BTreeMap<String, SchemaId> {
+    // A bare name is a component's, wherever the component's schema sits: a bundle's components
+    // name schemas at their own pointers.
+    let components = parsed
+        .document
+        .components
+        .as_ref()
+        .and_then(|components| components.schemas.as_ref());
     let mut targets = BTreeMap::new();
-    for (_, schema) in store.iter() {
+    for (_, schema) in parsed.schemas.iter() {
         let Schema::Object(object) = schema else {
             continue;
         };
@@ -300,11 +322,11 @@ fn discriminator_targets(index: &Index, store: &SchemaStore) -> BTreeMap<String,
                 continue;
             }
             // The two spellings OpenAPI allows: a `$ref`, and the bare name of a schema component.
-            let address = match written.strip_prefix('#') {
-                Some(pointer) => pointer.to_owned(),
-                None => format!("/components/schemas/{written}"),
+            let id = match written.strip_prefix('#') {
+                Some(pointer) => index.addresses.get(pointer).copied(),
+                None => components.and_then(|schemas| schemas.get(written)).copied(),
             };
-            if let Some(&id) = index.addresses.get(&address) {
+            if let Some(id) = id {
                 targets.insert(written.clone(), id);
             }
         }
@@ -331,8 +353,9 @@ const MAX_MATERIALIZE_ROUNDS: usize = 8;
 /// The reference is the evidence: the model holds the node either way, and something reading it as
 /// a schema is what says it is one. Nothing is materialized speculatively, so a document whose
 /// uninterpreted members are genuinely not schemas is untouched.
-fn materialize(parsed: &mut ParsedDocument, ctx: &mut Ctx) -> Vec<(SchemaId, String)> {
+fn materialize(parsed: &mut ParsedDocument, ctx: &mut Ctx) -> Materialized {
     let mut materialized = Vec::new();
+    let mut aliases: Vec<(String, String)> = Vec::new();
     for _ in 0..MAX_MATERIALIZE_ROUNDS {
         let known: BTreeSet<String> = parsed
             .schemas
@@ -367,6 +390,12 @@ fn materialize(parsed: &mut ParsedDocument, ctx: &mut Ctx) -> Vec<(SchemaId, Str
             if known.contains(&pointer.to_string()) {
                 continue;
             }
+            if let Some(rewritten) = crate::normalize::moved_address(&pointer, &parsed.moves)
+                && known.contains(&rewritten)
+            {
+                aliases.push((pointer.to_string(), rewritten));
+                continue;
+            }
             if !holds_schema(&parsed.document, pointer.tokens()) {
                 continue;
             }
@@ -376,41 +405,100 @@ fn materialize(parsed: &mut ParsedDocument, ctx: &mut Ctx) -> Vec<(SchemaId, Str
                 .push(parsed.schemas.address(id).child("$ref"));
         }
         if wanted.is_empty() {
-            return materialized;
+            return Materialized {
+                schemas: materialized,
+                aliases,
+            };
         }
+        // What this round has registered so far, so a target an earlier one in the round already
+        // read, where it sits or where a rewrite moved it, is not read twice.
+        let mut registered = known.clone();
         for address in wanted.keys() {
             let Some(pointer) = JsonPointer::parse(address) else {
                 continue;
             };
-            let Some(mut value) = uninterpreted(&parsed.document, pointer.tokens()).cloned() else {
+            if registered.contains(address) {
                 continue;
-            };
-            // The dialect rewrite the positional walk could not reach, now that the reference has
-            // said this node is a schema.
-            crate::normalize::schema_at(&mut value, parsed.dialect_30, pointer.clone(), ctx);
-            let parsed_id = at_pointer(ctx, pointer.tokens(), |ctx| {
-                crate::schema::parse::schema(value, &mut parsed.schemas, ctx).ok()
-            });
+            }
+            if let Some(rewritten) = crate::normalize::moved_address(&pointer, &parsed.moves)
+                && registered.contains(&rewritten)
+            {
+                aliases.push((address.clone(), rewritten));
+                continue;
+            }
+            let before = parsed.schemas.len();
+            let parsed_id = read_target(parsed, &pointer, ctx);
+            registered.extend(
+                parsed
+                    .schemas
+                    .iter()
+                    .skip(before)
+                    .map(|(id, _)| parsed.schemas.address(id).to_string()),
+            );
             // The position's own last segment, which is the name the document gave it — the same
             // rule `components.schemas` follows, applied to a section OpenAPI does not define.
             if let (Some(id), Some(name)) = (parsed_id, pointer.tokens().last()) {
                 materialized.push((id, name.clone()));
             }
         }
-        for sites in wanted.into_values() {
-            for site in sites {
-                ctx.report(Diagnostic::new(
-                    BreakageClass::DanglingRef,
-                    Action::Repair,
-                    site,
-                    "`$ref` addresses a position no part of an OpenAPI document is defined at, so \
-                     nothing parsed it; the document holds a schema there, and a reference to it \
-                     is what says it is one, so it was read as a schema",
-                ));
-            }
-        }
+        report_materialized(parsed.bundle_dialect.is_some(), wanted, ctx);
     }
-    materialized
+    Materialized {
+        schemas: materialized,
+        aliases,
+    }
+}
+
+/// Report each reference that a position nothing parsed was read for, as the repair it is.
+fn report_materialized(bundle: bool, wanted: BTreeMap<String, Vec<JsonPointer>>, ctx: &mut Ctx) {
+    let detail = if bundle {
+        "`$ref` addresses a position no namespace of the bundle holds, so nothing parsed it; the \
+         bundle holds a schema there, and a reference to it is what says it is one, so it was read \
+         as a schema"
+    } else {
+        "`$ref` addresses a position no part of an OpenAPI document is defined at, so nothing \
+         parsed it; the document holds a schema there, and a reference to it is what says it is \
+         one, so it was read as a schema"
+    };
+    for site in wanted.into_values().flatten() {
+        ctx.report(Diagnostic::new(
+            BreakageClass::DanglingRef,
+            Action::Repair,
+            site,
+            detail,
+        ));
+    }
+}
+
+/// Read the schema the document holds at `pointer`, rewritten by the dialect it is written in.
+///
+/// The rewrite is the one the positional walk could not reach, now that a reference has said the
+/// node is a schema, and the moves it makes are kept with the others.
+fn read_target(
+    parsed: &mut ParsedDocument,
+    pointer: &JsonPointer,
+    ctx: &mut Ctx,
+) -> Option<SchemaId> {
+    let mut value = uninterpreted(&parsed.document, pointer.tokens()).cloned()?;
+    let moves = match parsed.bundle_dialect {
+        Some(legacy) => {
+            let legacy = crate::bundle::legacy_at(&parsed.document, pointer.tokens(), legacy);
+            crate::normalize::bundle_schema_at(&mut value, legacy, pointer.clone(), ctx)
+        }
+        None => crate::normalize::schema_at(&mut value, parsed.dialect_30, pointer.clone(), ctx),
+    };
+    parsed.moves.extend(moves);
+    at_pointer(ctx, pointer.tokens(), |ctx| {
+        crate::schema::parse::schema(value, &mut parsed.schemas, ctx).ok()
+    })
+}
+
+/// What [`materialize`] read, and the pointers it found already read under another.
+struct Materialized {
+    /// Each schema parsed, with the name its position gives it.
+    schemas: Vec<(SchemaId, String)>,
+    /// Pointers into a position normalization rewrote, each with the pointer it rewrote it to.
+    aliases: Vec<(String, String)>,
 }
 
 /// Whether the document holds something a schema could be read out of at `tokens`.

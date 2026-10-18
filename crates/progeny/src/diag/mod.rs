@@ -117,6 +117,12 @@ pub enum BreakageClass {
     UnregistrableRoute,
     /// The draft-04 tuple form `items: [A, B]`, which 2020-12 spells `prefixItems`.
     LegacyTupleItems,
+    /// Keywords beside a `$ref` in a draft-07 or earlier JSON Schema bundle, which that draft
+    /// ignores.
+    LegacyRefSiblings,
+    /// draft-07's `dependencies`, which 2020-12 spells `dependentSchemas` and
+    /// `dependentRequired`.
+    LegacyDependencies,
     /// The 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum` form in a document that declares
     /// 3.1, where a boolean there is never valid.
     LegacyExclusiveBound,
@@ -176,7 +182,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 31] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -197,6 +203,8 @@ impl BreakageClass {
         Self::InvalidDefault,
         Self::UnregistrableRoute,
         Self::LegacyTupleItems,
+        Self::LegacyRefSiblings,
+        Self::LegacyDependencies,
         Self::LegacyExclusiveBound,
         Self::LegacyStringFormat,
         Self::LegacyRequiredFlag,
@@ -234,6 +242,8 @@ impl BreakageClass {
             Self::InvalidDefault => "invalid-default",
             Self::UnregistrableRoute => "unregistrable-route",
             Self::LegacyTupleItems => "legacy-tuple-items",
+            Self::LegacyRefSiblings => "legacy-ref-siblings",
+            Self::LegacyDependencies => "legacy-dependencies",
             Self::LegacyExclusiveBound => "legacy-exclusive-bound",
             Self::LegacyStringFormat => "legacy-string-format",
             Self::LegacyRequiredFlag => "legacy-required-flag",
@@ -276,6 +286,8 @@ impl BreakageClass {
             | Self::InvalidExample
             | Self::InvalidDefault
             | Self::LegacyTupleItems
+            | Self::LegacyRefSiblings
+            | Self::LegacyDependencies
             | Self::LegacyExclusiveBound
             | Self::LegacyStringFormat
             | Self::LegacyRequiredFlag

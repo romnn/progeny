@@ -19,6 +19,9 @@
 //! * **In both**, or in neither: a type reached from both directions pays both, and a type on no
 //!   wire at all pays nothing a caller can observe.
 //!
+//! A JSON Schema bundle has no operations, and its roots are its wire instead: a root the caller
+//! sends is a request position and one it receives is a response position.
+//!
 //! 27,044 fields across 58 documents, which is why the split is worth having rather than being a
 //! nicety: a policy decision affecting that many fields deserves to know which half it affects.
 
@@ -27,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{ApiModel, BodyContract};
 use crate::contract::{CollapseKind, Contracts, TypeIndex, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic};
+use crate::resolve::ResolvedDocument;
 
 /// Which directions a type is reachable in.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,8 +40,16 @@ struct Reach {
 }
 
 impl Reach {
-    /// How a diagnostic names this position.
-    fn describe(self) -> &'static str {
+    /// How a diagnostic names this position, as a bundle's roots or as an operation's bodies.
+    fn describe(self, bundle: bool) -> &'static str {
+        if bundle {
+            return match (self.request, self.response) {
+                (true, true) => "a root the caller sends and one it receives",
+                (true, false) => "a root the caller sends",
+                (false, true) => "a root the caller receives",
+                (false, false) => "no root",
+            };
+        }
         match (self.request, self.response) {
             (true, true) => "a request body and a response body",
             (true, false) => "a request body",
@@ -49,7 +61,10 @@ impl Reach {
     }
 
     /// What the collapse actually costs at this position.
-    fn consequence(self) -> &'static str {
+    fn consequence(self, bundle: bool) -> &'static str {
+        if bundle && !self.request && !self.response {
+            return "nothing on the wire is affected, because no root reaches it";
+        }
         match (self.request, self.response) {
             (true, _) => {
                 "a caller cannot send an explicit null, which is how a request says `clear this` \
@@ -61,7 +76,10 @@ impl Reach {
     }
 
     /// What reading an explicit null as absent costs at this position.
-    fn null_read_consequence(self) -> &'static str {
+    fn null_read_consequence(self, bundle: bool) -> &'static str {
+        if bundle && !self.request && !self.response {
+            return "nothing on the wire is affected, because no root reaches it";
+        }
         match (self.request, self.response) {
             (true, true) => {
                 "neither a request nor a response read through the generated type can tell an \
@@ -78,11 +96,17 @@ impl Reach {
 }
 
 /// Report every collapse, split by the position its type occupies.
-pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
+pub(super) fn report(
+    resolved: &ResolvedDocument,
+    contracts: &Contracts,
+    model: &ApiModel,
+    ctx: &mut Ctx,
+) {
     if contracts.collapses().is_empty() {
         return;
     }
-    let reach = reachability(contracts, model);
+    let reach = reachability(resolved, contracts, model);
+    let bundle = !resolved.bundle_roots().is_empty();
 
     // Reported one by one and aggregated by the context, which folds records sharing a class and a
     // detail. The detail names the position, so the split falls out as one record per position
@@ -98,8 +122,8 @@ pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
                 format!(
                     "the property may be absent and may be null, and the document says those are \
                      different; both become `None`. The type is reached from {}, so {}",
-                    at.describe(),
-                    at.consequence()
+                    at.describe(bundle),
+                    at.consequence(bundle)
                 ),
             )),
             CollapseKind::NullReadsAbsent => ctx.report(Diagnostic::new(
@@ -110,8 +134,8 @@ pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
                     "the property may be absent, and its type also holds `null`; an explicit \
                      `null` is written out but read back as `None`, the same as absent. The type \
                      is reached from {}, so {}",
-                    at.describe(),
-                    at.null_read_consequence()
+                    at.describe(bundle),
+                    at.null_read_consequence(bundle)
                 ),
             )),
             // An access marker costs nothing until the type crosses the direction it excludes;
@@ -145,9 +169,26 @@ pub(super) fn report(contracts: &Contracts, model: &ApiModel, ctx: &mut Ctx) {
 /// Counted on the description's own graph: a response position names a type's read twin, and
 /// the twin is folded back onto the type the document declared, so a member is judged once by
 /// every direction that reaches it rather than once per form.
-fn reachability(contracts: &Contracts, model: &ApiModel) -> BTreeMap<TypeIndex, Reach> {
+fn reachability(
+    resolved: &ResolvedDocument,
+    contracts: &Contracts,
+    model: &ApiModel,
+) -> BTreeMap<TypeIndex, Reach> {
     let mut requests = BTreeSet::new();
     let mut responses = BTreeSet::new();
+    // A bundle's roots, each in the direction the caller exchanges it.
+    for root in resolved.bundle_roots() {
+        let key = crate::shape::key_of(resolved, root.id);
+        let Some(ty) = contracts.type_of(&key) else {
+            continue;
+        };
+        if root.direction.sent() {
+            seed(ty, contracts, &mut requests);
+        }
+        if root.direction.received() {
+            seed(ty, contracts, &mut responses);
+        }
+    }
     for operation in model.operations() {
         // Every typed body is a request position, whatever its wire format: a multipart or form
         // body carries its type out with the call exactly as a JSON one does, and seeding JSON

@@ -473,7 +473,14 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
         addresses: BTreeMap::new(),
     };
 
-    let mut queue: Vec<ShapeKey> = Vec::new();
+    // A bundle's roots are its wire: only what they reach is classified, and each is a position a
+    // payload really sits at.
+    let selected: Vec<(ShapeKey, String)> = resolved
+        .bundle_roots()
+        .iter()
+        .map(|root| (merge::key_of(resolved, root.id), root.name.clone()))
+        .collect();
+    let mut queue: Vec<ShapeKey> = selected.iter().map(|(key, _)| key.clone()).collect();
     let mut named = Vec::new();
     // The name `components.schemas` gave each shape, which is the discriminator's implicit
     // mapping. Collected from the roots because their keys are computed here anyway, and because
@@ -488,14 +495,22 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
         {
             component_names.entry(key.clone()).or_insert(name.clone());
         }
-        queue.push(key.clone());
+        if selected.is_empty() {
+            queue.push(key.clone());
+        }
         named.push(Root {
             key,
             hint: site.hint,
             kind: site.kind,
         });
     }
-    shapes.roots = named;
+    for (key, name) in &selected {
+        named.push(Root {
+            key: key.clone(),
+            hint: vec![name.clone()],
+            kind: RootKind::Position,
+        });
+    }
 
     while let Some(key) = queue.pop() {
         if shapes.by_key.contains_key(&key) {
@@ -510,6 +525,9 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
         }
         shapes.by_key.insert(key, shape);
     }
+    // A name the bundle gives a type its roots never reach names nothing generated.
+    named.retain(|root| shapes.by_key.contains_key(&root.key));
+    shapes.roots = named;
     // Every shape exists now, which is the earliest moment a proposed discriminator tag can be
     // priced: what it costs is a property off each variant type, and whether that is affordable
     // depends on where else those types are used.

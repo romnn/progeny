@@ -94,6 +94,39 @@ brew install --cask romnn/tap/cargo-progeny
 `progeny --version` reports the version of the *library* that would generate the output, not of the
 front end, because that is the number a reviewer of a generated diff needs.
 
+## JSON Schema bundles
+
+A protocol that publishes a plain JSON Schema bundle rather than an OpenAPI document — draft-07
+`definitions`, 2020-12 `$defs`, or namespaces nested in them, as JSON-RPC protocols and `schemars`
+export them — is read by `generate_schemas`, with the types the caller exchanges as its roots.
+
+```rust
+use progeny::{Config, Direction, SchemaInput, SchemaRoot};
+
+fn generate(bundle: &[u8]) -> Result<progeny::Output, progeny::RejectError> {
+    let input = SchemaInput {
+        // In precedence order: a name both define names the first one's type.
+        namespaces: vec!["/definitions/v2".into(), "/definitions".into()],
+        roots: vec![
+            SchemaRoot { name: "ThreadStartParams".into(), direction: Direction::Sent },
+            SchemaRoot { name: "ThreadStartResponse".into(), direction: Direction::Received },
+        ],
+    };
+    progeny::generate_schemas(bundle, &input, &Config::default())
+}
+```
+
+Each namespace member is a named type, and a `$ref` reaches it in whichever spelling the bundle
+uses.
+Only what the roots reach is generated.
+A root's direction stands in for the request or response position an operation would give it, so
+a presence collapse is priced by the way its type travels, and under lenient decoding a received
+type gets a read form.
+A bundle declaring draft-07 or earlier is read by that draft's rules where they differ: keywords
+beside a `$ref` are dropped, because that draft ignores them, and `dependencies` becomes
+`dependentSchemas` and `dependentRequired`; each is reported.
+Nested `$id` scopes are not followed: a reference resolves against the bundle's root.
+
 ## Preserving explicit null
 
 Optional and nullable properties normally use `Option<T>`, which cannot distinguish an omitted

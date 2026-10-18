@@ -377,7 +377,7 @@ pub(crate) fn build(
     // After the operations exist and before anything renders: a declaration that the document
     // cannot support has to stop generation rather than produce a method that cannot work.
     pagination::attach(&mut model.operations, contracts, config)?;
-    presence::report(contracts, &model, ctx);
+    presence::report(resolved, contracts, &model, ctx);
     examples::report(resolved, shapes, ctx);
     Ok(model)
 }
