@@ -1,0 +1,90 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+name: bench
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Every commit is a point in the history, so pending runs queue in order rather than replacing each
+# other, and none is cancelled.
+concurrency:
+  group: bench
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  compile-cost:
+    name: generated-crate compile cost
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # The history lives on `gh-pages`, which this job commits to.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      # The two vendor documents at fixed upstream commits, rather than the corpus's daily fetch of
+      # their moving branches, so a step in the chart is a change in progeny or its toolchain.
+      # Moving a pin is a deliberate commit here, which the history then shows as one.
+      - name: Fetch the pinned documents
+        run: |
+          mkdir -p corpus/cache
+          curl -fsSL -o corpus/cache/oxide.json \
+            https://raw.githubusercontent.com/oxidecomputer/oxide.rs/ed6b8352db6e1a4c97e13672254fc4646cb47458/oxide.json
+          curl -fsSL -o corpus/cache/okta.yaml \
+            https://raw.githubusercontent.com/okta/okta-management-openapi-spec/2bc3a3631fef54cab7aaa97fbaf053f2069cb311/dist/current/management-minimal.yaml
+      # Three documents from the quick tier, small to large: `petstore-31` is the fixed cost of a
+      # generated crate, `oxide` a typical API, and `okta` a discriminator-heavy one.
+      # The hand-written serde strategy is measured because it is what the default configuration
+      # generates.
+      # CPU time and peak RSS at one compiler job are the figures a shared runner holds steady;
+      # its load gating and discarding of crowded repetitions apply here as they do locally.
+      - name: Measure
+        run: >-
+          cargo run -p xtask --release -- bench-compile petstore-31 oxide okta
+          --hand-written --reps 3 --max-wait 5 --json target/bench-compile.json
+      # Runner hardware varies between runs, so only a large move is an alert; the chart shows the
+      # rest.
+      # The history and its chart page are committed to `bench/` on `gh-pages`, which must exist.
+      - name: Record the history
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Generated-crate compile cost
+          tool: customSmallerIsBetter
+          output-file-path: target/bench-compile.json
+          benchmark-data-dir-path: bench
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: "120%"
+          comment-on-alert: true
+          fail-on-alert: false
+          summary-always: true
+
+  # A push made with `GITHUB_TOKEN` does not start a branch-based Pages build, so `gh-pages` is
+  # deployed here, and Pages is set to publish from Actions.
+  # The chart is at `/bench/`; a docs site deployed by Actions later can copy that directory into
+  # its own `static/bench/` and keep the URL.
+  deploy:
+    name: deploy the chart
+    needs: compile-cost
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: .
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
