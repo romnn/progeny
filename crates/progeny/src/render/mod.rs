@@ -1168,7 +1168,9 @@ mod tests {
                 .find(&format!("pub enum {name} {{"))
                 .ok_or_eyre("the enum is rendered")?;
             let rest = rendered.get(start..).unwrap_or_default();
-            Ok(rest.get(..rest.find("\n}").unwrap_or(rest.len())).unwrap_or_default())
+            Ok(rest
+                .get(..rest.find("\n}").unwrap_or(rest.len()))
+                .unwrap_or_default())
         };
         // A string, keyed, tagged and untagged enum each keep `Unknown` for their one fallback,
         // and give the declared value, or the variant holding the `Unknown` type, `Unknown_`.
@@ -4060,8 +4062,8 @@ mod tests {
     }
 
     /// A strict workspace client carries its own report in a private support module, so it
-    /// re-exports only what its runtime names, and leaves out the constructor only the lenient
-    /// decoder calls: anything more is a warning in the consumer's build.
+    /// re-exports only what its runtime names, and leaves out the constructor and the report
+    /// method only the lenient decoder calls: anything more is a warning in the consumer's build.
     #[test_util::test]
     fn a_strict_workspace_client_ships_only_the_report_it_uses() {
         let config = Config {
@@ -4079,6 +4081,7 @@ mod tests {
             "{support}"
         );
         assert!(!support.contains("fn decoded("), "{support}");
+        assert!(!support.contains("fn merge_tolerated("), "{support}");
         assert!(support.contains("fn into_decoded("), "{support}");
     }
 

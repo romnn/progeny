@@ -25,6 +25,35 @@ use serde_json::Value;
 
 use crate::schema::{ExternalDocs, SchemaId, SchemaStore};
 
+/// Which way a type travels between the caller and its peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// The caller builds and sends it, as it would a request.
+    Sent,
+    /// The caller receives and reads it, as it would a response.
+    Received,
+    /// Both.
+    Both,
+}
+
+impl Direction {
+    pub(crate) fn sent(self) -> bool {
+        matches!(self, Self::Sent | Self::Both)
+    }
+
+    pub(crate) fn received(self) -> bool {
+        matches!(self, Self::Received | Self::Both)
+    }
+}
+
+/// A JSON Schema bundle's root, as the schema that defines it, read by [`crate::bundle`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Selected {
+    pub(crate) id: SchemaId,
+    pub(crate) name: String,
+    pub(crate) direction: Direction,
+}
+
 /// A parsed document, together with the arena holding every schema it mentions.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedDocument {
@@ -35,7 +64,7 @@ pub(crate) struct ParsedDocument {
     pub(crate) dialect_30: bool,
     /// The types a JSON Schema bundle's caller exchanges, which are its wire in place of
     /// operations; empty for an OpenAPI document.
-    pub(crate) roots: Vec<crate::bundle::Selected>,
+    pub(crate) roots: Vec<Selected>,
     /// For a JSON Schema bundle, whether it declares draft-07 or an earlier draft, for the
     /// schemas only a `$ref` proves are schemas; `None` for an OpenAPI document.
     pub(crate) bundle_dialect: Option<bool>,

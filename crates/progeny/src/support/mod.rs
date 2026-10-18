@@ -324,7 +324,8 @@ pub(crate) fn tokens(
     let buffered = source(BUFFERED);
     // The report travels with every client response, however the response was decoded; the
     // decoder itself is only compiled where responses are read leniently.
-    let degradations = (client || decoding.is_lenient()).then(degradations_tokens);
+    let degradations =
+        (client || decoding.is_lenient()).then(|| degradations_tokens(decoding.is_lenient()));
     let lenient = decoding.lenient().map(lenient_tokens);
     let presence = (presence == PresenceUse::Preserved).then(|| presence_tokens(decoding));
     let upload = source_items(UPLOAD);
@@ -360,7 +361,7 @@ pub(crate) fn tokens(
 /// Support owned by a generated types crate.
 pub(crate) fn types_tokens(presence: bool, decoding: Decoding) -> proc_macro2::TokenStream {
     let buffered = source(BUFFERED);
-    let degradations = decoding.is_lenient().then(degradations_tokens);
+    let degradations = decoding.is_lenient().then(|| degradations_tokens(true));
     let lenient = decoding.lenient().map(lenient_tokens);
     let presence = presence.then(|| presence_tokens(decoding));
     let upload = source_items(UPLOAD);
@@ -403,8 +404,8 @@ impl Decoding {
 
 /// The report vocabulary as a submodule, re-exported at the support root — where the client
 /// runtime reaches it as `super::…` and the types module as `super::support::…`.
-fn degradations_tokens() -> proc_macro2::TokenStream {
-    let degradations = degradations_module();
+fn degradations_tokens(lenient: bool) -> proc_macro2::TokenStream {
+    let degradations = degradations_module(lenient);
     quote::quote! {
         #degradations
         pub use degradations::{
@@ -414,8 +415,19 @@ fn degradations_tokens() -> proc_macro2::TokenStream {
 }
 
 /// The report as a submodule, without the re-exports a caller names it by.
-fn degradations_module() -> proc_macro2::TokenStream {
-    let degradations = source_without_file_expectation(DEGRADATIONS);
+///
+/// Shipped without the lenient decoder, it leaves out the methods only that decoder calls, which
+/// would otherwise be dead code in the consumer's build.
+fn degradations_module(lenient: bool) -> proc_macro2::TokenStream {
+    let Ok(mut file) = syn::parse_file(DEGRADATIONS) else {
+        return source_without_file_expectation(DEGRADATIONS);
+    };
+    remove_dead_code_file_expectation(&mut file);
+    file.items.retain(|item| !is_test_module(item));
+    if !lenient {
+        drop_methods(&mut file, "Degradations", &["merge_tolerated"]);
+    }
+    let degradations = quote::quote! { #file };
     quote::quote! {
         pub mod degradations {
             #degradations
@@ -605,7 +617,7 @@ pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2:
     let vocabulary = if decoding.is_lenient() {
         quote::quote! { pub use super::types::{Decoded, Degradations, Lenient, Site}; }
     } else {
-        let degradations = degradations_module();
+        let degradations = degradations_module(false);
         quote::quote! {
             #degradations
             pub use degradations::{Decoded, Degradations};
@@ -924,6 +936,21 @@ fn source(text: &str) -> proc_macro2::TokenStream {
     quote::quote! { #file }
 }
 
+/// Leave the named methods out of a shipped file's inherent `impl` blocks for `ty`.
+fn drop_methods(file: &mut syn::File, ty: &str, names: &[&str]) {
+    for item in &mut file.items {
+        if let syn::Item::Impl(implementation) = item
+            && implementation.trait_.is_none()
+            && impl_type_is(implementation, ty)
+        {
+            implementation.items.retain(|member| {
+                !matches!(member, syn::ImplItem::Fn(method)
+                    if names.iter().any(|name| method.sig.ident == name))
+            });
+        }
+    }
+}
+
 /// One shipped file as tokens with its `cfg_attr` dead-code expectation removed: every item is
 /// live in a generated crate, so the expectation progeny needs would go unfulfilled there.
 fn source_without_file_expectation(text: &str) -> proc_macro2::TokenStream {
@@ -971,18 +998,7 @@ fn client_source(
         .retain(|item| !is_test_module(item) && (decoding.is_lenient() || !lenient_decoder(item)));
     // The constructor that takes a decoded report
     if !decoding.is_lenient() {
-        for item in &mut file.items {
-            if let syn::Item::Impl(implementation) = item
-                && impl_type_is(implementation, "ResponseValue")
-            {
-                implementation.items.retain(|implementation_item| {
-                    !matches!(
-                        implementation_item,
-                        syn::ImplItem::Fn(function) if function.sig.ident == "decoded"
-                    )
-                });
-            }
-        }
+        drop_methods(&mut file, "ResponseValue", &["decoded"]);
     }
     let Some(used) = used else {
         return quote::quote! { #file };

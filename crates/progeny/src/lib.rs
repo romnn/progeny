@@ -87,13 +87,14 @@ use std::collections::BTreeMap;
 
 use camino::Utf8PathBuf;
 
+pub use crate::bundle::{SchemaInput, SchemaRoot};
 pub use crate::config::{
     Accept, BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit,
     ExtraDerives, Formats, JsonSchemaImpls, MapKind, Package, Packaging, Pagination, SchemaType,
     SerdeAttributes, SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
 };
-pub use crate::bundle::{Direction, SchemaInput, SchemaRoot};
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
+pub use crate::doc::Direction;
 
 /// The version of the generator, for a front end to report.
 ///
