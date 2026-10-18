@@ -2020,8 +2020,8 @@ fn same_kind(value: &Value, against: Option<&&Value>) -> bool {
 /// writes for "known values, or any other", names no value of its own.
 /// It makes every other string one the document allows, whichever order the branches come in.
 /// At least one branch has to list a value, or there is no enum.
-/// The second half of the answer says whether such a branch admits `null` too, which the enum then
-/// has to keep.
+/// The second half of the answer says whether a branch admits `null` too, by listing it or as a
+/// catch-all whose type includes it, which the enum then has to keep.
 ///
 /// A branch with something to report, or a union of its own, is not folded in: it is reported and
 /// read where it is classified, and folded into the enum it would never be classified at all.
@@ -2054,6 +2054,12 @@ fn folded_strings(
             (None, None) => return None,
         };
         for value in declared {
+            // A listed `null`, as a 3.0 `nullable` enum lists it, makes the enum optional, where
+            // the branch's own `type` admits it: `{type: string, enum: [a, null]}` does not.
+            if value.is_null() {
+                null |= admits_null_type(&view);
+                continue;
+            }
             values.push(value.as_str()?.to_owned());
         }
     }
