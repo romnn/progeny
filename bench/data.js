@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792364691706,
+  "lastUpdate": 1792366595678,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -261,6 +261,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 332.65625,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "11cc5f648955a2a20a51ca7b125a0a0e29583b39",
+          "message": "fix(shape): let a later number branch keep the fractions an earlier integer cannot hold (#63)\n\n`oneOf: [{type: integer, enum: [1]}, {type: number, enum: [2.5]}]` degraded,\nbecause the integer lists its values and the number branch lists one it does\nnot. The generated `i64` refuses `2.5`, so the later branch is reached, and\nthe union stays typed. A value counts as refused only by what it is: a\nfractional number against an integer, or a negative one against an unsigned\ninteger. `2.0` equals `2`, which the integer reads, so it still degrades.\n\nCompletes #22.",
+          "timestamp": "2026-10-19T01:31:19+02:00",
+          "tree_id": "5c3e804d33fdc64b838a1f10a370136abb39aada",
+          "url": "https://github.com/romnn/progeny/commit/11cc5f648955a2a20a51ca7b125a0a0e29583b39"
+        },
+        "date": 1792366594875,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.883588000000003,
+            "range": "± 0.38",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3011.591145515442,
+            "range": "± 1.9",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.674301333333332,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1252.2877597808838,
+            "range": "± 1.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6636719999999999,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 333.5377597808838,
             "range": "± 1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
