@@ -529,3 +529,29 @@ fn a_self_naming_union_reads_a_branch_with_a_flattened_union_by_its_tag() {
     };
     assert_eq!(image.detail.as_deref(), Some("high"));
 }
+
+/// A union matched by shape reads each payload into the branch it fits, whether the branches
+/// differ one level down or a closed earlier branch reads what it accepts whole, the same way
+/// under both strategies.
+#[test_util::test]
+fn a_union_matched_by_shape_reads_each_payload_into_its_branch() {
+    for payload in [r#"{"items":{"enum":["a"]}}"#, r#"{"items":{"anyOf":["a"]}}"#] {
+        let (left, right) =
+            round_trip::<derived::types::MultiSelect, hand::types::MultiSelect>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+    }
+    let titled = serde_json::from_str::<hand::types::MultiSelect>(r#"{"items":{"anyOf":["a"]}}"#)?;
+    assert!(matches!(titled, hand::types::MultiSelect::TitledMultiSelect(_)));
+
+    for payload in [r#"{"enum":["a"]}"#, r#"{"enum":["a"],"enumNames":["A"]}"#] {
+        let (left, right) =
+            round_trip::<derived::types::EnumSchema, hand::types::EnumSchema>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+    }
+    // The member the earlier branch does not declare makes it refuse, so the later one reads it.
+    let legacy =
+        serde_json::from_str::<hand::types::EnumSchema>(r#"{"enum":["a"],"enumNames":["A"]}"#)?;
+    assert!(matches!(legacy, hand::types::EnumSchema::LegacyEnum(_)));
+    let untitled = serde_json::from_str::<hand::types::EnumSchema>(r#"{"enum":["a"]}"#)?;
+    assert!(matches!(untitled, hand::types::EnumSchema::UntitledEnum(_)));
+}
