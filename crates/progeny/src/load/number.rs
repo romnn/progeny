@@ -213,9 +213,7 @@ impl Decimal {
             Some(rest) => (true, rest),
             None => (false, literal),
         };
-        let (mantissa, exponent) = magnitude
-            .split_once(['e', 'E'])
-            .unwrap_or((magnitude, "0"));
+        let (mantissa, exponent) = magnitude.split_once(['e', 'E']).unwrap_or((magnitude, "0"));
         let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
         let all: String = integer.chars().chain(fraction.chars()).collect();
         // Zeros before the first significant digit say nothing; zeros after the last one move

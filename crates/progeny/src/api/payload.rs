@@ -511,7 +511,8 @@ impl Collect<'_> {
                 .filter(|(key, _)| !structure.fields.iter().any(|field| field.wire == **key))
                 .map(|(key, member)| (key.clone(), member.clone()))
                 .collect();
-            let Value::Object(kept) = self.through(&Value::Object(rest), flattened, lenient)? else {
+            let Value::Object(kept) = self.through(&Value::Object(rest), flattened, lenient)?
+            else {
                 return None;
             };
             out.extend(kept);

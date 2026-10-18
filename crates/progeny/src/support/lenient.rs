@@ -1321,7 +1321,10 @@ mod tests {
         assert!(report.is_empty(), "{report}");
         // A member neither declares lands in the flattened type's own capture.
         let (value, report) = decode::<Assignment>(r#"{"type":"salaried","floor":2}"#)?;
-        assert_eq!(value.employment.extra.get("floor"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            value.employment.extra.get("floor"),
+            Some(&serde_json::json!(2))
+        );
         assert_eq!(
             only(&report, Employment::SITE)?.kind,
             DegradationKind::UndeclaredMember

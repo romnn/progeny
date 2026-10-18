@@ -727,7 +727,10 @@ impl Walk<'_> {
                 schemas.insert(name, dependency);
             }
         }
-        for (keyword, entries) in [("dependentSchemas", schemas), ("dependentRequired", required)] {
+        for (keyword, entries) in [
+            ("dependentSchemas", schemas),
+            ("dependentRequired", required),
+        ] {
             if !entries.is_empty() {
                 map.insert(keyword.to_owned(), Value::Object(entries));
             }
@@ -1117,7 +1120,12 @@ mod tests {
         });
         let mut ctx = Ctx::new();
         let mut legacy = written.clone();
-        super::bundle_schema_at(&mut legacy, true, crate::diag::JsonPointer::root(), &mut ctx);
+        super::bundle_schema_at(
+            &mut legacy,
+            true,
+            crate::diag::JsonPointer::root(),
+            &mut ctx,
+        );
         assert_eq!(
             legacy,
             json!({
@@ -1134,10 +1142,18 @@ mod tests {
             .collect();
         assert_eq!(
             classes,
-            [BreakageClass::LegacyDependencies, BreakageClass::LegacyRefSiblings]
+            [
+                BreakageClass::LegacyDependencies,
+                BreakageClass::LegacyRefSiblings
+            ]
         );
         let mut current = written.clone();
-        super::bundle_schema_at(&mut current, false, crate::diag::JsonPointer::root(), &mut Ctx::new());
+        super::bundle_schema_at(
+            &mut current,
+            false,
+            crate::diag::JsonPointer::root(),
+            &mut Ctx::new(),
+        );
         assert_eq!(current, written);
     }
 
