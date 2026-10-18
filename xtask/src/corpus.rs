@@ -14,7 +14,7 @@ use color_eyre::eyre::{self, WrapErr, bail};
 use progeny::harness::{self, Stats};
 use serde::Deserialize;
 
-use crate::{generated, paths, snapshot};
+use crate::{generated, jobs, paths, snapshot};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -64,6 +64,14 @@ pub struct Args {
     /// Write a per-document timing report here, as JSON.
     #[arg(long, value_name = "PATH")]
     timings: Option<Utf8PathBuf>,
+
+    /// How many documents to check at once.
+    ///
+    /// Defaults to four, or fewer when the cores or the free memory cannot carry four: about
+    /// 4 GiB per document to generate, and 10 GiB to compile one.
+    /// Each compiles in its own cargo target directory, because cargo locks one for a whole build.
+    #[arg(long, value_name = "N")]
+    jobs: Option<usize>,
 
     /// Which serde strategy to generate with, rather than the configuration default.
     ///
@@ -258,10 +266,26 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     let mut totals = Stats::default();
     let mut counted = 0usize;
 
-    for spec in &selected {
+    // Documents run at once up to the job count, and report in manifest order whatever it is.
+    let budget = match (args.compile, args.serde) {
+        (false, _) => jobs::Budget::Generate,
+        (true, Some(SerdeChoice::Derive)) => jobs::Budget::CompileDerive,
+        (true, _) => jobs::Budget::Compile,
+    };
+    let jobs = jobs::resolve(args.jobs, budget);
+    println!("corpus: {jobs} documents at a time");
+    let checked = jobs::map_ordered(&selected, jobs, |spec, slot| {
         let started = Instant::now();
-        let outcome = check(spec, args, &mut totals, &mut counted)?;
-        outcomes.push((spec.name.clone(), outcome, started.elapsed()));
+        check(spec, args, slot).map(|checked| (checked, started.elapsed()))
+    })?;
+    for (spec, checked) in selected.iter().zip(checked) {
+        let ((outcome, stats), elapsed) = checked?;
+        if let Some(stats) = stats {
+            print_upload_stats(&spec.name, &stats);
+            totals.merge(&stats);
+            counted += 1;
+        }
+        outcomes.push((spec.name.clone(), outcome, elapsed));
     }
 
     let failures = report(&specs, &outcomes, args.show_diagnostics);
@@ -305,7 +329,9 @@ pub fn load_manifest() -> eyre::Result<Vec<Spec>> {
 pub fn selected(names: &[String]) -> eyre::Result<Vec<(Spec, Vec<u8>)>> {
     let specs = load_manifest()?;
     let mut out = Vec::new();
-    for name in names {
+    // A document named twice is checked once, for the reason [`select`] gives.
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names.iter().filter(|name| seen.insert(name.as_str())) {
         let Some(spec) = specs.iter().find(|spec| &spec.name == name) else {
             bail!("no corpus document named `{name}`");
         };
@@ -373,9 +399,12 @@ fn select(specs: &[Spec], args: &Args) -> eyre::Result<Vec<Spec>> {
     } else {
         specs.to_vec()
     };
+    // A document named twice is checked once: two workers writing one generated directory would
+    // race, and a repeat checks nothing new.
+    let mut seen = std::collections::BTreeSet::new();
     Ok(selected
         .into_iter()
-        .filter(|spec| !args.except.contains(&spec.name))
+        .filter(|spec| !args.except.contains(&spec.name) && seen.insert(spec.name.clone()))
         .collect())
 }
 
@@ -562,24 +591,22 @@ fn check_convergence() -> eyre::Result<usize> {
     Ok(failures)
 }
 
-fn check(
-    spec: &Spec,
-    args: &Args,
-    totals: &mut Stats,
-    counted: &mut usize,
-) -> eyre::Result<Outcome> {
+/// Check one document, and collect its model-level counts when the run reports them.
+///
+/// `slot` is the worker running it, whose own cargo target directory a compile builds in.
+fn check(spec: &Spec, args: &Args, slot: usize) -> eyre::Result<(Outcome, Option<Stats>)> {
     let path = document_path(spec);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) => return Ok(Outcome::Unavailable(format!("{path}: {error}"))),
+        Err(error) => return Ok((Outcome::Unavailable(format!("{path}: {error}")), None)),
     };
 
     let result = match harness::round_trip(&bytes) {
         Ok(result) => result,
-        Err(error) => return Ok(Outcome::Rejected(error.to_string())),
+        Err(error) => return Ok((Outcome::Rejected(error.to_string()), None)),
     };
     if !result.is_clean() {
-        return Ok(Outcome::Differs(result.differences));
+        return Ok((Outcome::Differs(result.differences), None));
     }
 
     // Determinism: identical input has to produce an identical model. At this stage that means the
@@ -587,30 +614,14 @@ fn check(
     // compares rendered bytes.
     match harness::round_trip(&bytes) {
         Ok(again) if again.reserialized == result.reserialized => {}
-        _ => return Ok(Outcome::Nondeterministic),
+        _ => return Ok((Outcome::Nondeterministic, None)),
     }
 
-    if args.stats
-        && let Ok(stats) = harness::stats(&bytes)
-    {
-        if stats.text_response_arms + stats.byte_response_arms > 0 {
-            println!(
-                "  response bodies: {}: {} text, {} bytes",
-                spec.name, stats.text_response_arms, stats.byte_response_arms
-            );
-        }
-        if stats.byte_request_bodies + stats.multipart_file_request_bodies > 0 {
-            println!(
-                "  upload bodies: {}: {} raw bytes, {} multipart with {} file parts",
-                spec.name,
-                stats.byte_request_bodies,
-                stats.multipart_file_request_bodies,
-                stats.multipart_file_parts
-            );
-        }
-        totals.merge(&stats);
-        *counted += 1;
-    }
+    let stats = if args.stats {
+        harness::stats(&bytes).ok()
+    } else {
+        None
+    };
 
     let version_drift = spec.version.as_deref().and_then(|recorded| {
         let family: String = result
@@ -638,11 +649,11 @@ fn check(
     }
     let output = match progeny::generate(&bytes, &config) {
         Ok(output) => output,
-        Err(error) => return Ok(Outcome::Rejected(error.to_string())),
+        Err(error) => return Ok((Outcome::Rejected(error.to_string()), stats)),
     };
     match progeny::generate(&bytes, &config) {
         Ok(again) if again.files == output.files => {}
-        _ => return Ok(Outcome::Nondeterministic),
+        _ => return Ok((Outcome::Nondeterministic, stats)),
     }
     let rendered = output
         .files
@@ -651,7 +662,7 @@ fn check(
         .sum();
     let compiled = if args.compile {
         let directory = generated::write(&spec.name, &output)?;
-        Some(generated::check(&directory, args.clippy)?)
+        Some(generated::check(&directory, args.clippy, slot)?)
     } else {
         None
     };
@@ -669,7 +680,7 @@ fn check(
         taken.compare(snapshot::read(&spec.name).as_ref())
     };
 
-    Ok(Outcome::Clean(Box::new(Clean {
+    let clean = Outcome::Clean(Box::new(Clean {
         schemas: result.schema_count,
         diagnostics,
         yaml: result.yaml,
@@ -679,7 +690,26 @@ fn check(
         snapshot: verdict,
         rendered,
         compiled,
-    })))
+    }));
+    Ok((clean, stats))
+}
+
+/// The response and upload bodies one document declares, when it has any to speak of.
+fn print_upload_stats(name: &str, stats: &Stats) {
+    if stats.text_response_arms + stats.byte_response_arms > 0 {
+        println!(
+            "  response bodies: {name}: {} text, {} bytes",
+            stats.text_response_arms, stats.byte_response_arms
+        );
+    }
+    if stats.byte_request_bodies + stats.multipart_file_request_bodies > 0 {
+        println!(
+            "  upload bodies: {name}: {} raw bytes, {} multipart with {} file parts",
+            stats.byte_request_bodies,
+            stats.multipart_file_request_bodies,
+            stats.multipart_file_parts
+        );
+    }
 }
 
 /// The configuration the corpus generates with.

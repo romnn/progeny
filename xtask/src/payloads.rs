@@ -44,6 +44,14 @@ pub struct Args {
     /// compares them on one fixture; this compares each against 643 payloads the vendors wrote.
     #[arg(long, value_name = "STRATEGY")]
     serde: Option<crate::corpus::SerdeChoice>,
+
+    /// How many documents to check at once.
+    ///
+    /// Defaults to four, or fewer when the cores or the free memory cannot carry four, at about
+    /// 10 GiB per compile.
+    /// Each compiles in its own cargo target directory, because cargo locks one for a whole build.
+    #[arg(long, value_name = "N")]
+    jobs: Option<usize>,
 }
 
 /// What one document's payloads did.
@@ -53,6 +61,8 @@ struct Outcome {
     failures: Vec<String>,
     vendor: Vec<String>,
     skipped: Payloads,
+    /// Where `--generate-only` wrote the test.
+    generated: Option<camino::Utf8PathBuf>,
 }
 
 pub fn run(args: &Args) -> eyre::Result<()> {
@@ -72,12 +82,24 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     // coverage it did.
     let documents = crate::corpus::selected(&wanted)?;
 
-    println!("payloads: {} documents", documents.len());
+    let budget = match args.serde {
+        Some(crate::corpus::SerdeChoice::Derive) => crate::jobs::Budget::CompileDerive,
+        _ => crate::jobs::Budget::Compile,
+    };
+    let jobs = crate::jobs::resolve(args.jobs, budget);
+    println!("payloads: {} documents, {jobs} at a time", documents.len());
+    // Each document compiles in its own worker's target directory, and reports in order.
+    let outcomes = crate::jobs::map_ordered(&documents, jobs, |(spec, bytes), slot| {
+        check(&spec.name, spec, bytes, args, slot)
+    })?;
     let mut failures = 0usize;
     let mut totals = (0usize, 0usize, 0usize);
-    for (spec, bytes) in &documents {
+    for ((spec, _), outcome) in documents.iter().zip(outcomes) {
         let name = &spec.name;
-        let outcome = check(name, spec, bytes, args)?;
+        let outcome = outcome?;
+        if let Some(file) = &outcome.generated {
+            println!("  {name} → {file}");
+        }
         totals.0 += outcome.checked;
         totals.1 += outcome.vendor.len();
         totals.2 += outcome.skipped.opaque + outcome.skipped.unnamed + outcome.skipped.captures;
@@ -127,6 +149,7 @@ fn check(
     spec: &crate::corpus::Spec,
     bytes: &[u8],
     args: &Args,
+    slot: usize,
 ) -> eyre::Result<Outcome> {
     let mut config = crate::corpus::config_for(spec);
     // Types only: the payload question is about the shared type layer, and compiling an HTTP stack
@@ -159,11 +182,11 @@ fn check(
     let file = directory.join("tests/payloads.rs");
 
     if args.generate_only {
-        println!("  {name} → {file}");
+        outcome.generated = Some(file);
         return Ok(outcome);
     }
 
-    let run = crate::generated::cargo(&directory)
+    let run = crate::generated::cargo_in(&directory, slot)
         // `--nocapture`, because the report travels on stdout and libtest swallows the stdout of a
         // test that passes — without it a document with vendor defects and no real failures would
         // report zero of both, which is the reading that looks like success.

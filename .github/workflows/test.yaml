@@ -48,6 +48,8 @@ jobs:
     # Generated crates are compiled one cargo job at a time, because the largest of them need more
     # rustc than a hosted runner has memory for. That trades wall clock for finishing at all: the
     # 45 minutes this used to allow were sized for a parallel build that never once survived.
+    # The compile and payload steps also take one document at a time (`--jobs 1`) for the same
+    # reason, rather than leaving it to the free memory the default reads.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
@@ -76,31 +78,31 @@ jobs:
       # This lints them too, with warnings denied: a warning in generated code is a defect its
       # consumer meets in their own build, about source they did not write.
       - name: Compile and lint the generated crates for the quick tier
-        run: task corpus:compile
+        run: task corpus:compile -- --jobs 1
       # Both serde strategies compile, because both ship. The step above uses the default, which is
       # the hand-written path; this is the derive escape hatch a caller falls back to for a format
       # that is not self-describing. An escape hatch nobody runs is not one.
       # Workspace packaging makes Cloudflare's derive rendering three compilation units; its
       # largest measured member is 9.19 GiB rather than the single crate's 14.7 GiB floor.
       - name: The same, with the derive escape hatch
-        run: task corpus:compile -- --serde derive
+        run: task corpus:compile -- --serde derive --jobs 1
       # Strict decoding ships a different client runtime: no read forms, no decoder, and under
       # workspace packaging a report of its own in a private support module. Its unused imports
       # went unseen while every gate compiled only the lenient default.
       - name: The same, decoding strictly
-        run: task corpus:compile -- --decoding strict
+        run: task corpus:compile -- --decoding strict --jobs 1
       # Runs serde against real payloads rather than asking whether source compiles, which makes it
       # the only gate here that can catch output that is wrong on the wire. It found a `default`
       # rendered as `#[serde(default = "…")]`, which put members into 60 requests the caller never
       # set — code that generated, compiled, round-tripped and snapshotted clean.
       - name: Payload round-trips
-        run: task payloads
+        run: task payloads -- --jobs 1
       # The same payloads through the derive. The differential harness compares the two strategies
       # on one fixture; this compares each against the payloads the vendors actually wrote, and it
       # is the only gate that can tell them apart on the wire at corpus scale. They agree exactly:
       # 643 checked, 34 vendor defects tolerated, 171 not checkable, both ways.
       - name: Payload round-trips, the derive escape hatch
-        run: task payloads -- --serde derive
+        run: task payloads -- --serde derive --jobs 1
       # The only gate that sends a request: the generated client of one description against the
       # generated server of the same one, over a real socket. It found two defects on its first run
       # that no amount of reading the emitted source had.
@@ -142,7 +144,7 @@ jobs:
       - name: Fetch corpus
         uses: ./.github/actions/fetch-corpus
       - name: Compile and lint every generated crate
-        run: task corpus:compile:all
+        run: task corpus:compile:all -- --jobs 1
       - name: The wire differential over the whole tier
         run: task probe
 
