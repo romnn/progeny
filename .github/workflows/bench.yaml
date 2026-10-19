@@ -63,11 +63,10 @@ jobs:
           fail-on-alert: false
           summary-always: true
 
-  # A push made with `GITHUB_TOKEN` does not start a branch-based Pages build, so benchtrail's
-  # workflow deploys `gh-pages` with the chart page installed beside the history, and Pages is set
-  # to publish from Actions.
-  # The chart is at `/bench/`; a docs site deployed by Actions later can install it into its own
-  # `static/bench/` with the `romnn/benchtrail` action and keep the URL.
+  # benchtrail's workflow reads the history from `gh-pages` and deploys the chart page with it at
+  # `/bench/`, and Pages is set to publish from Actions.
+  # A docs site deployed by Actions later can install the chart into its own build with the
+  # `romnn/benchtrail` action, keep that URL, and be what this job deploys instead.
   # The settings split each benchmark name into its document, strategy, and metric.
   deploy:
     name: deploy the chart
@@ -76,9 +75,9 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    uses: romnn/benchtrail/.github/workflows/pages.yaml@v0.2.0
+    uses: romnn/benchtrail/.github/workflows/pages.yaml@v0.3.0
     with:
-      path: bench
+      benchmark-data-dir-path: bench
       settings: |
         {
           "title": "progeny compile cost",
