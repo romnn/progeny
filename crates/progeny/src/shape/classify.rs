@@ -752,66 +752,41 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
     None
 }
 
-/// Every value a member's schema admits, when that is a list of strings: the values each `enum`
-/// and `const` of every schema the member merges lists, in the order the first lists them.
+/// Every value a member's schema admits, when that is a list of strings: each string an `enum` or
+/// `const` of the member lists that the member's whole schema admits, in the order they are
+/// listed.
 ///
-/// Read from the schemas themselves as well as from the merged view, which keeps the first
-/// `const` it meets.
-/// A list the merged view could not narrow, a member any of whose schemas is a union, one whose
-/// `type` admits no string, one that admits `null`, and one that admits nothing have no such
-/// list, because the branches it names
-/// would then not be the ones whose schemas admit the value.
+/// Admission is judged by every schema the member merges ([`super::listed::admits`]), so a
+/// `const` beside a list, two `const`s that disagree, a `type` that admits no string and a union
+/// that narrows the list each leave out what they refuse.
+/// A member that may admit a value the judgement cannot settle, or that admits `null`, has no
+/// such list, because the branches it names would then not be the ones whose schemas admit the
+/// value.
 fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
-    let view = merge::view(resolved, key);
-    let uncertain = view
-        .uninterpreted
-        .iter()
-        .any(|keyword| matches!(*keyword, "enum" | "const"));
-    let strings = view
-        .types
-        .as_ref()
-        .is_none_or(|types| types.contains(&TypeName::String));
-    if uncertain
-        || !strings
-        || view.impossible
-        || view.conflict.is_some()
-        || view.union.is_some()
-        || declares_null(&view)
-    {
+    use super::listed::{Admission, admits};
+    if admits(resolved, key, &Value::Null, 0) != Admission::No {
         return None;
     }
-    let mut values: Option<Vec<String>> = None;
+    let mut listed: Vec<&Value> = Vec::new();
     for &part in key.parts() {
         let Schema::Object(object) = resolved.schema(part) else {
             continue;
         };
-        if object.any_of.is_some() || object.one_of.is_some() {
-            return None;
-        }
-        let lists = [
-            object.enumeration.clone(),
-            object.constant.clone().map(|only| vec![only]),
-            view.enumeration.clone(),
-            view.constant.clone().map(|only| vec![only]),
-        ];
-        for listed in lists.into_iter().flatten() {
-            let mut strings: Vec<String> = Vec::new();
-            for value in listed {
-                let value = value.as_str()?.to_owned();
-                if !strings.contains(&value) {
-                    strings.push(value);
-                }
+        listed.extend(object.enumeration.iter().flatten());
+        listed.extend(&object.constant);
+    }
+    let mut values: Vec<String> = Vec::new();
+    for value in listed {
+        let text = value.as_str()?;
+        match admits(resolved, key, value, 0) {
+            Admission::Yes if !values.iter().any(|known| known == text) => {
+                values.push(text.to_owned());
             }
-            values = Some(match values {
-                None => strings,
-                Some(before) => before
-                    .into_iter()
-                    .filter(|value| strings.contains(value))
-                    .collect(),
-            });
+            Admission::Yes | Admission::No => {}
+            Admission::Unknown => return None,
         }
     }
-    values.filter(|values| !values.is_empty())
+    (!values.is_empty()).then_some(values)
 }
 
 /// Whether the object branch tried first would take a payload of a later one that names, in

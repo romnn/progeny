@@ -3364,21 +3364,35 @@ mod tests {
             }),
             "Field",
         )?);
-        // The union beside `A`'s list narrows it to `a`, so `{"type": "b"}` is `B`'s alone.
-        assert!(degrades_as_wild_union(
-            json!({
-                "A": object(
-                    json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
-                    true,
-                    json!({}),
-                    &["type"],
-                ),
-                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
-                "C": object(listing(&["c"]), true, json!({}), &["type"]),
-                "Field": {"anyOf": branches.clone()},
-            }),
-            "Field",
-        )?);
+        // The union beside `A`'s list narrows it to `a`, so `{"type": "b"}` is `B`'s alone, and
+        // `A` lists only `a`.
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "A": object(
+                json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
+                true,
+                json!({}),
+                &["type"],
+            ),
+            "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+            "C": object(listing(&["c"]), true, json!({}), &["type"]),
+            "Field": {"anyOf": branches.clone()},
+        })))?;
+        let Shape::Union(union) = shape_of(&shapes, "Field")? else {
+            panic!("expected a union: {:?}", shape_of(&shapes, "Field")?);
+        };
+        let spellings: Vec<Vec<&str>> = union
+            .variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .tag
+                    .iter()
+                    .chain(&variant.aliases)
+                    .map(String::as_str)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(spellings, [vec!["a"], vec!["b", "c"], vec!["c"]]);
 
         // `A`'s `type` admits integers alone, so it admits none of the strings it lists.
         assert!(degrades_as_wild_union(
