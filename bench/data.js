@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792377549352,
+  "lastUpdate": 1792405198453,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -526,6 +526,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 334.1263017654419,
             "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9be5911d02bf244fd50a448f82b4666d2afe6e3f",
+          "message": "feat(shape): size integers by their format, opt-in (#69)\n\n`[formats] integers = \"by-format\"` gives an integer whose `format` names a\nwidth (`int8` through `int64`, `uint8` through `uint64`, `uint`) that Rust\ntype, when every value its bounds and listed values admit fits it.\nA format progeny does not know, parts that disagree, or a bound or listed\nvalue outside the width keep the wide type and are reported.\nThe default stays `i64`/`u64`.\n\nBounds now live in the merged view as exact values, so a bound equal to its\ntype's range end is no longer reported as unexpressed.\n\nCloses #66",
+          "timestamp": "2026-10-19T12:14:40+02:00",
+          "tree_id": "fe9deb1c3bfda322b5e955132b9cc662fcb89b1d",
+          "url": "https://github.com/romnn/progeny/commit/9be5911d02bf244fd50a448f82b4666d2afe6e3f"
+        },
+        "date": 1792405197522,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 26.70028566666667,
+            "range": "± 0.22",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3000.513020515442,
+            "range": "± 3.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.180933666666666,
+            "range": "± 0.11",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1249.9401035308838,
+            "range": "± 0.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6823653333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 334.6822910308838,
+            "range": "± 1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
