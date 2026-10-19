@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792420212449,
+  "lastUpdate": 1792426750372,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -658,6 +658,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 334.16796875,
             "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "363c8e3fa6b4d53585629091b58b90f991167553",
+          "message": "fix(shape): read a nested anyOf before another branch as its own branches (#73)\n\nA nested union that was a branch of another, but not the last, made the\nouter union `wild-union`: the type generated for the nested union holds\nevery payload its branches do not fit, so it took the payloads of every\nbranch after it.\n\nA nested `anyOf` that declares nothing beside its branches admits exactly\nwhat they do. Where the outer union would otherwise degrade for want of a\ntag, it is now matched again with every such nested `anyOf` read as its\nbranches, in order, and a `null` among them makes the outer union\noptional. The nested union keeps its own type wherever it is referenced\non its own. A nested `oneOf` is not spread, because it refuses a payload\ntwo of its branches admit, and neither is one with a discriminator, a\n`type` or any other keyword beside its branches. Ambiguity checks count a\n`null` a spread lifts as making a member optional.\n\nCorpus: wild-union occurrences fall in runway, qdrant, lithic, logfire,\nopenai and opensearch.\n\nCloses #71",
+          "timestamp": "2026-10-19T18:13:16+02:00",
+          "tree_id": "d421c697ffb64d236e2239712fcb58a66176fb98",
+          "url": "https://github.com/romnn/progeny/commit/363c8e3fa6b4d53585629091b58b90f991167553"
+        },
+        "date": 1792426749530,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 27.453357999999998,
+            "range": "± 0.45",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3003.46484375,
+            "range": "± 2.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.367625666666667,
+            "range": "± 0.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.3307285308838,
+            "range": "± 2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7171810000000001,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 335.32421875,
+            "range": "± 2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
