@@ -63,49 +63,34 @@ jobs:
           fail-on-alert: false
           summary-always: true
 
-  # A push made with `GITHUB_TOKEN` does not start a branch-based Pages build, so `gh-pages` is
-  # deployed here, and Pages is set to publish from Actions.
-  # The chart is at `/bench/`; a docs site deployed by Actions later can copy that directory into
-  # its own `static/bench/` and keep the URL.
+  # A push made with `GITHUB_TOKEN` does not start a branch-based Pages build, so benchtrail's
+  # workflow deploys `gh-pages` with the chart page installed beside the history, and Pages is set
+  # to publish from Actions.
+  # The chart is at `/bench/`; a docs site deployed by Actions later can install it into its own
+  # `static/bench/` with the `romnn/benchtrail` action and keep the URL.
+  # The settings split each benchmark name into its document, strategy, and metric.
   deploy:
     name: deploy the chart
     needs: compile-cost
-    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pages: write
       id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: gh-pages
-      # The deployed page is the release pinned here, in place of the page github-action-benchmark
-      # committed beside the history.
-      # The settings split each benchmark name into its document, strategy, and metric.
-      - uses: romnn/benchtrail@v0.2.0
-        with:
-          path: bench
-          settings: |
-            {
-              "title": "progeny compile cost",
-              "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
-              "label": "{{document}} / {{strategy}}",
-              "metrics": {
-                "cpu": { "label": "CPU time", "direction": "lower" },
-                "peak rss": { "label": "Peak RSS", "direction": "lower" }
-              },
-              "dimensions": {
-                "document": { "label": "Document" },
-                "strategy": { "label": "Serde strategy" }
-              },
-              "colorBy": "document"
-            }
-      - uses: actions/upload-pages-artifact@v5
-        with:
-          path: .
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v5
+    uses: romnn/benchtrail/.github/workflows/pages.yaml@v0.2.0
+    with:
+      path: bench
+      settings: |
+        {
+          "title": "progeny compile cost",
+          "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
+          "label": "{{document}} / {{strategy}}",
+          "metrics": {
+            "cpu": { "label": "CPU time", "direction": "lower" },
+            "peak rss": { "label": "Peak RSS", "direction": "lower" }
+          },
+          "dimensions": {
+            "document": { "label": "Document" },
+            "strategy": { "label": "Serde strategy" }
+          },
+          "colorBy": "document"
+        }
