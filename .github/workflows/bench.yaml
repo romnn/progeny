@@ -92,8 +92,8 @@ jobs:
         with:
           ref: gh-pages
           path: pages
-      # The page is replaced on every deploy, so `gh-pages` holds only the history, and the chart
-      # follows the release pinned above rather than whatever page was committed beside the data.
+      # The deployed page is the release pinned above, in place of the page github-action-benchmark
+      # committed beside the history on `gh-pages`.
       - name: Install benchtrail
         run: |
           curl -fsSL -o "$RUNNER_TEMP/benchtrail.zip" \
@@ -102,14 +102,14 @@ jobs:
           unzip -oq "$RUNNER_TEMP/benchtrail.zip" -d pages/bench
       # The page reads its settings from a JSON block in its own markup, so the block is replaced
       # with `.github/benchtrail.json`.
-      # Escaping `</` keeps a setting from closing the script element early.
+      # Every `<` is escaped, so no setting can end the script element or open a comment in it.
       - name: Apply the chart settings
         shell: python
         run: |
           import json, pathlib, re, sys
 
           settings = json.loads(pathlib.Path(".github/benchtrail.json").read_text())
-          block = json.dumps(settings, indent=2).replace("</", "<\\/")
+          block = json.dumps(settings, indent=2).replace("<", "\\u003c")
           page = pathlib.Path("pages/bench/index.html")
           html, count = re.subn(
               r'(<script id="benchtrail-config" type="application/json">).*?(</script>)',
