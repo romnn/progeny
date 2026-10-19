@@ -34,6 +34,7 @@
 mod classify;
 mod discriminate;
 mod fit;
+mod listed;
 mod merge;
 mod roots;
 
@@ -3221,7 +3222,7 @@ mod tests {
                  "properties": {"v": {"type": ["string", "integer"]}}},
                 {},
             ]}),
-            // Values listed beside a member's union are not in the string it reads as.
+            // A member's list beside its union is that list, whose open enum reads `"b"`.
             json!({"oneOf": [
                 {"type": "object", "required": ["v"], "properties": {"v": {
                     "enum": ["a"],
@@ -3311,6 +3312,20 @@ mod tests {
         ]}})))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
+    }
+
+    /// Both booleans beside a union nested too deep to check are kept, but not as a list the type
+    /// holds, so they are not every boolean either, and the catch-all after them is still reached.
+    #[test_util::test]
+    fn an_unchecked_list_is_no_list_a_catch_all_may_follow() {
+        let deep = (0..6).fold(json!({"const": true}), |inner, _| json!({"anyOf": [inner]}));
+        assert!(degrades_as_wild_union(
+            json!({"Either": {"anyOf": [
+                {"enum": [true, false], "anyOf": [deep]},
+                {},
+            ]}}),
+            "Either",
+        )?);
     }
 
     /// A closed branch that keeps whole what it reads still takes the wrong variant when what it
@@ -3433,6 +3448,234 @@ mod tests {
                 "{schema} should degrade"
             );
         }
+    }
+
+    /// A list beside a union reads as that list, narrowed to the values the union admits.
+    #[test_util::test]
+    fn a_list_beside_a_union_is_the_list_the_union_admits() {
+        let listed = |values: &[&str]| {
+            Shape::StringEnum(StringEnum::listed(
+                values.iter().map(|value| (*value).to_owned()).collect(),
+            ))
+        };
+        let cases = [
+            // The list is the tighter bound, so `"b"` is no declared value.
+            (
+                json!({"enum": ["a"], "anyOf": [{"const": "a"}, {"type": "string"}]}),
+                listed(&["a"]),
+            ),
+            // An integer branch admits no string, so there is no integer arm.
+            (
+                json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
+                listed(&["a"]),
+            ),
+            // A list that restates its union's values, the way vapi writes one, stays that list.
+            (
+                json!({"enum": ["x", "y", "auto"], "oneOf": [
+                    {"type": "string", "enum": ["x", "y"]},
+                    {"type": "string", "enum": ["auto"]},
+                ]}),
+                listed(&["x", "y", "auto"]),
+            ),
+            // A constant beside the list narrows it to itself.
+            (
+                json!({"enum": ["a", "b"], "const": "b", "anyOf": [{"type": "string"}]}),
+                listed(&["b"]),
+            ),
+            // `null` stays only where the union admits it.
+            (
+                json!({"enum": ["a", null], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
+                listed(&["a"]),
+            ),
+            // An empty list beside a reference, as discord writes one, is no list.
+            (
+                json!({"type": "string", "enum": [], "anyOf": [{"const": "a"}, {"const": "b"}]}),
+                listed(&["a", "b"]),
+            ),
+            // An empty list is no list, wherever it is written, so the other parts' list and a
+            // branch's type still count.
+            (
+                json!({"enum": [], "allOf": [{"enum": ["a"]}], "anyOf": [{"type": "string"}]}),
+                listed(&["a"]),
+            ),
+            (
+                json!({"enum": ["a"], "anyOf": [{"const": "a"}, {"type": "integer", "enum": []}]}),
+                listed(&["a"]),
+            ),
+            // A `false` branch is no `null` branch, so this union is no alias to keep.
+            (
+                json!({"enum": ["a"], "anyOf": [{"const": "a"}, false]}),
+                listed(&["a"]),
+            ),
+            // A `null` branch that admits nothing makes no `Option` of the list.
+            (
+                json!({"enum": ["a"], "anyOf": [
+                    {"const": "a"},
+                    {"allOf": [{"type": "null"}, false]},
+                ]}),
+                listed(&["a"]),
+            ),
+            // A constant beside an empty list is still the constant.
+            (
+                json!({"enum": [], "const": "a", "anyOf": [{"type": "integer"}, {"type": "string"}]}),
+                listed(&["a"]),
+            ),
+            // Two constants of one kind are read as the list, whose one integer tells them apart
+            // where two integer branches would not.
+            (
+                json!({"enum": [1, 2], "anyOf": [{"const": 1}, {"const": 2}]}),
+                Shape::Scalar(Scalar::Integer { signed: true }),
+            ),
+            // A list narrowed to `null` alone is `null`.
+            (
+                json!({"enum": [null], "anyOf": [{"type": "null"}, {"type": "string"}]}),
+                Shape::Null,
+            ),
+            (
+                json!({"enum": ["a", null], "anyOf": [{"type": "null"}]}),
+                Shape::Null,
+            ),
+            // `2.0` stays a number, because the integer would refuse the way it is written, and
+            // so does a number no `i64` holds.
+            (
+                json!({"enum": [9_223_372_036_854_775_808_u64], "anyOf": [{"type": "number"}]}),
+                Shape::Scalar(Scalar::Number),
+            ),
+            (
+                json!({"type": "number", "enum": [2.0], "anyOf": [{"type": "number"}]}),
+                Shape::Scalar(Scalar::Number),
+            ),
+            // An unsigned integer holds what an `i64` cannot.
+            (
+                json!({
+                    "type": "integer", "minimum": 0, "enum": [18_446_744_073_709_551_615_u64],
+                    "anyOf": [{"type": "integer"}],
+                }),
+                Shape::Scalar(Scalar::Integer { signed: false }),
+            ),
+        ];
+        for (schema, expected) in cases {
+            let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": schema.clone()})))?;
+            assert!(diagnostics.is_empty(), "{schema}: {diagnostics:?}");
+            assert_eq!(shape_of(&shapes, "Code")?, &expected, "{schema}");
+        }
+    }
+
+    /// A union that is one branch and perhaps `null`, admitting listed values alone, already
+    /// holds the list, so it keeps its own reading, a reference to a named type included.
+    #[test_util::test]
+    fn a_list_a_nullable_alias_holds_keeps_the_alias() {
+        // Here an `Option` of its one other branch.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": {
+            "enum": ["a", null], "anyOf": [{"const": "a"}, {"type": "null"}],
+        }})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Code")?, Shape::Optional(_)));
+
+        // The union's own `null` branch is the one `null`, however the `type` beside it says so.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": {
+            "type": ["string", "null"], "enum": ["a", null],
+            "anyOf": [{"const": "a"}, {"type": "null"}],
+        }})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Code")? else {
+            eyre::bail!("an optional shape was expected");
+        };
+        assert!(!matches!(**inner, Shape::Optional(_)), "{inner:?}");
+
+        // A `type` that admits `null` beside a union that refuses it is no `Option`.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": {
+            "type": ["string", "null"], "enum": ["a", null], "anyOf": [{"const": "a"}],
+        }})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Code")?, Shape::Alias(_)));
+    }
+
+    /// A list beside a union that cannot be narrowed exactly is reported, never dropped.
+    #[test_util::test]
+    fn a_list_beside_a_union_that_cannot_be_checked_is_reported() {
+        let reported = |schema: Value| -> eyre::Result<(Shape, bool)> {
+            let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": schema})))?;
+            let narrows = diagnostics.iter().any(|d| {
+                d.class() == crate::BreakageClass::UnsupportedConstruct
+                    && d.detail().contains("`enum` narrows")
+            });
+            Ok((shape_of(&shapes, "Code")?.clone(), narrows))
+        };
+
+        // A `pattern` might refuse `"a"`, so it is kept, and the list is reported.
+        let (shape, narrows) = reported(json!({
+            "enum": ["a"], "anyOf": [{"type": "string", "pattern": "^b"}, {"type": "integer"}],
+        }))?;
+        assert_eq!(
+            shape,
+            Shape::StringEnum(StringEnum::listed(vec!["a".to_owned()]))
+        );
+        assert!(narrows);
+
+        // A list of objects is not checked, so the union stays and the list is reported.
+        let (shape, narrows) = reported(json!({
+            "enum": [{"kind": "a"}],
+            "anyOf": [
+                {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "a"}}},
+                {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "b"}}},
+            ],
+        }))?;
+        assert!(!matches!(shape, Shape::StringEnum(_)), "{shape:?}");
+        assert!(narrows);
+
+        // `1` and `1.0` are one value, so both survive the `allOf`, and a list of a string and a
+        // number has no one Rust type to be.
+        let (shape, _) = reported(json!({
+            "allOf": [{"enum": [1, "a"]}, {"enum": [1.0, "a"]}],
+            "anyOf": [{"type": "integer"}, {"type": "string"}],
+        }))?;
+        assert_eq!(shape, Shape::Any);
+
+        // A list beside a union of members is not narrowed, and is reported.
+        let (_, narrows) = reported(json!({
+            "enum": ["a"],
+            "properties": {"unused": {"type": "string"}},
+            "anyOf": [{"const": "a"}, {"type": "string"}],
+        }))?;
+        assert!(narrows);
+
+        // A list and a constant that share no value admit nothing either.
+        let (shapes, _) = shapes_of(with_schemas(json!({"Code": {
+            "enum": ["a"], "const": "b", "anyOf": [{"type": "string"}],
+        }})))?;
+        assert_eq!(shape_of(&shapes, "Code")?, &Shape::Any);
+
+        // A branch that refers back to the schema is read without recursing into it, so this
+        // returns at all.
+        let (shapes, _) = shapes_of(with_schemas(json!({"Code": {
+            "enum": ["a"], "anyOf": [{"const": "a"}, {"$ref": "#/components/schemas/Code"}],
+        }})))?;
+        shape_of(&shapes, "Code")?;
+
+        // Under `oneOf` a value two branches admit is refused, so this admits nothing at all.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Code": {
+            "enum": ["a"], "oneOf": [{"const": "a"}, {"type": "string"}],
+        }})))?;
+        assert_eq!(shape_of(&shapes, "Code")?, &Shape::Any);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.detail().contains("accepts no value at all")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A union branch whose list beside its own union is narrowed is the enum it reads as, so a
+    /// later branch of another kind is still reached.
+    #[test_util::test]
+    fn a_narrowed_branch_leaves_other_kinds_to_later_branches() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Either": {"anyOf": [
+            {"enum": ["a"], "anyOf": [{"const": "a"}, {"type": "integer"}]},
+            {"type": "integer"},
+        ]}})))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
     }
 
     #[test_util::test]
