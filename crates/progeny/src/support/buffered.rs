@@ -740,8 +740,9 @@ where
 /// The resolver receives the position of the matched name in `variants`, always in range.
 /// `variants` lists every spelling of every variant, so several positions can name one variant.
 /// Several variants may list one spelling too, in a union that tells those apart by shape: each
-/// is then tried in order, the first whose type reads the payload is the value, and a payload
-/// none of them reads goes to `unknown`.
+/// variant listing the payload's spelling is then tried in order, the first whose type reads the
+/// payload is the value, and a payload none of them reads goes to `unknown`, however many there
+/// are.
 /// A payload without the tag member is the variant at `absent`, and one whose tag is `null` is
 /// the variant at `null`, where the description names one.
 /// A payload that names no variant — no tag or a `null` one where nothing is named for it, a tag
@@ -766,11 +767,14 @@ where
     let Some(choice) = choice(&payload, tag, variants, absent, null)? else {
         return Deserialize::deserialize(ContentDeserializer::<'de, E>::new(payload)).map(unknown);
     };
-    let shared = sharing(variants, choice);
-    if shared.len() < 2 {
+    let repeated = variants
+        .iter()
+        .enumerate()
+        .any(|(at, name)| variants.iter().skip(at + 1).any(|other| other == name));
+    if !repeated {
         return resolve(choice, ContentDeserializer::new(payload));
     }
-    for position in shared {
+    for position in sharing(variants, choice) {
         if let Ok(value) = resolve(position, ContentDeserializer::new(payload.clone())) {
             return Ok(value);
         }
@@ -2448,7 +2452,12 @@ mod tests {
 
         #[test]
         fn a_payload_no_variant_listing_its_spelling_reads_is_kept_whole() {
-            for wire in [r#"{"type":"string","size":1}"#, r#"{"type":"boolean"}"#] {
+            // A spelling one variant lists is that one's to read, and kept whole where it cannot.
+            for wire in [
+                r#"{"type":"string","size":1}"#,
+                r#"{"type":"boolean"}"#,
+                r#"{"type":"number","size":1}"#,
+            ] {
                 let field = read(wire);
                 let Field::Unknown(value) = field else {
                     panic!("{wire} was read as {field:?}");

@@ -408,7 +408,7 @@ fn tagged_body(
         };
     }
     // Variants that list one spelling are told apart by shape: the first the payload fits
-    // strictly, read leniently, or the open arm where it fits none.
+    // strictly, read leniently, or the open arm where it fits none, as many as there are.
     let probes = variants
         .iter()
         .zip(&table.patterns)
@@ -428,22 +428,14 @@ fn tagged_body(
     quote! {
         const TAG: &str = #tag;
         const VARIANTS: &[&str] = &[#(#wire_names),*];
-        let choices = #support::lenient::tag_choices(&content, TAG, VARIANTS, #absent, #null)?;
-        let choice = if let [only] = choices.as_slice() {
-            Some(*only)
-        } else {
-            for &choice in &choices {
-                match choice {
-                    #(#probes)*
-                    _ => {}
-                }
+        for choice in #support::lenient::tag_choices(&content, TAG, VARIANTS, #absent, #null)? {
+            match choice {
+                #(#probes)*
+                _ => {}
             }
-            None
-        };
-        match choice {
-            #(#arms)*
-            #fallback
         }
+        let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);
+        #support::lenient::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
     }
 }
 

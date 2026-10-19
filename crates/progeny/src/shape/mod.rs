@@ -3331,17 +3331,8 @@ mod tests {
         schemas["Choice"]["additionalProperties"] = json!(true);
         schemas["Choice"]["required"] = json!(["type"]);
         assert!(degrades_as_wild_union(schemas, "Field")?);
-        let object = |kind: Value, closed: bool, members: Value, required: &[&str]| {
-            let mut properties = members;
-            properties["type"] = kind;
-            json!({
-                "type": "object", "additionalProperties": !closed,
-                "required": required, "properties": properties,
-            })
-        };
-        let listing = |values: &[&str]| json!({"type": "string", "enum": values});
-        let branches =
-            ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}));
+        let (object, listing) = (tagged_object, listing);
+        let branches = abc();
 
         // `B` admits members it does not declare, so `{"type": "s", "x": "b"}` is `B`'s, and `A`'s
         // open `x` would read it.
@@ -3410,6 +3401,83 @@ mod tests {
             }),
             "Field",
         )?);
+    }
+
+    /// An object whose `type` is `kind`, closed or not, beside `members`.
+    fn tagged_object(kind: Value, closed: bool, members: Value, required: &[&str]) -> Value {
+        let mut properties = members;
+        properties["type"] = kind;
+        json!({
+            "type": "object", "additionalProperties": !closed,
+            "required": required, "properties": properties,
+        })
+    }
+
+    /// A string listing `values`.
+    fn listing(values: &[&str]) -> Value {
+        json!({"type": "string", "enum": values})
+    }
+
+    /// References to `A`, `B` and `C`.
+    fn abc() -> [Value; 3] {
+        ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}))
+    }
+
+    #[test_util::test]
+    fn a_partition_reads_each_branchs_whole_schema() {
+        let (object, branches) = (tagged_object, abc());
+        // Each schema below makes a payload of `B` naming `b` `B`'s alone, by something only the
+        // whole schema says, so `A`, tried first, may not be handed it.
+        let string = json!({"type": "string"});
+        let mut patterned = object(listing(&["b", "c"]), true, json!({}), &["type"]);
+        patterned["patternProperties"] = json!({"^x$": {}});
+        let mut refusing = object(listing(&["a", "b"]), true, json!({}), &["type"]);
+        refusing["not"] = json!({"properties": {"type": {"const": "b"}}, "required": ["type"]});
+        let mut long = object(listing(&["a", "b"]), true, json!({}), &["type"]);
+        long["properties"]["type"]["allOf"] = json!(
+            std::iter::once(json!({"const": "a"}))
+                .chain(std::iter::repeat_n(json!({"type": "string"}), 511))
+                .collect::<Vec<_>>()
+        );
+        let cases = [
+            // A closed `B` still admits the names its patterns match, `x` among them.
+            (
+                object(listing(&["a", "b"]), true, json!({"x": string}), &["type"]),
+                patterned,
+            ),
+            // `A` refuses `b` beside its members.
+            (
+                refusing,
+                object(listing(&["b", "c"]), true, json!({}), &["type"]),
+            ),
+            // `A`'s first part is closed and forbids the `x` its second declares.
+            (
+                json!({"allOf": [
+                    object(listing(&["a", "b"]), true, json!({}), &["type"]),
+                    {"properties": {"x": string}},
+                ]}),
+                object(listing(&["b", "c"]), true, json!({"x": string}), &["type"]),
+            ),
+            // `A`'s tag is more schemas than a merge follows, its first `const` among them.
+            (
+                long,
+                object(listing(&["b", "c"]), true, json!({}), &["type"]),
+            ),
+        ];
+        for (case, (a, b)) in cases.into_iter().enumerate() {
+            assert!(
+                degrades_as_wild_union(
+                    json!({
+                        "A": a,
+                        "B": b,
+                        "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                        "Field": {"anyOf": branches.clone()},
+                    }),
+                    "Field",
+                )?,
+                "case {case}"
+            );
+        }
 
         // `A`'s `type` admits integers alone, so it admits none of the strings it lists.
         assert!(degrades_as_wild_union(

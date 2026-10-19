@@ -664,8 +664,9 @@ fn told_apart(
 /// Among the branches that list one value the member says nothing more, and they are compared as
 /// [`swallows_payloads_of`] compares two objects, with the member set aside ([`takes_beside`]).
 ///
-/// Only objects that each require the member, list strings for it and admit no `null` there are
-/// read this way, so every payload a branch is meant for names the branches to try.
+/// Only plain closed objects ([`plain_closed`]) that each require the member and list strings for
+/// it are read this way, so every payload a branch is meant for names the branches to try, and
+/// what a branch's payloads carry is what its schema declares.
 /// A member every branch lists the same values for tells nothing apart and is passed over.
 /// A declared or inherited discriminator says which branch each value is, so a union that has one
 /// is read by it instead.
@@ -675,16 +676,10 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
     }
     let views = branches
         .iter()
-        .map(|branch| match Branch::of(resolved, branch) {
-            Branch::Leaf(view)
-                if kind_of(resolved, &view) == Some(Kind::Object)
-                    && !names_its_subtypes(resolved, &view, branch)
-                    && !declares_null(&view)
-                    && !lists_beside_its_union(resolved, branch) =>
-            {
-                Some(view)
-            }
-            _ => None,
+        .map(|branch| {
+            let view = merge::view(resolved, branch);
+            (plain_closed(resolved, branch) && !names_its_subtypes(resolved, &view, branch))
+                .then_some(view)
         })
         .collect::<Option<Vec<_>>>()?;
     let first = views.first()?;
@@ -759,12 +754,12 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
 /// Admission is judged by every schema the member merges ([`super::listed::admits`]), so a
 /// `const` beside a list, two `const`s that disagree, a `type` that admits no string and a union
 /// that narrows the list each leave out what they refuse.
-/// A member that may admit a value the judgement cannot settle, or that admits `null`, has no
-/// such list, because the branches it names would then not be the ones whose schemas admit the
+/// A member written as more than one schema, one that may admit a value the judgement cannot
+/// settle, or one that admits `null`, has no such list, because the branches it names would then not be the ones whose schemas admit the
 /// value.
 fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
     use super::listed::{Admission, admits};
-    if admits(resolved, key, &Value::Null, 0) != Admission::No {
+    if key.parts().len() != 1 || admits(resolved, key, &Value::Null, 0) != Admission::No {
         return None;
     }
     let mut listed: Vec<&Value> = Vec::new();
@@ -795,8 +790,9 @@ fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<S
 /// [`swallows_payloads_of`]'s reading of two objects, with `member` set aside where it asks
 /// whether the earlier branch reads values its schema refuses: the payload's value of it is one
 /// the earlier branch lists.
-/// An earlier branch that reads such a payload as the later one would ([`reads_as_well`]) is as
-/// faithful to it as one that keeps every payload whole.
+/// Only an earlier branch that reads such a payload as the later one would ([`reads_as_well`])
+/// counts as faithful to it, because that judges the schemas the two types are generated from
+/// rather than the types.
 fn takes_beside(
     resolved: &ResolvedDocument,
     earlier: &ShapeKey,
@@ -807,68 +803,94 @@ fn takes_beside(
     let mut beside = merge::view(resolved, earlier);
     beside.properties.remove(member);
     beside.required.remove(member);
-    let keeps = reads_whole(resolved, &first, 0) || reads_as_well(resolved, &first, &second);
-    let faithful = keeps && !view_overreaches(resolved, &beside, 0);
+    let faithful =
+        reads_as_well(resolved, &first, &second, member) && !view_overreaches(resolved, &beside, 0);
     !faithful && !refuses(resolved, &first, &second, 0)
 }
 
-/// Whether an object's type refuses every payload of a later object, judged by what the later
-/// one's schema guarantees its payloads carry and leave out.
+/// Whether a plain closed object's type refuses every payload of a later plain closed object,
+/// judged by what the later one's schema guarantees its payloads carry and leave out.
 ///
-/// A member the later one requires is on every payload, and a closed earlier one refuses it where
-/// it does not declare it.
-/// A member a closed later one does not declare is on none, so an earlier one that insists on it
+/// A member the later one requires is on every payload, and the earlier one refuses it where it
+/// does not declare it.
+/// A member the later one does not declare is on none, so an earlier one that insists on it
 /// refuses them all.
-/// A member both declare and the later one requires refuses the payload where the earlier one's
-/// type refuses every value the later one's schema gives it: a value of another kind than an
-/// earlier member that lists no values, or an object refused in turn, as far as
+/// A member both declare and the later one requires refuses the payload where both are plain
+/// closed objects and the earlier one's refuses the later one's in turn, as far as
 /// [`MAX_AMBIGUITY_DEPTH`].
-/// Unlike [`rejects`], a later object that admits members it does not declare is not taken to
-/// leave them out.
+/// Nothing is concluded from the kinds the two members name, which the generated types need not
+/// follow.
 fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usize) -> bool {
     if depth > MAX_AMBIGUITY_DEPTH {
         return false;
     }
     let carried =
         |name: &String| later.required.contains(name) && later.properties.contains_key(name);
-    let undeclared = earlier.additional_denied
-        && later
-            .properties
-            .keys()
-            .any(|name| carried(name) && !earlier.properties.contains_key(name));
-    let missing = later.additional_denied
-        && earlier.required.iter().any(|name| {
-            !later.properties.contains_key(name)
-                && earlier
-                    .properties
-                    .get(name)
-                    .is_some_and(|key| !generates_option(resolved, key, 0))
-        });
+    let undeclared = later
+        .properties
+        .keys()
+        .any(|name| carried(name) && !earlier.properties.contains_key(name));
+    let missing = earlier.required.iter().any(|name| {
+        !later.properties.contains_key(name)
+            && earlier
+                .properties
+                .get(name)
+                .is_some_and(|key| !generates_option(resolved, key, 0))
+    });
     undeclared
         || missing
         || earlier.properties.iter().any(|(name, key)| {
             let Some(other) = later.properties.get(name).filter(|_| carried(name)) else {
                 return false;
             };
-            let (mine, theirs) = (merge::view(resolved, key), merge::view(resolved, other));
-            if declares_null(&theirs)
-                || names_its_subtypes(resolved, &mine, key)
-                || names_its_subtypes(resolved, &theirs, other)
-            {
-                return false;
-            }
-            match (kind_of(resolved, &mine), kind_of(resolved, &theirs)) {
-                (Some(Kind::Object), Some(Kind::Object)) => {
-                    refuses(resolved, &mine, &theirs, depth + 1)
-                }
-                // A member that lists values may be generated as a string enum, whatever its
-                // `type` says, so only one that lists none is the kind its `type` names.
-                (Some(left), Some(right)) => {
-                    left != right && mine.union.is_none() && listed_values(&mine).is_none()
-                }
-                _ => false,
-            }
+            plain_closed(resolved, key)
+                && plain_closed(resolved, other)
+                && refuses(
+                    resolved,
+                    &merge::view(resolved, key),
+                    &merge::view(resolved, other),
+                    depth + 1,
+                )
         })
+}
+
+/// Whether a schema is one closed object and nothing more: `additionalProperties: false`, its
+/// members exactly the ones it declares, and no keyword beside them that admits or refuses
+/// anything else, so its payloads carry what it declares and its type reads them as such.
+fn plain_closed(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
+    let [part] = key.parts() else {
+        return false;
+    };
+    let Schema::Object(object) = resolved.schema(*part) else {
+        return false;
+    };
+    let closed = object
+        .additional_properties
+        .is_some_and(|rest| matches!(resolved.schema(rest), Schema::Bool(false)));
+    let object_type = object
+        .types
+        .as_ref()
+        .is_none_or(|types| types.iter().all(|name| *name == TypeName::Object));
+    closed
+        && object_type
+        && object.properties.is_some()
+        && object.pattern_properties.is_none()
+        && object.property_names.is_none()
+        && object.unevaluated_properties.is_none()
+        && object.dependent_schemas.is_none()
+        && object.dependent_required.is_none()
+        && object.min_properties.is_none()
+        && object.max_properties.is_none()
+        && object.not.is_none()
+        && object.if_schema.is_none()
+        && object.then_schema.is_none()
+        && object.else_schema.is_none()
+        && object.all_of.is_none()
+        && object.any_of.is_none()
+        && object.one_of.is_none()
+        && object.enumeration.is_none()
+        && object.constant.is_none()
+        && object.discriminator.is_none()
 }
 
 /// Whether a closed struct reads every payload of a later branch it accepts as that branch's own
@@ -877,11 +899,14 @@ fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usi
 /// It accepts only payloads whose members it declares, and each member the two share is the same
 /// schema, required or not alike, so it becomes the same field and keeps what the later one keeps.
 /// A member only the earlier one declares is never on a payload of a later closed struct.
-fn reads_as_well(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
+/// `member` is set aside: the payloads compared name a value of it both list, which each reads as
+/// that listed value.
+fn reads_as_well(resolved: &ResolvedDocument, earlier: &View, later: &View, member: &str) -> bool {
     earlier.additional_denied
         && earlier
             .properties
             .iter()
+            .filter(|(name, _)| name.as_str() != member)
             .all(|(name, key)| match later.properties.get(name) {
                 Some(other) => {
                     earlier.required.contains(name) == later.required.contains(name)
