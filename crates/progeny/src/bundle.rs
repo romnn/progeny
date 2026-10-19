@@ -83,7 +83,7 @@ pub(crate) fn read(
     let written = root.clone();
     let mut moves = crate::normalize::bundle_schema_at(&mut root, legacy, JsonPointer::root(), ctx);
     let (store, registered) = register(&root, &written, &namespaces, legacy, &mut moves, ctx);
-    let Named { named, repeats } = name(&written, &namespaces, &registered, legacy, ctx);
+    let Named { named, repeats } = name(&written, &namespaces, &store, &registered, legacy, ctx);
     let roots = select(input, &named)?;
 
     // The whole bundle stays readable, so a `$ref` to a position nothing read is still read as
@@ -184,9 +184,9 @@ fn register(
 /// What [`name`] found: the type each name names, and the definitions that repeat it.
 struct Named {
     named: BTreeMap<String, SchemaId>,
-    /// Each later definition of a name that is the schema the first one is, with the first's
-    /// pointer.
-    repeats: Vec<(String, String)>,
+    /// Each schema of a later definition that repeats the first one, with the schema at the same
+    /// place in the first.
+    repeats: BTreeMap<SchemaId, SchemaId>,
 }
 
 /// The type each name names: the first namespace's, in the caller's order, to define it.
@@ -196,13 +196,14 @@ struct Named {
 fn name(
     root: &Value,
     namespaces: &[JsonPointer],
+    store: &SchemaStore,
     registered: &BTreeMap<String, SchemaId>,
     legacy: bool,
     ctx: &mut Ctx,
 ) -> Named {
     let mut named: BTreeMap<String, SchemaId> = BTreeMap::new();
     let mut first: BTreeMap<String, JsonPointer> = BTreeMap::new();
-    let mut repeats = Vec::new();
+    let mut repeats = BTreeMap::new();
     for namespace in namespaces {
         let Some(Value::Object(entries)) = lookup(root, namespace) else {
             continue;
@@ -215,9 +216,9 @@ fn name(
             else {
                 continue;
             };
-            if let Some(earlier) = first.get(name) {
+            if let (Some(earlier), Some(&canonical)) = (first.get(name), named.get(name)) {
                 if repeated(root, earlier, &at, legacy) {
-                    repeats.push((at.to_string(), earlier.to_string()));
+                    repeats.extend(same_places(store, registered, id, canonical));
                     continue;
                 }
                 // The sentence names no pointer, so a bundle with a habit of shadowing is one
@@ -238,12 +239,71 @@ fn name(
     Named { named, repeats }
 }
 
-/// Annotations a definition can differ in and still be the schema another one is, because none
-/// of them changes what it accepts.
-const ANNOTATIONS: [&str; 5] = ["$schema", "title", "description", "$comment", "examples"];
+/// Each schema the definition `repeated` holds, with the schema at the same place in `canonical`.
+///
+/// The two are equal apart from annotations, which hold no schemas, so every place in one is a
+/// place in the other.
+fn same_places(
+    store: &SchemaStore,
+    registered: &BTreeMap<String, SchemaId>,
+    repeated: SchemaId,
+    canonical: SchemaId,
+) -> BTreeMap<SchemaId, SchemaId> {
+    let (from, to) = (store.address(repeated), store.address(canonical));
+    store
+        .iter()
+        .filter_map(|(id, _)| {
+            let rest = store.address(id).tokens().strip_prefix(from.tokens())?;
+            let place = rest
+                .iter()
+                .fold(to.clone(), |at, token| at.child(token.clone()));
+            let &same = registered.get(&place.to_string())?;
+            (same != id).then_some((id, same))
+        })
+        .collect()
+}
+
+/// Annotations a schema can differ in and still be the schema another one is, because none of
+/// them changes what it accepts.
+const ANNOTATIONS: [&str; 4] = ["title", "description", "$comment", "examples"];
+
+/// Keywords whose value is a schema or an array of schemas.
+const SUBSCHEMAS: [&str; 16] = [
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "not",
+    "if",
+    "then",
+    "else",
+    "items",
+    "prefixItems",
+    "additionalItems",
+    "contains",
+    "additionalProperties",
+    "propertyNames",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "contentSchema",
+];
+
+/// Keywords whose value maps names to schemas.
+///
+/// A draft-07 `dependencies` entry may be an array of names, which is compared as written.
+const SCHEMA_MAPS: [&str; 6] = [
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+];
 
 /// Whether the definition at `then` repeats the one at `first`: the two are read by one draft and
-/// are equal once [`ANNOTATIONS`] are set aside, and `$id` too where neither holds a reference.
+/// are the same schema once [`ANNOTATIONS`] are set aside wherever a schema sits.
+///
+/// The definitions' own `$schema` is set aside once they are read by one draft, and their own
+/// `$id` where neither holds a reference it would be the base of.
 fn repeated(root: &Value, first: &JsonPointer, then: &JsonPointer, legacy: bool) -> bool {
     let (Some(left), Some(right)) = (lookup(root, first), lookup(root, then)) else {
         return false;
@@ -253,21 +313,68 @@ fn repeated(root: &Value, first: &JsonPointer, then: &JsonPointer, legacy: bool)
     {
         return false;
     }
-    // `$id` is compared where it is the base a reference resolves against.
     let with_id = holds_reference(left) || holds_reference(right);
     let (Value::Object(left), Value::Object(right)) = (left, right) else {
         return left == right;
     };
-    content(left, with_id) == content(right, with_id)
+    let (mut left, mut right) = (members(left), members(right));
+    for own in [&mut left, &mut right] {
+        own.retain(|&key, _| key != "$schema" && (with_id || key != "$id"));
+    }
+    same_members(left, right)
 }
 
-/// A definition's members, without the ones [`repeated`] sets aside.
-fn content(members: &serde_json::Map<String, Value>, with_id: bool) -> BTreeMap<&str, &Value> {
-    members
+/// A schema's members by keyword.
+fn members(schema: &serde_json::Map<String, Value>) -> BTreeMap<&str, &Value> {
+    schema
         .iter()
         .map(|(key, member)| (key.as_str(), member))
-        .filter(|(key, _)| !ANNOTATIONS.contains(key) && (with_id || *key != "$id"))
         .collect()
+}
+
+/// Whether two schemas are the same once [`ANNOTATIONS`] are set aside.
+fn same_schema(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => same_members(members(left), members(right)),
+        _ => left == right,
+    }
+}
+
+/// Whether two schemas' members are the same once [`ANNOTATIONS`] are set aside, each compared as
+/// what its keyword holds.
+fn same_members(mut left: BTreeMap<&str, &Value>, mut right: BTreeMap<&str, &Value>) -> bool {
+    left.retain(|key, _| !ANNOTATIONS.contains(key));
+    right.retain(|key, _| !ANNOTATIONS.contains(key));
+    left.len() == right.len()
+        && left.iter().all(|(&key, left)| {
+            right
+                .get(key)
+                .is_some_and(|right| same_keyword(key, left, right))
+        })
+}
+
+/// Whether two values of the keyword `key` are the same, as schemas where it holds schemas and as
+/// written otherwise.
+fn same_keyword(key: &str, left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) if SCHEMA_MAPS.contains(&key) => {
+            left.len() == right.len()
+                && left.iter().all(|(name, left)| {
+                    right
+                        .get(name)
+                        .is_some_and(|right| same_schema(left, right))
+                })
+        }
+        (Value::Array(left), Value::Array(right)) if SUBSCHEMAS.contains(&key) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_schema(left, right))
+        }
+        _ if SUBSCHEMAS.contains(&key) => same_schema(left, right),
+        _ => left == right,
+    }
 }
 
 /// Whether `value` holds a `$ref` or `$dynamicRef` anywhere, a member named so included.
@@ -1007,6 +1114,101 @@ mod tests {
             assert!(source.contains("pub inner: Option<Id>"), "{then}: {source}");
             assert!(!source.contains("Identifier"), "{then}: {source}");
         }
+    }
+
+    /// Annotations are set aside wherever a schema sits, and a member's own name or a listed
+    /// value is compared as written.
+    #[test_util::test]
+    fn a_repeat_may_differ_in_annotations_below_its_root() {
+        let object = |description: &str| {
+            json!({"type": "object", "properties": {
+                "value": {"type": "string", "description": description, "title": description},
+            }})
+        };
+        let (source, collisions) = repeating(&object("Old."), &object("New."))?;
+        assert!(collisions.is_empty(), "{collisions:?}");
+        assert!(source.contains("pub outer: Option<Id>"), "{source}");
+        assert!(source.contains("pub inner: Option<Id>"), "{source}");
+
+        // A member called `title` and a listed `description` are what the schema accepts.
+        let members =
+            |name: &str| json!({"type": "object", "properties": {name: {"type": "string"}}});
+        let (_, collisions) = repeating(&members("title"), &members("description"))?;
+        assert_eq!(collisions, ["/definitions/Id"]);
+        let listed = |value: &str| json!({"enum": [{"description": value}]});
+        let (_, collisions) = repeating(&listed("a"), &listed("b"))?;
+        assert_eq!(collisions, ["/definitions/Id"]);
+    }
+
+    /// A repeat is the schema it repeats by every route to it: its `$id`, an anchor both declare,
+    /// and its pointer where draft-07 normalization moved the first definition.
+    #[test_util::test]
+    fn a_repeat_is_the_schema_it_repeats_by_every_route() {
+        let id = id();
+        let mut titled = id.clone();
+        titled["title"] = json!("Identifier");
+        titled["$id"] = json!("urn:id");
+        let mut anchored = id.clone();
+        anchored["$anchor"] = json!("id");
+        let mut anchored_titled = anchored.clone();
+        anchored_titled["title"] = json!("Identifier");
+        let bundles = [
+            // By `$id`
+            json!({"definitions": {
+                "Root": {"type": "object", "properties": {
+                    "outer": {"$ref": "urn:id"},
+                    "inner": {"$ref": "#/definitions/v2/Id"},
+                }},
+                "Id": titled,
+                "v2": {"Id": id},
+            }}),
+            // By an anchor both declare
+            json!({"$defs": {
+                "Root": {"type": "object", "properties": {
+                    "outer": {"$ref": "#id"},
+                    "inner": {"$ref": "#/$defs/Id"},
+                }},
+                "Id": anchored_titled,
+                "v2": {"Id": anchored},
+            }}),
+        ];
+        for (bundle, namespaces) in bundles
+            .iter()
+            .zip([["/definitions/v2", "/definitions"], ["/$defs/v2", "/$defs"]])
+        {
+            let output = generated(bundle, &received(&namespaces))?;
+            let source = types(&output);
+            assert!(source.contains("pub outer: Option<Id>"), "{source}");
+            assert!(source.contains("pub inner: Option<Id>"), "{source}");
+            assert!(!source.contains("Identifier"), "{source}");
+            assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        }
+
+        // The first `Id` is a draft-07 dependency, which normalization moves to
+        // `dependentSchemas`, and nothing references the pointer it was written at.
+        let mut first = id.clone();
+        first["$id"] = json!("urn:first");
+        let mut then = id.clone();
+        then["title"] = json!("Identifier");
+        let bundle = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "definitions": {
+                "Root": {"type": "object", "properties": {
+                    "outer": {"$ref": "#/definitions/Id"},
+                    "inner": {"$ref": "urn:first"},
+                }},
+                "Host": {"type": "object", "dependencies": {"Id": first}},
+                "Id": then,
+            },
+        });
+        let output = generated(
+            &bundle,
+            &received(&["/definitions/Host/dependencies", "/definitions"]),
+        )?;
+        let source = types(&output);
+        assert!(source.contains("pub outer: Option<Id>"), "{source}");
+        assert!(source.contains("pub inner: Option<Id>"), "{source}");
+        assert!(!source.contains("Identifier"), "{source}");
     }
 
     /// A repeated name whose schemas differ in what they accept is still reported, and so is one
