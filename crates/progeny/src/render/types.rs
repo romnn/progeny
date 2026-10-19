@@ -212,11 +212,13 @@ fn deprecated_alias_names(
         for reference in contract.kind().references() {
             note_deprecated(reference, contracts, names);
         }
-        // Its own impls name it: the hand-written serde ones, the lenient decoder every
-        // read-reachable type carries, and a JSON Schema impl.
+        // Its own impls name it: the hand-written serde ones, a derived struct's `Deserialize`,
+        // the lenient decoder every read-reachable type carries, and a JSON Schema impl.
         if contract.docs().deprecated
             && (contract.deser() != DeserStrategy::Derive
                 || matches!(contract.kind(), ContractKind::StringEnum { .. })
+                || (matches!(contract.kind(), ContractKind::Struct { .. })
+                    && !contract.form().is_lenient())
                 || contract.form().is_read()
                 || contract.json_schema().is_some())
         {
@@ -305,10 +307,12 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
     match contract.kind() {
         ContractKind::Struct { fields } => {
             let body = struct_item(fields, contract, contracts, config, scope);
+            let object = derived_object(fields, contract, contracts, config, scope);
             quote! {
                 #docs
                 #derives
                 #body
+                #object
             }
         }
         ContractKind::Enum { variants, fallback } => {
@@ -763,15 +767,7 @@ fn struct_item(
     scope: Scope,
 ) -> TokenStream {
     let name = ident(contract.rust_name());
-    // A read form has no derived `Deserialize` to deny anything on.
-    let deny = match (contract.deser(), contract.unknown_fields()) {
-        (DeserStrategy::Derive, crate::config::UnknownFields::Deny)
-            if !contract.form().is_lenient() =>
-        {
-            quote! { #[serde(deny_unknown_fields)] }
-        }
-        _ => quote! {},
-    };
+    let deny = deny_unknown_fields(contract);
     let members = fields
         .iter()
         .map(|field| member(field, contract, contracts, config, scope));
@@ -779,6 +775,58 @@ fn struct_item(
         #deny
         pub struct #name {
             #(#members)*
+        }
+    }
+}
+
+/// The `Deserialize` of a struct under the derive strategy, which reads an object and nothing
+/// else.
+///
+/// The derive also reads a struct from a sequence, by position, which no JSON Schema object
+/// describes; inside an untagged union that let an object branch take a list meant for a later
+/// one.
+/// So the derive runs on a private copy of the struct's members, declared remote to the struct,
+/// and reads through `support::Object`, which refuses a sequence the way the hand-written path
+/// does.
+/// The copy lives inside the function, and it and the deserializer's parameter take names no
+/// document's type is given, because either would shadow a type of the same name for the field
+/// types inside it.
+/// A read form's `Deserialize` is the lenient decoder's, so it has none of this.
+fn derived_object(
+    fields: &[FieldContract],
+    contract: &TypeContract,
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> TokenStream {
+    if contract.deser() != DeserStrategy::Derive || contract.form().is_lenient() {
+        return quote! {};
+    }
+    let name = super::serde_impl::implementation_type(contract);
+    let remote = name.to_string().replace(' ', "");
+    let support = scope.support();
+    let deny = deny_unknown_fields(contract);
+    let members = fields.iter().map(|field| {
+        let member = ident(&field.rust_name);
+        let ty = type_ref_in(&field.ty, contracts, config, scope);
+        let nesting = type_complexity(&ty);
+        let serde = member_attributes(field, scope);
+        quote! { #serde #nesting #member: #ty, }
+    });
+    quote! {
+        impl<'de> serde::Deserialize<'de> for #name {
+            fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>
+            where
+                __D: serde::Deserializer<'de>,
+            {
+                #[derive(serde::Deserialize)]
+                #[serde(remote = #remote)]
+                #deny
+                struct __ProgenyObject {
+                    #(#members)*
+                }
+                __ProgenyObject::deserialize(#support::Object(deserializer))
+            }
         }
     }
 }
@@ -799,12 +847,37 @@ fn member(
         // does not consult attributes, so leaving them on would be a second source of truth.
         return quote! { #docs #nesting pub #name: #ty, };
     }
-    let support = scope.support();
+    let serde = member_attributes(field, scope);
+    quote! { #docs #serde #nesting pub #name: #ty, }
+}
 
+/// `deny_unknown_fields` where the contract refuses undeclared members.
+///
+/// On the public struct as well as on the private copy that derives its `Deserialize`, because a
+/// configured derive may read serde's attributes off the public declaration.
+/// A read form has no derived `Deserialize` to deny anything on.
+fn deny_unknown_fields(contract: &TypeContract) -> TokenStream {
+    match (contract.deser(), contract.unknown_fields()) {
+        (DeserStrategy::Derive, crate::config::UnknownFields::Deny)
+            if !contract.form().is_lenient() =>
+        {
+            quote! { #[serde(deny_unknown_fields)] }
+        }
+        _ => quote! {},
+    }
+}
+
+/// A member's serde attributes, the same on the public struct and on the private copy in
+/// [`derived_object`].
+///
+/// Each derive reads what it needs and ignores the rest, and a configured derive may read them
+/// off the public declaration too.
+fn member_attributes(field: &FieldContract, scope: Scope) -> TokenStream {
+    let support = scope.support();
     let mut attributes = Vec::new();
     if field.is_capture() {
         attributes.push(quote! { flatten });
-    } else if name != field.wire_name {
+    } else if ident(&field.rust_name) != field.wire_name {
         let wire = &field.wire_name;
         attributes.push(quote! { rename = #wire });
     }
@@ -818,8 +891,11 @@ fn member(
             skip_serializing_if = #is_omitted
         });
     }
-    let serde = (!attributes.is_empty()).then(|| quote! { #[serde(#(#attributes),*)] });
-    quote! { #docs #serde #nesting pub #name: #ty, }
+    if attributes.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! { #[serde(#(#attributes),*)] }
+    }
 }
 
 /// A field's declared default, said in its documentation rather than applied on deserialize.
@@ -854,6 +930,12 @@ fn derives(contract: &TypeContract) -> TokenStream {
     // no serde attributes at all, so it must carry no serde derive either. A read form's
     // `Deserialize` goes through the lenient decoder and is written by hand under both.
     let serde = match (contract.deser(), contract.form().is_lenient()) {
+        // A struct's `Deserialize` is [`derived_object`]'s, which derives it on a private copy.
+        (DeserStrategy::Derive, false)
+            if matches!(contract.kind(), ContractKind::Struct { .. }) =>
+        {
+            quote! { , serde::Serialize }
+        }
         (DeserStrategy::Derive, false) => quote! { , serde::Serialize, serde::Deserialize },
         // A keyed enum's `Serialize` is serde's own encoding, and only its `Deserialize` is
         // written by hand.

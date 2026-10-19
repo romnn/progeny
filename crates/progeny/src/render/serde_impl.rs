@@ -21,12 +21,15 @@ use crate::contract::{
     Capture, ContractKind, Contracts, DeserStrategy, RustIdent, SkipRule, TagRoutes, TypeContract,
 };
 
-/// Whether any type takes a hand-written path, and therefore whether the support module is needed.
+/// Whether any type's serde implementation calls into the support module.
 pub(super) fn needed(contracts: &Contracts) -> bool {
-    contracts
-        .types()
-        .iter()
-        .any(|contract| contract.deser() != DeserStrategy::Derive)
+    // A hand-written path does, and so does a derived struct, which reads through
+    // `support::Object`, unless it is a read form.
+    contracts.types().iter().any(|contract| {
+        contract.deser() != DeserStrategy::Derive
+            || (matches!(contract.kind(), ContractKind::Struct { .. })
+                && !contract.form().is_lenient())
+    })
 }
 
 /// The hand-written serde impls of one type.
@@ -129,12 +132,6 @@ fn reading(
         UnknownFields::Capture => quote! { Capture },
     };
 
-    let defaulted = declared
-        .iter()
-        // A presence-preserving field uses its own `Default` only to represent an absent member.
-        // OpenAPI's declared `default` remains documentation about the server and never enters
-        // this decision — see `types::with_default`.
-        .map(|field| field.skip_serializing_if == SkipRule::WhenOmitted);
     let reads = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let wire = field.wire_name.as_str();
@@ -163,7 +160,6 @@ fn reading(
         impl<'de> #support::Assemble<'de> for #name {
             const NAME: &'static str = #literal_name;
             const FIELDS: &'static [&'static str] = &[#(#wire_names),*];
-            const DEFAULTED: &'static [bool] = &[#(#defaulted),*];
 
             fn assemble<E>(#buffer_binding: &mut #support::Buffer<'de>) -> Result<Self, E>
             where
