@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792376688883,
+  "lastUpdate": 1792377549352,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -460,6 +460,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 335.5052080154419,
             "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8af64c22ce56e4ec8e42d8ad5f10dcd3e3f4721e",
+          "message": "fix(shape): stop reporting a zero lower bound spelled as a float (#68)\n\n`minimum: 0.0` on an integer, the way schemars writes every bound, was\nreported as a `minimum` the generated `u64` does not express, although it\nexpresses exactly that. A bound now counts as zero by its text, so `0.0`,\n`-0.0` and `0e0` are zero. Under `exact-numbers` a bound like `1e-400`\nkeeps its text and is still reported; without it `serde_json` has already\nread it as `0.0`, and the loader reports it as an inexact number.\n\nCloses #65.",
+          "timestamp": "2026-10-19T04:35:10+02:00",
+          "tree_id": "89e18d808396a3bffe0721867f0fe54c4c094dc7",
+          "url": "https://github.com/romnn/progeny/commit/8af64c22ce56e4ec8e42d8ad5f10dcd3e3f4721e"
+        },
+        "date": 1792377548571,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 19.089367666666668,
+            "range": "± 0.42",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3000.576822280884,
+            "range": "± 6.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 6.610619,
+            "range": "± 0.07",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1255.294270515442,
+            "range": "± 2.8",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.5021243333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 334.1263017654419,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
