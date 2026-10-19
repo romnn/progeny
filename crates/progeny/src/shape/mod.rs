@@ -4113,6 +4113,9 @@ mod tests {
             bound_reported: bool,
         }
         let unsigned = || Shape::Scalar(Scalar::Integer { signed: false });
+        // Whether `serde_json` keeps literals as written, which `exact-numbers` turns on and so
+        // may another crate in the build.
+        let exact = serde_json::from_str::<Value>("1e-400")? != json!(0.0);
         let case = |schema, shape, bound_reported| Case {
             schema,
             shape,
@@ -4136,6 +4139,27 @@ mod tests {
                 false,
             ),
             case(r#"{"enum": [0, 1], "minimum": 0}"#, Some(unsigned()), false),
+            // Zero spelled as a float, the way schemars writes every bound
+            case(
+                r#"{"type": "integer", "minimum": 0.0}"#,
+                Some(unsigned()),
+                false,
+            ),
+            case(
+                r#"{"type": ["integer", "null"], "minimum": 0.0}"#,
+                Some(Shape::Optional(ShapeRef::Inline(Box::new(unsigned())))),
+                false,
+            ),
+            case(
+                r#"{"type": "integer", "minimum": -0.0}"#,
+                Some(unsigned()),
+                false,
+            ),
+            case(
+                r#"{"type": "integer", "minimum": 0e0}"#,
+                Some(unsigned()),
+                false,
+            ),
             // Narrower than the unsigned integer
             case(
                 r#"{"type": "integer", "minimum": 1}"#,
@@ -4153,9 +4177,15 @@ mod tests {
                 true,
             ),
             case(
-                r#"{"type": "integer", "minimum": 1e-400}"#,
+                r#"{"type": "integer", "minimum": 1.0}"#,
                 Some(unsigned()),
                 true,
+            ),
+            // Above zero, which only a build that keeps number literals can tell from `0.0`
+            case(
+                r#"{"type": "integer", "minimum": 1e-400}"#,
+                Some(unsigned()),
+                exact,
             ),
             // Not an unsigned integer at all
             case(r#"{"type": "number", "minimum": 0}"#, None, true),
