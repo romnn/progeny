@@ -1472,9 +1472,9 @@ fn swallows_payloads_of(
     let depth = depth.saturating_add(1);
     if lists_beside_its_union(resolved, earlier) {
         return Some(
-            "one of its branches lists values beside a union of its own, and the type generated \
-             for that union reads values the list leaves out, so it may accept the payloads of a \
-             later branch"
+            "one of its branches lists objects or lists beside a union of its own, and the type \
+             generated for that union reads values the list leaves out, so it may accept the \
+             payloads of a later branch"
                 .to_owned(),
         );
     }
@@ -2015,6 +2015,15 @@ fn view_overreaches(resolved: &ResolvedDocument, view: &View, depth: usize) -> b
     if view.impossible || view.conflict.is_some() || view.unions_collide {
         return true;
     }
+    // A list the generated type does not hold, which [`merge::view`] reports, admits more than
+    // it lists.
+    if view
+        .uninterpreted
+        .iter()
+        .any(|keyword| matches!(*keyword, "enum" | "const"))
+    {
+        return true;
+    }
     let member = |key: &ShapeKey| overreaches(resolved, key, depth.saturating_add(1));
     match kind_of(resolved, view) {
         // A list of `null` alone is the unit type, which reads nothing else.
@@ -2080,10 +2089,12 @@ fn view_overreaches(resolved: &ResolvedDocument, view: &View, depth: usize) -> b
     }
 }
 
-/// Whether a schema lists values beside a union of its own.
+/// Whether a schema lists values beside a union of its own that the merged view could not narrow
+/// it to.
 ///
-/// The list is not in the branch [`Branch::of`] reads the schema as, and the type generated for
-/// the union reads values the list leaves out.
+/// [`merge::view`] reads a list of strings, numbers or booleans beside a union as that list, so
+/// only a list holding an object or a list keeps its union here.
+/// That union's type stands in for the schema, and it reads values the list leaves out.
 fn lists_beside_its_union(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
     let view = merge::view(resolved, key);
     view.union.is_some() && admitted_values(&view).is_some()

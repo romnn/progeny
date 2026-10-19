@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Number, Value};
 
+use super::listed::Narrowed;
 use super::{Docs, MAX_FIXED_ARRAY, ShapeKey};
 use crate::resolve::ResolvedDocument;
 use crate::schema::{Schema, SchemaId, SchemaObject, TypeName};
@@ -231,7 +232,118 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
     if key.is_branches() {
         return branches_only(view);
     }
+    narrow_listed(resolved, key, &mut view);
     view
+}
+
+/// Read a list of values beside a union as that list, narrowed to what the union admits.
+///
+/// See [`super::listed`].
+/// A schema that also declares members or items is left alone, because the union there may be
+/// the one flattened beside those members.
+/// What cannot be checked is reported through `uninterpreted`, as a list the generated type does
+/// not hold.
+fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
+    let declares_members = !view.properties.is_empty()
+        || view.additional.is_some()
+        || view.uniform_pattern.is_some()
+        || view.items.is_some()
+        || view.prefix_items.is_some();
+    if view.unions_collide || view.impossible || view.conflict.is_some() {
+        return;
+    }
+    let Some(branches) = view.union.as_deref() else {
+        return;
+    };
+    let enumeration = view.enumeration.clone();
+    let keyword = if enumeration.is_some() {
+        "enum"
+    } else {
+        "const"
+    };
+    let lists = enumeration.is_some() || view.constant.is_some();
+    // The list stays beside a union of members, and the generated type does not hold it.
+    if declares_members {
+        if lists && !view.uninterpreted.contains(&keyword) {
+            view.uninterpreted.push(keyword);
+        }
+        return;
+    }
+    // A value has to be in the list and be the constant both, when the schema says both.
+    // A value that cannot be told apart from the constant is kept, and the list is not held.
+    let mut uncertain = false;
+    let listed: Vec<Value> = match (enumeration, &view.constant) {
+        (Some(values), Some(constant)) => values
+            .iter()
+            .filter(|value| {
+                if let Some(same) = super::listed::same(value, constant) {
+                    same
+                } else {
+                    uncertain = true;
+                    true
+                }
+            })
+            .cloned()
+            .collect(),
+        (Some(values), None) => values,
+        (None, Some(constant)) => vec![constant.clone()],
+        (None, None) => return,
+    };
+    // A list that the parts or the constant narrow to nothing admits nothing.
+    if listed.is_empty() {
+        view.union = None;
+        view.discriminator = None;
+        view.impossible = true;
+        return;
+    }
+    let exactly_one = key.parts().iter().any(
+        |&part| matches!(resolved.schema(part), Schema::Object(object) if object.one_of.is_some()),
+    );
+    match super::listed::narrow(
+        resolved,
+        &listed,
+        view.types.as_ref(),
+        branches,
+        exactly_one,
+    ) {
+        Narrowed::Values { values, checked } => {
+            view.union = None;
+            view.discriminator = None;
+            // The kept values say which kinds remain, `null` among them or not.
+            view.types = Some(super::listed::types_of(
+                &values,
+                view.types.as_ref(),
+                view.unsigned,
+            ));
+            view.enumeration = Some(values);
+            view.constant = None;
+            if (!checked || uncertain) && !view.uninterpreted.contains(&keyword) {
+                view.uninterpreted.push(keyword);
+            }
+        }
+        // The union reads the list exactly, so the list adds nothing to it, and the union's own
+        // `null` branch, if it has one, is the schema's one `null`.
+        Narrowed::Held => {
+            view.enumeration = None;
+            view.constant = None;
+            if uncertain && !view.uninterpreted.contains(&keyword) {
+                view.uninterpreted.push(keyword);
+            }
+            if let Some(types) = &mut view.types {
+                types.remove(&TypeName::Null);
+            }
+        }
+        Narrowed::Nothing => {
+            view.union = None;
+            view.discriminator = None;
+            view.impossible = true;
+        }
+        Narrowed::Unchecked => {
+            if !view.uninterpreted.contains(&keyword) {
+                view.uninterpreted.push(keyword);
+            }
+        }
+    }
 }
 
 /// The union a view declares, apart from the members declared beside it.
@@ -331,9 +443,35 @@ fn render(names: &BTreeSet<TypeName>) -> String {
 }
 
 fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocument) {
-    if let Some(values) = &object.enumeration {
+    // An empty list, which generators write beside a reference to mean "the values it names", is
+    // read as no list at all.
+    if let Some(values) = object
+        .enumeration
+        .as_ref()
+        .filter(|values| !values.is_empty())
+    {
         match &mut view.enumeration {
-            Some(existing) => existing.retain(|value| values.contains(value)),
+            // Numbers by value, so `1` in one part is `1.0` in another.
+            // A value that cannot be told apart from one listed in the other part is kept, and
+            // the list is not held.
+            Some(existing) => {
+                let mut uncertain = false;
+                existing.retain(|value| {
+                    let answers: Vec<Option<bool>> = values
+                        .iter()
+                        .map(|listed| super::listed::same(listed, value))
+                        .collect();
+                    if answers.contains(&Some(true)) {
+                        return true;
+                    }
+                    let kept = answers.contains(&None);
+                    uncertain |= kept;
+                    kept
+                });
+                if uncertain && !view.uninterpreted.contains(&"enum") {
+                    view.uninterpreted.push("enum");
+                }
+            }
             None => view.enumeration = Some(values.clone()),
         }
     }
