@@ -3364,6 +3364,21 @@ mod tests {
             }),
             "Field",
         )?);
+        // The union beside `A`'s list narrows it to `a`, so `{"type": "b"}` is `B`'s alone.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(
+                    json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
+                    true,
+                    json!({}),
+                    &["type"],
+                ),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches},
+            }),
+            "Field",
+        )?);
     }
 
     #[test_util::test]

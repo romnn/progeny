@@ -755,11 +755,11 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
 /// Every value a member's schema admits, when that is a list of strings: the values each `enum`
 /// and `const` of every schema the member merges lists, in the order the first lists them.
 ///
-/// Read from the schemas themselves rather than from the merged view, which keeps the first
+/// Read from the schemas themselves as well as from the merged view, which keeps the first
 /// `const` it meets.
-/// A list the merged view could not narrow, a member that is a union, one that admits `null`,
-/// and one that admits nothing have no such list, because the branches it names would then not
-/// be the ones whose schemas admit the value.
+/// A list the merged view could not narrow, a member any of whose schemas is a union, one that
+/// admits `null`, and one that admits nothing have no such list, because the branches it names
+/// would then not be the ones whose schemas admit the value.
 fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
     let view = merge::view(resolved, key);
     let uncertain = view
@@ -774,9 +774,14 @@ fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<S
         let Schema::Object(object) = resolved.schema(part) else {
             continue;
         };
+        if object.any_of.is_some() || object.one_of.is_some() {
+            return None;
+        }
         let lists = [
             object.enumeration.clone(),
             object.constant.clone().map(|only| vec![only]),
+            view.enumeration.clone(),
+            view.constant.clone().map(|only| vec![only]),
         ];
         for listed in lists.into_iter().flatten() {
             let mut strings: Vec<String> = Vec::new();
