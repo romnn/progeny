@@ -1409,6 +1409,47 @@ mod tests {
         );
     }
 
+    /// A default is any of the variants that list its tag, so one only a later such variant reads
+    /// is kept, and one none of them reads is dropped.
+    #[test_util::test]
+    fn a_default_may_be_any_variant_listing_its_tag() {
+        let closed = |kind: &str, member: &str| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": [kind]},
+                    member: {"type": "string"},
+                },
+            })
+        };
+        let field =
+            |default: Value| json!({"$ref": "#/components/schemas/Field", "default": default});
+        let branches =
+            ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}));
+        let (_, diagnostics) = contracts_of(
+            with_schemas(json!({
+                "A": closed("s", "a"),
+                "B": closed("s", "b"),
+                "C": closed("c", "c"),
+                "Field": {"anyOf": branches},
+                "Request": {"type": "object", "properties": {
+                    "later": field(json!({"type": "s", "b": "keep"})),
+                    "none": field(json!({"type": "s", "c": "lost"})),
+                }},
+            })),
+            &Config::default(),
+        )?;
+        let dropped: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| d.class() == crate::BreakageClass::InvalidDefault)
+            .map(|d| d.location().to_string())
+            .collect();
+        assert_eq!(
+            dropped,
+            ["/components/schemas/Request/properties/none/default"]
+        );
+    }
+
     /// An enum that admits any other string takes an unlisted default as one of its values, where
     /// an enum that lists every value it allows drops it.
     #[test_util::test]

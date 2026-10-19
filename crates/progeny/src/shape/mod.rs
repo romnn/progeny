@@ -375,27 +375,50 @@ pub(crate) struct Union {
 }
 
 impl Union {
-    /// The variant a tagged payload is, from its tag member: `None` for the member being absent,
-    /// and otherwise its value.
+    /// The position of the variant a tagged payload is, from its tag member: `None` for the member
+    /// being absent, and otherwise its value.
     ///
     /// A missing or `null` member is the variant [`Tag::absent`] or [`Tag::null`] names, a string
-    /// is the variant whose tag or alias it is, and any other value names no variant.
-    pub(crate) fn tagged_variant(&self, member: Option<&Value>) -> Option<&Variant> {
-        self.variants.get(self.tagged_position(member)?)
-    }
-
-    /// The position of the variant [`Union::tagged_variant`] finds.
+    /// is the first variant whose tag or alias it is, and any other value names no variant.
     pub(crate) fn tagged_position(&self, member: Option<&Value>) -> Option<usize> {
         let tag = self.tag.as_ref()?;
         match member {
             None => tag.absent,
             Some(Value::Null) => tag.null,
-            Some(Value::String(named)) => self.variants.iter().position(|variant| {
-                variant.tag.as_deref() == Some(named.as_str())
-                    || variant.aliases.iter().any(|alias| alias == named)
-            }),
+            Some(Value::String(named)) => self
+                .variants
+                .iter()
+                .position(|variant| variant.spells(named)),
             Some(_) => None,
         }
+    }
+
+    /// Every variant a tagged payload may be, in the order they are tried.
+    ///
+    /// The one [`Union::tagged_position`] finds, and, where the tag is [`Tag::shared`], each
+    /// later variant that lists the same spelling.
+    pub(crate) fn tagged_positions(&self, member: Option<&Value>) -> Vec<usize> {
+        let Some(first) = self.tagged_position(member) else {
+            return Vec::new();
+        };
+        match member {
+            Some(Value::String(named)) if self.tag.as_ref().is_some_and(|tag| tag.shared) => self
+                .variants
+                .iter()
+                .enumerate()
+                .skip(first)
+                .filter(|(_, variant)| variant.spells(named))
+                .map(|(position, _)| position)
+                .collect(),
+            _ => vec![first],
+        }
+    }
+}
+
+impl Variant {
+    /// Whether a tag spelled `named` names this variant, as its tag or one of its aliases.
+    fn spells(&self, named: &str) -> bool {
+        self.tag.as_deref() == Some(named) || self.aliases.iter().any(|alias| alias == named)
     }
 }
 
@@ -1365,7 +1388,8 @@ mod tests {
         // The one lookup reads a payload's tag member the way the generated decoder does.
         let named = |member: Option<Value>| {
             union
-                .tagged_variant(member.as_ref())
+                .tagged_position(member.as_ref())
+                .and_then(|position| union.variants.get(position))
                 .and_then(|variant| variant.tag.clone())
         };
         assert_eq!(named(None), Some("custom".to_owned()));
@@ -1514,7 +1538,7 @@ mod tests {
             .as_ref()
             .ok_or_eyre("the constants are still the tag")?;
         assert_eq!((tag.absent, tag.null), (None, None));
-        assert!(two.tagged_variant(None).is_none());
+        assert!(two.tagged_position(None).is_none());
 
         // A branch whose tag takes any string does not name itself, so nothing is a tag.
         // A spelling two branches share does not either.
@@ -3254,6 +3278,43 @@ mod tests {
             !matches!(field, Shape::Union(Union { tag: Some(tag), .. }) if tag.shared),
             "{field:?}"
         );
+    }
+
+    /// A branch lists the values its schema admits, so a `const` beside an `enum` narrows it.
+    #[test_util::test]
+    fn a_branch_lists_only_the_values_its_schema_admits() {
+        let closed = |kind: Value| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {"type": kind},
+            })
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": closed(json!({"type": "string", "enum": ["a", "b"], "const": "a"})),
+            "B": closed(json!({"type": "string", "enum": ["b", "c"]})),
+            "Field": {"anyOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/B"},
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Field")? else {
+            panic!("expected a union: {:?}", shape_of(&shapes, "Field")?);
+        };
+        // `{"type": "b"}` is only `B`'s, so `A` does not list it.
+        let spellings: Vec<Vec<&str>> = union
+            .variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .tag
+                    .iter()
+                    .chain(&variant.aliases)
+                    .map(String::as_str)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(spellings, [vec!["a"], vec!["b", "c"]]);
     }
 
     #[test_util::test]

@@ -689,20 +689,23 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
         .collect::<Option<Vec<_>>>()?;
     let first = views.first()?;
     'candidates: for name in &first.required {
-        let mut listed: Vec<BTreeSet<String>> = Vec::new();
+        let mut listed: Vec<Vec<String>> = Vec::new();
         for view in &views {
-            let Some(constants) = view
+            let Some(values) = view
                 .properties
                 .get(name)
                 .filter(|_| view.required.contains(name))
-                .and_then(|property| tag_constants(resolved, property))
-                .filter(|constants| !constants.null && !constants.values.is_empty())
+                .and_then(|property| partition_values(resolved, property))
             else {
                 continue 'candidates;
             };
-            listed.push(constants.values.into_iter().collect());
+            listed.push(values);
         }
-        if listed.iter().all(|values| Some(values) == listed.first()) {
+        let sets: Vec<BTreeSet<&String>> = listed
+            .iter()
+            .map(|values| values.iter().collect())
+            .collect();
+        if sets.iter().all(|values| Some(values) == sets.first()) {
             continue;
         }
         // The branches that list one value are tried in order, so none may read a later one's.
@@ -724,16 +727,10 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
         }
         let variants = branches
             .iter()
-            .zip(&views)
-            .map(|(branch, view)| {
+            .zip(listed)
+            .map(|(branch, values)| {
                 // The first spelling is the one written, and the rest are read too.
-                let mut values = view
-                    .properties
-                    .get(name)
-                    .and_then(|property| tag_constants(resolved, property))
-                    .map(|constants| constants.values)
-                    .unwrap_or_default()
-                    .into_iter();
+                let mut values = values.into_iter();
                 Variant {
                     shape: ShapeRef::Key(branch.clone()),
                     tag: values.next(),
@@ -753,6 +750,37 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
         }));
     }
     None
+}
+
+/// Every value a member's schema admits, when that is a list of strings the merged view holds
+/// exactly: an `enum` narrowed by a `const` beside it, and no `null`.
+///
+/// A list [`merge::view`] could not narrow, a member that is a union, or one that admits `null`
+/// has no such list, because the branches it names would then not be the ones whose schemas
+/// admit the value.
+fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
+    let view = merge::view(resolved, key);
+    let uncertain = view
+        .uninterpreted
+        .iter()
+        .any(|keyword| matches!(*keyword, "enum" | "const"));
+    if uncertain || view.union.is_some() || declares_null(&view) {
+        return None;
+    }
+    let listed = match (&view.enumeration, &view.constant) {
+        (Some(listed), Some(only)) => listed.iter().filter(|value| *value == only).collect(),
+        (Some(listed), None) => listed.iter().collect(),
+        (None, Some(only)) => vec![only],
+        (None, None) => return None,
+    };
+    let mut values: Vec<String> = Vec::new();
+    for value in listed {
+        let value = value.as_str()?.to_owned();
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    (!values.is_empty()).then_some(values)
 }
 
 /// Whether the object branch tried first would take a payload of a later one that names, in
