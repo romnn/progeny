@@ -581,14 +581,8 @@ impl<'de> Buffer<'de> {
 pub(crate) trait Assemble<'de>: Sized {
     /// The struct's name, as the format is told it.
     const NAME: &'static str;
-    /// Every member's wire name, in declaration order, which is also the positional order.
+    /// Every member's wire name, in declaration order.
     const FIELDS: &'static [&'static str];
-    /// Whether each member has a declared default, parallel to `FIELDS`.
-    ///
-    /// Only the positional form needs this: a member with a default that is absent from a sequence
-    /// is not an error, and the *next* member without one is what the length complaint names. The
-    /// derive behaves this way, so this has to.
-    const DEFAULTED: &'static [bool];
 
     /// Build the value from its buffered members.
     fn assemble<E>(buffer: &mut Buffer<'de>) -> Result<Self, E>
@@ -597,6 +591,12 @@ pub(crate) trait Assemble<'de>: Sized {
 }
 
 /// Buffers an object's members, checking for duplicates and unknown names, then assembles it.
+///
+/// It reads an object and nothing else.
+/// The serde derive also reads a struct from a sequence, by position, which no JSON Schema object
+/// describes; inside an untagged union that let an object branch take a list meant for a later
+/// one.
+/// Under the derive, [`Object`] refuses a sequence the same way.
 pub(crate) struct BufferVisitor<T> {
     unknown: Unknown,
     value: std::marker::PhantomData<T>,
@@ -657,56 +657,76 @@ where
         }
         T::assemble(&mut buffer)
     }
+}
 
-    /// A struct read from a sequence, positionally.
-    ///
-    /// The derive supports this, so this has to as well — including the shape of its error, which
-    /// names the element count rather than the type.
-    fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+/// A deserializer that hands a struct's derived visitor an object and nothing else.
+///
+/// A derived struct's `Deserialize` goes through this, so that it refuses a sequence as
+/// [`BufferVisitor`] does, with the same message.
+/// Asking the format for a map is not enough on its own, because a replay may answer any request
+/// from what it holds, so the visitor refuses a sequence too.
+pub(crate) struct Object<D>(pub(crate) D);
+
+impl<'de, D> Deserializer<'de> for Object<D>
+where
+    D: Deserializer<'de>,
+{
+    type Error = D::Error;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
-        A: SeqAccess<'de>,
+        V: Visitor<'de>,
     {
-        let fields = T::FIELDS;
-        let mut buffer = Buffer {
-            members: Vec::with_capacity(fields.len()),
-            rest: Vec::new(),
-        };
-        for (index, field) in fields.iter().enumerate() {
-            match access.next_element::<Content<'de>>()? {
-                Some(content) => buffer.members.push((field, content)),
-                // A member with a default fills itself in; everything past the end of the sequence
-                // is absent too, so the walk continues until it meets one that cannot.
-                None if T::DEFAULTED.get(index).copied().unwrap_or(false) => {}
-                None => {
-                    return Err(de::Error::invalid_length(
-                        index,
-                        &Elements {
-                            name: T::NAME,
-                            count: fields.len(),
-                        },
-                    ));
-                }
-            }
-        }
-        T::assemble(&mut buffer)
+        self.0.deserialize_any(Members(visitor))
+    }
+
+    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_map(Members(visitor))
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.0.deserialize_struct(name, fields, Members(visitor))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.0.is_human_readable()
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        option unit unit_struct newtype_struct seq tuple tuple_struct enum identifier ignored_any
     }
 }
 
-/// What a struct read from a sequence expected, worded the way the derive words it.
-struct Elements {
-    name: &'static str,
-    count: usize,
-}
+/// A visitor that passes an object on and refuses everything else, a sequence included.
+struct Members<V>(V);
 
-impl de::Expected for Elements {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "struct {} with {} element{}",
-            self.name,
-            self.count,
-            if self.count == 1 { "" } else { "s" }
-        )
+impl<'de, V> Visitor<'de> for Members<V>
+where
+    V: Visitor<'de>,
+{
+    type Value = V::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.expecting(formatter)
+    }
+
+    fn visit_map<A>(self, access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        self.0.visit_map(access)
     }
 }
 

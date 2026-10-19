@@ -1601,7 +1601,6 @@ mod tests {
     impl<'de> Assemble<'de> for Spike {
         const NAME: &'static str = "Spike";
         const FIELDS: &'static [&'static str] = &["required", "optional", "wireName"];
-        const DEFAULTED: &'static [bool] = &[false, false, false];
 
         fn assemble<E>(buffer: &mut Buffer<'de>) -> Result<Self, E>
         where
@@ -1710,24 +1709,98 @@ mod tests {
         );
     }
 
+    /// The derive's shape of the spike, read through [`super::buffered::Object`] the way the
+    /// renderer emits it under the derive strategy.
+    #[derive(Debug, PartialEq)]
+    struct Derived {
+        required: String,
+        optional: Option<i64>,
+    }
+
+    impl<'de> Deserialize<'de> for Derived {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            #[derive(serde::Deserialize)]
+            #[serde(remote = "Derived")]
+            struct Members {
+                required: String,
+                optional: Option<i64>,
+            }
+            Members::deserialize(super::buffered::Object(deserializer))
+        }
+    }
+
+    /// A struct reads an object and nothing else, under either strategy, with one message.
     #[test_util::test]
-    fn a_struct_can_be_read_from_a_sequence_the_way_the_derive_reads_one() {
+    fn a_struct_refuses_a_sequence_under_either_strategy() {
+        let refused = |error: serde_json::Error| {
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("invalid type: sequence, expected struct "),
+                "{error}"
+            );
+        };
+        refused(
+            serde_json::from_str::<Spike>(r#"["a", 1, true]"#)
+                .err()
+                .ok_or_eyre("the hand-written struct should refuse a sequence")?,
+        );
+        refused(
+            serde_json::from_str::<Derived>(r#"["a", 1]"#)
+                .err()
+                .ok_or_eyre("the derived struct should refuse a sequence")?,
+        );
         assert_eq!(
-            serde_json::from_str::<Spike>(r#"["a", 1, true]"#)?,
-            Spike {
+            serde_json::from_str::<Derived>(r#"{"required": "a"}"#)?,
+            Derived {
                 required: "a".to_owned(),
-                optional: Some(1),
-                renamed: true,
+                optional: None,
             }
         );
-        let error = serde_json::from_str::<Spike>(r#"["a"]"#)
-            .err()
-            .ok_or_eyre("the test expects this operation to fail")?;
-        assert!(
-            error
-                .to_string()
-                .starts_with("invalid length 1, expected struct Spike with 3 elements"),
-            "{error}"
+    }
+
+    /// An untagged union replays its payload into each variant, and a struct variant before a
+    /// list one leaves a list to it.
+    #[test_util::test]
+    fn a_struct_branch_leaves_a_list_to_a_later_list_branch() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(untagged)]
+        enum Hand {
+            Spike(Spike),
+            List(Vec<serde_json::Value>),
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(untagged)]
+        enum Derive {
+            Derived(Derived),
+            List(Vec<String>),
+        }
+        // `["a", 1, true]` fills the spike's three members in order, which a positional read took.
+        assert_eq!(
+            serde_json::from_str::<Hand>(r#"["a", 1, true]"#)?,
+            Hand::List(vec![
+                serde_json::json!("a"),
+                serde_json::json!(1),
+                serde_json::json!(true)
+            ])
+        );
+        assert_eq!(
+            serde_json::from_str::<Derive>(r#"["a"]"#)?,
+            Derive::List(vec!["a".to_owned()])
+        );
+        // The same one level down, where a list of structs meets a list of lists.
+        assert_eq!(
+            serde_json::from_str::<Vec<Derive>>(r#"[["a"], {"required": "b"}]"#)?,
+            vec![
+                Derive::List(vec!["a".to_owned()]),
+                Derive::Derived(Derived {
+                    required: "b".to_owned(),
+                    optional: None,
+                }),
+            ]
         );
     }
 

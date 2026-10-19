@@ -555,3 +555,15 @@ fn a_union_matched_by_shape_reads_each_payload_into_its_branch() {
     let untitled = serde_json::from_str::<hand::types::EnumSchema>(r#"{"enum":["a"]}"#)?;
     assert!(matches!(untitled, hand::types::EnumSchema::UntitledEnum(_)));
 }
+
+/// A struct reads an object and nothing else, so a list reaches the list branch after it, and
+/// both renderings write each payload back as it came.
+#[test_util::test]
+fn a_list_reaches_the_list_branch_after_an_object_one() {
+    for payload in [r#"["Ada"]"#, r#"{"name":"Ada"}"#] {
+        let derived = serde_json::from_str::<derived::types::Either>(payload)?;
+        let hand = serde_json::from_str::<hand::types::Either>(payload)?;
+        assert_eq!(serde_json::to_string(&derived)?, payload);
+        assert_eq!(serde_json::to_string(&hand)?, payload);
+    }
+}

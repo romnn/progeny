@@ -299,3 +299,15 @@ components:
           type: array
           items:
             type: string
+    # An object branch before a list branch, which a struct that also read a sequence by position
+    # took the list from.
+    Either:
+      oneOf:
+        - type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+        - type: array
+          items:
+            type: string
