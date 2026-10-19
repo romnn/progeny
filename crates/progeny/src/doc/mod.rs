@@ -70,6 +70,9 @@ pub(crate) struct ParsedDocument {
     pub(crate) bundle_dialect: Option<bool>,
     /// Each position normalization moved, so a `$ref` to it as written reaches what is there.
     pub(crate) moves: Vec<crate::normalize::Move>,
+    /// For a JSON Schema bundle, each definition that repeats one an earlier namespace gives its
+    /// name, with that definition's pointer, so a `$ref` to either reaches one schema.
+    pub(crate) repeats: Vec<(String, String)>,
 }
 
 /// Either a reference to a component or the component itself.

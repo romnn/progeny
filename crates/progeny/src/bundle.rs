@@ -23,8 +23,10 @@ pub struct SchemaInput {
     /// JSON Pointers to the objects whose members are the bundle's named types, in precedence
     /// order.
     ///
-    /// A name two namespaces define names the first one's type, and the other is reported and
-    /// stays reachable by its own pointer.
+    /// A name two namespaces define names the first one's type.
+    /// A later definition that repeats that schema, apart from annotations such as `title` and
+    /// `$schema`, is that type wherever it is referenced.
+    /// One that differs is reported and stays reachable by its own pointer.
     /// A namespace nested in another, such as `/definitions/v2` in `/definitions`, is not a type
     /// of the outer one.
     /// Empty means the bundle's own `/$defs` and `/definitions`, in that order, where they exist.
@@ -81,7 +83,7 @@ pub(crate) fn read(
     let written = root.clone();
     let mut moves = crate::normalize::bundle_schema_at(&mut root, legacy, JsonPointer::root(), ctx);
     let (store, registered) = register(&root, &written, &namespaces, legacy, &mut moves, ctx);
-    let named = name(&written, &namespaces, &registered, ctx);
+    let Named { named, repeats } = name(&written, &namespaces, &registered, legacy, ctx);
     let roots = select(input, &named)?;
 
     // The whole bundle stays readable, so a `$ref` to a position nothing read is still read as
@@ -107,6 +109,7 @@ pub(crate) fn read(
         roots,
         bundle_dialect: Some(legacy),
         moves,
+        repeats,
     })
 }
 
@@ -178,14 +181,28 @@ fn register(
     (store, registered)
 }
 
+/// What [`name`] found: the type each name names, and the definitions that repeat it.
+struct Named {
+    named: BTreeMap<String, SchemaId>,
+    /// Each later definition of a name that is the schema the first one is, with the first's
+    /// pointer.
+    repeats: Vec<(String, String)>,
+}
+
 /// The type each name names: the first namespace's, in the caller's order, to define it.
+///
+/// A later definition of the name that only repeats the first is that schema, and nothing is
+/// reported; one that differs is.
 fn name(
     root: &Value,
     namespaces: &[JsonPointer],
     registered: &BTreeMap<String, SchemaId>,
+    legacy: bool,
     ctx: &mut Ctx,
-) -> BTreeMap<String, SchemaId> {
+) -> Named {
     let mut named: BTreeMap<String, SchemaId> = BTreeMap::new();
+    let mut first: BTreeMap<String, JsonPointer> = BTreeMap::new();
+    let mut repeats = Vec::new();
     for namespace in namespaces {
         let Some(Value::Object(entries)) = lookup(root, namespace) else {
             continue;
@@ -198,8 +215,13 @@ fn name(
             else {
                 continue;
             };
-            // The sentence names no pointer, so a bundle with a habit of shadowing is one record.
-            if named.contains_key(name) {
+            if let Some(earlier) = first.get(name) {
+                if repeated(root, earlier, &at, legacy) {
+                    repeats.push((at.to_string(), earlier.to_string()));
+                    continue;
+                }
+                // The sentence names no pointer, so a bundle with a habit of shadowing is one
+                // record.
                 ctx.report(Diagnostic::new(
                     BreakageClass::CollidingTypeName,
                     Action::Warn,
@@ -209,10 +231,54 @@ fn name(
                 ));
             } else {
                 named.insert(name.clone(), id);
+                first.insert(name.clone(), at);
             }
         }
     }
-    named
+    Named { named, repeats }
+}
+
+/// Annotations a definition can differ in and still be the schema another one is, because none
+/// of them changes what it accepts.
+const ANNOTATIONS: [&str; 5] = ["$schema", "title", "description", "$comment", "examples"];
+
+/// Whether the definition at `then` repeats the one at `first`: the two are read by one draft and
+/// are equal once [`ANNOTATIONS`] are set aside, and `$id` too where neither holds a reference.
+fn repeated(root: &Value, first: &JsonPointer, then: &JsonPointer, legacy: bool) -> bool {
+    let (Some(left), Some(right)) = (lookup(root, first), lookup(root, then)) else {
+        return false;
+    };
+    if legacy_along(Some(root), first.tokens(), legacy)
+        != legacy_along(Some(root), then.tokens(), legacy)
+    {
+        return false;
+    }
+    // `$id` is compared where it is the base a reference resolves against.
+    let with_id = holds_reference(left) || holds_reference(right);
+    let (Value::Object(left), Value::Object(right)) = (left, right) else {
+        return left == right;
+    };
+    content(left, with_id) == content(right, with_id)
+}
+
+/// A definition's members, without the ones [`repeated`] sets aside.
+fn content(members: &serde_json::Map<String, Value>, with_id: bool) -> BTreeMap<&str, &Value> {
+    members
+        .iter()
+        .map(|(key, member)| (key.as_str(), member))
+        .filter(|(key, _)| !ANNOTATIONS.contains(key) && (with_id || *key != "$id"))
+        .collect()
+}
+
+/// Whether `value` holds a `$ref` or `$dynamicRef` anywhere, a member named so included.
+fn holds_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(members) => members.iter().any(|(key, member)| {
+            matches!(key.as_str(), "$ref" | "$dynamicRef") || holds_reference(member)
+        }),
+        Value::Array(items) => items.iter().any(holds_reference),
+        _ => false,
+    }
 }
 
 /// The roots, as the schemas their names name.
@@ -885,6 +951,103 @@ mod tests {
             "{}",
             types(&output)
         );
+    }
+
+    /// The `Id` both namespaces of [`repeating`] define, as the `v2` one does.
+    fn id() -> serde_json::Value {
+        json!({"anyOf": [{"type": "string"}, {"type": "integer", "format": "int64"}]})
+    }
+
+    /// A bundle whose `v2` namespace defines `Id` as `first` and whose outer one defines it again
+    /// as `then`, read by a root that reaches both, with what it generated and the pointers of its
+    /// collisions.
+    fn repeating(
+        first: &serde_json::Value,
+        then: &serde_json::Value,
+    ) -> eyre::Result<(String, Vec<String>)> {
+        let bundle = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "definitions": {
+                "Root": {"type": "object", "properties": {
+                    "outer": {"$ref": "#/definitions/Id"},
+                    "inner": {"$ref": "#/definitions/v2/Id"},
+                }},
+                "Id": then,
+                "Text": {"type": "string"},
+                "v2": {"Id": first},
+            },
+        });
+        let output = generated(&bundle, &received(&["/definitions/v2", "/definitions"]))?;
+        let collisions = output
+            .diagnostics
+            .iter()
+            .filter(|found| found.class() == BreakageClass::CollidingTypeName)
+            .map(|found| found.location().to_string())
+            .collect();
+        Ok((types(&output), collisions))
+    }
+
+    /// A name two namespaces define as one schema, annotations aside, is one type, and nothing
+    /// is lost to report.
+    #[test_util::test]
+    fn a_definition_repeated_in_another_namespace_is_one_type() {
+        let annotated = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Identifier",
+            "description": "The id.",
+            "$comment": "Exported twice.",
+            "examples": ["a"],
+            "$id": "https://example.test/id.json",
+            "anyOf": [{"type": "string"}, {"type": "integer", "format": "int64"}],
+        });
+        for then in [id(), annotated] {
+            let (source, collisions) = repeating(&id(), &then)?;
+            assert!(collisions.is_empty(), "{then}: {collisions:?}");
+            assert!(source.contains("pub outer: Option<Id>"), "{then}: {source}");
+            assert!(source.contains("pub inner: Option<Id>"), "{then}: {source}");
+            assert!(!source.contains("Identifier"), "{then}: {source}");
+        }
+    }
+
+    /// A repeated name whose schemas differ in what they accept is still reported, and so is one
+    /// read by another draft or one whose `$id` is the base of a reference.
+    #[test_util::test]
+    fn a_name_defined_differently_still_collides() {
+        let referencing = json!({
+            "anyOf": [{"$ref": "#/definitions/Text"}, {"type": "integer", "format": "int64"}],
+        });
+        let mut identified = referencing.clone();
+        identified["$id"] = json!("https://example.test/id.json");
+        let cases = [
+            (
+                id(),
+                json!({"anyOf": [{"type": "string"}, {"type": "number", "format": "int64"}]}),
+            ),
+            (
+                id(),
+                json!({"anyOf": [{"type": "string"}, {"type": "integer", "format": "int32"}]}),
+            ),
+            (id(), json!({"anyOf": [{"type": "string"}]})),
+            (
+                id(),
+                json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "anyOf": [{"type": "string"}, {"type": "integer", "format": "int64"}],
+                }),
+            ),
+            (referencing, identified),
+            (
+                json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+                json!({"type": "object", "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"},
+                }}),
+            ),
+        ];
+        for (first, then) in cases {
+            let (_, collisions) = repeating(&first, &then)?;
+            assert_eq!(collisions, ["/definitions/Id"], "{then}");
+        }
     }
 
     /// A root that names no type, or a namespace the bundle does not hold, is refused rather

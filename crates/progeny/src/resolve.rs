@@ -199,8 +199,9 @@ pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocu
         aliases,
     } = materialize(&mut parsed, ctx);
     let mut index = Index::build(&parsed.schemas);
-    // A position normalization moved is the schema it moved, one identity under both pointers.
-    for (written, rewritten) in aliases {
+    // A position normalization moved is the schema it moved, one identity under both pointers,
+    // and a bundle's repeated definition is the one it repeats.
+    for (written, rewritten) in aliases.into_iter().chain(parsed.repeats.iter().cloned()) {
         if let Some(&id) = index.addresses.get(&rewritten) {
             index.addresses.insert(written, id);
         }
