@@ -287,25 +287,22 @@ fn proposals(shapes: &Shapes) -> Vec<(ShapeKey, String)> {
 
 /// The union with a tag that a shape is, or that the `Option` it is holds.
 ///
-/// A `null` among a union's branches makes it an `Option` of the union, which is settled like
-/// the union it holds.
+/// A `null` among a union's branches makes it an `Option` of the union, and a `type` that admits
+/// `null` beside them may wrap that again, so every `Option` written inline is looked through.
+/// The union is settled like one that is a shape of its own.
 fn tagged_union(shape: &Shape) -> Option<&Union> {
-    let union = match shape {
-        Shape::Union(union) => union,
-        Shape::Optional(ShapeRef::Inline(inner)) => match &**inner {
-            Shape::Union(union) => union,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    union.tag.is_some().then_some(union)
+    match shape {
+        Shape::Union(union) => union.tag.is_some().then_some(union),
+        Shape::Optional(ShapeRef::Inline(inner)) => tagged_union(inner),
+        _ => None,
+    }
 }
 
 /// `shape` with the union [`tagged_union`] found in it replaced by `union`.
 fn with_union(shape: &Shape, union: Union) -> Shape {
     match shape {
-        Shape::Optional(ShapeRef::Inline(_)) => {
-            Shape::Optional(ShapeRef::Inline(Box::new(Shape::Union(union))))
+        Shape::Optional(ShapeRef::Inline(inner)) => {
+            Shape::Optional(ShapeRef::Inline(Box::new(with_union(inner, union))))
         }
         _ => Shape::Union(union),
     }

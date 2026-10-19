@@ -3099,6 +3099,7 @@ mod tests {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": tagged("a"), "B": tagged("b"), "C": tagged("c"), "D": tagged("d"),
             "E": tagged("e"), "F": tagged("f"), "G": tagged("g"), "H": tagged("h"),
+            "I": tagged("i"), "J": tagged("j"), "K": tagged("k"), "L": tagged("l"),
             "Consumed": {"anyOf": [reference("A"), reference("B"), {"type": "null"}]},
             // `C` is also a member of `Holder`, where `kind` is on the wire.
             "Carried": {"anyOf": [reference("C"), reference("D"), {"type": "null"}]},
@@ -3109,15 +3110,25 @@ mod tests {
             },
             // A `null` the outer union reads out of a nested one makes it optional too.
             "Spread": {"anyOf": [{"anyOf": [reference("G"), {"type": "null"}]}, reference("H")]},
+            // A `type` that admits `null` beside the branches wraps the optional union again.
+            "Typed": {
+                "type": ["object", "null"],
+                "anyOf": [reference("I"), reference("J"), {"type": "null"}],
+            },
+            "TypedSpread": {
+                "type": ["object", "null"],
+                "anyOf": [{"anyOf": [reference("K"), {"type": "null"}]}, reference("L")],
+            },
         })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
+        // The style of the tagged union inside however many `Option`s hold it.
         let style = |name: &str| -> eyre::Result<Option<TagStyle>> {
-            let shape = shape_of(&shapes, name)?;
-            let Shape::Optional(ShapeRef::Inline(inner)) = shape else {
-                return Ok(None);
-            };
-            Ok(match &**inner {
+            let mut shape = shape_of(&shapes, name)?;
+            while let Shape::Optional(ShapeRef::Inline(inner)) = shape {
+                shape = inner;
+            }
+            Ok(match shape {
                 Shape::Union(Union { tag: Some(tag), .. }) => Some(tag.style),
                 _ => None,
             })
@@ -3128,7 +3139,7 @@ mod tests {
             };
             Ok(structure.fields.iter().any(|field| field.wire == "kind"))
         };
-        for name in ["Consumed", "Declared", "Spread"] {
+        for name in ["Consumed", "Declared", "Spread", "Typed", "TypedSpread"] {
             assert_eq!(style(name)?, Some(TagStyle::Consumed), "{name}");
         }
         assert_eq!(style("Carried")?, Some(TagStyle::Carried));
@@ -3137,6 +3148,8 @@ mod tests {
             ("A", false),
             ("E", false),
             ("G", false),
+            ("I", false),
+            ("K", false),
             ("C", true),
             ("D", true),
         ] {
