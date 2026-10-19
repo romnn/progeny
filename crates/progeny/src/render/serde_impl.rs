@@ -762,6 +762,12 @@ impl<'a> TagTable<'a> {
         }
     }
 
+    /// Whether several variants list one spelling, which the decoders then tell apart by shape.
+    pub(super) fn shared(&self) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        self.names.iter().any(|name| !seen.insert(*name))
+    }
+
     /// The position a missing tag member resolves to, as an `Option<usize>` expression.
     pub(super) fn absent(&self) -> TokenStream {
         self.route(self.routes.absent)

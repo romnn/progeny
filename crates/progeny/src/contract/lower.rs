@@ -612,7 +612,10 @@ impl Lower<'_> {
                         ContractKind::Enum { variants, fallback }
                     }
                     Some(tag) => {
-                        if let Some((variants, fallback)) = tagged_variants(variants) {
+                        if let Some((mut variants, fallback)) = tagged_variants(variants) {
+                            if tag.shared {
+                                self.name_by_type(&mut variants);
+                            }
                             match tag.style {
                                 TagStyle::Consumed => ContractKind::TaggedEnum {
                                     tag: tag.property.clone(),
@@ -1083,6 +1086,16 @@ impl Lower<'_> {
             })
             .collect();
         (variants, RustIdent::fallback_variant())
+    }
+
+    /// Name each variant of a union whose variants share a value of its tag after its type, as an
+    /// untagged union's are, because the value names more than one of them.
+    fn name_by_type(&self, variants: &mut [TaggedVariant]) {
+        let mut used = Namer::default();
+        for variant in variants {
+            variant.rust_name =
+                used.unique(RustIdent::declared_variant(&self.variant_name(&variant.ty)));
+        }
     }
 
     /// What to call a variant holding this type.

@@ -627,6 +627,7 @@ fn told_apart(
                 style: TagStyle::Consumed,
                 absent: named.absent,
                 null: named.null,
+                shared: false,
             }),
         }));
     }
@@ -644,7 +645,203 @@ fn told_apart(
                 .collect(),
             tag: None,
         })),
-        Some(reason) => Err((rest, reason)),
+        Some(reason) => match partitioned(resolved, view, &rest) {
+            Some(shape) => Ok(shape),
+            None => Err((rest, reason)),
+        },
+    }
+}
+
+/// Branches told apart by a member each of them requires and lists the values of, where the
+/// branches that list one value are told apart by shape.
+///
+/// `type: {enum: [string]}` in four branches, `type: {enum: [number, integer]}` in a fifth: a
+/// payload is tried against the branches that list its value of the member, in order, so a branch
+/// is only ever handed a payload whose value it lists.
+/// By shape alone that would not hold, because the type generated for the member is an open enum,
+/// which reads a value its schema refuses, so a branch listing `string` would take a payload
+/// meant for one listing `number`.
+/// Among the branches that list one value the member says nothing more, and they are compared as
+/// [`swallows_payloads_of`] compares two objects, with the member set aside ([`takes_beside`]).
+///
+/// Only objects that each require the member, list strings for it and admit no `null` there are
+/// read this way, so every payload a branch is meant for names the branches to try.
+/// A member every branch lists the same values for tells nothing apart and is passed over.
+/// A declared or inherited discriminator says which branch each value is, so a union that has one
+/// is read by it instead.
+fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> Option<Shape> {
+    if view.discriminator.is_some() || shared_base_discriminator(resolved, branches).is_some() {
+        return None;
+    }
+    let views = branches
+        .iter()
+        .map(|branch| match Branch::of(resolved, branch) {
+            Branch::Leaf(view)
+                if kind_of(resolved, &view) == Some(Kind::Object)
+                    && !names_its_subtypes(resolved, &view, branch)
+                    && !declares_null(&view)
+                    && !lists_beside_its_union(resolved, branch) =>
+            {
+                Some(view)
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let first = views.first()?;
+    'candidates: for name in &first.required {
+        let mut listed: Vec<BTreeSet<String>> = Vec::new();
+        for view in &views {
+            let Some(constants) = view
+                .properties
+                .get(name)
+                .filter(|_| view.required.contains(name))
+                .and_then(|property| tag_constants(resolved, property))
+                .filter(|constants| !constants.null && !constants.values.is_empty())
+            else {
+                continue 'candidates;
+            };
+            listed.push(constants.values.into_iter().collect());
+        }
+        if listed.iter().all(|values| Some(values) == listed.first()) {
+            continue;
+        }
+        // The branches that list one value are tried in order, so none may read a later one's.
+        let values: BTreeSet<&String> = listed.iter().flatten().collect();
+        for value in values {
+            let sharing: Vec<&ShapeKey> = branches
+                .iter()
+                .zip(&listed)
+                .filter(|(_, values)| values.contains(value))
+                .map(|(branch, _)| branch)
+                .collect();
+            for (at, earlier) in sharing.iter().enumerate() {
+                for later in sharing.iter().skip(at + 1) {
+                    if takes_beside(resolved, earlier, later, name) {
+                        continue 'candidates;
+                    }
+                }
+            }
+        }
+        let variants = branches
+            .iter()
+            .zip(&views)
+            .map(|(branch, view)| {
+                // The first spelling is the one written, and the rest are read too.
+                let mut values = view
+                    .properties
+                    .get(name)
+                    .and_then(|property| tag_constants(resolved, property))
+                    .map(|constants| constants.values)
+                    .unwrap_or_default()
+                    .into_iter();
+                Variant {
+                    shape: ShapeRef::Key(branch.clone()),
+                    tag: values.next(),
+                    aliases: values.collect(),
+                }
+            })
+            .collect();
+        return Some(Shape::Union(Union {
+            variants,
+            tag: Some(Tag {
+                property: name.clone(),
+                style: TagStyle::Consumed,
+                absent: None,
+                null: None,
+                shared: true,
+            }),
+        }));
+    }
+    None
+}
+
+/// Whether the object branch tried first would take a payload of a later one that names, in
+/// `member`, a value both list.
+///
+/// [`swallows_payloads_of`]'s reading of two objects, with `member` set aside where it asks
+/// whether the earlier branch reads values its schema refuses: the payload's value of it is one
+/// the earlier branch lists.
+/// An earlier branch that reads such a payload as the later one would ([`reads_as_well`]) is as
+/// faithful to it as one that keeps every payload whole.
+fn takes_beside(
+    resolved: &ResolvedDocument,
+    earlier: &ShapeKey,
+    later: &ShapeKey,
+    member: &str,
+) -> bool {
+    let (first, second) = (merge::view(resolved, earlier), merge::view(resolved, later));
+    let mut beside = merge::view(resolved, earlier);
+    beside.properties.remove(member);
+    beside.required.remove(member);
+    let keeps = reads_whole(resolved, &first, 0) || reads_as_well(resolved, &first, &second);
+    let faithful = keeps && !view_overreaches(resolved, &beside, 0);
+    !faithful && !rejects(resolved, &first, &second, 0)
+}
+
+/// Whether a closed struct reads every payload of a later branch it accepts as that branch's own
+/// type would.
+///
+/// It accepts only payloads whose members it declares, and each member the two share is the same
+/// schema, required or not alike, so it becomes the same field and keeps what the later one keeps.
+/// A member only the earlier one declares is never on a payload of a later closed struct.
+fn reads_as_well(resolved: &ResolvedDocument, earlier: &View, later: &View) -> bool {
+    earlier.additional_denied
+        && earlier
+            .properties
+            .iter()
+            .all(|(name, key)| match later.properties.get(name) {
+                Some(other) => {
+                    earlier.required.contains(name) == later.required.contains(name)
+                        && same_schema(resolved, key, other)
+                }
+                None => later.additional_denied,
+            })
+}
+
+/// Whether two keys are the same schemas, written at the same or at different places.
+fn same_schema(resolved: &ResolvedDocument, left: &ShapeKey, right: &ShapeKey) -> bool {
+    left == right
+        || (left.is_branches() == right.is_branches()
+            && left.parts().len() == right.parts().len()
+            && left
+                .parts()
+                .iter()
+                .zip(right.parts())
+                .all(|(&left, &right)| same_written(resolved, left, right, 0)))
+}
+
+/// Whether two schemas say the same, each keyword alike and each subschema in turn, as far as
+/// [`MAX_AMBIGUITY_DEPTH`]; deeper than that they are taken to differ.
+///
+/// A `$ref` is compared as written and by the schema it reaches, so two references are the same
+/// only where they reach one schema.
+fn same_written(
+    resolved: &ResolvedDocument,
+    left: SchemaId,
+    right: SchemaId,
+    depth: usize,
+) -> bool {
+    if left == right {
+        return true;
+    }
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return false;
+    }
+    match (resolved.schema(left), resolved.schema(right)) {
+        (Schema::Bool(written), Schema::Bool(other)) => written == other,
+        (Schema::Object(written), Schema::Object(other)) => {
+            let (mut lefts, mut rights) = (Vec::new(), Vec::new());
+            written.children(|id| lefts.push(id));
+            other.children(|id| rights.push(id));
+            written.same_apart_from_children(other)
+                && resolved.follow(left) == resolved.follow(right)
+                && lefts.len() == rights.len()
+                && lefts
+                    .into_iter()
+                    .zip(rights)
+                    .all(|(left, right)| same_written(resolved, left, right, depth + 1))
+        }
+        _ => false,
     }
 }
 

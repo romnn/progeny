@@ -17,7 +17,7 @@ mod upload;
 // The names `multipart.rs` and `lenient.rs` reach with `super::`: in a generated crate the
 // buffered and upload files are spliced flat into the support root, so these imports make
 // progeny's own module tree answer the same paths.
-use buffered::{Content, ContentDeserializer, choice};
+use buffered::{Content, ContentDeserializer, choice, sharing};
 use upload::{base64_decode, base64_encode};
 // What the client runtime reaches as `super::…`; here only the `cfg(test)` copy of that
 // runtime does, so the imports are gated the same way.

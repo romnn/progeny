@@ -212,27 +212,14 @@ fn evaluate(
             continue;
         }
 
-        if let Some(reason) = refuse_outright(shapes, &named, property) {
+        let shared = union.tag.as_ref().is_some_and(|tag| tag.shared);
+        if let Some(reason) = refuse_outright(shapes, &named, property, shared) {
             round.modes.insert(union_key.clone(), Mode::Demoted);
             round.demoted.push((union_key.clone(), reason));
             continue;
         }
 
-        // A union that reads a tag it would not write back, an alias or an absent or `null` tag,
-        // cannot consume it, because consuming means the union writes its one value.
-        let refusal = if union
-            .tag
-            .as_ref()
-            .is_some_and(|tag| tag.reads_more_than_it_writes(union))
-        {
-            Some(
-                "some payloads name their variant by a spelling the union would not write back, \
-                 or by leaving the tag out"
-                    .to_owned(),
-            )
-        } else {
-            refuse_consumption(shapes, &borrowed, &claimed, &named, property)
-        };
+        let refusal = refusal(shapes, &borrowed, &claimed, union, &named, property);
         match refusal {
             None => {
                 for (variant, _) in &named {
@@ -316,6 +303,7 @@ fn refuse_outright(
     shapes: &Shapes,
     variants: &[(ShapeKey, Option<String>)],
     property: &str,
+    shared: bool,
 ) -> Option<String> {
     let mut names: BTreeSet<&str> = BTreeSet::new();
     for (_, tag) in variants {
@@ -330,7 +318,8 @@ fn refuse_outright(
                     .to_owned(),
             );
         };
-        if !names.insert(tag) {
+        // A union whose variants may share a value tells those apart by shape.
+        if !names.insert(tag) && !shared {
             return Some(format!(
                 "two of its variants would both be tagged `{tag}`, so the tag would not say which \
                  of them a payload is"
@@ -357,6 +346,36 @@ fn refuse_outright(
         }
     }
     None
+}
+
+/// Why a union that dispatches on its tag may not consume it, if it may not: what it reads of its
+/// tag, or [`refuse_consumption`]'s reasons.
+fn refusal(
+    shapes: &Shapes,
+    borrowed: &BTreeSet<ShapeKey>,
+    claimed: &BTreeMap<ShapeKey, (String, ShapeKey)>,
+    union: &Union,
+    variants: &[(ShapeKey, Option<String>)],
+    property: &str,
+) -> Option<String> {
+    let tag = union.tag.as_ref();
+    // A union that reads a tag it would not write back, an alias or an absent or `null` tag,
+    // cannot consume it, because consuming means the union writes its one value.
+    if tag.is_some_and(|tag| tag.reads_more_than_it_writes(union)) {
+        return Some(
+            "some payloads name their variant by a spelling the union would not write back, or \
+             by leaving the tag out"
+                .to_owned(),
+        );
+    }
+    // The variants that share a value are told apart by their whole payload, tag included.
+    if tag.is_some_and(|tag| tag.shared) {
+        return Some(format!(
+            "several of its variants list one value of `{property}`, and they are told apart by \
+             payloads that keep it"
+        ));
+    }
+    refuse_consumption(shapes, borrowed, claimed, variants, property)
 }
 
 /// Why this union may not *consume* its tag, if it may not.

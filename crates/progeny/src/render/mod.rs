@@ -2205,6 +2205,60 @@ mod tests {
         }
     }
 
+    /// A union whose variants share a value of the member they carry lists the value once per
+    /// variant, tries those variants in turn in both decoders, and names them after their types.
+    #[test_util::test]
+    fn a_carried_tag_enum_whose_variants_share_a_value_tries_each_of_them() {
+        // Only `type` is required, so by shape alone `Choice` would read `{"type": "number"}`.
+        let closed = |kind: &[&str], member: &str| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": kind},
+                    member: {"type": "string"},
+                },
+            })
+        };
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let mut document = with_schemas(json!({
+            "Choice": closed(&["string"], "option"),
+            "Text": closed(&["string"], "format"),
+            "Number": closed(&["number", "integer"], "unit"),
+            "Field": {"anyOf": [reference("Choice"), reference("Text"), reference("Number")]},
+        }));
+        // A response that returns the union, so its read form's lenient decoder is rendered too.
+        document["paths"] = json!({"/field": {"get": {"responses": {"200": {
+            "description": "a field",
+            "content": {"application/json": {"schema": reference("Field")}},
+        }}}}});
+        let strict = |config: Config| Config {
+            decoding: crate::config::Decoding::Strict,
+            ..config
+        };
+        // The lenient decoder probes each choice in turn, and the strict one dispatches.
+        for (config, decoder) in [
+            (Config::default(), "lenient::tag_choices("),
+            (derive_mode(), "lenient::tag_choices("),
+            (strict(Config::default()), "support::dispatch("),
+            (strict(derive_mode()), "support::dispatch("),
+        ] {
+            let rendered = types(document.clone(), &config)?;
+            let flat = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                flat.contains(r#"&["string", "string", "number", "integer"]"#),
+                "{rendered}"
+            );
+            for variant in [
+                "Choice(Box<Choice>)",
+                "Text(Box<Text>)",
+                "Number(Box<Number>)",
+            ] {
+                assert!(flat.contains(variant), "{variant}: {rendered}");
+            }
+            assert!(flat.contains(decoder), "{decoder}: {rendered}");
+        }
+    }
+
     /// Two tagged unions that agree on everything but the bytes their tags read are two types.
     ///
     /// The trap is that a Rust variant name is a *normalization* of the tag value — `a-cat` and

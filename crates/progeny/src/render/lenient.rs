@@ -391,15 +391,58 @@ fn tagged_body(
             }
         });
     let unknown = unknown_arm(contract, fallback);
+    let fallback = quote! {
+        _ => {
+            let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);
+            #support::lenient::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
+        }
+    };
+    if !table.shared() {
+        return quote! {
+            const TAG: &str = #tag;
+            const VARIANTS: &[&str] = &[#(#wire_names),*];
+            match #support::lenient::tag_choice(&content, TAG, VARIANTS, #absent, #null)? {
+                #(#arms)*
+                #fallback
+            }
+        };
+    }
+    // Variants that list one spelling are told apart by shape: the first the payload fits
+    // strictly, read leniently, or the open arm where it fits none.
+    let probes = variants
+        .iter()
+        .zip(&table.patterns)
+        .filter(|(variant, _)| variant.ty != TypeRef::Unit)
+        .map(|(variant, pattern)| {
+            let name = ident(&variant.rust_name);
+            let ty = type_ref_in(&variant.ty, contracts, config, scope);
+            let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
+            quote! {
+                #pattern => {
+                    if let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
+                        return Ok(#wrap);
+                    }
+                }
+            }
+        });
     quote! {
         const TAG: &str = #tag;
         const VARIANTS: &[&str] = &[#(#wire_names),*];
-        match #support::lenient::tag_choice(&content, TAG, VARIANTS, #absent, #null)? {
-            #(#arms)*
-            _ => {
-                let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);
-                #support::lenient::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
+        let choices = #support::lenient::tag_choices(&content, TAG, VARIANTS, #absent, #null)?;
+        let choice = if let [only] = choices.as_slice() {
+            Some(*only)
+        } else {
+            for &choice in &choices {
+                match choice {
+                    #(#probes)*
+                    _ => {}
+                }
             }
+            None
+        };
+        match choice {
+            #(#arms)*
+            #fallback
         }
     }
 }

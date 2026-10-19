@@ -33,7 +33,7 @@ use std::fmt;
 use serde::de::{self, Deserialize, Deserializer, Error as _};
 
 use super::degradations::{Decoded, DegradationKind, Degradations, MemberSite, Site};
-use super::{Content, ContentDeserializer, choice};
+use super::{Content, ContentDeserializer, choice, sharing};
 
 /// The error the decoder reasons with: a message, and no position.
 ///
@@ -497,6 +497,25 @@ pub(crate) fn tag_choice(
     null: Option<usize>,
 ) -> Result<Option<usize>, Problem> {
     choice(content, tag, variants, absent, null)
+}
+
+/// Every position whose variant a tagged union's payload may be, in the order to try them: the
+/// one `tag_choice` names, and each later variant that lists the same spelling.
+///
+/// # Errors
+///
+/// Returns the duplicate-member error when the payload writes the tag twice.
+#[doc(hidden)]
+pub(crate) fn tag_choices(
+    content: &Content<'_>,
+    tag: &'static str,
+    variants: &'static [&'static str],
+    absent: Option<usize>,
+    null: Option<usize>,
+) -> Result<Vec<usize>, Problem> {
+    Ok(choice(content, tag, variants, absent, null)?
+        .map(|choice| sharing(variants, choice))
+        .unwrap_or_default())
 }
 
 /// The tag member's text, for the report's sample when it names no variant.
@@ -1588,6 +1607,20 @@ mod tests {
         assert_eq!(entry.samples, ["fired"]);
         // A tag written twice is the one thing the choice refuses outright.
         assert!(decode::<Event>(r#"{"kind":"hired","kind":"moved"}"#).is_err());
+    }
+
+    /// Every variant that lists a payload's spelling is a choice, in the order they are listed,
+    /// and a spelling nothing lists is none.
+    #[test_util::test]
+    fn every_variant_listing_the_tag_is_a_choice() {
+        const VARIANTS: &[&str] = &["string", "string", "number", "integer", "string"];
+        let choices = |wire: &str| -> eyre::Result<Vec<usize>> {
+            let content: Content<'_> = serde_json::from_str(wire)?;
+            Ok(super::tag_choices(&content, "type", VARIANTS, None, None)?)
+        };
+        assert_eq!(choices(r#"{"type":"string"}"#)?, [0, 1, 4]);
+        assert_eq!(choices(r#"{"type":"integer"}"#)?, [3]);
+        assert_eq!(choices(r#"{"type":"boolean"}"#)?, Vec::<usize>::new());
     }
 
     /// The raw slot reader the presence-preserving member reader is built on tells absent,
