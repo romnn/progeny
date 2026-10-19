@@ -75,6 +75,8 @@ pub(crate) struct ParsedDocument {
     ///
     /// A reference to the repeat, by pointer, `$id` or anchor, reaches the earlier schema, so
     /// the two are one type.
+    /// A schema read only once a reference reaches it, inside a keyword progeny does not read,
+    /// keeps its own identity.
     pub(crate) repeats: BTreeMap<SchemaId, SchemaId>,
 }
 

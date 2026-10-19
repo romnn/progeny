@@ -8,7 +8,7 @@
 //! The roots are the wire: only the types they reach are generated, and their directions decide
 //! what a collapse costs and which types get a read form.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -236,13 +236,40 @@ fn name(
             }
         }
     }
+    // A repeat of a schema that is itself a repeat, found later, is the schema that one repeats,
+    // and so is a name whose first definition sits inside a repeat.
+    let repeats = settled(&repeats);
+    for id in named.values_mut() {
+        *id = repeats.get(id).copied().unwrap_or(*id);
+    }
     Named { named, repeats }
+}
+
+/// Each repeat with the schema at the end of its chain of repeats.
+fn settled(repeats: &BTreeMap<SchemaId, SchemaId>) -> BTreeMap<SchemaId, SchemaId> {
+    repeats
+        .iter()
+        .map(|(&repeat, &next)| {
+            let mut seen = BTreeSet::from([repeat]);
+            let mut at = next;
+            while let Some(&further) = repeats.get(&at) {
+                if !seen.insert(at) {
+                    break;
+                }
+                at = further;
+            }
+            (repeat, at)
+        })
+        .filter(|(repeat, at)| repeat != at)
+        .collect()
 }
 
 /// Each schema the definition `repeated` holds, with the schema at the same place in `canonical`.
 ///
-/// The two are equal apart from annotations, which hold no schemas, so every place in one is a
-/// place in the other.
+/// Only places a keyword holds schemas at are followed, because those are the places
+/// [`repeated`] compared, and the two definitions are the same schema there.
+/// A schema registered inside an annotation, or inside a keyword progeny does not read, keeps its
+/// own identity.
 fn same_places(
     store: &SchemaStore,
     registered: &BTreeMap<String, SchemaId>,
@@ -253,7 +280,11 @@ fn same_places(
     store
         .iter()
         .filter_map(|(id, _)| {
-            let rest = store.address(id).tokens().strip_prefix(from.tokens())?;
+            let rest = store
+                .address(id)
+                .tokens()
+                .strip_prefix(from.tokens())
+                .filter(|rest| schema_path(rest))?;
             let place = rest
                 .iter()
                 .fold(to.clone(), |at, token| at.child(token.clone()));
@@ -261,6 +292,27 @@ fn same_places(
             (same != id).then_some((id, same))
         })
         .collect()
+}
+
+/// Whether `tokens` lead from a schema to a schema through keywords that hold schemas alone.
+fn schema_path(mut tokens: &[String]) -> bool {
+    while let Some((keyword, rest)) = tokens.split_first() {
+        tokens = if SCHEMA_MAPS.contains(&keyword.as_str()) {
+            let Some((_, rest)) = rest.split_first() else {
+                return false;
+            };
+            rest
+        } else if SUBSCHEMAS.contains(&keyword.as_str()) {
+            // An array of schemas is entered by its index.
+            match rest.split_first() {
+                Some((index, rest)) if index.parse::<usize>().is_ok() => rest,
+                _ => rest,
+            }
+        } else {
+            return false;
+        };
+    }
+    true
 }
 
 /// Annotations a schema can differ in and still be the schema another one is, because none of
@@ -1209,6 +1261,74 @@ mod tests {
         assert!(source.contains("pub outer: Option<Id>"), "{source}");
         assert!(source.contains("pub inner: Option<Id>"), "{source}");
         assert!(!source.contains("Identifier"), "{source}");
+    }
+
+    /// A repeat is the end of a chain of repeats, a name whose first definition sits inside a
+    /// repeat names the schema that one repeats, and a schema read inside an annotation keeps its
+    /// own identity.
+    #[test_util::test]
+    fn nested_namespaces_reach_one_schema_per_repeat() {
+        // `third`'s `Foo` repeats `second`'s, which repeats `first`'s, so the anchor all three
+        // declare names one schema.
+        let foo = json!({"type": "string", "$anchor": "foo"});
+        let boxed = json!({"type": "object", "$defs": {"Foo": foo}});
+        let bundle = json!({
+            "first": {
+                "Foo": foo,
+                "Root": {"type": "object", "properties": {"foo": {"$ref": "#foo"}}},
+            },
+            "second": {"Box": boxed},
+            "third": {"Box": boxed},
+        });
+        let output = generated(
+            &bundle,
+            &received(&["/first", "/second", "/second/Box/$defs", "/third"]),
+        )?;
+        let source = types(&output);
+        assert!(source.contains("pub foo: Option<Foo>"), "{source}");
+        assert!(source.contains("pub type Foo = String;"), "{source}");
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+
+        // The root `Foo` is first defined inside `b`'s `Box`, which repeats `a`'s.
+        let titled = |title: &str| {
+            json!({"type": "object", "$defs": {"Foo": {
+                "type": "object", "title": title, "properties": {"v": {"type": "string"}},
+            }}})
+        };
+        let bundle = json!({
+            "a": {
+                "Box": titled("CanonicalFoo"),
+                "Root": {"type": "object", "properties": {"foo": {"$ref": "#/b/Box/$defs/Foo"}}},
+            },
+            "b": {"Box": titled("OtherFoo")},
+        });
+        let mut input = received(&["/a", "/b", "/b/Box/$defs"]);
+        input.roots.push(SchemaRoot {
+            name: "Foo".to_owned(),
+            direction: Direction::Received,
+        });
+        let source = types(&generated(&bundle, &input)?);
+        assert!(source.contains("pub foo: Option<Foo>"), "{source}");
+        // The titles are only the schema's documentation.
+        assert!(!source.contains("struct CanonicalFoo"), "{source}");
+        assert!(!source.contains("struct OtherFoo"), "{source}");
+
+        // `examples` are set aside, but a schema a namespace reads out of one is not the one at
+        // the same place in the other example.
+        let example = |kind: &str| json!({"type": "object", "examples": [{"X": {"type": kind}}]});
+        let bundle = json!({
+            "a": {
+                "Id": example("string"),
+                "Root": {"type": "object", "properties": {"x": {"$ref": "#/b/Id/examples/0/X"}}},
+            },
+            "b": {"Id": example("integer")},
+        });
+        let output = generated(
+            &bundle,
+            &received(&["/a", "/b", "/a/Id/examples/0", "/b/Id/examples/0"]),
+        )?;
+        let source = types(&output);
+        assert!(source.contains("pub x: Option<i64>"), "{source}");
     }
 
     /// A repeated name whose schemas differ in what they accept is still reported, and so is one
