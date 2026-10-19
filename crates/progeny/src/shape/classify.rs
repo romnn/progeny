@@ -574,7 +574,7 @@ fn union(
         Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::Variants(rest) => match told_apart(resolved, view, rest) {
             Ok(shape) => shape,
-            Err((rest, reason)) => match spread_union(resolved, view, &rest) {
+            Err((rest, reason)) => match spread_union(resolved, view, &rest, nullable) {
                 Some((shape, null)) => {
                     nullable |= null;
                     shape
@@ -658,13 +658,15 @@ fn told_apart(
 /// Wherever it is referenced on its own, it keeps that type.
 ///
 /// A declared or inherited discriminator decides the union as written, so nothing is spread there.
-/// Neither is a union that its branches tell apart by a tag of their own once a nested `null` has
-/// made it optional, because [`super::discriminate`] settles only a tagged union that is a shape
-/// of its own.
+/// Neither is a union that its branches tell apart by a tag of their own and that is optional,
+/// by a `null` among the branches of either union or one its `type` admits, because
+/// [`super::discriminate`] settles only a tagged union that is a shape of its own.
+/// `nullable` says whether the outer union's own branches listed `null`.
 fn spread_union(
     resolved: &ResolvedDocument,
     view: &View,
     rest: &[ShapeKey],
+    nullable: bool,
 ) -> Option<(Shape, bool)> {
     if view.discriminator.is_some() || shared_base_discriminator(resolved, rest).is_some() {
         return None;
@@ -673,17 +675,18 @@ fn spread_union(
     if !spread_into(resolved, rest, &mut BTreeSet::new(), &mut spread) {
         return None;
     }
-    let (reading, nullable) = Reading::of(resolved, &spread);
+    let (reading, lifted) = Reading::of(resolved, &spread);
     let shape = match reading {
         Reading::Empty => return None,
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::Variants(spread) => told_apart(resolved, view, spread).ok()?,
     };
-    if nullable && matches!(shape, Shape::Union(Union { tag: Some(_), .. })) {
+    let optional = nullable || lifted || declares_null(view);
+    if optional && matches!(shape, Shape::Union(Union { tag: Some(_), .. })) {
         return None;
     }
-    Some((shape, nullable))
+    Some((shape, lifted))
 }
 
 /// Push `branches` onto `spread`, each nested union that declares nothing beside its branches as

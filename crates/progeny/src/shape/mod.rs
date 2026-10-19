@@ -3095,13 +3095,34 @@ mod tests {
             "A": tagged("a"), "B": tagged("b"),
             "Outer": {"anyOf": [{"anyOf": [reference("A"), {"type": "null"}]}, reference("B")]},
         })))?;
+        let optional_tag = |shape: &Shape| {
+            matches!(
+                shape,
+                Shape::Optional(ShapeRef::Inline(inner))
+                    if matches!(**inner, Shape::Union(Union { tag: Some(_), .. }))
+            )
+        };
         let outer = shape_of(&shapes, "Outer")?;
-        let tagged_inside = matches!(
-            outer,
-            Shape::Optional(ShapeRef::Inline(inner))
-                if matches!(**inner, Shape::Union(Union { tag: Some(_), .. }))
-        );
-        assert!(!tagged_inside, "{outer:?}");
+        assert!(!optional_tag(outer), "{outer:?}");
+
+        // The same holds where `null` is a branch of the outer union, or its `type` admits it.
+        for outer in [
+            json!({"anyOf": [
+                {"anyOf": [reference("A"), reference("B")]},
+                reference("C"),
+                {"type": "null"},
+            ]}),
+            json!({"type": ["object", "null"], "anyOf": [
+                {"anyOf": [reference("A"), reference("B")]},
+                reference("C"),
+            ]}),
+        ] {
+            let (shapes, _) = shapes_of(with_schemas(json!({
+                "A": tagged("a"), "B": tagged("b"), "C": tagged("c"), "Outer": outer,
+            })))?;
+            let shape = shape_of(&shapes, "Outer")?;
+            assert!(!optional_tag(shape), "{shape:?}");
+        }
     }
 
     #[test_util::test]
