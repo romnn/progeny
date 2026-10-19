@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792405198453,
+  "lastUpdate": 1792420212449,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -592,6 +592,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 334.6822910308838,
             "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7f17ea17a499d843b514d36326edd5a72a73af80",
+          "message": "fix(bundle): read a definition another namespace repeats as one type (#72)\n\nA name two namespaces of a bundle define was reported as\n`colliding-type-name` even when both definitions are the same schema, as\ncodex's app-server bundle writes `AbsolutePathBuf` and `RequestId` in\n`/definitions/v2` and `/definitions`.\n\nA later definition equal to the first once `title`, `description`,\n`$comment` and `examples` are set aside wherever a schema sits, read by\nthe same draft, is now that schema, and nothing is reported. Its own `$id`\nis set aside too where neither definition holds a reference. Every schema\nof the repeat maps onto the one at the same place in the first\ndefinition, so a `$ref` to it by pointer, `$id` or anchor reaches one\ntype, chains of repeats settle on one schema, and a name first defined\ninside a repeat names that schema. A definition that differs in anything\nelse is still reported.\n\nCloses #70",
+          "timestamp": "2026-10-19T16:25:10+02:00",
+          "tree_id": "04683cf1d680eec2e0ac9ebdccfaba293c46b3cf",
+          "url": "https://github.com/romnn/progeny/commit/7f17ea17a499d843b514d36326edd5a72a73af80"
+        },
+        "date": 1792420211943,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.601564666666665,
+            "range": "± 0.07",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3002.423176765442,
+            "range": "± 3.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.816478666666667,
+            "range": "± 0.03",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.8046875,
+            "range": "± 1.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6657633333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 334.16796875,
+            "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
