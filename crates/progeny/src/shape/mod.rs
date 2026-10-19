@@ -3082,46 +3082,65 @@ mod tests {
             }),
             "Root",
         )?);
+    }
 
-        // Read as its branches, `Outer` is told apart by `kind` once `null` makes it optional,
-        // which leaves a tag nothing settles, so it is not read that way.
+    /// A union whose tagged branches a `null` makes optional settles its tag like one without it:
+    /// consumed off variants used nowhere else, carried where a variant is used elsewhere, and
+    /// read as written where the document declares the discriminator.
+    #[test_util::test]
+    fn a_tagged_union_a_null_makes_optional_settles_its_tag() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
         let tagged = |tag: &str| {
             json!({
                 "type": "object", "additionalProperties": false, "required": ["kind", "value"],
                 "properties": {"kind": {"const": tag}, "value": {"type": "string"}},
             })
         };
-        let (shapes, _) = shapes_of(with_schemas(json!({
-            "A": tagged("a"), "B": tagged("b"),
-            "Outer": {"anyOf": [{"anyOf": [reference("A"), {"type": "null"}]}, reference("B")]},
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": tagged("a"), "B": tagged("b"), "C": tagged("c"), "D": tagged("d"),
+            "E": tagged("e"), "F": tagged("f"), "G": tagged("g"), "H": tagged("h"),
+            "Consumed": {"anyOf": [reference("A"), reference("B"), {"type": "null"}]},
+            // `C` is also a member of `Holder`, where `kind` is on the wire.
+            "Carried": {"anyOf": [reference("C"), reference("D"), {"type": "null"}]},
+            "Holder": {"type": "object", "properties": {"c": reference("C")}},
+            "Declared": {
+                "oneOf": [reference("E"), reference("F"), {"type": "null"}],
+                "discriminator": {"propertyName": "kind"},
+            },
+            // A `null` the outer union reads out of a nested one makes it optional too.
+            "Spread": {"anyOf": [{"anyOf": [reference("G"), {"type": "null"}]}, reference("H")]},
         })))?;
-        let optional_tag = |shape: &Shape| {
-            matches!(
-                shape,
-                Shape::Optional(ShapeRef::Inline(inner))
-                    if matches!(**inner, Shape::Union(Union { tag: Some(_), .. }))
-            )
-        };
-        let outer = shape_of(&shapes, "Outer")?;
-        assert!(!optional_tag(outer), "{outer:?}");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
-        // The same holds where `null` is a branch of the outer union, or its `type` admits it.
-        for outer in [
-            json!({"anyOf": [
-                {"anyOf": [reference("A"), reference("B")]},
-                reference("C"),
-                {"type": "null"},
-            ]}),
-            json!({"type": ["object", "null"], "anyOf": [
-                {"anyOf": [reference("A"), reference("B")]},
-                reference("C"),
-            ]}),
+        let style = |name: &str| -> eyre::Result<Option<TagStyle>> {
+            let shape = shape_of(&shapes, name)?;
+            let Shape::Optional(ShapeRef::Inline(inner)) = shape else {
+                return Ok(None);
+            };
+            Ok(match &**inner {
+                Shape::Union(Union { tag: Some(tag), .. }) => Some(tag.style),
+                _ => None,
+            })
+        };
+        let keeps_kind = |name: &str| -> eyre::Result<bool> {
+            let Shape::Struct(structure) = shape_of(&shapes, name)? else {
+                return Err(eyre::eyre!("{name} is not a struct"));
+            };
+            Ok(structure.fields.iter().any(|field| field.wire == "kind"))
+        };
+        for name in ["Consumed", "Declared", "Spread"] {
+            assert_eq!(style(name)?, Some(TagStyle::Consumed), "{name}");
+        }
+        assert_eq!(style("Carried")?, Some(TagStyle::Carried));
+        // A consumed tag comes off the variants, and a carried one stays on them.
+        for (name, kept) in [
+            ("A", false),
+            ("E", false),
+            ("G", false),
+            ("C", true),
+            ("D", true),
         ] {
-            let (shapes, _) = shapes_of(with_schemas(json!({
-                "A": tagged("a"), "B": tagged("b"), "C": tagged("c"), "Outer": outer,
-            })))?;
-            let shape = shape_of(&shapes, "Outer")?;
-            assert!(!optional_tag(shape), "{shape:?}");
+            assert_eq!(keeps_kind(name)?, kept, "{name}");
         }
     }
 

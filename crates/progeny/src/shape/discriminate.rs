@@ -116,14 +116,18 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
         .map(|(key, _)| key.clone())
         .collect();
     for union_key in carried {
-        let Some(Shape::Union(union)) = shapes.get(&union_key) else {
+        let Some(shape) = shapes.get(&union_key) else {
+            continue;
+        };
+        let Some(union) = tagged_union(shape) else {
             continue;
         };
         let mut settled = union.clone();
         if let Some(tag) = settled.tag.as_mut() {
             tag.style = TagStyle::Carried;
         }
-        shapes.replace(&union_key, Shape::Union(settled));
+        let settled = with_union(shape, settled);
+        shapes.replace(&union_key, settled);
     }
     for (variant, property) in outcome.strip {
         shapes.strip_property(&variant, &property);
@@ -187,7 +191,7 @@ fn evaluate(
         if modes.get(union_key) != Some(&Mode::Consumed) {
             continue;
         }
-        let Some(Shape::Union(union)) = shapes.get(union_key) else {
+        let Some(union) = shapes.get(union_key).and_then(tagged_union) else {
             continue;
         };
         let named: Vec<(ShapeKey, Option<String>)> = union
@@ -274,11 +278,37 @@ fn evaluate(
 fn proposals(shapes: &Shapes) -> Vec<(ShapeKey, String)> {
     shapes
         .entries()
-        .filter_map(|(key, shape)| match shape {
-            Shape::Union(Union { tag: Some(tag), .. }) => Some((key.clone(), tag.property.clone())),
-            _ => None,
+        .filter_map(|(key, shape)| {
+            let tag = tagged_union(shape)?.tag.as_ref()?;
+            Some((key.clone(), tag.property.clone()))
         })
         .collect()
+}
+
+/// The union with a tag that a shape is, or that the `Option` it is holds.
+///
+/// A `null` among a union's branches makes it an `Option` of the union, which is settled like
+/// the union it holds.
+fn tagged_union(shape: &Shape) -> Option<&Union> {
+    let union = match shape {
+        Shape::Union(union) => union,
+        Shape::Optional(ShapeRef::Inline(inner)) => match &**inner {
+            Shape::Union(union) => union,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    union.tag.is_some().then_some(union)
+}
+
+/// `shape` with the union [`tagged_union`] found in it replaced by `union`.
+fn with_union(shape: &Shape, union: Union) -> Shape {
+    match shape {
+        Shape::Optional(ShapeRef::Inline(_)) => {
+            Shape::Optional(ShapeRef::Inline(Box::new(Shape::Union(union))))
+        }
+        _ => Shape::Union(union),
+    }
 }
 
 /// Why no style can dispatch this union on its tag, if none can.
@@ -439,7 +469,7 @@ fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
     for (_, shape) in shapes.entries() {
         // A tagged union has no children but its variant edges, so exempting the shape exempts
         // exactly those.
-        if matches!(shape, Shape::Union(Union { tag: Some(_), .. })) {
+        if tagged_union(shape).is_some() {
             continue;
         }
         for key in super::child_keys(shape) {
