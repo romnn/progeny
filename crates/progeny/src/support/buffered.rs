@@ -739,6 +739,10 @@ where
 ///
 /// The resolver receives the position of the matched name in `variants`, always in range.
 /// `variants` lists every spelling of every variant, so several positions can name one variant.
+/// Several variants may list one spelling too, in a union that tells those apart by shape: each
+/// variant listing the payload's spelling is then tried in order, the first whose type reads the
+/// payload is the value, and a payload none of them reads goes to `unknown`, however many there
+/// are.
 /// A payload without the tag member is the variant at `absent`, and one whose tag is `null` is
 /// the variant at `null`, where the description names one.
 /// A payload that names no variant — no tag or a `null` one where nothing is named for it, a tag
@@ -752,18 +756,40 @@ pub(crate) fn dispatch<'de, T, E, F, U>(
     absent: Option<usize>,
     null: Option<usize>,
     payload: Content<'de>,
-    resolve: F,
+    mut resolve: F,
     unknown: U,
 ) -> Result<T, E>
 where
     E: de::Error,
-    F: FnOnce(usize, ContentDeserializer<'de, E>) -> Result<T, E>,
+    F: FnMut(usize, ContentDeserializer<'de, E>) -> Result<T, E>,
     U: FnOnce(Value) -> T,
 {
-    match choice(&payload, tag, variants, absent, null)? {
-        Some(choice) => resolve(choice, ContentDeserializer::new(payload)),
-        None => Deserialize::deserialize(ContentDeserializer::<'de, E>::new(payload)).map(unknown),
+    let Some(choice) = choice(&payload, tag, variants, absent, null)? else {
+        return Deserialize::deserialize(ContentDeserializer::<'de, E>::new(payload)).map(unknown);
+    };
+    let repeated = variants
+        .iter()
+        .enumerate()
+        .any(|(at, name)| variants.iter().skip(at + 1).any(|other| other == name));
+    if !repeated {
+        return resolve(choice, ContentDeserializer::new(payload));
     }
+    for position in sharing(variants, choice) {
+        if let Ok(value) = resolve(position, ContentDeserializer::new(payload.clone())) {
+            return Ok(value);
+        }
+    }
+    Deserialize::deserialize(ContentDeserializer::<'de, E>::new(payload)).map(unknown)
+}
+
+/// Every position at or after `choice` that spells the name `choice` does, `choice` first.
+pub(crate) fn sharing(variants: &[&str], choice: usize) -> Vec<usize> {
+    let Some(name) = variants.get(choice) else {
+        return vec![choice];
+    };
+    (choice..variants.len())
+        .filter(|&position| variants.get(position) == Some(name))
+        .collect()
 }
 
 /// Which variant a payload names in its tag member, or `None` when it names none.
@@ -2340,6 +2366,107 @@ mod tests {
         fn a_key_written_twice_is_refused() {
             let refused = serde_json::from_str::<Decision>(r#"{"denied":{},"denied":{}}"#);
             assert!(refused.is_err(), "{refused:?}");
+        }
+    }
+
+    /// A carried-tag enum whose variants share a spelling, written the way the generator writes
+    /// one: the variants listing the payload's spelling are tried in order, and a payload none of
+    /// them reads is kept whole.
+    mod shared {
+        use super::super::{Content, dispatch};
+        use serde::{Deserialize, Deserializer};
+
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Choice {
+            r#type: String,
+            options: Vec<String>,
+        }
+
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Text {
+            r#type: String,
+            format: Option<String>,
+        }
+
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Number {
+            r#type: String,
+        }
+
+        #[derive(Debug, PartialEq)]
+        enum Field {
+            Choice(Choice),
+            Text(Text),
+            Number(Number),
+            Unknown(Box<serde_json::Value>),
+        }
+
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                const TAG: &str = "type";
+                const VARIANTS: &[&str] = &["string", "string", "number", "integer"];
+                let payload: Content<'de> = Deserialize::deserialize(deserializer)?;
+                dispatch(
+                    TAG,
+                    VARIANTS,
+                    None,
+                    None,
+                    payload,
+                    |variant, replay| match variant {
+                        0usize => Deserialize::deserialize(replay).map(Self::Choice),
+                        1usize => Deserialize::deserialize(replay).map(Self::Text),
+                        _ => Deserialize::deserialize(replay).map(Self::Number),
+                    },
+                    |value| Self::Unknown(Box::new(value)),
+                )
+            }
+        }
+
+        fn read(wire: &str) -> Field {
+            match serde_json::from_str(wire) {
+                Ok(field) => field,
+                Err(err) => panic!("{wire} was refused: {err}"),
+            }
+        }
+
+        #[test]
+        fn the_variants_sharing_a_spelling_are_tried_in_order() {
+            // Both list `string`, and only the second reads a payload without `options`.
+            assert!(matches!(
+                read(r#"{"type":"string","options":["a"]}"#),
+                Field::Choice(_)
+            ));
+            assert!(matches!(
+                read(r#"{"type":"string","format":"email"}"#),
+                Field::Text(_)
+            ));
+            // A spelling one variant lists is that variant's, as in any carried union.
+            assert!(matches!(read(r#"{"type":"integer"}"#), Field::Number(_)));
+        }
+
+        #[test]
+        fn a_payload_no_variant_listing_its_spelling_reads_is_kept_whole() {
+            // A spelling one variant lists is that one's to read, and kept whole where it cannot.
+            for wire in [
+                r#"{"type":"string","size":1}"#,
+                r#"{"type":"boolean"}"#,
+                r#"{"type":"number","size":1}"#,
+            ] {
+                let field = read(wire);
+                let Field::Unknown(value) = field else {
+                    panic!("{wire} was read as {field:?}");
+                };
+                assert_eq!(
+                    *value,
+                    serde_json::from_str::<serde_json::Value>(wire).unwrap_or_default()
+                );
+            }
         }
     }
 

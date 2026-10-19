@@ -317,6 +317,75 @@ impl SchemaObject {
             }
         }
     }
+
+    /// Whether two schema objects say the same apart from which schemas their subschemas are.
+    ///
+    /// Every keyword is compared, and every keyword that holds subschemas holds as many, under
+    /// the same names, so [`Self::children`] lists the subschemas of both in corresponding order
+    /// for the caller to compare in turn.
+    /// A subschema keyword this does not set aside compares its subschemas by identity, which
+    /// only ever says two schemas differ.
+    pub(crate) fn same_apart_from_children(&self, other: &Self) -> bool {
+        let places = |object: &Self| {
+            let single = [
+                object.not,
+                object.if_schema,
+                object.then_schema,
+                object.else_schema,
+                object.additional_properties,
+                object.property_names,
+                object.items,
+                object.contains,
+                object.unevaluated_items,
+                object.unevaluated_properties,
+                object.content_schema,
+            ]
+            .map(|id| id.is_some());
+            let lists = [
+                &object.all_of,
+                &object.any_of,
+                &object.one_of,
+                &object.prefix_items,
+            ]
+            .map(|list| list.as_ref().map(Vec::len));
+            let maps = [
+                &object.defs,
+                &object.definitions,
+                &object.dependent_schemas,
+                &object.properties,
+                &object.pattern_properties,
+            ]
+            .map(|map| {
+                map.as_ref()
+                    .map(|map| map.keys().cloned().collect::<Vec<_>>())
+            });
+            (single, lists, maps)
+        };
+        let bare = |object: &Self| Self {
+            defs: None,
+            definitions: None,
+            all_of: None,
+            any_of: None,
+            one_of: None,
+            not: None,
+            if_schema: None,
+            then_schema: None,
+            else_schema: None,
+            dependent_schemas: None,
+            properties: None,
+            pattern_properties: None,
+            additional_properties: None,
+            property_names: None,
+            items: None,
+            prefix_items: None,
+            contains: None,
+            unevaluated_items: None,
+            unevaluated_properties: None,
+            content_schema: None,
+            ..object.clone()
+        };
+        places(self) == places(other) && bare(self) == bare(other)
+    }
 }
 
 /// The OpenAPI discriminator: which property names the variant, and how names map to schemas.

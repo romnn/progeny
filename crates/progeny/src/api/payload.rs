@@ -353,20 +353,24 @@ impl Collect<'_> {
     /// accepts it, which is the branch serde takes.
     fn untagged(&self, value: &Value, union: &Union, lenient: bool) -> Option<Value> {
         for variant in &union.variants {
-            let accepted = match &variant.shape {
-                ShapeRef::Key(key) => self
-                    .shapes
-                    .get(key)
-                    .is_some_and(|shape| super::examples::accepts(self.shapes, value, shape)),
-                ShapeRef::Inline(shape) => super::examples::accepts(self.shapes, value, shape),
-            };
-            if accepted {
+            if self.accepts(value, &variant.shape) {
                 return self.through(value, &variant.shape, lenient);
             }
         }
         // No branch accepts it, so the open arm keeps it whole.
         // That is a finding about the document, which the example check has already made.
         Some(value.clone())
+    }
+
+    /// Whether the schema of a variant accepts the payload.
+    fn accepts(&self, value: &Value, shape: &ShapeRef) -> bool {
+        match shape {
+            ShapeRef::Key(key) => self
+                .shapes
+                .get(key)
+                .is_some_and(|shape| super::examples::accepts(self.shapes, value, shape)),
+            ShapeRef::Inline(shape) => super::examples::accepts(self.shapes, value, shape),
+        }
     }
 
     /// The expectation for a keyed union.
@@ -429,8 +433,20 @@ impl Collect<'_> {
             return Some(value.clone());
         };
         let member = members.get(&tag.property);
-        let Some(position) = union.tagged_position(member) else {
-            return Some(value.clone());
+        // Variants that list one spelling are tried in order, and the first whose schema accepts
+        // the payload stands in for the first whose type reads it, as for an untagged union.
+        let position = match union.tagged_positions(member).as_slice() {
+            [] => return Some(value.clone()),
+            [only] => *only,
+            several => match several.iter().find(|&&position| {
+                union
+                    .variants
+                    .get(position)
+                    .is_some_and(|variant| self.accepts(value, &variant.shape))
+            }) {
+                Some(position) => *position,
+                None => return Some(value.clone()),
+            },
         };
         let variant = union.variants.get(position)?;
         let mut pruned = self.through(value, &variant.shape, lenient)?;
@@ -893,6 +909,34 @@ mod tests {
             found[0].expected,
             json!({"factorType": "sms", "phone": "+1-555-415-1337"})
         );
+    }
+
+    /// Variants that list one value of their tag are tried in order, so a payload only the later
+    /// one reads is expected back as that one reads it, not pruned under the first.
+    #[test_util::test]
+    fn a_tag_several_variants_list_expects_the_one_that_accepts_the_payload() {
+        let closed = |kind: &str, member: &str| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": [kind]},
+                    member: {"type": "string"},
+                },
+            })
+        };
+        let example = json!({"type": "s", "b": "keep"});
+        let mut document = requesting(&json!({"$ref": "#/components/schemas/Field"}), &example);
+        let branches =
+            ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}));
+        document["components"] = json!({"schemas": {
+            "A": closed("s", "a"),
+            "B": closed("s", "b"),
+            "C": closed("c", "c"),
+            "Field": {"anyOf": branches},
+        }});
+        let found = payloads_of(document)?;
+        assert_eq!(found[0].expected, example);
+        assert!(!found[0].vendor_defect);
     }
 
     /// A `null` tag names the one branch that admits it, and the variant reads it as an absent

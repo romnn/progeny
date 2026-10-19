@@ -285,7 +285,8 @@ impl<'a> Fit<'a> {
             return Some(self.not_an_object(value));
         };
         let member = members.get(&tag.property);
-        let Some(variant) = union.tagged_variant(member) else {
+        let positions = union.tagged_positions(member);
+        if positions.is_empty() {
             return Some(match member.and_then(Value::as_str) {
                 Some(named) => format!(
                     "{} names `{named}` in `{}`, which no branch of the union is tagged",
@@ -296,14 +297,27 @@ impl<'a> Fit<'a> {
                     self.subject, tag.property
                 ),
             });
-        };
-        match tag.style {
-            TagStyle::Consumed => {
-                let mut rest = members.clone();
-                rest.remove(&tag.property);
-                self.through(&Value::Object(rest), &variant.shape)
-            }
-            TagStyle::Carried => self.through(value, &variant.shape),
+        }
+        // Several branches may list one spelling, and the value is any of them that accepts it.
+        let mut reasons = Vec::new();
+        for position in positions {
+            let variant = union.variants.get(position)?;
+            let reason = match tag.style {
+                TagStyle::Consumed => {
+                    let mut rest = members.clone();
+                    rest.remove(&tag.property);
+                    self.through(&Value::Object(rest), &variant.shape)
+                }
+                TagStyle::Carried => self.through(value, &variant.shape),
+            };
+            reasons.push(reason?);
+        }
+        match reasons.as_slice() {
+            [only] => Some(only.clone()),
+            several => Some(format!(
+                "no branch its tag names accepts it ({})",
+                several.join("; ")
+            )),
         }
     }
 

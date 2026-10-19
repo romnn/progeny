@@ -150,7 +150,7 @@ fn holds_only(resolved: &ResolvedDocument, branch: &ShapeKey, values: &[Value]) 
 
 /// Whether a schema admits a value, as far as its keywords decide it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Admission {
+pub(super) enum Admission {
     Yes,
     No,
     /// A keyword this does not evaluate may refuse the value.
@@ -195,7 +195,12 @@ fn union_admits(
 }
 
 /// Whether every part of a key admits a value.
-fn admits(resolved: &ResolvedDocument, key: &ShapeKey, value: &Value, depth: usize) -> Admission {
+pub(super) fn admits(
+    resolved: &ResolvedDocument,
+    key: &ShapeKey,
+    value: &Value,
+    depth: usize,
+) -> Admission {
     if depth > MAX_DEPTH {
         return Admission::Unknown;
     }

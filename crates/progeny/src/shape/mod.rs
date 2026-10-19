@@ -375,27 +375,50 @@ pub(crate) struct Union {
 }
 
 impl Union {
-    /// The variant a tagged payload is, from its tag member: `None` for the member being absent,
-    /// and otherwise its value.
+    /// The position of the variant a tagged payload is, from its tag member: `None` for the member
+    /// being absent, and otherwise its value.
     ///
     /// A missing or `null` member is the variant [`Tag::absent`] or [`Tag::null`] names, a string
-    /// is the variant whose tag or alias it is, and any other value names no variant.
-    pub(crate) fn tagged_variant(&self, member: Option<&Value>) -> Option<&Variant> {
-        self.variants.get(self.tagged_position(member)?)
-    }
-
-    /// The position of the variant [`Union::tagged_variant`] finds.
+    /// is the first variant whose tag or alias it is, and any other value names no variant.
     pub(crate) fn tagged_position(&self, member: Option<&Value>) -> Option<usize> {
         let tag = self.tag.as_ref()?;
         match member {
             None => tag.absent,
             Some(Value::Null) => tag.null,
-            Some(Value::String(named)) => self.variants.iter().position(|variant| {
-                variant.tag.as_deref() == Some(named.as_str())
-                    || variant.aliases.iter().any(|alias| alias == named)
-            }),
+            Some(Value::String(named)) => self
+                .variants
+                .iter()
+                .position(|variant| variant.spells(named)),
             Some(_) => None,
         }
+    }
+
+    /// Every variant a tagged payload may be, in the order they are tried.
+    ///
+    /// The one [`Union::tagged_position`] finds, and, where the tag is [`Tag::shared`], each
+    /// later variant that lists the same spelling.
+    pub(crate) fn tagged_positions(&self, member: Option<&Value>) -> Vec<usize> {
+        let Some(first) = self.tagged_position(member) else {
+            return Vec::new();
+        };
+        match member {
+            Some(Value::String(named)) if self.tag.as_ref().is_some_and(|tag| tag.shared) => self
+                .variants
+                .iter()
+                .enumerate()
+                .skip(first)
+                .filter(|(_, variant)| variant.spells(named))
+                .map(|(position, _)| position)
+                .collect(),
+            _ => vec![first],
+        }
+    }
+}
+
+impl Variant {
+    /// Whether a tag spelled `named` names this variant, as its tag or one of its aliases.
+    fn spells(&self, named: &str) -> bool {
+        self.tag.as_deref() == Some(named) || self.aliases.iter().any(|alias| alias == named)
     }
 }
 
@@ -438,6 +461,12 @@ pub(crate) struct Tag {
     ///
     /// Set where exactly one branch admits `null` there, for the same reason.
     pub(crate) null: Option<usize>,
+    /// Whether several variants may list one value of the property.
+    ///
+    /// A payload is then the first of the variants listing its value whose type reads it, and the
+    /// fallback where none does, which is sound only where [`classify`] has shown that no earlier
+    /// such variant reads a later one's payloads.
+    pub(crate) shared: bool,
 }
 
 impl Tag {
@@ -448,6 +477,7 @@ impl Tag {
             style: TagStyle::Consumed,
             absent: None,
             null: None,
+            shared: false,
         }
     }
 
@@ -832,6 +862,7 @@ mod tests {
                 style: TagStyle::Consumed,
                 absent: None,
                 null: None,
+                shared: false,
             }),
             vec![Some("cat".to_owned()), Some("dog".to_owned())],
         );
@@ -1191,6 +1222,7 @@ mod tests {
                 style: TagStyle::Consumed,
                 absent: None,
                 null: None,
+                shared: false,
             })
         );
         let tags: Vec<Option<&str>> = either
@@ -1325,6 +1357,7 @@ mod tests {
                 style: TagStyle::Carried,
                 absent: Some(0),
                 null: Some(0),
+                shared: false,
             })
         );
         // Each branch writes its first spelling and reads the rest.
@@ -1355,7 +1388,8 @@ mod tests {
         // The one lookup reads a payload's tag member the way the generated decoder does.
         let named = |member: Option<Value>| {
             union
-                .tagged_variant(member.as_ref())
+                .tagged_position(member.as_ref())
+                .and_then(|position| union.variants.get(position))
                 .and_then(|variant| variant.tag.clone())
         };
         assert_eq!(named(None), Some("custom".to_owned()));
@@ -1504,7 +1538,7 @@ mod tests {
             .as_ref()
             .ok_or_eyre("the constants are still the tag")?;
         assert_eq!((tag.absent, tag.null), (None, None));
-        assert!(two.tagged_variant(None).is_none());
+        assert!(two.tagged_position(None).is_none());
 
         // A branch whose tag takes any string does not name itself, so nothing is a tag.
         // A spelling two branches share does not either.
@@ -1548,6 +1582,7 @@ mod tests {
                 style: TagStyle::Carried,
                 absent: None,
                 null: None,
+                shared: false,
             })
         );
         let Shape::Struct(a) = shape_of(&shapes, "A")? else {
@@ -1616,6 +1651,7 @@ mod tests {
                 style: TagStyle::Consumed,
                 absent: None,
                 null: None,
+                shared: false,
             })
         );
     }
@@ -1654,6 +1690,7 @@ mod tests {
                     style: TagStyle::Carried,
                     absent: None,
                     null: None,
+                    shared: false,
                 }),
                 "{union_name}"
             );
@@ -3157,6 +3194,411 @@ mod tests {
         }
     }
 
+    /// Closed objects that each require `type` from a list of their own, as MCP's elicitation
+    /// schemas write them, where several list `string`.
+    fn elicitation(title: &Value) -> Value {
+        let kind = |values: &[&str]| json!({"type": "string", "enum": values});
+        let closed = |kind: Value, required: &[&str], properties: Value| {
+            let mut properties = properties;
+            properties["type"] = kind;
+            json!({
+                "type": "object", "additionalProperties": false,
+                "required": required, "properties": properties,
+            })
+        };
+        let strings = json!({"type": "array", "items": {"type": "string"}});
+        let branches = ["Choice", "Legacy", "Text", "Number", "Flag"]
+            .map(|name| json!({"$ref": format!("#/components/schemas/{name}")}));
+        json!({
+            "Choice": closed(kind(&["string"]), &["type", "options"], json!({
+                "options": strings, "title": {"type": ["string", "null"]},
+            })),
+            "Legacy": closed(kind(&["string"]), &["type", "options"], json!({
+                "options": strings, "names": strings, "title": title,
+            })),
+            "Text": closed(kind(&["string"]), &["type"], json!({"format": {"type": "string"}})),
+            "Number": closed(kind(&["number", "integer"]), &["type"], json!({
+                "minimum": {"type": "number"},
+            })),
+            "Flag": closed(kind(&["boolean"]), &["type"], json!({"default": {"type": "boolean"}})),
+            "Field": {"anyOf": branches},
+        })
+    }
+
+    /// The branches are tried by the values they list of `type`, in order, and each carries its
+    /// own `type`: no `string` branch is handed a `number`, which its open enum would read.
+    #[test_util::test]
+    fn branches_a_required_member_partitions_are_tried_by_its_value() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(elicitation(
+            &json!({"type": ["string", "null"]}),
+        )))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Field")? else {
+            panic!("expected a union: {:?}", shape_of(&shapes, "Field")?);
+        };
+        let tag = union
+            .tag
+            .as_ref()
+            .ok_or_eyre("the union should carry a tag")?;
+        assert_eq!(
+            (tag.property.as_str(), tag.style, tag.shared),
+            ("type", TagStyle::Carried, true)
+        );
+        let leaves = ["Choice", "Legacy", "Text", "Number", "Flag"]
+            .map(|name| shape_key_of(&shapes, name).map(ShapeRef::Key))
+            .into_iter()
+            .collect::<eyre::Result<Vec<_>>>()?;
+        assert_eq!(variant_keys(shape_of(&shapes, "Field")?), leaves);
+        let spellings: Vec<(Option<&str>, Vec<&str>)> = union
+            .variants
+            .iter()
+            .map(|variant| {
+                (
+                    variant.tag.as_deref(),
+                    variant.aliases.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            spellings,
+            [
+                (Some("string"), vec![]),
+                (Some("string"), vec![]),
+                (Some("string"), vec![]),
+                (Some("number"), vec!["integer"]),
+                (Some("boolean"), vec![]),
+            ]
+        );
+        // A declared discriminator says which branch each value is, so it is read instead.
+        let mut schemas = elicitation(&json!({"type": ["string", "null"]}));
+        schemas["Field"]["discriminator"] = json!({"propertyName": "type"});
+        let (shapes, _) = shapes_of(with_schemas(schemas))?;
+        let field = shape_of(&shapes, "Field")?;
+        assert!(
+            !matches!(field, Shape::Union(Union { tag: Some(tag), .. }) if tag.shared),
+            "{field:?}"
+        );
+    }
+
+    /// A branch lists the values its schema admits, so a `const` beside an `enum` narrows it.
+    #[test_util::test]
+    fn a_branch_lists_only_the_values_its_schema_admits() {
+        let closed = |kind: Value| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {"type": kind},
+            })
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": closed(json!({"type": "string", "enum": ["a", "b"], "const": "a"})),
+            "B": closed(json!({"type": "string", "enum": ["b", "c"]})),
+            "C": closed(json!({"type": "string", "enum": ["c"]})),
+            "Field": {"anyOf": abc()},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Field")? else {
+            panic!("expected a union: {:?}", shape_of(&shapes, "Field")?);
+        };
+        // `{"type": "b"}` is only `B`'s, so `A` does not list it.
+        let spellings: Vec<Vec<&str>> = union
+            .variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .tag
+                    .iter()
+                    .chain(&variant.aliases)
+                    .map(String::as_str)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(spellings, [vec!["a"], vec!["b", "c"], vec!["c"]]);
+
+        // With nothing shared, there is nothing to partition, and the union degrades as before.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": closed(json!({"type": "string", "enum": ["a", "b"], "const": "a"})),
+                "B": closed(json!({"type": "string", "enum": ["b", "c"]})),
+                "Field": {"anyOf": abc()[..2]},
+            }),
+            "Field",
+        )?);
+    }
+
+    #[test_util::test]
+    fn branches_sharing_a_value_still_have_to_tell_themselves_apart() {
+        // `Choice` reads a `Legacy` payload without `names`, and its `title` is a different
+        // schema, so it may not read that payload as `Legacy` would.
+        assert!(degrades_as_wild_union(
+            elicitation(&json!({"type": "string"})),
+            "Field",
+        )?);
+
+        // An open branch reads every member a later one sharing its value adds.
+        let mut schemas = elicitation(&json!({"type": ["string", "null"]}));
+        schemas["Choice"]["additionalProperties"] = json!(true);
+        schemas["Choice"]["required"] = json!(["type"]);
+        assert!(degrades_as_wild_union(schemas, "Field")?);
+        let (object, listing) = (tagged_object, listing);
+        let branches = abc();
+
+        // `B` admits members it does not declare, so `{"type": "s", "x": "b"}` is `B`'s, and `A`'s
+        // open `x` would read it.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(listing(&["s"]), true, json!({"x": listing(&["a"])}), &["type", "x"]),
+                "B": object(listing(&["s"]), false, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
+
+        // `A`'s two constants admit no value at all, so it lists none, and `{"type": "b"}` is `B`'s.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(json!({"allOf": [{"const": "b"}, {"const": "a"}]}), true, json!({}), &["type"]),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": [branches[0].clone(), branches[1].clone()]},
+            }),
+            "Field",
+        )?);
+        // A union beside `A`'s list narrows it to `a`, but a member that combines schemas is not
+        // read for its values, so `{"type": "b"}`, which is `B`'s alone, is not handed to `A`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(
+                    json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
+                    true,
+                    json!({}),
+                    &["type"],
+                ),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
+
+        // `A`'s `x` lists a string beside an integer `type`, which is generated as a string enum,
+        // so it reads `B`'s `x` and refuses nothing.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(
+                    listing(&["a", "b"]),
+                    true,
+                    json!({"x": {"type": "integer", "enum": ["oops"]}}),
+                    &["type"],
+                ),
+                "B": object(listing(&["b", "c"]), true, json!({"x": {"type": "string"}}), &["type", "x"]),
+                "C": object(listing(&["c"]), true, json!({"x": {"type": "string"}}), &["type", "x"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
+    }
+
+    /// An object whose `type` is `kind`, closed or not, beside `members`.
+    fn tagged_object(kind: Value, closed: bool, members: Value, required: &[&str]) -> Value {
+        let mut properties = members;
+        properties["type"] = kind;
+        json!({
+            "type": "object", "additionalProperties": !closed,
+            "required": required, "properties": properties,
+        })
+    }
+
+    /// A string listing `values`.
+    fn listing(values: &[&str]) -> Value {
+        json!({"type": "string", "enum": values})
+    }
+
+    /// References to `A`, `B` and `C`.
+    fn abc() -> [Value; 3] {
+        ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}))
+    }
+
+    /// A partition reads what is written, however far it is from the branch: every schema a
+    /// member's references pass through, and every schema a branch's `allOf` lists.
+    #[test_util::test]
+    fn a_partition_reads_what_is_written_however_far_away() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let closed = |kind: Value| tagged_object(kind, true, json!({}), &["type"]);
+        let shared = |schemas: &mut Value| {
+            schemas["B"] = closed(listing(&["b", "c"]));
+            schemas["C"] = closed(listing(&["c"]));
+            schemas["Field"] = json!({"anyOf": abc()});
+        };
+
+        // `A`'s tag is five references away from the empty list that admits nothing, which is
+        // as far as the walk goes.
+        let mut schemas = json!({
+            "R1": reference("R2"), "R2": reference("R3"), "R3": reference("R4"),
+            "R4": reference("Tag"),
+            "Tag": {"type": "string", "enum": [], "const": "b"},
+            "A": closed(reference("R1")),
+        });
+        shared(&mut schemas);
+        assert!(degrades_as_wild_union(schemas, "Field")?);
+
+        // `A` is `false` beside a closed object, with more `true`s between them than a merge
+        // follows.
+        let mut all = vec![json!(false)];
+        all.extend(std::iter::repeat_n(json!(true), 510));
+        all.push(closed(listing(&["a", "b"])));
+        let mut schemas = json!({"A": {"allOf": all}});
+        shared(&mut schemas);
+        assert!(degrades_as_wild_union(schemas, "Field")?);
+    }
+
+    #[test_util::test]
+    fn a_partition_reads_the_whole_schema_of_each_branch() {
+        let (object, branches) = (tagged_object, abc());
+        // Each schema below makes a payload of `B` naming `b` `B`'s alone, by something only the
+        // whole schema says, so `A`, tried first, may not be handed it.
+        let string = json!({"type": "string"});
+        let mut patterned = object(listing(&["b", "c"]), true, json!({}), &["type"]);
+        patterned["patternProperties"] = json!({"^x$": {}});
+        let mut refusing = object(listing(&["a", "b"]), true, json!({}), &["type"]);
+        refusing["not"] = json!({"properties": {"type": {"const": "b"}}, "required": ["type"]});
+        let mut long = object(listing(&["a", "b"]), true, json!({}), &["type"]);
+        long["properties"]["type"]["allOf"] = json!(
+            std::iter::once(json!({"const": "a"}))
+                .chain(std::iter::repeat_n(json!({"type": "string"}), 511))
+                .collect::<Vec<_>>()
+        );
+        let cases = [
+            // A closed `B` still admits the names its patterns match, `x` among them.
+            (
+                object(listing(&["a", "b"]), true, json!({"x": string}), &["type"]),
+                patterned,
+            ),
+            // `B`'s required `x` names no `type`, so it admits `null`, which `A`'s optional `x`
+            // reads as absent, however the two objects' required members differ.
+            (
+                object(
+                    listing(&["s"]),
+                    true,
+                    json!({"x": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["a"], "properties": {"a": {"type": "string"}},
+                    }}),
+                    &["type"],
+                ),
+                object(
+                    listing(&["s"]),
+                    true,
+                    json!({"x": {
+                        "additionalProperties": false,
+                        "required": ["b"], "properties": {"b": {"type": "string"}},
+                    }}),
+                    &["type", "x"],
+                ),
+            ),
+            // `A`'s empty list admits nothing beside its `const`.
+            (
+                object(
+                    json!({"type": "string", "enum": [], "const": "b"}),
+                    true,
+                    json!({}),
+                    &["type"],
+                ),
+                object(listing(&["b", "c"]), true, json!({}), &["type"]),
+            ),
+            // `A` refuses `b` beside its members.
+            (
+                refusing,
+                object(listing(&["b", "c"]), true, json!({}), &["type"]),
+            ),
+            // `A`'s first part is closed and forbids the `x` its second declares.
+            (
+                json!({"allOf": [
+                    object(listing(&["a", "b"]), true, json!({}), &["type"]),
+                    {"properties": {"x": string}},
+                ]}),
+                object(listing(&["b", "c"]), true, json!({"x": string}), &["type"]),
+            ),
+            // `A`'s tag is more schemas than a merge follows, its first `const` among them.
+            (
+                long,
+                object(listing(&["b", "c"]), true, json!({}), &["type"]),
+            ),
+        ];
+        for (case, (a, b)) in cases.into_iter().enumerate() {
+            assert!(
+                degrades_as_wild_union(
+                    json!({
+                        "A": a,
+                        "B": b,
+                        "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                        "Field": {"anyOf": branches.clone()},
+                    }),
+                    "Field",
+                )?,
+                "case {case}"
+            );
+        }
+
+        // `A`'s `type` admits integers alone, so it admits none of the strings it lists.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(json!({"type": "integer", "enum": ["a", "b"]}), true, json!({}), &["type"]),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches},
+            }),
+            "Field",
+        )?);
+    }
+
+    /// A partition is not proved by a branch whose key leaves out something it references.
+    #[test_util::test]
+    fn a_partition_reads_what_a_branch_references() {
+        let object = tagged_object;
+        // `A` references a schema whose `allOf` is more schemas than a merge follows, the
+        // `false` that refuses everything last among them, so its key is `A` alone however much
+        // the merge left out.
+        let mut truncating = object(listing(&["a", "b"]), true, json!({}), &["type"]);
+        truncating["$ref"] = json!("#/components/schemas/R");
+        let refusing_all = std::iter::once(json!(false))
+            .chain(std::iter::repeat_n(json!(true), 600))
+            .collect::<Vec<_>>();
+        // `A`'s tag is `AB` and `OnlyA` both, which resolution reads as `AB` alone.
+        let both = object(
+            json!({
+                "$ref": "#/components/schemas/AB",
+                "$dynamicRef": "#/components/schemas/OnlyA",
+            }),
+            true,
+            json!({}),
+            &["type"],
+        );
+        // `A` is a branch that is `AB` and `OnlyA` both, which resolution reads as `AB` alone.
+        let wrapped = json!({
+            "$ref": "#/components/schemas/ABObject",
+            "$dynamicRef": "#/components/schemas/OnlyAObject",
+        });
+        for (case, a) in [truncating, both, wrapped].into_iter().enumerate() {
+            let [_, b, c] = abc();
+            assert!(
+                degrades_as_wild_union(
+                    json!({
+                        "R": {"allOf": refusing_all},
+                        "AB": listing(&["a", "b"]),
+                        "OnlyA": {"const": "a"},
+                        "ABObject": object(listing(&["a", "b"]), true, json!({}), &["type"]),
+                        "OnlyAObject": {"properties": {"type": {"const": "a"}}},
+                        "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                        "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                        "Field": {"anyOf": [a, b, c]},
+                    }),
+                    "Field",
+                )?,
+                "case {case}"
+            );
+        }
+    }
+
     #[test_util::test]
     fn a_nested_union_of_strings_is_one_string_branch() {
         // `Mode` becomes one string enum, which turns every object down, so it can sit first.
@@ -4108,6 +4550,7 @@ mod tests {
                 style: TagStyle::Carried,
                 absent: None,
                 null: None,
+                shared: false,
             })
         );
     }
@@ -4174,6 +4617,7 @@ mod tests {
                 style: TagStyle::Consumed,
                 absent: None,
                 null: None,
+                shared: false,
             })
         );
         // And the variant gave the property up, because nothing else carries it.
