@@ -752,35 +752,50 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
     None
 }
 
-/// Every value a member's schema admits, when that is a list of strings the merged view holds
-/// exactly: an `enum` narrowed by a `const` beside it, and no `null`.
+/// Every value a member's schema admits, when that is a list of strings: the values each `enum`
+/// and `const` of every schema the member merges lists, in the order the first lists them.
 ///
-/// A list [`merge::view`] could not narrow, a member that is a union, or one that admits `null`
-/// has no such list, because the branches it names would then not be the ones whose schemas
-/// admit the value.
+/// Read from the schemas themselves rather than from the merged view, which keeps the first
+/// `const` it meets.
+/// A list the merged view could not narrow, a member that is a union, one that admits `null`,
+/// and one that admits nothing have no such list, because the branches it names would then not
+/// be the ones whose schemas admit the value.
 fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
     let view = merge::view(resolved, key);
     let uncertain = view
         .uninterpreted
         .iter()
         .any(|keyword| matches!(*keyword, "enum" | "const"));
-    if uncertain || view.union.is_some() || declares_null(&view) {
+    if uncertain || view.impossible || view.union.is_some() || declares_null(&view) {
         return None;
     }
-    let listed = match (&view.enumeration, &view.constant) {
-        (Some(listed), Some(only)) => listed.iter().filter(|value| *value == only).collect(),
-        (Some(listed), None) => listed.iter().collect(),
-        (None, Some(only)) => vec![only],
-        (None, None) => return None,
-    };
-    let mut values: Vec<String> = Vec::new();
-    for value in listed {
-        let value = value.as_str()?.to_owned();
-        if !values.contains(&value) {
-            values.push(value);
+    let mut values: Option<Vec<String>> = None;
+    for &part in key.parts() {
+        let Schema::Object(object) = resolved.schema(part) else {
+            continue;
+        };
+        let lists = [
+            object.enumeration.clone(),
+            object.constant.clone().map(|only| vec![only]),
+        ];
+        for listed in lists.into_iter().flatten() {
+            let mut strings: Vec<String> = Vec::new();
+            for value in listed {
+                let value = value.as_str()?.to_owned();
+                if !strings.contains(&value) {
+                    strings.push(value);
+                }
+            }
+            values = Some(match values {
+                None => strings,
+                Some(before) => before
+                    .into_iter()
+                    .filter(|value| strings.contains(value))
+                    .collect(),
+            });
         }
     }
-    (!values.is_empty()).then_some(values)
+    values.filter(|values| !values.is_empty())
 }
 
 /// Whether the object branch tried first would take a payload of a later one that names, in
@@ -803,7 +818,61 @@ fn takes_beside(
     beside.required.remove(member);
     let keeps = reads_whole(resolved, &first, 0) || reads_as_well(resolved, &first, &second);
     let faithful = keeps && !view_overreaches(resolved, &beside, 0);
-    !faithful && !rejects(resolved, &first, &second, 0)
+    !faithful && !refuses(resolved, &first, &second, 0)
+}
+
+/// Whether an object's type refuses every payload of a later object, judged by what the later
+/// one's schema guarantees its payloads carry and leave out.
+///
+/// A member the later one requires is on every payload, and a closed earlier one refuses it where
+/// it does not declare it.
+/// A member a closed later one does not declare is on none, so an earlier one that insists on it
+/// refuses them all.
+/// A member both declare and the later one requires refuses the payload where the earlier one's
+/// type refuses every value the later one's schema gives it: a value of another kind, or an
+/// object refused in turn, as far as [`MAX_AMBIGUITY_DEPTH`].
+/// Unlike [`rejects`], a later object that admits members it does not declare is not taken to
+/// leave them out.
+fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usize) -> bool {
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return false;
+    }
+    let carried =
+        |name: &String| later.required.contains(name) && later.properties.contains_key(name);
+    let undeclared = earlier.additional_denied
+        && later
+            .properties
+            .keys()
+            .any(|name| carried(name) && !earlier.properties.contains_key(name));
+    let missing = later.additional_denied
+        && earlier.required.iter().any(|name| {
+            !later.properties.contains_key(name)
+                && earlier
+                    .properties
+                    .get(name)
+                    .is_some_and(|key| !generates_option(resolved, key, 0))
+        });
+    undeclared
+        || missing
+        || earlier.properties.iter().any(|(name, key)| {
+            let Some(other) = later.properties.get(name).filter(|_| carried(name)) else {
+                return false;
+            };
+            let (mine, theirs) = (merge::view(resolved, key), merge::view(resolved, other));
+            if declares_null(&theirs)
+                || names_its_subtypes(resolved, &mine, key)
+                || names_its_subtypes(resolved, &theirs, other)
+            {
+                return false;
+            }
+            match (kind_of(resolved, &mine), kind_of(resolved, &theirs)) {
+                (Some(Kind::Object), Some(Kind::Object)) => {
+                    refuses(resolved, &mine, &theirs, depth + 1)
+                }
+                (Some(left), Some(right)) => left != right && mine.union.is_none(),
+                _ => false,
+            }
+        })
 }
 
 /// Whether a closed struct reads every payload of a later branch it accepts as that branch's own

@@ -3331,6 +3331,39 @@ mod tests {
         schemas["Choice"]["additionalProperties"] = json!(true);
         schemas["Choice"]["required"] = json!(["type"]);
         assert!(degrades_as_wild_union(schemas, "Field")?);
+        let object = |kind: Value, closed: bool, members: Value, required: &[&str]| {
+            let mut properties = members;
+            properties["type"] = kind;
+            json!({
+                "type": "object", "additionalProperties": !closed,
+                "required": required, "properties": properties,
+            })
+        };
+        let listing = |values: &[&str]| json!({"type": "string", "enum": values});
+        let branches =
+            ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}));
+
+        // `B` admits members it does not declare, so `{"type": "s", "x": "b"}` is `B`'s, and `A`'s
+        // open `x` would read it.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(listing(&["s"]), true, json!({"x": listing(&["a"])}), &["type", "x"]),
+                "B": object(listing(&["s"]), false, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
+
+        // `A`'s two constants admit no value at all, so it lists none, and `{"type": "b"}` is `B`'s.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(json!({"allOf": [{"const": "b"}, {"const": "a"}]}), true, json!({}), &["type"]),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": [branches[0].clone(), branches[1].clone()]},
+            }),
+            "Field",
+        )?);
     }
 
     #[test_util::test]
