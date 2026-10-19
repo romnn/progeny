@@ -724,7 +724,8 @@ impl<'ast> syn::visit::Visit<'ast> for TypeComplexity {
 fn type_docs(contract: &TypeContract, setting: crate::config::Docs) -> TokenStream {
     let described = if contract.docs().is_empty() || setting == crate::config::Docs::None {
         let origin = format!(" Generated from `{}`.", contract.origin());
-        quote! { #[doc = #origin] }
+        let deprecated = contract.docs().deprecated.then(|| quote! { #[deprecated] });
+        quote! { #[doc = #origin] #deprecated }
     } else {
         docs(contract.docs(), setting)
     };
@@ -841,7 +842,13 @@ fn member(
     let name = ident(&field.rust_name);
     let ty = type_ref_in(&field.ty, contracts, config, scope);
     let nesting = type_complexity(&ty);
-    let docs = with_default(docs(&field.docs, config.docs), field);
+    // A capture's docs are progeny's own account of what it holds, never the document's prose.
+    let setting = if field.is_capture() {
+        crate::config::Docs::Schema
+    } else {
+        config.docs
+    };
+    let docs = with_default(docs(&field.docs, setting), field);
     if contract.deser() != DeserStrategy::Derive {
         // No serde attributes at all: the hand-written implementation reads the same contract and
         // does not consult attributes, so leaving them on would be a second source of truth.

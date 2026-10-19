@@ -584,7 +584,7 @@ pub enum Docs {
     /// None of the document's prose.
     ///
     /// `#[deprecated]` is still emitted, and so is every doc comment progeny writes itself, such
-    /// as a type's note of where it was generated from.
+    /// as where a type was generated from or the `default` a server assumes for a member.
     None,
 }
 

@@ -235,8 +235,9 @@ not a switch on a client: strict leaves out `types::read`, so the response types
 
 ## Doc comments
 
-Every `title`, `summary` and `description` the document writes becomes a doc comment, as the
-vendor wrote it. A schema exported from Rust carries its source crate's doc comments, whose
+The `title`, `summary` and `description` the document writes for a schema, a member, an
+operation, a parameter, a response or a security scheme become doc comments, as the vendor wrote
+them. A schema exported from Rust carries its source crate's doc comments, whose
 intra-doc links name types the generated crate does not have, so a build that denies rustdoc
 warnings fails on prose nobody in it wrote. Leaving the document's prose out is one setting:
 
@@ -244,7 +245,8 @@ warnings fails on prose nobody in it wrote. Leaving the document's prose out is 
 docs = "none"
 ```
 
-`#[deprecated]` is still emitted, and so are the doc comments progeny writes itself.
+`#[deprecated]` is still emitted, and so are the doc comments progeny writes itself, such as where
+a type was generated from or the `default` a server assumes for a member.
 
 ## Bounding and keeping response bodies
 
