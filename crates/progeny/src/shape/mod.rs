@@ -3636,6 +3636,29 @@ mod tests {
                 "case {case}"
             );
         }
+
+        // `A`'s `x` is a `type: file`, which is read as a string whatever members it declares,
+        // and `A` is open, so it reads `B`'s payloads and drops `keep`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": {
+                    "type": "object", "required": ["x"],
+                    "properties": {"x": {"type": "file", "properties": {"ignored": {}}}},
+                },
+                "B": {
+                    "type": "object", "required": ["x", "keep"],
+                    "properties": {
+                        "x": {"enum": ["keep"], "properties": {"ignored": {}}},
+                        "keep": {"type": "integer"},
+                    },
+                },
+                "Field": {"anyOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+            }),
+            "Field",
+        )?);
     }
 
     #[test_util::test]

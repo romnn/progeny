@@ -2336,11 +2336,18 @@ fn declared_kind(view: &View) -> Option<Kind> {
     if view.impossible || view.conflict.is_some() || view.unions_collide {
         return None;
     }
+    // `type: file` is a string by the time the type is chosen, which [`report_unknown_types`]
+    // repairs on a view of its own.
+    let mut types = view.types.clone();
+    if view.unknown_types.iter().any(|spelling| spelling == "file") {
+        types
+            .get_or_insert_with(BTreeSet::new)
+            .insert(TypeName::String);
+    }
     // The precedence [`nullable`] and [`core`] give the emitted type: `type: null` alone, then a
     // list of strings, which is a string enum whatever `type` says, then `type`, then the keywords
     // in [`untyped`]'s order.
-    if view
-        .types
+    if types
         .as_ref()
         .is_some_and(|types| types.len() == 1 && types.contains(&TypeName::Null))
     {
@@ -2349,8 +2356,7 @@ fn declared_kind(view: &View) -> Option<Kind> {
     if enumerated_kind(view) == Some(Kind::String) {
         return Some(Kind::String);
     }
-    let named: Vec<&TypeName> = view
-        .types
+    let named: Vec<&TypeName> = types
         .iter()
         .flatten()
         .filter(|name| **name != TypeName::Null)
