@@ -198,7 +198,7 @@ pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocu
         schemas: materialized,
         aliases,
     } = materialize(&mut parsed, ctx);
-    let mut index = Index::build(&parsed.schemas);
+    let mut index = Index::build(&parsed.schemas, &parsed.repeats);
     // A position normalization moved is the schema it moved, one identity under both pointers.
     for (written, rewritten) in aliases {
         if let Some(&id) = index.addresses.get(&rewritten) {
@@ -593,12 +593,14 @@ struct Index {
 }
 
 impl Index {
-    fn build(store: &SchemaStore) -> Self {
+    /// Index every schema in `store`, a schema `repeats` maps under the schema it repeats.
+    fn build(store: &SchemaStore, repeats: &BTreeMap<SchemaId, SchemaId>) -> Self {
         let mut addresses = BTreeMap::new();
         let mut ids = BTreeMap::new();
         let mut anchors = BTreeMap::new();
-        for (id, schema) in store.iter() {
-            addresses.insert(store.address(id).to_string(), id);
+        for (written, schema) in store.iter() {
+            let id = repeats.get(&written).copied().unwrap_or(written);
+            addresses.insert(store.address(written).to_string(), id);
             let Schema::Object(object) = schema else {
                 continue;
             };
@@ -739,10 +741,15 @@ enum Folded {
 /// A name declared twice addresses no single schema, so a reference to it degrades rather than
 /// silently picking one of them — which would be the forbidden failure mode over a construct no
 /// corpus document uses at all.
+/// Record that `id` declares `name`, which stays unique while every declaration is that schema.
 fn declare(table: &mut BTreeMap<String, Option<SchemaId>>, name: &str, id: SchemaId) {
     table
         .entry(name.to_owned())
-        .and_modify(|slot| *slot = None)
+        .and_modify(|slot| {
+            if *slot != Some(id) {
+                *slot = None;
+            }
+        })
         .or_insert(Some(id));
 }
 

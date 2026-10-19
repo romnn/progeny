@@ -67,6 +67,7 @@ pub(crate) fn document(normalized: Normalized, ctx: &mut Ctx) -> ParsedDocument 
         roots: Vec::new(),
         bundle_dialect: None,
         moves,
+        repeats: BTreeMap::new(),
     }
 }
 
