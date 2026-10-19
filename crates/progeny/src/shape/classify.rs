@@ -766,10 +766,11 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
 /// the values.
 /// Admission is judged by every schema the member merges ([`super::listed::admits`]), so a
 /// `const` beside a list and a `type` that admits no string leave out what they refuse.
-/// A member that combines schemas with `allOf`, `anyOf`, `oneOf`, `not` or `if` anywhere along its
-/// `$ref`s, or lists an empty `enum`, which admits nothing, has no such list, and neither has one
-/// that may admit a value the judgement cannot settle or that admits `null`, because the branches
-/// it names would then not be the ones whose schemas admit the value.
+/// A member has no such list when anywhere along its `$ref`s it combines schemas with `allOf`,
+/// `anyOf`, `oneOf`, `not` or `if`, writes a `$dynamicRef`, which resolution ignores beside a
+/// `$ref`, or lists an empty `enum`, which admits nothing.
+/// Neither has one that may admit a value the judgement cannot settle or that admits `null`,
+/// because the branches it names would then not be the ones whose schemas admit the value.
 fn partition_values(resolved: &ResolvedDocument, member: SchemaId) -> Option<Vec<String>> {
     use super::listed::{Admission, admits};
     // Every schema along the member's references is inspected, the last one included, or the
@@ -784,7 +785,8 @@ fn partition_values(resolved: &ResolvedDocument, member: SchemaId) -> Option<Vec
             || object.any_of.is_some()
             || object.one_of.is_some()
             || object.not.is_some()
-            || object.if_schema.is_some();
+            || object.if_schema.is_some()
+            || object.dynamic_reference.is_some();
         if combines || object.enumeration.as_ref().is_some_and(Vec::is_empty) {
             return None;
         }
@@ -897,6 +899,10 @@ fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usi
 /// `additionalProperties: false`, its members exactly the ones it declares, and no keyword beside
 /// them that admits or refuses anything else, so its payloads carry what it declares and its type
 /// reads them as such.
+///
+/// It references nothing either, so its one part is everything it says.
+/// A merge that stops short of a reference's schemas still leaves a key of one part, and
+/// resolution ignores a `$dynamicRef` written beside a `$ref`.
 fn plain_closed<'a>(resolved: &'a ResolvedDocument, key: &ShapeKey) -> Option<&'a SchemaObject> {
     let [part] = key.parts() else {
         return None;
@@ -931,7 +937,9 @@ fn plain_closed<'a>(resolved: &'a ResolvedDocument, key: &ShapeKey) -> Option<&'
         && object.one_of.is_none()
         && object.enumeration.is_none()
         && object.constant.is_none()
-        && object.discriminator.is_none();
+        && object.discriminator.is_none()
+        && resolved.follow(*part).is_none()
+        && object.dynamic_reference.is_none();
     plain.then_some(object)
 }
 

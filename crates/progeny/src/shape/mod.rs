@@ -3551,6 +3551,47 @@ mod tests {
         )?);
     }
 
+    /// A partition is not proved by a branch whose key leaves out something it references.
+    #[test_util::test]
+    fn a_partition_reads_what_a_branch_references() {
+        let object = tagged_object;
+        // `A` references a schema whose `allOf` is more schemas than a merge follows, the
+        // `false` that refuses everything last among them, so its key is `A` alone however much
+        // the merge left out.
+        let mut truncating = object(listing(&["a", "b"]), true, json!({}), &["type"]);
+        truncating["$ref"] = json!("#/components/schemas/R");
+        let refusing_all = std::iter::once(json!(false))
+            .chain(std::iter::repeat_n(json!(true), 600))
+            .collect::<Vec<_>>();
+        // `A`'s tag is `AB` and `OnlyA` both, which resolution reads as `AB` alone.
+        let both = object(
+            json!({
+                "$ref": "#/components/schemas/AB",
+                "$dynamicRef": "#/components/schemas/OnlyA",
+            }),
+            true,
+            json!({}),
+            &["type"],
+        );
+        for (case, a) in [truncating, both].into_iter().enumerate() {
+            let [_, b, c] = abc();
+            assert!(
+                degrades_as_wild_union(
+                    json!({
+                        "R": {"allOf": refusing_all},
+                        "AB": listing(&["a", "b"]),
+                        "OnlyA": {"const": "a"},
+                        "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                        "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                        "Field": {"anyOf": [a, b, c]},
+                    }),
+                    "Field",
+                )?,
+                "case {case}"
+            );
+        }
+    }
+
     #[test_util::test]
     fn a_nested_union_of_strings_is_one_string_branch() {
         // `Mode` becomes one string enum, which turns every object down, so it can sit first.
