@@ -100,7 +100,7 @@ fn trait_method(
     config: &Config,
 ) -> TokenStream {
     let name = ident(&operation.rust_name);
-    let docs = docs_of(&operation.docs);
+    let docs = docs_of(&operation.docs, config.docs);
     let response = response_name(operation);
     let arguments = argument_list(operation, contracts, config);
     quote! {
@@ -205,7 +205,7 @@ fn group_struct(
         } else {
             quote! { ::std::option::Option<#ty> }
         };
-        let docs = docs_of(&param.docs);
+        let docs = docs_of(&param.docs, config.docs);
         let nesting = super::types::type_complexity(&ty);
         quote! { #docs #nesting pub #field: #ty, }
     });
@@ -237,7 +237,7 @@ fn response_enum(
     let variants = arms.iter().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
         let ty = response_enum_type_path(&arm.body, contracts, config);
-        let docs = docs_of(&arm.docs);
+        let docs = docs_of(&arm.docs, config.docs);
         quote! { #docs #variant(#ty), }
     });
     let matches = arms.iter().map(|arm| {

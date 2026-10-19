@@ -299,7 +299,7 @@ fn note_deprecated(ty: &TypeRef, contracts: &Contracts, names: &mut BTreeSet<Str
 fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> TokenStream {
     let scope = Scope::of(contract);
     let name = ident(contract.rust_name());
-    let docs = type_docs(contract);
+    let docs = type_docs(contract, config.docs);
     // The serde derives join the typed derive set in one attribute: which of them appears is the
     // serde strategy's business, and the strategy was decided by the eligibility function.
     let derives = derives(contract);
@@ -721,12 +721,13 @@ impl<'ast> syn::visit::Visit<'ast> for TypeComplexity {
 /// A type the document documented says what it is; one it did not says where it came from, which
 /// is the next most useful thing for someone reading checked-in generated source. A read form
 /// says so first, because its members are not the description's members.
-fn type_docs(contract: &TypeContract) -> TokenStream {
-    let described = if contract.docs().is_empty() {
+fn type_docs(contract: &TypeContract, setting: crate::config::Docs) -> TokenStream {
+    let described = if contract.docs().is_empty() || setting == crate::config::Docs::None {
         let origin = format!(" Generated from `{}`.", contract.origin());
-        quote! { #[doc = #origin] }
+        let deprecated = contract.docs().deprecated.then(|| quote! { #[deprecated] });
+        quote! { #[doc = #origin] #deprecated }
     } else {
-        docs(contract.docs())
+        docs(contract.docs(), setting)
     };
     // What the read form changed depends on the kind: a struct loosened its members and grew a
     // capture map, everything else only names the read forms of what it holds.
@@ -841,7 +842,13 @@ fn member(
     let name = ident(&field.rust_name);
     let ty = type_ref_in(&field.ty, contracts, config, scope);
     let nesting = type_complexity(&ty);
-    let docs = with_default(docs(&field.docs), field);
+    // A capture's docs are progeny's own account of what it holds, never the document's prose.
+    let setting = if field.is_capture() {
+        crate::config::Docs::Schema
+    } else {
+        config.docs
+    };
+    let docs = with_default(docs(&field.docs, setting), field);
     if contract.deser() != DeserStrategy::Derive {
         // No serde attributes at all: the hand-written implementation reads the same contract and
         // does not consult attributes, so leaving them on would be a second source of truth.
@@ -1199,8 +1206,10 @@ fn ident(name: &RustIdent) -> proc_macro2::Ident {
 }
 
 /// Doc comments, one attribute per line so a multi-line description reads as one.
-pub(super) fn docs(docs: &Docs) -> TokenStream {
-    let prose = docs_prose(docs);
+///
+/// `setting` says whether the document's prose is written at all; `#[deprecated]` is either way.
+pub(super) fn docs(docs: &Docs, setting: crate::config::Docs) -> TokenStream {
+    let prose = docs_prose(docs, setting);
     let deprecated = docs.deprecated.then(|| quote! { #[deprecated] });
     quote! { #prose #deprecated }
 }
@@ -1211,7 +1220,10 @@ pub(super) fn docs(docs: &Docs) -> TokenStream {
 /// the compiler accepts, so the attribute would make the deprecation warning unavoidable at
 /// every call site. The fact rides the field's prose instead, and the operation-level attribute
 /// still marks the API a caller can choose not to call.
-pub(super) fn docs_prose(docs: &Docs) -> TokenStream {
+pub(super) fn docs_prose(docs: &Docs, setting: crate::config::Docs) -> TokenStream {
+    if setting == crate::config::Docs::None {
+        return TokenStream::new();
+    }
     let mut lines: Vec<String> = Vec::new();
     if let Some(title) = &docs.title {
         lines.extend(wrap(title));

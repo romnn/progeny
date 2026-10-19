@@ -934,6 +934,133 @@ mod tests {
         assert!(!flat.contains("cfg_attr"), "{ungated}");
     }
 
+    /// A document whose every piece of prose says which position it was written for.
+    fn prose_document() -> Value {
+        json!({
+        "openapi": "3.1.0",
+        "info": {"title": "pets", "version": "1"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "summary": "Vendor operation summary.",
+                    "description": "Vendor operation description.",
+                    "security": [{"key": []}],
+                    "parameters": [{
+                        "name": "limit",
+                        "in": "query",
+                        "description": "Vendor parameter description.",
+                        "schema": {"type": "integer"},
+                    }],
+                    "responses": {
+                        "404": {"description": "Vendor failure description."},
+                        "200": {
+                            "description": "Vendor response description.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Pet"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "components": {
+            "securitySchemes": {
+                "key": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-Key",
+                    "description": "Vendor scheme description.",
+                },
+            },
+            "schemas": {
+                "Pet": {
+                    "type": "object",
+                    "title": "Vendor type title.",
+                    "description": "Vendor type description.",
+                    "additionalProperties": {"type": "string"},
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "deprecated": true,
+                            "description": "Vendor field description.",
+                        },
+                        "age": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Vendor defaulted description.",
+                        },
+                    },
+                },
+                "Old": {
+                    "type": "object",
+                    "deprecated": true,
+                    "description": "Vendor deprecated type description.",
+                    "properties": {"name": {"type": "string"}},
+                },
+            },
+        },
+        })
+    }
+
+    /// With `docs = "none"`, no prose the document wrote reaches the generated source, while what
+    /// progeny writes itself stays: every deprecation, the provenance of a type and of an input, a
+    /// member's default and what a capture holds.
+    #[test_util::test]
+    fn turning_docs_off_drops_the_documents_prose_and_keeps_progenys_own() {
+        let document = prose_document();
+        let vendor = [
+            "Vendor operation summary.",
+            "Vendor operation description.",
+            "Vendor parameter description.",
+            "Vendor scheme description.",
+            "Vendor type title.",
+            "Vendor type description.",
+            "Vendor field description.",
+            "Vendor defaulted description.",
+            "Vendor deprecated type description.",
+            "Vendor response description.",
+            "Vendor failure description.",
+        ];
+        let joined = |config: &Config| -> eyre::Result<String> {
+            Ok(files(document.clone(), config)?
+                .into_values()
+                .collect::<Vec<_>>()
+                .join("\n"))
+        };
+
+        let documented = joined(&Config::default())?;
+        for prose in vendor {
+            assert!(documented.contains(prose), "{prose}: {documented}");
+        }
+
+        let quiet = joined(&Config {
+            docs: crate::config::Docs::None,
+            ..Config::default()
+        })?;
+        for prose in vendor {
+            assert!(!quiet.contains(prose), "{prose}: {quiet}");
+        }
+        assert_eq!(
+            quiet.matches("#[deprecated]").count(),
+            documented.matches("#[deprecated]").count(),
+            "{quiet}"
+        );
+        assert!(
+            quiet.contains("Members the description did not declare"),
+            "{quiet}"
+        );
+        assert!(quiet.contains("The server assumes `3`"), "{quiet}");
+        assert!(quiet.contains("/// Generated from `"), "{quiet}");
+        assert!(
+            quiet.contains("Sent as the `limit` query parameter."),
+            "{quiet}"
+        );
+        assert!(quiet.contains("the `X-Key` header."), "{quiet}");
+    }
+
     /// A generated manifest declares each gate, and the JSON Schema gate turns on an optional
     /// `schemars`; with nothing configured, neither appears anywhere.
     #[test_util::test]

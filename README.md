@@ -233,6 +233,21 @@ decoding = "strict"
 or `--decoding strict` on the command line. It is a choice made when the crate is generated,
 not a switch on a client: strict leaves out `types::read`, so the response types change with it.
 
+## Doc comments
+
+The `title`, `summary` and `description` the document writes for a schema, a member, an
+operation, a parameter, a response or a security scheme become doc comments, as the vendor wrote
+them. A schema exported from Rust carries its source crate's doc comments, whose
+intra-doc links name types the generated crate does not have, so a build that denies rustdoc
+warnings fails on prose nobody in it wrote. Leaving the document's prose out is one setting:
+
+```toml
+docs = "none"
+```
+
+`#[deprecated]` is still emitted, and so are the doc comments progeny writes itself, such as where
+a type was generated from or the `default` a server assumes for a member.
+
 ## Bounding and keeping response bodies
 
 A client reads a whole body by default, however long it is. `response_body_limit` bounds it, on

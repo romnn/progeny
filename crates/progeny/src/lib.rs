@@ -89,7 +89,7 @@ use camino::Utf8PathBuf;
 
 pub use crate::bundle::{SchemaInput, SchemaRoot};
 pub use crate::config::{
-    Accept, BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit,
+    Accept, BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Docs, Emit,
     ExtraDerives, Formats, IntegerWidth, JsonSchemaImpls, MapKind, Package, Packaging, Pagination,
     SchemaType, SerdeAttributes, SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
 };
