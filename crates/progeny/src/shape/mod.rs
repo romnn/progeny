@@ -3573,7 +3573,12 @@ mod tests {
             json!({}),
             &["type"],
         );
-        for (case, a) in [truncating, both].into_iter().enumerate() {
+        // `A` is a branch that is `AB` and `OnlyA` both, which resolution reads as `AB` alone.
+        let wrapped = json!({
+            "$ref": "#/components/schemas/ABObject",
+            "$dynamicRef": "#/components/schemas/OnlyAObject",
+        });
+        for (case, a) in [truncating, both, wrapped].into_iter().enumerate() {
             let [_, b, c] = abc();
             assert!(
                 degrades_as_wild_union(
@@ -3581,6 +3586,8 @@ mod tests {
                         "R": {"allOf": refusing_all},
                         "AB": listing(&["a", "b"]),
                         "OnlyA": {"const": "a"},
+                        "ABObject": object(listing(&["a", "b"]), true, json!({}), &["type"]),
+                        "OnlyAObject": {"properties": {"type": {"const": "a"}}},
                         "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
                         "C": object(listing(&["c"]), true, json!({}), &["type"]),
                         "Field": {"anyOf": [a, b, c]},

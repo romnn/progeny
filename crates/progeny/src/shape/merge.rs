@@ -120,6 +120,9 @@ fn constrains(object: &SchemaObject) -> bool {
         || object.content_media_type.is_some()
         || object.content_schema.is_some()
         || object.discriminator.is_some()
+        // Resolution follows the `$ref` and ignores a `$dynamicRef` beside it, which still
+        // constrains the value, so the schema stays in the key for a reader that has to know.
+        || (object.reference.is_some() && object.dynamic_reference.is_some())
 }
 
 /// A declared discriminator: which property names the variant, and what each name points at.
