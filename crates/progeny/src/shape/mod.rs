@@ -3315,6 +3315,11 @@ mod tests {
             })
             .collect();
         assert_eq!(spellings, [vec!["a"], vec!["b", "c"]]);
+        // No value is listed twice, so the tag is one like any other.
+        assert!(
+            union.tag.as_ref().is_some_and(|tag| !tag.shared),
+            "{union:?}"
+        );
     }
 
     #[test_util::test]
@@ -3355,35 +3360,22 @@ mod tests {
             }),
             "Field",
         )?);
-        // The union beside `A`'s list narrows it to `a`, so `{"type": "b"}` is `B`'s alone, and
-        // `A` lists only `a`.
-        let (shapes, _) = shapes_of(with_schemas(json!({
-            "A": object(
-                json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
-                true,
-                json!({}),
-                &["type"],
-            ),
-            "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
-            "C": object(listing(&["c"]), true, json!({}), &["type"]),
-            "Field": {"anyOf": branches.clone()},
-        })))?;
-        let Shape::Union(union) = shape_of(&shapes, "Field")? else {
-            panic!("expected a union: {:?}", shape_of(&shapes, "Field")?);
-        };
-        let spellings: Vec<Vec<&str>> = union
-            .variants
-            .iter()
-            .map(|variant| {
-                variant
-                    .tag
-                    .iter()
-                    .chain(&variant.aliases)
-                    .map(String::as_str)
-                    .collect()
-            })
-            .collect();
-        assert_eq!(spellings, [vec!["a"], vec!["b", "c"], vec!["c"]]);
+        // A union beside `A`'s list narrows it to `a`, but a member that combines schemas is not
+        // read for its values, so `{"type": "b"}`, which is `B`'s alone, is not handed to `A`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(
+                    json!({"enum": ["a", "b"], "anyOf": [{"const": "a"}, {"type": "integer"}]}),
+                    true,
+                    json!({}),
+                    &["type"],
+                ),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
 
         // `A`'s `x` lists a string beside an integer `type`, which is generated as a string enum,
         // so it reads `B`'s `x` and refuses nothing.
@@ -3424,7 +3416,7 @@ mod tests {
     }
 
     #[test_util::test]
-    fn a_partition_reads_each_branchs_whole_schema() {
+    fn a_partition_reads_the_whole_schema_of_each_branch() {
         let (object, branches) = (tagged_object, abc());
         // Each schema below makes a payload of `B` naming `b` `B`'s alone, by something only the
         // whole schema says, so `A`, tried first, may not be handed it.
@@ -3444,6 +3436,38 @@ mod tests {
             (
                 object(listing(&["a", "b"]), true, json!({"x": string}), &["type"]),
                 patterned,
+            ),
+            // `B`'s required `x` names no `type`, so it admits `null`, which `A`'s optional `x`
+            // reads as absent, however the two objects' required members differ.
+            (
+                object(
+                    listing(&["s"]),
+                    true,
+                    json!({"x": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["a"], "properties": {"a": {"type": "string"}},
+                    }}),
+                    &["type"],
+                ),
+                object(
+                    listing(&["s"]),
+                    true,
+                    json!({"x": {
+                        "additionalProperties": false,
+                        "required": ["b"], "properties": {"b": {"type": "string"}},
+                    }}),
+                    &["type", "x"],
+                ),
+            ),
+            // `A`'s empty list admits nothing beside its `const`.
+            (
+                object(
+                    json!({"type": "string", "enum": [], "const": "b"}),
+                    true,
+                    json!({}),
+                    &["type"],
+                ),
+                object(listing(&["b", "c"]), true, json!({}), &["type"]),
             ),
             // `A` refuses `b` beside its members.
             (

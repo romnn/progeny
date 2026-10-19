@@ -22,7 +22,7 @@ use super::{
 use crate::config::IntegerWidth;
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
-use crate::schema::{Schema, SchemaId, TypeName};
+use crate::schema::{Schema, SchemaId, SchemaObject, TypeName};
 
 /// The name `components.schemas` gave each shape, which is what a discriminator falls back to
 /// when its mapping does not name a branch.
@@ -678,19 +678,20 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
         .iter()
         .map(|branch| {
             let view = merge::view(resolved, branch);
-            (plain_closed(resolved, branch) && !names_its_subtypes(resolved, &view, branch))
-                .then_some(view)
+            let object = plain_closed(resolved, branch)?;
+            (!names_its_subtypes(resolved, &view, branch)).then_some((view, object))
         })
         .collect::<Option<Vec<_>>>()?;
-    let first = views.first()?;
+    let (first, _) = views.first()?;
     'candidates: for name in &first.required {
         let mut listed: Vec<Vec<String>> = Vec::new();
-        for view in &views {
-            let Some(values) = view
+        for (view, object) in &views {
+            let Some(values) = object
                 .properties
-                .get(name)
+                .as_ref()
+                .and_then(|properties| properties.get(name))
                 .filter(|_| view.required.contains(name))
-                .and_then(|property| partition_values(resolved, property))
+                .and_then(|&member| partition_values(resolved, member))
             else {
                 continue 'candidates;
             };
@@ -720,6 +721,13 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
                 }
             }
         }
+        // Where no value is listed twice, the member is a tag like any other.
+        let shared = listed.iter().enumerate().any(|(at, values)| {
+            listed
+                .iter()
+                .skip(at + 1)
+                .any(|other| values.iter().any(|value| other.contains(value)))
+        });
         let variants = branches
             .iter()
             .zip(listed)
@@ -740,7 +748,7 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
                 style: TagStyle::Consumed,
                 absent: None,
                 null: None,
-                shared: true,
+                shared,
             }),
         }));
     }
@@ -751,15 +759,39 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
 /// `const` of the member lists that the member's whole schema admits, in the order they are
 /// listed.
 ///
+/// `member` is the schema the branch writes for it, which may be a `$ref` to the one that lists
+/// the values.
 /// Admission is judged by every schema the member merges ([`super::listed::admits`]), so a
-/// `const` beside a list, two `const`s that disagree, a `type` that admits no string and a union
-/// that narrows the list each leave out what they refuse.
-/// A member written as more than one schema, one that may admit a value the judgement cannot
-/// settle, or one that admits `null`, has no such list, because the branches it names would then not be the ones whose schemas admit the
-/// value.
-fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
+/// `const` beside a list and a `type` that admits no string leave out what they refuse.
+/// A member that combines schemas with `allOf`, `anyOf`, `oneOf`, `not` or `if` anywhere along its
+/// `$ref`s, or lists an empty `enum`, which admits nothing, has no such list, and neither has one
+/// that may admit a value the judgement cannot settle or that admits `null`, because the branches
+/// it names would then not be the ones whose schemas admit the value.
+fn partition_values(resolved: &ResolvedDocument, member: SchemaId) -> Option<Vec<String>> {
     use super::listed::{Admission, admits};
-    if key.parts().len() != 1 || admits(resolved, key, &Value::Null, 0) != Admission::No {
+    let mut at = member;
+    for _ in 0..=MAX_AMBIGUITY_DEPTH {
+        let Schema::Object(object) = resolved.schema(at) else {
+            return None;
+        };
+        let combines = object.all_of.is_some()
+            || object.any_of.is_some()
+            || object.one_of.is_some()
+            || object.not.is_some()
+            || object.if_schema.is_some();
+        if combines || object.enumeration.as_ref().is_some_and(Vec::is_empty) {
+            return None;
+        }
+        match resolved.follow(at) {
+            Some(target) => at = target,
+            None => break,
+        }
+    }
+    if resolved.follow(at).is_some() {
+        return None;
+    }
+    let key = merge::key_of(resolved, member);
+    if admits(resolved, &key, &Value::Null, 0) != Admission::No {
         return None;
     }
     let mut listed: Vec<&Value> = Vec::new();
@@ -773,7 +805,7 @@ fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<S
     let mut values: Vec<String> = Vec::new();
     for value in listed {
         let text = value.as_str()?;
-        match admits(resolved, key, value, 0) {
+        match admits(resolved, &key, value, 0) {
             Admission::Yes if !values.iter().any(|known| known == text) => {
                 values.push(text.to_owned());
             }
@@ -843,8 +875,8 @@ fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usi
             let Some(other) = later.properties.get(name).filter(|_| carried(name)) else {
                 return false;
             };
-            plain_closed(resolved, key)
-                && plain_closed(resolved, other)
+            plain_closed(resolved, key).is_some()
+                && plain_closed(resolved, other).is_some()
                 && refuses(
                     resolved,
                     &merge::view(resolved, key),
@@ -854,24 +886,26 @@ fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usi
         })
 }
 
-/// Whether a schema is one closed object and nothing more: `additionalProperties: false`, its
-/// members exactly the ones it declares, and no keyword beside them that admits or refuses
-/// anything else, so its payloads carry what it declares and its type reads them as such.
-fn plain_closed(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
+/// The one schema a key is, where it is one closed object and nothing more: `type: object`,
+/// `additionalProperties: false`, its members exactly the ones it declares, and no keyword beside
+/// them that admits or refuses anything else, so its payloads carry what it declares and its type
+/// reads them as such.
+fn plain_closed<'a>(resolved: &'a ResolvedDocument, key: &ShapeKey) -> Option<&'a SchemaObject> {
     let [part] = key.parts() else {
-        return false;
+        return None;
     };
     let Schema::Object(object) = resolved.schema(*part) else {
-        return false;
+        return None;
     };
     let closed = object
         .additional_properties
         .is_some_and(|rest| matches!(resolved.schema(rest), Schema::Bool(false)));
+    // An object with no `type` of its own admits every other kind of value too, `null` among them.
     let object_type = object
         .types
         .as_ref()
-        .is_none_or(|types| types.iter().all(|name| *name == TypeName::Object));
-    closed
+        .is_some_and(|types| types.iter().all(|name| *name == TypeName::Object));
+    let plain = closed
         && object_type
         && object.properties.is_some()
         && object.pattern_properties.is_none()
@@ -890,7 +924,8 @@ fn plain_closed(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
         && object.one_of.is_none()
         && object.enumeration.is_none()
         && object.constant.is_none()
-        && object.discriminator.is_none()
+        && object.discriminator.is_none();
+    plain.then_some(object)
 }
 
 /// Whether a closed struct reads every payload of a later branch it accepts as that branch's own
