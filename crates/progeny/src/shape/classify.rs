@@ -550,6 +550,8 @@ fn string(view: &View) -> Shape {
 /// union is carried. Structural matching is preferred wherever it is *sound*, because it costs the
 /// variants nothing; a declared discriminator is consumed as a serde tag only where it is not, and
 /// a union that is neither soundly structural nor soundly tagged degrades to arbitrary JSON.
+/// Before it degrades for want of a tag, a union whose branches include unions of their own is
+/// matched by shape once more, with those read as their branches ([`spread_union`]).
 ///
 /// The order is the whole policy in one sentence: **a union is matched by shape when shape decides
 /// it, by its tag when only the tag decides it, and by neither when nothing does.**
@@ -561,7 +563,7 @@ fn union(
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
-    let (reading, nullable) = Reading::of(resolved, branches);
+    let (reading, mut nullable) = Reading::of(resolved, branches);
     let inner = match reading {
         Reading::Empty => {
             return if nullable { Shape::Null } else { Shape::Any };
@@ -570,59 +572,171 @@ fn union(
         // the branches at all before treating this as a union.
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(strings) => Shape::StringEnum(strings),
-        Reading::Variants(rest) => {
-            if let Some(keyed) = keyed(resolved, view, &rest) {
-                Shape::Keyed(keyed)
-            } else if let Some(named) = constant_discriminator(resolved, &rest) {
-                // The branches name themselves: read the tag, the way a declared discriminator
-                // is read, rather than match by shape — which would rest on the constants, and a
-                // generated string enum reads any string.
-                Shape::Union(Union {
-                    variants: named
-                        .variants
-                        .into_iter()
-                        .map(|(key, values)| {
-                            // The first spelling is the one written, and the rest are read too.
-                            let mut values = values.into_iter();
-                            Variant {
-                                shape: ShapeRef::Key(key),
-                                tag: values.next(),
-                                aliases: values.collect(),
-                            }
-                        })
-                        .collect(),
-                    tag: Some(Tag {
-                        property: named.property,
-                        style: TagStyle::Consumed,
-                        absent: named.absent,
-                        null: named.null,
-                    }),
-                })
-            } else {
-                match ambiguity(resolved, &rest) {
-                    // Shape decides it: an untagged enum is exact, and every variant keeps every
-                    // property the document gave it.
-                    None => Shape::Union(Union {
-                        variants: rest
-                            .into_iter()
-                            .map(|key| Variant {
-                                shape: ShapeRef::Key(key),
-                                tag: None,
-                                aliases: Vec::new(),
-                            })
-                            .collect(),
-                        tag: None,
-                    }),
-                    Some(reason) => tagged(resolved, view, rest, component_names, &reason, ctx, at),
+        Reading::Variants(rest) => match told_apart(resolved, view, rest) {
+            Ok(shape) => shape,
+            Err((rest, reason)) => match spread_union(resolved, view, &rest) {
+                Some((shape, null)) => {
+                    nullable |= null;
+                    shape
                 }
-            }
-        }
+                None => tagged(resolved, view, rest, component_names, &reason, ctx, at),
+            },
+        },
     };
 
     if nullable {
         return Shape::Optional(ShapeRef::Inline(Box::new(inner)));
     }
     inner
+}
+
+/// Two or more branches as the union they are told apart in by what they hold, or why they cannot
+/// be, with the branches handed back.
+///
+/// Shape tells them apart when every payload is read by the branch it is meant for, and the
+/// branches tell themselves apart when they hold a member keyed by their own name or a constant of
+/// their own.
+fn told_apart(
+    resolved: &ResolvedDocument,
+    view: &View,
+    rest: Vec<ShapeKey>,
+) -> Result<Shape, (Vec<ShapeKey>, String)> {
+    if let Some(keyed) = keyed(resolved, view, &rest) {
+        return Ok(Shape::Keyed(keyed));
+    }
+    if let Some(named) = constant_discriminator(resolved, &rest) {
+        // The branches name themselves: read the tag, the way a declared discriminator is read,
+        // rather than match by shape — which would rest on the constants, and a generated string
+        // enum reads any string.
+        return Ok(Shape::Union(Union {
+            variants: named
+                .variants
+                .into_iter()
+                .map(|(key, values)| {
+                    // The first spelling is the one written, and the rest are read too.
+                    let mut values = values.into_iter();
+                    Variant {
+                        shape: ShapeRef::Key(key),
+                        tag: values.next(),
+                        aliases: values.collect(),
+                    }
+                })
+                .collect(),
+            tag: Some(Tag {
+                property: named.property,
+                style: TagStyle::Consumed,
+                absent: named.absent,
+                null: named.null,
+            }),
+        }));
+    }
+    match ambiguity(resolved, &rest) {
+        // Shape decides it: an untagged enum is exact, and every variant keeps every property the
+        // document gave it.
+        None => Ok(Shape::Union(Union {
+            variants: rest
+                .into_iter()
+                .map(|key| Variant {
+                    shape: ShapeRef::Key(key),
+                    tag: None,
+                    aliases: Vec::new(),
+                })
+                .collect(),
+            tag: None,
+        })),
+        Some(reason) => Err((rest, reason)),
+    }
+}
+
+/// A union whose branches are told apart once every nested union among them is read as its own
+/// branches, and whether one of those was `null`.
+///
+/// A union that is a branch of another and declares nothing beside its branches admits exactly
+/// what they do, so the outer union admits the same payloads with them in its place.
+/// The type generated for the nested union holds every payload none of its branches fits, which
+/// is what a later branch is meant for, and read as its branches it holds none.
+/// Wherever it is referenced on its own, it keeps that type.
+///
+/// A declared or inherited discriminator decides the union as written, so nothing is spread there.
+fn spread_union(
+    resolved: &ResolvedDocument,
+    view: &View,
+    rest: &[ShapeKey],
+) -> Option<(Shape, bool)> {
+    if view.discriminator.is_some() || shared_base_discriminator(resolved, rest).is_some() {
+        return None;
+    }
+    let mut spread = Vec::new();
+    if !spread_into(resolved, rest, &mut BTreeSet::new(), &mut spread) {
+        return None;
+    }
+    let (reading, nullable) = Reading::of(resolved, &spread);
+    let shape = match reading {
+        Reading::Empty => return None,
+        Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
+        Reading::Strings(strings) => Shape::StringEnum(strings),
+        Reading::Variants(spread) => told_apart(resolved, view, spread).ok()?,
+    };
+    Some((shape, nullable))
+}
+
+/// Push `branches` onto `spread`, each nested union that declares nothing beside its branches as
+/// those branches, and say whether there was one.
+///
+/// `open` holds the unions being spread, so a union that is a branch of itself stays one branch,
+/// which [`ambiguity`] then compares as the type it becomes.
+fn spread_into(
+    resolved: &ResolvedDocument,
+    branches: &[ShapeKey],
+    open: &mut BTreeSet<ShapeKey>,
+    spread: &mut Vec<ShapeKey>,
+) -> bool {
+    let mut found = false;
+    for branch in branches {
+        match bare_union(resolved, branch) {
+            Some(nested) if open.insert(branch.clone()) => {
+                spread_into(resolved, &nested, open, spread);
+                open.remove(branch);
+                found = true;
+            }
+            _ => spread.push(branch.clone()),
+        }
+    }
+    found
+}
+
+/// The branches of a `oneOf` or `anyOf` that declares nothing but them, annotations aside.
+///
+/// A union with a discriminator, a type, members or any other keyword beside its branches admits
+/// less than they do, or is read by its tag, so it is not one.
+fn bare_union(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<ShapeKey>> {
+    let view = merge::view(resolved, key);
+    let bare = view.types.is_none()
+        && view.enumeration.is_none()
+        && view.constant.is_none()
+        && view.properties.is_empty()
+        && view.required.is_empty()
+        && view.additional.is_none()
+        && !view.additional_denied
+        && view.uniform_pattern.is_none()
+        && view.items.is_none()
+        && view.prefix_items.is_none()
+        && view.min_items.is_none()
+        && view.max_items.is_none()
+        && !view.unsigned
+        && view.lower.is_none()
+        && view.upper.is_none()
+        && view.format.is_none()
+        && !view.formats_disagree
+        && view.content_encoding.is_none()
+        && view.content_media_type.is_none()
+        && view.discriminator.is_none()
+        && !view.unions_collide
+        && view.uninterpreted.is_empty()
+        && view.conflict.is_none()
+        && !view.impossible
+        && view.unknown_types.is_empty();
+    view.union.filter(|_| bare)
 }
 
 /// The subtypes a base schema's discriminator mapping names, and the mapped targets that name no
