@@ -32,7 +32,7 @@ use crate::config::{Config, Derive, UnknownFields};
 use crate::diag::{Ctx, JsonPointer};
 use crate::resolve::ResolvedDocument;
 pub(crate) use crate::shape::Format;
-use crate::shape::{Docs, ShapeKey, Shapes};
+use crate::shape::{Docs, IntType, ShapeKey, Shapes};
 
 #[cfg(feature = "harness")]
 pub(crate) use finalize::BASE as BASE_DERIVES;
@@ -101,9 +101,9 @@ pub(crate) enum TypeRef {
     /// `()`. What a `type: "null"` schema and an empty response body are.
     Unit,
     Bool,
-    /// `i64`. Never narrower: see [`crate::shape::Scalar::Integer`].
-    I64,
-    U64,
+    /// An integer: `i64` or `u64` by its sign, or the width its `format` names where the
+    /// configuration sizes integers by format.
+    Integer(IntType),
     F64,
     String,
     /// A format with a `Config`-chosen type.
@@ -149,8 +149,7 @@ impl TypeRef {
             Self::Named(_)
             | Self::Unit
             | Self::Bool
-            | Self::I64
-            | Self::U64
+            | Self::Integer(_)
             | Self::F64
             | Self::String
             | Self::Format(_)
@@ -171,8 +170,7 @@ impl TypeRef {
             Self::Named(_)
             | Self::Unit
             | Self::Bool
-            | Self::I64
-            | Self::U64
+            | Self::Integer(_)
             | Self::F64
             | Self::String
             | Self::Format(_)
@@ -202,8 +200,7 @@ impl TypeRef {
             }
             Self::Unit
             | Self::Bool
-            | Self::I64
-            | Self::U64
+            | Self::Integer(_)
             | Self::F64
             | Self::String
             | Self::Format(_)
@@ -245,8 +242,7 @@ impl TypeRef {
             }
             Self::Unit
             | Self::Bool
-            | Self::I64
-            | Self::U64
+            | Self::Integer(_)
             | Self::F64
             | Self::String
             | Self::Format(_)
@@ -803,7 +799,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = build(&resolved, &shapes, config, &mut ctx)?;
         Ok((contracts, ctx.into_diagnostics()))
     }
@@ -1108,7 +1104,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = build(&resolved, &shapes, &Config::default(), &mut ctx)?;
         let ContractKind::Struct { fields } = named(&contracts, "InstanceUpdate")?.kind() else {
             panic!("expected a struct");
@@ -1502,7 +1498,10 @@ mod tests {
             .last()
             .ok_or_eyre("test fixture should contain this value")?;
         assert_eq!(extra.capture, Some(super::Capture::Declared));
-        assert_eq!(extra.ty, TypeRef::Map(Box::new(TypeRef::I64)));
+        assert_eq!(
+            extra.ty,
+            TypeRef::Map(Box::new(TypeRef::Integer(crate::shape::IntType::I64)))
+        );
     }
 
     #[test_util::test]
@@ -1523,7 +1522,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let error = build(&resolved, &shapes, &config, &mut ctx)
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
@@ -1552,7 +1551,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let error = build(&resolved, &shapes, &config, &mut ctx)
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;

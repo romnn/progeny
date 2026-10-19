@@ -322,7 +322,25 @@ impl<'a> Fit<'a> {
             Scalar::Bool => value.is_boolean(),
             // An integer schema with a `1.0` example is the document being loose about JSON's one
             // number type, not a contradiction: it deserializes.
-            Scalar::Integer { .. } => value.as_f64().is_some_and(|number| number.fract() == 0.0),
+            Scalar::Integer(integer) => {
+                let whole = match value {
+                    Value::Number(number) => super::merge::integer_value(number),
+                    _ => None,
+                };
+                // A whole number past the integer's range, which a `format` may narrow, is no
+                // value the type holds, compared exactly.
+                let (least, greatest) = integer.range();
+                if let Some(whole) = whole
+                    && !(least..=greatest).contains(&whole)
+                {
+                    return Some(format!(
+                        "the schema says an integer a `{}` holds, {} is {whole}",
+                        integer.rust(),
+                        self.subject
+                    ));
+                }
+                whole.is_some()
+            }
             Scalar::Number => value.is_number(),
             Scalar::String => value.is_string(),
         };
@@ -331,7 +349,7 @@ impl<'a> Fit<'a> {
                 "the schema says {}, {} is {}",
                 match scalar {
                     Scalar::Bool => "a boolean",
-                    Scalar::Integer { .. } => "an integer",
+                    Scalar::Integer(_) => "an integer",
                     Scalar::Number => "a number",
                     Scalar::String => "a string",
                 },

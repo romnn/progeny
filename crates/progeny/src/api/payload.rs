@@ -687,7 +687,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
         let model = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
         Ok(super::collect(&resolved, &shapes, &contracts, &model).0)
@@ -982,7 +982,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         let model = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
         let (found, skipped) = super::collect(&resolved, &shapes, &contracts, &model);

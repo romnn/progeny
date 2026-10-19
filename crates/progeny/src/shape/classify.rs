@@ -16,9 +16,10 @@ use serde_json::Value;
 
 use super::merge::{self, Discriminated, View};
 use super::{
-    Docs, Extra, Field, Format, Keyed, KeyedVariant, MAX_FIXED_ARRAY, Scalar, Shape, ShapeKey,
-    ShapeRef, StringEnum, Struct, Tag, TagStyle, Union, Variant,
+    Docs, Extra, Field, Format, IntType, Keyed, KeyedVariant, MAX_FIXED_ARRAY, Scalar, Shape,
+    ShapeKey, ShapeRef, StringEnum, Struct, Tag, TagStyle, Union, Variant,
 };
+use crate::config::IntegerWidth;
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::{Schema, SchemaId, TypeName};
@@ -32,6 +33,7 @@ pub(crate) fn key(
     resolved: &ResolvedDocument,
     key: &ShapeKey,
     component_names: &ComponentNames,
+    integers: IntegerWidth,
     ctx: &mut Ctx,
 ) -> Shape {
     let mut view = merge::view(resolved, key);
@@ -66,8 +68,147 @@ pub(crate) fn key(
     inheritance_union(resolved, &mut view, key, ctx, &at);
 
     let shape = nullable(resolved, &view, key, component_names, ctx, &at);
+    let shape = sized(&view, shape, integers, ctx, &at);
     report_uninterpreted(&view, &shape, ctx, &at);
     shape
+}
+
+/// An integer shape at the width its `format` names, where the configuration sizes integers by
+/// format and the format can be followed.
+///
+/// Where it cannot, the integer keeps its wide type, and the reason is reported.
+/// A `number` with an integer format stays a float, because the format sizes integers alone.
+fn sized(
+    view: &View,
+    shape: Shape,
+    integers: IntegerWidth,
+    ctx: &mut Ctx,
+    at: &JsonPointer,
+) -> Shape {
+    if integers == IntegerWidth::Wide {
+        return shape;
+    }
+    let size = |scalar: Scalar, ctx: &mut Ctx| match scalar {
+        Scalar::Integer(wide) => match format_width(view) {
+            Ok(Some(width)) => Scalar::Integer(width),
+            Ok(None) => scalar,
+            Err(reason) => {
+                degrade(
+                    ctx,
+                    at,
+                    BreakageClass::UnsupportedConstruct,
+                    &format!("{reason}, so the integer is `{}`", wide.rust()),
+                );
+                scalar
+            }
+        },
+        Scalar::Number => {
+            if let Some(format) = view
+                .format
+                .as_deref()
+                .filter(|format| IntType::of_format(format).is_some())
+            {
+                degrade(
+                    ctx,
+                    at,
+                    BreakageClass::UnsupportedConstruct,
+                    &format!(
+                        "`format: {format}` names an integer width, but the schema is a `number`, \
+                         so it is `f64`"
+                    ),
+                );
+            }
+            scalar
+        }
+        Scalar::Bool | Scalar::String => scalar,
+    };
+    // A format beside a union, or anything else that is no integer of this schema's own, has
+    // nothing here to size.
+    let unsized_format = |ctx: &mut Ctx| {
+        if let Some(format) = view
+            .format
+            .as_deref()
+            .filter(|format| IntType::of_format(format).is_some())
+        {
+            degrade(
+                ctx,
+                at,
+                BreakageClass::UnsupportedConstruct,
+                &format!(
+                    "`format: {format}` names an integer width, but this schema is no integer of \
+                     its own, such as a union, so the format sizes nothing"
+                ),
+            );
+        }
+    };
+    match shape {
+        Shape::Scalar(scalar) => Shape::Scalar(size(scalar, ctx)),
+        Shape::Optional(ShapeRef::Inline(inner)) => match *inner {
+            Shape::Scalar(scalar) => {
+                Shape::Optional(ShapeRef::Inline(Box::new(Shape::Scalar(size(scalar, ctx)))))
+            }
+            other => {
+                unsized_format(ctx);
+                Shape::Optional(ShapeRef::Inline(Box::new(other)))
+            }
+        },
+        other => {
+            unsized_format(ctx);
+            other
+        }
+    }
+}
+
+/// The integer type a view's `format` names, `None` where it names none, or why it cannot be
+/// followed: a format progeny does not know, parts that disagree, or a bound or listed value the
+/// width cannot hold.
+fn format_width(view: &View) -> Result<Option<IntType>, String> {
+    let Some(format) = view.format.as_deref() else {
+        return Ok(None);
+    };
+    if view.formats_disagree {
+        return Err(format!(
+            "the parts of this schema name different `format`s, `{format}` among them"
+        ));
+    }
+    let Some(width) = IntType::of_format(format) else {
+        return Err(format!(
+            "`format: {format}` names no integer width progeny knows"
+        ));
+    };
+    let (least, greatest) = width.range();
+    let holds = |bound: Option<merge::Bound>| match bound {
+        None => true,
+        Some(merge::Bound::At(value)) => (least..=greatest).contains(&value),
+        Some(merge::Bound::Unknown) => false,
+    };
+    if !holds(view.lower) || !holds(view.upper) {
+        return Err(format!(
+            "`format: {format}` names `{}`, but a bound of the schema reaches past it",
+            width.rust()
+        ));
+    }
+    let listed = listed_values(view).unwrap_or_default();
+    if listed
+        .iter()
+        .any(|value| !value.is_null() && !holds_integer(width, value))
+    {
+        return Err(format!(
+            "`format: {format}` names `{}`, but a value the schema lists does not fit it",
+            width.rust()
+        ));
+    }
+    Ok(Some(width))
+}
+
+/// Whether an integer type holds a value: a number that is whole and in its range, compared by
+/// what it is, so a listed `-1.0` is the payload `-1`.
+fn holds_integer(width: IntType, value: &Value) -> bool {
+    let (least, greatest) = width.range();
+    let Value::Number(number) = value else {
+        return false;
+    };
+    merge::integer_value(number).is_some_and(|value| (least..=greatest).contains(&value))
 }
 
 /// The inheritance spelling of a discriminated union, turned into the union it describes.
@@ -219,9 +360,7 @@ fn core(
         Some(TypeName::Object) => object(view),
         Some(TypeName::Array) => array(resolved, view, ctx, at),
         Some(TypeName::String) => string(view),
-        Some(TypeName::Integer) => Shape::Scalar(Scalar::Integer {
-            signed: !view.unsigned,
-        }),
+        Some(TypeName::Integer) => Shape::Scalar(Scalar::Integer(IntType::wide(!view.unsigned))),
         Some(TypeName::Number) => Shape::Scalar(Scalar::Number),
         Some(TypeName::Boolean) => Shape::Scalar(Scalar::Bool),
         Some(TypeName::Null) => Shape::Null,
@@ -267,9 +406,7 @@ fn untyped(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPoi
 fn enumerated_scalar(view: &View) -> Option<Shape> {
     match enumerated_kind(view)? {
         Kind::Number => Some(Shape::Scalar(if integral(view) {
-            Scalar::Integer {
-                signed: !view.unsigned,
-            }
+            Scalar::Integer(IntType::wide(!view.unsigned))
         } else {
             Scalar::Number
         })),
@@ -2184,6 +2321,21 @@ fn listed_values(view: &View) -> Option<Vec<Value>> {
 /// and the integer reads that.
 /// A whole number too large for the integer is not counted, which is the direction that degrades.
 fn integer_refuses(view: &View, value: &Value) -> bool {
+    // The type is the wide one or the one the format names, as the configuration says, and the
+    // value is refused only where both refuse it.
+    // A value whose integer reading cannot be told is not shown refused either.
+    if let Ok(Some(width)) = format_width(view)
+        && let Value::Number(number) = value
+    {
+        let (least, greatest) = width.range();
+        match merge::rounded(number) {
+            None => return false,
+            Some((floor, ceil)) if floor == ceil && (least..=greatest).contains(&floor) => {
+                return false;
+            }
+            Some(_) => {}
+        }
+    }
     let named: Vec<&TypeName> = view
         .types
         .iter()
@@ -2373,17 +2525,34 @@ fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {
 /// An unsigned integer holds every integer from zero up, so a lower bound that admits zero and
 /// nothing below it narrows nothing.
 fn report_uninterpreted(view: &View, shape: &Shape, ctx: &mut Ctx, at: &JsonPointer) {
-    let unsigned =
-        |shape: &Shape| matches!(shape, Shape::Scalar(Scalar::Integer { signed: false }));
-    let bound_expressed = !view.bound_above_zero
-        && match shape {
-            Shape::Optional(ShapeRef::Inline(inner)) => unsigned(inner),
-            other => unsigned(other),
-        };
+    // A bound the integer's own range ends at is what the type expresses: a zero `minimum` on an
+    // unsigned integer, or a `maximum` of 65535 on a `u16`.
+    let integer = match shape {
+        Shape::Scalar(Scalar::Integer(integer)) => Some(*integer),
+        Shape::Optional(ShapeRef::Inline(inner)) => match **inner {
+            Shape::Scalar(Scalar::Integer(integer)) => Some(integer),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (least, greatest) = integer.map_or((None, None), |integer| {
+        let (least, greatest) = integer.range();
+        (Some(least), Some(greatest))
+    });
+    let expressed = |bound: Option<merge::Bound>, end: Option<i128>| match (bound, end) {
+        (Some(merge::Bound::At(bound)), Some(end)) => bound == end,
+        _ => false,
+    };
+    let lower_expressed = expressed(view.lower, least);
+    let upper_expressed = expressed(view.upper, greatest);
     let keywords: Vec<String> = view
         .uninterpreted
         .iter()
-        .filter(|&&keyword| !(bound_expressed && matches!(keyword, "minimum" | "exclusiveMinimum")))
+        .filter(|&&keyword| match keyword {
+            "minimum" | "exclusiveMinimum" => !lower_expressed,
+            "maximum" | "exclusiveMaximum" => !upper_expressed,
+            _ => true,
+        })
         .map(|keyword| format!("`{keyword}`"))
         .collect();
     if keywords.is_empty() {

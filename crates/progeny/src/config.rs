@@ -359,6 +359,30 @@ pub struct Formats {
     /// representation does not implicitly choose a codec.
     #[serde(default)]
     pub bytes: BytesRepr,
+    /// How wide an integer is.
+    #[serde(default)]
+    pub integers: IntegerWidth,
+}
+
+/// How wide the generated integers are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntegerWidth {
+    /// `i64`, or `u64` where a `minimum` of zero says the value has no sign, whatever the
+    /// `format` says.
+    ///
+    /// A bound alone never narrows the width, because a vendor raising a documented ceiling would
+    /// turn valid responses into decoding failures.
+    #[default]
+    Wide,
+    /// The width and sign an integer `format` names: `int8` to `int64`, `uint8` to `uint64`, and
+    /// `uint`, which is `u64`.
+    ///
+    /// The decoder then refuses a value the format rules out, and strict decoding reports it.
+    /// A format progeny does not know, two parts naming different formats, or bounds or listed
+    /// values the width cannot hold keep the wide type, and are reported.
+    /// An integer without a format stays wide.
+    ByFormat,
 }
 
 /// Which crate holds the date and time types.

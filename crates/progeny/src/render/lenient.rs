@@ -855,8 +855,7 @@ fn convert(value: TokenStream, ty: &TypeRef, contracts: &Contracts) -> TokenStre
         // Nothing named inside, so `needs_conversion` was false and this arm is unreachable.
         TypeRef::Unit
         | TypeRef::Bool
-        | TypeRef::I64
-        | TypeRef::U64
+        | TypeRef::Integer(_)
         | TypeRef::F64
         | TypeRef::String
         | TypeRef::Format(_)

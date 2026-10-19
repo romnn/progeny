@@ -202,8 +202,7 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
         },
         TypeRef::Unit
         | TypeRef::Bool
-        | TypeRef::I64
-        | TypeRef::U64
+        | TypeRef::Integer(_)
         | TypeRef::F64
         | TypeRef::String
         | TypeRef::Format(_)
@@ -381,7 +380,7 @@ mod tests {
         let params = &model.operations()[0].params;
         assert_eq!(params.len(), 1);
         assert!(params[0].required);
-        assert_eq!(params[0].ty, TypeRef::I64);
+        assert_eq!(params[0].ty, TypeRef::Integer(crate::shape::IntType::I64));
         assert_eq!(params[0].style.location(), Location::Query);
     }
 }

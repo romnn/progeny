@@ -461,7 +461,7 @@ fn carries(derive: Derive, ty: &TypeRef, supported: &[BTreeSet<Derive>], config:
         TypeRef::Tuple(items) => items
             .iter()
             .all(|item| carries(derive, item, supported, config)),
-        TypeRef::Unit | TypeRef::Bool | TypeRef::I64 | TypeRef::U64 => true,
+        TypeRef::Unit | TypeRef::Bool | TypeRef::Integer(_) => true,
     }
 }
 
