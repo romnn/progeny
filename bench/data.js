@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792366595678,
+  "lastUpdate": 1792369925632,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -328,6 +328,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 333.5377597808838,
             "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cf06eccb8511e5e7af418dcf7cb0ce3ba6bcd102",
+          "message": "fix(render): read a generated struct from an object and nothing else (#64)\n\nA generated struct also read a JSON array by position, as serde's derive\ndoes, which no JSON Schema object describes. Inside an untagged union that\nlet an object branch take a list meant for a later list branch: `[\"Ada\"]`\nbecame `{name: \"Ada\"}`, and the same happened one level down in nested lists\nand shared members.\n\nThe hand-written struct visitor drops its `visit_seq`. Under the derive\nstrategy a struct's `Deserialize` derives on a private copy declared remote\nto it, read through `support::Object`, which refuses a sequence with the same\nmessage. Lenient decoding already read structs from objects alone.\n\nCloses #60.",
+          "timestamp": "2026-10-19T02:26:47+02:00",
+          "tree_id": "8a1cdb54fab43a76ba2f8dde7d70029188ae10a9",
+          "url": "https://github.com/romnn/progeny/commit/cf06eccb8511e5e7af418dcf7cb0ce3ba6bcd102"
+        },
+        "date": 1792369924856,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 27.061282333333335,
+            "range": "± 0.07",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2998.037759780884,
+            "range": "± 0.8",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.272484666666665,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1252.1484375,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7117786666666667,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 334.8450517654419,
+            "range": "± 1.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
