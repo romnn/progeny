@@ -24,12 +24,19 @@ const MAX_PARTS: usize = 512;
 /// A schema that only points somewhere — `{$ref: X}`, `{allOf: [X]}`, `{$ref: X, description: …}` —
 /// contributes nothing of its own and so drops out of the key entirely, which is what makes a
 /// reference position share a type with its target instead of copying it.
+/// A walk cut short at [`MAX_PARTS`] keeps `id` among the parts, so a key that lost schemas never
+/// looks like the one schema it kept.
 pub(crate) fn key_of(resolved: &ResolvedDocument, id: SchemaId) -> ShapeKey {
     let mut parts = Vec::new();
     let mut seen = BTreeSet::new();
     let mut stack = vec![id];
+    let mut truncated = false;
     while let Some(current) = stack.pop() {
-        if !seen.insert(current) || seen.len() > MAX_PARTS {
+        if !seen.insert(current) {
+            continue;
+        }
+        if seen.len() > MAX_PARTS {
+            truncated = true;
             continue;
         }
         match resolved.schema(current) {
@@ -49,8 +56,9 @@ pub(crate) fn key_of(resolved: &ResolvedDocument, id: SchemaId) -> ShapeKey {
             }
         }
     }
-    if parts.is_empty() {
-        // Nothing constrains the value: the key is the schema itself, and it classifies as "any".
+    if parts.is_empty() || (truncated && !parts.contains(&id)) {
+        // Nothing constrains the value, or not everything that does was reached: the key holds the
+        // schema itself, which classifies as "any" alone.
         parts.push(id);
     }
     ShapeKey::new(parts)

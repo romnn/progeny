@@ -3292,10 +3292,8 @@ mod tests {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "A": closed(json!({"type": "string", "enum": ["a", "b"], "const": "a"})),
             "B": closed(json!({"type": "string", "enum": ["b", "c"]})),
-            "Field": {"anyOf": [
-                {"$ref": "#/components/schemas/A"},
-                {"$ref": "#/components/schemas/B"},
-            ]},
+            "C": closed(json!({"type": "string", "enum": ["c"]})),
+            "Field": {"anyOf": abc()},
         })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let Shape::Union(union) = shape_of(&shapes, "Field")? else {
@@ -3314,12 +3312,17 @@ mod tests {
                     .collect()
             })
             .collect();
-        assert_eq!(spellings, [vec!["a"], vec!["b", "c"]]);
-        // No value is listed twice, so the tag is one like any other.
-        assert!(
-            union.tag.as_ref().is_some_and(|tag| !tag.shared),
-            "{union:?}"
-        );
+        assert_eq!(spellings, [vec!["a"], vec!["b", "c"], vec!["c"]]);
+
+        // With nothing shared, there is nothing to partition, and the union degrades as before.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": closed(json!({"type": "string", "enum": ["a", "b"], "const": "a"})),
+                "B": closed(json!({"type": "string", "enum": ["b", "c"]})),
+                "Field": {"anyOf": abc()[..2]},
+            }),
+            "Field",
+        )?);
     }
 
     #[test_util::test]
@@ -3413,6 +3416,39 @@ mod tests {
     /// References to `A`, `B` and `C`.
     fn abc() -> [Value; 3] {
         ["A", "B", "C"].map(|name| json!({"$ref": format!("#/components/schemas/{name}")}))
+    }
+
+    /// A partition reads what is written, however far it is from the branch: every schema a
+    /// member's references pass through, and every schema a branch's `allOf` lists.
+    #[test_util::test]
+    fn a_partition_reads_what_is_written_however_far_away() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let closed = |kind: Value| tagged_object(kind, true, json!({}), &["type"]);
+        let shared = |schemas: &mut Value| {
+            schemas["B"] = closed(listing(&["b", "c"]));
+            schemas["C"] = closed(listing(&["c"]));
+            schemas["Field"] = json!({"anyOf": abc()});
+        };
+
+        // `A`'s tag is five references away from the empty list that admits nothing, which is
+        // as far as the walk goes.
+        let mut schemas = json!({
+            "R1": reference("R2"), "R2": reference("R3"), "R3": reference("R4"),
+            "R4": reference("Tag"),
+            "Tag": {"type": "string", "enum": [], "const": "b"},
+            "A": closed(reference("R1")),
+        });
+        shared(&mut schemas);
+        assert!(degrades_as_wild_union(schemas, "Field")?);
+
+        // `A` is `false` beside a closed object, with more `true`s between them than a merge
+        // follows.
+        let mut all = vec![json!(false)];
+        all.extend(std::iter::repeat_n(json!(true), 510));
+        all.push(closed(listing(&["a", "b"])));
+        let mut schemas = json!({"A": {"allOf": all}});
+        shared(&mut schemas);
+        assert!(degrades_as_wild_union(schemas, "Field")?);
     }
 
     #[test_util::test]

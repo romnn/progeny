@@ -721,13 +721,16 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
                 }
             }
         }
-        // Where no value is listed twice, the member is a tag like any other.
+        // Where no value is listed twice, nothing is shared, and the union is left as it was.
         let shared = listed.iter().enumerate().any(|(at, values)| {
             listed
                 .iter()
                 .skip(at + 1)
                 .any(|other| values.iter().any(|value| other.contains(value)))
         });
+        if !shared {
+            continue;
+        }
         let variants = branches
             .iter()
             .zip(listed)
@@ -748,7 +751,7 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
                 style: TagStyle::Consumed,
                 absent: None,
                 null: None,
-                shared,
+                shared: true,
             }),
         }));
     }
@@ -769,7 +772,10 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
 /// it names would then not be the ones whose schemas admit the value.
 fn partition_values(resolved: &ResolvedDocument, member: SchemaId) -> Option<Vec<String>> {
     use super::listed::{Admission, admits};
+    // Every schema along the member's references is inspected, the last one included, or the
+    // member is refused.
     let mut at = member;
+    let mut inspected = false;
     for _ in 0..=MAX_AMBIGUITY_DEPTH {
         let Schema::Object(object) = resolved.schema(at) else {
             return None;
@@ -782,12 +788,13 @@ fn partition_values(resolved: &ResolvedDocument, member: SchemaId) -> Option<Vec
         if combines || object.enumeration.as_ref().is_some_and(Vec::is_empty) {
             return None;
         }
-        match resolved.follow(at) {
-            Some(target) => at = target,
-            None => break,
-        }
+        let Some(target) = resolved.follow(at) else {
+            inspected = true;
+            break;
+        };
+        at = target;
     }
-    if resolved.follow(at).is_some() {
+    if !inspected {
         return None;
     }
     let key = merge::key_of(resolved, member);
