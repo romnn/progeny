@@ -99,6 +99,9 @@ pub struct Config {
     /// How a generated client decodes what it receives. See [`Decoding`].
     #[serde(default)]
     pub decoding: Decoding,
+    /// Whether the document's prose becomes doc comments. See [`Docs`].
+    #[serde(default)]
+    pub docs: Docs,
     /// Whether to emit a crate, a workspace, or a module tree.
     #[serde(default)]
     pub packaging: Packaging,
@@ -560,6 +563,29 @@ pub enum SerdeImpl {
     /// self-describing one.
     #[default]
     HandWrittenWhereEligible,
+}
+
+/// Whether the prose a document writes becomes the doc comments of the code generated from it.
+///
+/// A `title`, `summary` or `description` is transcribed as the vendor wrote it, which is faithful,
+/// but publishes their markdown as the consumer's own rustdoc.
+/// A schema exported from Rust carries its source crate's doc comments, whose intra-doc links
+/// name that crate's types and do not resolve in the generated one, so a build that denies rustdoc
+/// warnings fails on prose the consumer did not write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Docs {
+    /// The document's prose, for every type, member, operation, parameter and response that has
+    /// some.
+    ///
+    /// The default.
+    #[default]
+    Schema,
+    /// None of the document's prose.
+    ///
+    /// `#[deprecated]` is still emitted, and so is every doc comment progeny writes itself, such
+    /// as a type's note of where it was generated from.
+    None,
 }
 
 /// How a generated client decodes a response body, and which types a response yields.

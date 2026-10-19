@@ -47,7 +47,7 @@ pub(super) fn render(
     let methods = model.operations().iter().map(|operation| {
         let name = ident(&operation.rust_name);
         let request = request_name(operation);
-        let docs = docs_of(&operation.docs);
+        let docs = docs_of(&operation.docs, config.docs);
         // A deprecated operation's request and params are `#[deprecated]`, and this accessor names
         // both — uses rustc lints, in the consumer's crate, about code the consumer did not
         // write. The method carrying `#[deprecated]` itself exempts neither: being deprecated is
@@ -112,7 +112,7 @@ pub(super) fn render(
         quote! { operations::Method::#variant => ::reqwest::Method::#constant, }
     });
 
-    let client = client_struct(methods, model.schemes(), decoding);
+    let client = client_struct(methods, model.schemes(), decoding, config.docs);
     let observing = observing(decoding);
     let reading = if decoding.is_lenient() {
         quote! {
@@ -256,9 +256,10 @@ fn client_struct(
     methods: impl Iterator<Item = TokenStream>,
     schemes: &[CredentialScheme],
     decoding: Decoding,
+    docs: crate::config::Docs,
 ) -> TokenStream {
     let unobserved = never_degraded(decoding);
-    let held = credentials(schemes);
+    let held = credentials(schemes, docs);
     let credential_field = held.as_ref().map(|held| &held.field);
     let credential_init = held.as_ref().map(|held| &held.init);
     let credential_setters = held.as_ref().map(|held| &held.setters);
@@ -392,7 +393,7 @@ struct Holding {
 ///
 /// One setter per scheme and nothing per operation beyond the static list of alternatives its
 /// request passes: the choosing and the placing are the shipped `support::Credentials`'s.
-fn credentials(schemes: &[CredentialScheme]) -> Option<Holding> {
+fn credentials(schemes: &[CredentialScheme], docs: crate::config::Docs) -> Option<Holding> {
     if schemes.is_empty() {
         return None;
     }
@@ -405,7 +406,7 @@ fn credentials(schemes: &[CredentialScheme]) -> Option<Holding> {
     let setters = schemes
         .iter()
         .enumerate()
-        .map(|(index, scheme)| setter(index, scheme));
+        .map(|(index, scheme)| setter(index, scheme, docs));
     Some(Holding {
         field: quote! { credentials: support::Credentials, },
         init: quote! { credentials: support::Credentials::new(&[#(#places),*]), },
@@ -418,7 +419,7 @@ fn credentials(schemes: &[CredentialScheme]) -> Option<Holding> {
 /// A header-borne credential takes a `HeaderValue`, so a value that cannot be a header fails
 /// where the caller builds it rather than at send time; a query or cookie key takes text, which
 /// the client encodes; a username and password take text, which base64 makes a valid header.
-fn setter(index: usize, scheme: &CredentialScheme) -> TokenStream {
+fn setter(index: usize, scheme: &CredentialScheme, docs: crate::config::Docs) -> TokenStream {
     let setter = ident(&scheme.setter);
     let name = &scheme.name;
     let (summary, notes, signature, body) = match &scheme.place {
@@ -477,16 +478,24 @@ fn setter(index: usize, scheme: &CredentialScheme) -> TokenStream {
             quote! { self.credentials.set_basic(#index, username, password); },
         ),
     };
-    let description = scheme.description.as_ref().map(|description| {
-        let prose = docs_prose(&crate::shape::Docs {
-            description: Some(description.clone()),
-            ..crate::shape::Docs::default()
+    // The blank line separates the description, so it goes when the description does.
+    let description = scheme
+        .description
+        .as_ref()
+        .filter(|_| docs == crate::config::Docs::Schema)
+        .map(|description| {
+            let prose = docs_prose(
+                &crate::shape::Docs {
+                    description: Some(description.clone()),
+                    ..crate::shape::Docs::default()
+                },
+                docs,
+            );
+            quote! {
+                #[doc = ""]
+                #prose
+            }
         });
-        quote! {
-            #[doc = ""]
-            #prose
-        }
-    });
     let notes = notes
         .iter()
         .map(|note| quote! { #[doc = ""] #[doc = #note] });
@@ -562,7 +571,7 @@ fn interface(
     decoding: Decoding,
 ) -> TokenStream {
     let request = request_name(operation);
-    let docs = docs_of(&operation.docs);
+    let docs = docs_of(&operation.docs, config.docs);
     let operation_name = operation.rust_name.as_str();
 
     let takes = takes_params(operation);
@@ -721,7 +730,7 @@ fn params_struct(
 ) -> TokenStream {
     let name = params_name(operation);
     let operation_name = operation.rust_name.as_str();
-    let docs = docs_of(&operation.docs);
+    let docs = docs_of(&operation.docs, config.docs);
     let fields = operation.params.iter().map(|param| {
         let field = ident(&param.rust_name);
         let ty = type_tokens(&param.ty, contracts, config);
@@ -730,7 +739,7 @@ fn params_struct(
         } else {
             quote! { ::std::option::Option<#ty> }
         };
-        let docs = docs_prose(&param.docs);
+        let docs = docs_prose(&param.docs, config.docs);
         let note = requirement_note(param);
         // The blank line is load-bearing. This sentence is progeny's, appended after the vendor's
         // prose, and without a paragraph break markdown reads it as a continuation of whatever the
@@ -994,7 +1003,7 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
                 let ty = response_enum_type_path(&arm.body, contracts, config);
-                let docs = docs_of(&arm.docs);
+                let docs = docs_of(&arm.docs, config.docs);
                 quote! { #docs #variant(#ty), }
             });
             let docs = format!(
@@ -1066,7 +1075,7 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
                 let ty = response_enum_type_path(&arm.body, contracts, config);
-                let docs = docs_of(&arm.docs);
+                let docs = docs_of(&arm.docs, config.docs);
                 quote! { #docs #variant(#ty), }
             });
             let docs = format!(
