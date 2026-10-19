@@ -757,8 +757,9 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
 ///
 /// Read from the schemas themselves as well as from the merged view, which keeps the first
 /// `const` it meets.
-/// A list the merged view could not narrow, a member any of whose schemas is a union, one that
-/// admits `null`, and one that admits nothing have no such list, because the branches it names
+/// A list the merged view could not narrow, a member any of whose schemas is a union, one whose
+/// `type` admits no string, one that admits `null`, and one that admits nothing have no such
+/// list, because the branches it names
 /// would then not be the ones whose schemas admit the value.
 fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<String>> {
     let view = merge::view(resolved, key);
@@ -766,7 +767,17 @@ fn partition_values(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<S
         .uninterpreted
         .iter()
         .any(|keyword| matches!(*keyword, "enum" | "const"));
-    if uncertain || view.impossible || view.union.is_some() || declares_null(&view) {
+    let strings = view
+        .types
+        .as_ref()
+        .is_none_or(|types| types.contains(&TypeName::String));
+    if uncertain
+        || !strings
+        || view.impossible
+        || view.conflict.is_some()
+        || view.union.is_some()
+        || declares_null(&view)
+    {
         return None;
     }
     let mut values: Option<Vec<String>> = None;

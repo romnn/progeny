@@ -3375,6 +3375,17 @@ mod tests {
                 ),
                 "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
                 "C": object(listing(&["c"]), true, json!({}), &["type"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
+
+        // `A`'s `type` admits integers alone, so it admits none of the strings it lists.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(json!({"type": "integer", "enum": ["a", "b"]}), true, json!({}), &["type"]),
+                "B": object(listing(&["b", "c"]), true, json!({}), &["type"]),
+                "C": object(listing(&["c"]), true, json!({}), &["type"]),
                 "Field": {"anyOf": branches},
             }),
             "Field",
