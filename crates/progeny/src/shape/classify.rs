@@ -651,13 +651,16 @@ fn told_apart(
 /// A union whose branches are told apart once every nested union among them is read as its own
 /// branches, and whether one of those was `null`.
 ///
-/// A union that is a branch of another and declares nothing beside its branches admits exactly
-/// what they do, so the outer union admits the same payloads with them in its place.
+/// An `anyOf` that is a branch of another union and declares nothing beside its branches admits
+/// exactly what they do, so the outer union admits the same payloads with them in its place.
 /// The type generated for the nested union holds every payload none of its branches fits, which
 /// is what a later branch is meant for, and read as its branches it holds none.
 /// Wherever it is referenced on its own, it keeps that type.
 ///
 /// A declared or inherited discriminator decides the union as written, so nothing is spread there.
+/// Neither is a union that its branches tell apart by a tag of their own once a nested `null` has
+/// made it optional, because [`super::discriminate`] settles only a tagged union that is a shape
+/// of its own.
 fn spread_union(
     resolved: &ResolvedDocument,
     view: &View,
@@ -677,6 +680,9 @@ fn spread_union(
         Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::Variants(spread) => told_apart(resolved, view, spread).ok()?,
     };
+    if nullable && matches!(shape, Shape::Union(Union { tag: Some(_), .. })) {
+        return None;
+    }
     Some((shape, nullable))
 }
 
@@ -705,11 +711,19 @@ fn spread_into(
     found
 }
 
-/// The branches of a `oneOf` or `anyOf` that declares nothing but them, annotations aside.
+/// The branches of an `anyOf` that declares nothing but them, annotations aside.
 ///
 /// A union with a discriminator, a type, members or any other keyword beside its branches admits
 /// less than they do, or is read by its tag, so it is not one.
+/// Neither is a `oneOf`, which refuses a payload two of its branches admit, and so leaves it to a
+/// later branch of the outer union that its branches, read in its place, would take first.
 fn bare_union(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<ShapeKey>> {
+    let one_of = key.parts().iter().any(
+        |&part| matches!(resolved.schema(part), Schema::Object(object) if object.one_of.is_some()),
+    );
+    if one_of {
+        return None;
+    }
     let view = merge::view(resolved, key);
     let bare = view.types.is_none()
         && view.enumeration.is_none()
@@ -2384,6 +2398,8 @@ fn admits_its_kind(resolved: &ResolvedDocument, view: &View) -> bool {
 /// Followed through a union of one branch, which is that branch's type, as far as
 /// [`MAX_AMBIGUITY_DEPTH`]; an alias chain longer than that answers yes, which is the direction
 /// that proves no separation.
+/// A `null` in a nested union [`spread_union`] may read as a branch of this one counts, whether
+/// or not the union is spread, for the same reason.
 fn generates_option(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> bool {
     if depth > MAX_AMBIGUITY_DEPTH {
         return true;
@@ -2395,7 +2411,9 @@ fn generates_option(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -
     let Some(branches) = view.union.as_deref() else {
         return false;
     };
-    match Reading::of(resolved, branches) {
+    let mut spread = Vec::new();
+    spread_into(resolved, branches, &mut BTreeSet::new(), &mut spread);
+    match Reading::of(resolved, &spread) {
         (_, true) => true,
         (Reading::One(inner), false) => generates_option(resolved, &inner, depth.saturating_add(1)),
         (Reading::Empty | Reading::Strings(_) | Reading::Variants(_), false) => false,

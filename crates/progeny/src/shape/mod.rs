@@ -3046,6 +3046,65 @@ mod tests {
     }
 
     #[test_util::test]
+    fn a_nested_union_is_not_read_as_its_branches_where_that_reads_a_payload_wrongly() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+
+        // An integer both of `Number`'s branches admit is no `Number`, so it is the constant's,
+        // which `Number`'s first branch would take as a float.
+        assert!(degrades_as_wild_union(
+            json!({
+                "Number": {"oneOf": [{"type": "number"}, {"type": "integer"}]},
+                "Outer": {"anyOf": [reference("Number"), {"const": 9_007_199_254_740_993_u64}]},
+            }),
+            "Outer",
+        )?);
+
+        // `V` reads as an optional union once its nested `null` is a branch of its own, so `A`'s
+        // required `x` reads a missing member as `None` and `A` would take `B`'s payloads.
+        assert!(degrades_as_wild_union(
+            json!({
+                "V": {"anyOf": [
+                    {"anyOf": [{"type": "integer"}, {"type": "boolean"}, {"type": "null"}]},
+                    {"type": "string"},
+                ]},
+                "A": {
+                    "type": "object", "required": ["x"],
+                    "properties": {"x": reference("V"), "note": {"type": "string"}},
+                },
+                "B": {
+                    "type": "object", "additionalProperties": false, "required": ["y"],
+                    "properties": {"y": {"type": "string"}},
+                },
+                "Root": {"anyOf": [
+                    {"anyOf": [reference("A"), reference("B")]},
+                    {"type": "boolean"},
+                ]},
+            }),
+            "Root",
+        )?);
+
+        // Read as its branches, `Outer` is told apart by `kind` once `null` makes it optional,
+        // which leaves a tag nothing settles, so it is not read that way.
+        let tagged = |tag: &str| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["kind", "value"],
+                "properties": {"kind": {"const": tag}, "value": {"type": "string"}},
+            })
+        };
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "A": tagged("a"), "B": tagged("b"),
+            "Outer": {"anyOf": [{"anyOf": [reference("A"), {"type": "null"}]}, reference("B")]},
+        })))?;
+        let outer = shape_of(&shapes, "Outer")?;
+        let tagged_inside = matches!(
+            outer,
+            Shape::Optional(ShapeRef::Inline(inner))
+                if matches!(**inner, Shape::Union(Union { tag: Some(_), .. }))
+        );
+        assert!(!tagged_inside, "{outer:?}");
+    }
+
+    #[test_util::test]
     fn a_nested_union_of_strings_is_one_string_branch() {
         // `Mode` becomes one string enum, which turns every object down, so it can sit first.
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
