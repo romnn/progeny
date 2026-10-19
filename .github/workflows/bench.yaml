@@ -78,51 +78,34 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    env:
-      # The benchtrail release that draws the chart, and its archive's checksum.
-      # Moving to another release changes both.
-      BENCHTRAIL_VERSION: v0.1.0
-      BENCHTRAIL_SHA256: fa0c19f0bd3fe8b3bec576fce9ba837019bc103294666f16217fea4da4e468e2
     steps:
       - uses: actions/checkout@v7
         with:
-          sparse-checkout: .github/benchtrail.json
-          sparse-checkout-cone-mode: false
-      - uses: actions/checkout@v7
-        with:
           ref: gh-pages
-          path: pages
-      # The deployed page is the release pinned above, in place of the page github-action-benchmark
-      # committed beside the history on `gh-pages`.
-      - name: Install benchtrail
-        run: |
-          curl -fsSL -o "$RUNNER_TEMP/benchtrail.zip" \
-            "https://github.com/romnn/benchtrail/releases/download/$BENCHTRAIL_VERSION/benchtrail.zip"
-          echo "$BENCHTRAIL_SHA256  $RUNNER_TEMP/benchtrail.zip" | sha256sum --check --strict
-          unzip -oq "$RUNNER_TEMP/benchtrail.zip" -d pages/bench
-      # The page reads its settings from a JSON block in its own markup, so the block is replaced
-      # with `.github/benchtrail.json`.
-      # Every `<` is escaped, so no setting can end the script element or open a comment in it.
-      - name: Apply the chart settings
-        shell: python
-        run: |
-          import json, pathlib, re, sys
-
-          settings = json.loads(pathlib.Path(".github/benchtrail.json").read_text())
-          block = json.dumps(settings, indent=2).replace("<", "\\u003c")
-          page = pathlib.Path("pages/bench/index.html")
-          html, count = re.subn(
-              r'(<script id="benchtrail-config" type="application/json">).*?(</script>)',
-              lambda match: f"{match[1]}\n{block}\n{match[2]}",
-              page.read_text(),
-              flags=re.S,
-          )
-          if count != 1:
-              sys.exit(f"{page} holds {count} settings blocks rather than one")
-          page.write_text(html)
+      # The deployed page is the release pinned here, in place of the page github-action-benchmark
+      # committed beside the history.
+      # The settings split each benchmark name into its document, strategy, and metric.
+      - uses: romnn/benchtrail@v0.2.0
+        with:
+          path: bench
+          settings: |
+            {
+              "title": "progeny compile cost",
+              "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
+              "label": "{{document}} / {{strategy}}",
+              "metrics": {
+                "cpu": { "label": "CPU time", "direction": "lower" },
+                "peak rss": { "label": "Peak RSS", "direction": "lower" }
+              },
+              "dimensions": {
+                "document": { "label": "Document" },
+                "strategy": { "label": "Serde strategy" }
+              },
+              "colorBy": "document"
+            }
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: pages
+          path: .
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5
