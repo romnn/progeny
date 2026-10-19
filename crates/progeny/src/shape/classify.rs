@@ -2336,6 +2336,19 @@ fn declared_kind(view: &View) -> Option<Kind> {
     if view.impossible || view.conflict.is_some() || view.unions_collide {
         return None;
     }
+    // The precedence [`nullable`] and [`core`] give the emitted type: `type: null` alone, then a
+    // list of strings, which is a string enum whatever `type` says, then `type`, then the keywords
+    // in [`untyped`]'s order.
+    if view
+        .types
+        .as_ref()
+        .is_some_and(|types| types.len() == 1 && types.contains(&TypeName::Null))
+    {
+        return Some(Kind::Null);
+    }
+    if enumerated_kind(view) == Some(Kind::String) {
+        return Some(Kind::String);
+    }
     let named: Vec<&TypeName> = view
         .types
         .iter()
@@ -2352,30 +2365,22 @@ fn declared_kind(view: &View) -> Option<Kind> {
         _ if !named.is_empty() => return None,
         _ => {}
     }
-    if view
-        .types
-        .as_ref()
-        .is_some_and(|types| types.len() == 1 && types.contains(&TypeName::Null))
-    {
-        return Some(Kind::Null);
-    }
-    if !view.properties.is_empty()
-        || view.additional.is_some()
-        || view.additional_denied
-        || view.uniform_pattern.is_some()
-    {
+    if !view.properties.is_empty() || view.additional.is_some() || view.additional_denied {
         return Some(Kind::Object);
     }
     if view.items.is_some() || view.prefix_items.is_some() {
         return Some(Kind::Array);
     }
+    if view.uniform_pattern.is_some() {
+        return Some(Kind::Object);
+    }
     match enumerated_kind(view) {
-        // A bare enumeration names its kind as plainly as `type` would, and these three have a
-        // Rust type of their own to be named into.
-        Some(kind @ (Kind::String | Kind::Number | Kind::Boolean)) => return Some(kind),
+        // A bare enumeration names its kind as plainly as `type` would, and these two have a Rust
+        // scalar of their own to be read into.
+        Some(kind @ (Kind::Number | Kind::Boolean)) => return Some(kind),
         // An enumeration of objects or lists narrows nothing progeny can express, so the branch
         // becomes `serde_json::Value` and discriminates nothing.
-        Some(Kind::Object | Kind::Array | Kind::Null) | None => {}
+        Some(Kind::String | Kind::Object | Kind::Array | Kind::Null) | None => {}
     }
     if view.format.is_some() || view.content_encoding.is_some() || view.content_media_type.is_some()
     {
