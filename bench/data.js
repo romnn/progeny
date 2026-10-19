@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792426750372,
+  "lastUpdate": 1792435022130,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -724,6 +724,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 335.32421875,
             "range": "± 2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4b9686e02aabe8a026a0a7e807233a2db720135b",
+          "message": "fix(shape): settle a tagged union that a null branch makes optional (#75)\n\nA `null` branch wraps a tagged union in an `Option`, and the settlement\npass in `shape::discriminate` only looked for a union stored as a shape\nof its own, so the wrapped union kept its provisional consumed tag while\nits variants still declared the property. Strict decoding read a valid\n`{\"kind\": \"a\", ...}` into the fallback, and lenient decoding lost the tag.\n\nThe pass now settles a tagged union inside any number of inline `Option`s\nlike any other: consumed, carried or demoted. The guard that kept a\nnested-union spread from producing one is gone.\n\nCorpus: clerk, deepinfra, langsmith and posthog report the variants\nseveral settled unions share; cloudflare's two env-var maps, whose\nvariants are nullable objects that can hold no tag, are demoted.\n\nCloses #74",
+          "timestamp": "2026-10-19T20:31:11+02:00",
+          "tree_id": "467a1e330cfb3fd20ad4db627840448050ce64bc",
+          "url": "https://github.com/romnn/progeny/commit/4b9686e02aabe8a026a0a7e807233a2db720135b"
+        },
+        "date": 1792435021642,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 29.466335333333333,
+            "range": "± 0.25",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3007.76171875,
+            "range": "± 5.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.883784,
+            "range": "± 0.17",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.69921875,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7195766666666666,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 334.9908847808838,
+            "range": "± 1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
