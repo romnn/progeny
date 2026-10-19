@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792369925632,
+  "lastUpdate": 1792376688883,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -393,6 +393,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 334.8450517654419,
+            "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "efbd57e7396af9bf59457170e1e029568c28764a",
+          "message": "fix(shape): read a list beside a union as the list the union admits (#67)\n\nA schema that lists `enum`/`const` values beside its own `anyOf`/`oneOf`\nwas generated as the union's type alone, and the list was dropped without\na report: `{enum: [a], anyOf: [{const: a}, {type: integer}]}` read `7`.\n\nThe merged view now narrows such a list to the values the union admits,\njudged exactly from `type`, `enum`, `const`, the boolean schemas and nested\nunions, with `oneOf`'s exactly-one rule and numbers compared by value. The\nschema reads as that list. Where the union is one branch and perhaps\n`null` and admits listed values alone, as OpenAPI 3.0 writes a nullable\nreference to an enum, the union is kept with its reference, and `null`\nis counted once. A value that cannot be checked, or a list of objects, is\nkept and reported, and an empty intersection admits nothing. An empty\n`enum` is read as no list.\n\nCloses #61.",
+          "timestamp": "2026-10-19T04:19:08+02:00",
+          "tree_id": "f35311f22b631fcd9dbd35bcd14c94ba390fc90d",
+          "url": "https://github.com/romnn/progeny/commit/efbd57e7396af9bf59457170e1e029568c28764a"
+        },
+        "date": 1792376688049,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 26.921170333333336,
+            "range": "± 0.52",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3000.9921875,
+            "range": "± 2.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.265079,
+            "range": "± 0.1",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.609375,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6989490000000002,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 335.5052080154419,
             "range": "± 1.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
