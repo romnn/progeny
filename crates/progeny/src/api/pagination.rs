@@ -348,7 +348,7 @@ fn describe(ty: &TypeRef) -> String {
         TypeRef::Map(_) => "a map".to_owned(),
         TypeRef::String => "a string".to_owned(),
         TypeRef::Bool => "a boolean".to_owned(),
-        TypeRef::I64 | TypeRef::U64 | TypeRef::F64 => "a number".to_owned(),
+        TypeRef::Integer(_) | TypeRef::F64 => "a number".to_owned(),
         TypeRef::Value => "arbitrary JSON".to_owned(),
         TypeRef::Unit => "nothing".to_owned(),
         other => format!("{other:?}"),
@@ -416,7 +416,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         super::super::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
         Ok(())
@@ -536,7 +536,7 @@ mod tests {
         let normalized = normalize::normalize(document(), &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         let error = super::super::build(&resolved, &shapes, &contracts, &config, &mut ctx)
             .err()

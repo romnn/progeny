@@ -100,7 +100,7 @@ fn generated(input: &[u8]) -> Result<Generated, RejectError> {
     // Resolution consumes the parsed document, so the model has to be taken first — the same
     // ordering the round trip needs, and for the same reason.
     let resolved = resolve::resolve(parsed, &mut ctx);
-    let shapes = shape::classify(&resolved, &mut ctx);
+    let shapes = shape::classify(&resolved, config.formats.integers, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
     let api = api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
     Ok(Generated {

@@ -489,8 +489,7 @@ fn part_of(ty: &TypeRef) -> (PartKind, bool) {
         // The one wrapper that does say something: each element is its own part.
         TypeRef::Vec(inner) | TypeRef::Array(inner, _) => (part_of(inner).0, true),
         TypeRef::Bool
-        | TypeRef::I64
-        | TypeRef::U64
+        | TypeRef::Integer(_)
         | TypeRef::F64
         | TypeRef::String
         | TypeRef::Format(_) => (PartKind::Text, false),

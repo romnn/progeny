@@ -90,8 +90,8 @@ use camino::Utf8PathBuf;
 pub use crate::bundle::{SchemaInput, SchemaRoot};
 pub use crate::config::{
     Accept, BodyLimit, BytesRepr, Config, DateTimeCrate, Decoding, Deny, Derive, Emit,
-    ExtraDerives, Formats, JsonSchemaImpls, MapKind, Package, Packaging, Pagination, SchemaType,
-    SerdeAttributes, SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
+    ExtraDerives, Formats, IntegerWidth, JsonSchemaImpls, MapKind, Package, Packaging, Pagination,
+    SchemaType, SerdeAttributes, SerdeImpl, TypeSelection, UnknownFields, UuidCrate,
 };
 pub use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer, RejectError, RejectKind};
 pub use crate::doc::Direction;
@@ -202,7 +202,7 @@ fn run(
 ) -> Result<Output, RejectError> {
     overrides::apply(&mut parsed, config)?;
     let resolved = resolve::resolve(parsed, &mut ctx);
-    let shapes = shape::classify(&resolved, &mut ctx);
+    let shapes = shape::classify(&resolved, config.formats.integers, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
     // Built whether or not a client will be rendered. Its diagnostics are findings about the
     // document — two operations that collide, an example that contradicts its own schema, which

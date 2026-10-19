@@ -423,12 +423,7 @@ impl Writer<'_> {
             },
             TypeRef::Unit => Node::json(serde_json::json!({"type": "null"})),
             TypeRef::Bool => Node::json(serde_json::json!({"type": "boolean"})),
-            TypeRef::I64 => Node::json(serde_json::json!({"type": "integer", "format": "int64"})),
-            TypeRef::U64 => Node::json(serde_json::json!({
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0,
-            })),
+            TypeRef::Integer(integer) => Node::json(integer_schema(*integer)),
             TypeRef::F64 => Node::json(serde_json::json!({"type": "number", "format": "double"})),
             TypeRef::String => Node::json(serde_json::json!({"type": "string"})),
             TypeRef::Format(format) => Node::json(format_schema(*format)),
@@ -552,6 +547,26 @@ fn fallback(when: &str) -> Node {
     Node::json(serde_json::json!({
         "description": format!("A payload that {when}, kept exactly as it arrived."),
     }))
+}
+
+/// An integer's schema: its format, and the bounds of a width narrower than 64 bits.
+///
+/// An unsigned integer says its zero lower bound at every width, and a 64-bit one says no upper
+/// bound, which is what its format already implies.
+fn integer_schema(integer: crate::shape::IntType) -> Value {
+    use crate::shape::IntType;
+
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".to_owned(), Value::from("integer"));
+    schema.insert("format".to_owned(), Value::from(integer.format()));
+    let (minimum, maximum) = integer.range();
+    if integer != IntType::I64 {
+        schema.insert("minimum".to_owned(), serde_json::json!(minimum));
+    }
+    if !matches!(integer, IntType::I64 | IntType::U64) {
+        schema.insert("maximum".to_owned(), serde_json::json!(maximum));
+    }
+    Value::Object(schema)
 }
 
 /// A format's schema: the string the wire carries, with the format the description named.

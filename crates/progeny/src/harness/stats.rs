@@ -176,7 +176,7 @@ pub fn stats(input: &[u8]) -> Result<Stats, RejectError> {
     let parsed = doc::parse::document(normalized, &mut ctx);
     let mut stats = collect(&parsed);
     let resolved = resolve::resolve(parsed, &mut ctx);
-    let shapes = shape::classify(&resolved, &mut ctx);
+    let shapes = shape::classify(&resolved, crate::config::IntegerWidth::default(), &mut ctx);
     stats.fixed_array_constraints = shapes
         .entries()
         .filter(|(_, shape)| matches!(shape, shape::Shape::FixedArray { .. }))

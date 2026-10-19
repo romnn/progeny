@@ -190,18 +190,97 @@ pub(crate) enum Shape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scalar {
     Bool,
-    /// Signedness comes from the bounds; width never does.
+    /// Signedness comes from the bounds, and width only from a `format` the configuration asks
+    /// to follow.
     ///
     /// 21% of the corpus's integers carry a bound, which looks like an argument for narrowing —
     /// but a width chosen from `maximum` is a forward-compatibility hazard, not an optimization:
     /// it costs nothing to store an `i64`, and a vendor raising a documented ceiling would turn
     /// previously-valid responses into deserialization failures. `minimum >= 0` is different in
     /// kind: it says the value has no sign, which a vendor cannot widen without a breaking change.
-    Integer {
-        signed: bool,
-    },
+    /// A `format` is different again: it names the width, and the configuration decides whether
+    /// the generated type follows it.
+    Integer(IntType),
     Number,
     String,
+}
+
+/// A Rust integer type, by width and sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum IntType {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
+impl IntType {
+    /// The type an integer has when no `format` sizes it: its sign from the bounds, at 64 bits.
+    pub(crate) fn wide(signed: bool) -> Self {
+        if signed { Self::I64 } else { Self::U64 }
+    }
+
+    /// The Rust spelling.
+    pub(crate) fn rust(self) -> &'static str {
+        match self {
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+        }
+    }
+
+    /// The OpenAPI `format` that names this width.
+    pub(crate) fn format(self) -> &'static str {
+        match self {
+            Self::I8 => "int8",
+            Self::I16 => "int16",
+            Self::I32 => "int32",
+            Self::I64 => "int64",
+            Self::U8 => "uint8",
+            Self::U16 => "uint16",
+            Self::U32 => "uint32",
+            Self::U64 => "uint64",
+        }
+    }
+
+    /// The smallest and largest values the type holds.
+    pub(crate) fn range(self) -> (i128, i128) {
+        match self {
+            Self::I8 => (i8::MIN.into(), i8::MAX.into()),
+            Self::I16 => (i16::MIN.into(), i16::MAX.into()),
+            Self::I32 => (i32::MIN.into(), i32::MAX.into()),
+            Self::I64 => (i64::MIN.into(), i64::MAX.into()),
+            Self::U8 => (0, u8::MAX.into()),
+            Self::U16 => (0, u16::MAX.into()),
+            Self::U32 => (0, u32::MAX.into()),
+            Self::U64 => (0, u64::MAX.into()),
+        }
+    }
+
+    /// The type an integer `format` names, where it names one: `int8` to `int64`, `uint8` to
+    /// `uint64`, and `uint`, which is `uint64`.
+    pub(crate) fn of_format(format: &str) -> Option<Self> {
+        Some(match format {
+            "int8" => Self::I8,
+            "int16" => Self::I16,
+            "int32" => Self::I32,
+            "int64" => Self::I64,
+            "uint8" => Self::U8,
+            "uint16" => Self::U16,
+            "uint32" => Self::U32,
+            "uint64" | "uint" => Self::U64,
+            _ => return None,
+        })
+    }
 }
 
 /// The string formats progeny gives a type other than `String`.
@@ -486,7 +565,11 @@ impl Shapes {
 ///
 /// Iterative rather than recursive: a document can nest schemas 128 deep and reference in cycles,
 /// and the work list makes both ordinary rather than a stack-depth question.
-pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
+pub(crate) fn classify(
+    resolved: &ResolvedDocument,
+    integers: crate::config::IntegerWidth,
+    ctx: &mut Ctx,
+) -> Shapes {
     let roots = roots::discover(resolved);
     let mut shapes = Shapes {
         by_key: BTreeMap::new(),
@@ -537,7 +620,7 @@ pub(crate) fn classify(resolved: &ResolvedDocument, ctx: &mut Ctx) -> Shapes {
         if shapes.by_key.contains_key(&key) {
             continue;
         }
-        let shape = classify::key(resolved, &key, &component_names, ctx);
+        let shape = classify::key(resolved, &key, &component_names, integers, ctx);
         children(&shape, &mut queue);
         if let Some(anchor) = key.anchor() {
             shapes
@@ -633,7 +716,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        Extra, Scalar, Shape, ShapeRef, Shapes, StringEnum, Tag, TagStyle, Union, classify,
+        Extra, IntType, Scalar, Shape, ShapeRef, Shapes, StringEnum, Tag, TagStyle, Union, classify,
     };
     use crate::diag::{BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
@@ -641,11 +724,19 @@ mod tests {
 
     /// Classify a document, keeping the diagnostics.
     pub(super) fn shapes_of(document: Value) -> eyre::Result<(Shapes, Vec<Diagnostic>)> {
+        shapes_sized(document, crate::config::IntegerWidth::Wide)
+    }
+
+    /// [`shapes_of`], with integers sized as `integers` says.
+    pub(super) fn shapes_sized(
+        document: Value,
+        integers: crate::config::IntegerWidth,
+    ) -> eyre::Result<(Shapes, Vec<Diagnostic>)> {
         let mut ctx = Ctx::new();
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = classify(&resolved, &mut ctx);
+        let shapes = classify(&resolved, integers, &mut ctx);
         Ok((shapes, ctx.into_diagnostics()))
     }
 
@@ -953,7 +1044,7 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
             shape_of(&shapes, "Id")?,
-            &Shape::Scalar(Scalar::Integer { signed: true })
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
         );
     }
 
@@ -3524,7 +3615,7 @@ mod tests {
             // where two integer branches would not.
             (
                 json!({"enum": [1, 2], "anyOf": [{"const": 1}, {"const": 2}]}),
-                Shape::Scalar(Scalar::Integer { signed: true }),
+                Shape::Scalar(Scalar::Integer(IntType::I64)),
             ),
             // A list narrowed to `null` alone is `null`.
             (
@@ -3551,7 +3642,7 @@ mod tests {
                     "type": "integer", "minimum": 0, "enum": [18_446_744_073_709_551_615_u64],
                     "anyOf": [{"type": "integer"}],
                 }),
-                Shape::Scalar(Scalar::Integer { signed: false }),
+                Shape::Scalar(Scalar::Integer(IntType::U64)),
             ),
         ];
         for (schema, expected) in cases {
@@ -3690,7 +3781,7 @@ mod tests {
         // lost the type *and* gave a union branch that swallows its siblings.
         assert_eq!(
             shape_of(&shapes, "Code")?,
-            &Shape::Scalar(Scalar::Integer { signed: true })
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
         );
         assert_eq!(shape_of(&shapes, "Ratio")?, &Shape::Scalar(Scalar::Number));
         assert_eq!(shape_of(&shapes, "Flag")?, &Shape::Scalar(Scalar::Bool));
@@ -4112,7 +4203,7 @@ mod tests {
             shape: Option<Shape>,
             bound_reported: bool,
         }
-        let unsigned = || Shape::Scalar(Scalar::Integer { signed: false });
+        let unsigned = || Shape::Scalar(Scalar::Integer(IntType::U64));
         // Whether `serde_json` keeps literals as written, which `exact-numbers` turns on and so
         // may another crate in the build.
         let exact = serde_json::from_str::<Value>("1e-400")? != json!(0.0);
@@ -4213,6 +4304,163 @@ mod tests {
         }
     }
 
+    /// Integers sized by format take the width and sign their `format` names, where the bounds
+    /// and listed values fit it, and keep the wide type, reported, where they do not.
+    #[test_util::test]
+    fn integers_sized_by_format_follow_a_format_they_fit() {
+        use crate::config::IntegerWidth;
+
+        let optional = |integer| {
+            Shape::Optional(ShapeRef::Inline(Box::new(Shape::Scalar(Scalar::Integer(
+                integer,
+            )))))
+        };
+        let integer = |integer| Shape::Scalar(Scalar::Integer(integer));
+        // The schema, the shape it becomes, and a phrase its one report says, if it has one.
+        let cases = [
+            (
+                json!({"type": "integer", "format": "int32"}),
+                integer(IntType::I32),
+                None,
+            ),
+            (
+                json!({"type": ["integer", "null"], "format": "uint16", "minimum": 0}),
+                optional(IntType::U16),
+                None,
+            ),
+            // A bound at the end of the range is what the type expresses.
+            (
+                json!({"type": "integer", "format": "uint16", "maximum": 65535}),
+                integer(IntType::U16),
+                None,
+            ),
+            (
+                json!({"type": "integer", "format": "uint8", "exclusiveMaximum": 256}),
+                integer(IntType::U8),
+                None,
+            ),
+            (
+                json!({"type": "integer", "format": "uint8", "maximum": 255.0}),
+                integer(IntType::U8),
+                None,
+            ),
+            (
+                json!({"type": "integer", "format": "uint"}),
+                integer(IntType::U64),
+                None,
+            ),
+            // The format's sign wins, and a `minimum` the signed type does not hold is reported.
+            (
+                json!({"type": "integer", "format": "int32", "minimum": 0}),
+                integer(IntType::I32),
+                Some("`minimum` narrows"),
+            ),
+            // A bound or listed value past the width, an unknown format, and parts that
+            // disagree keep the wide type.
+            (
+                json!({"type": "integer", "format": "uint8", "maximum": 256}),
+                integer(IntType::I64),
+                Some("reaches past it"),
+            ),
+            (
+                json!({"type": "integer", "format": "uint", "minimum": -1}),
+                integer(IntType::I64),
+                Some("reaches past it"),
+            ),
+            (
+                json!({"type": "integer", "format": "uint8", "enum": [0, 300]}),
+                integer(IntType::I64),
+                Some("does not fit it"),
+            ),
+            (
+                json!({"type": "integer", "format": "int128"}),
+                integer(IntType::I64),
+                Some("names no integer width"),
+            ),
+            (
+                json!({"allOf": [{"type": "integer", "format": "int32"}, {"format": "int64"}]}),
+                integer(IntType::I64),
+                Some("different `format`s"),
+            ),
+            // A `number` stays a float.
+            (
+                json!({"type": "number", "format": "int32"}),
+                Shape::Scalar(Scalar::Number),
+                Some("but the schema is a `number`"),
+            ),
+        ];
+        for (schema, shape, reported) in cases {
+            let (shapes, diagnostics) = shapes_sized(
+                with_schemas(json!({"Count": schema.clone()})),
+                IntegerWidth::ByFormat,
+            )?;
+            assert_eq!(shape_of(&shapes, "Count")?, &shape, "{schema}");
+            match reported {
+                Some(phrase) => assert!(
+                    diagnostics.iter().any(|d| d.detail().contains(phrase)),
+                    "{schema}: {diagnostics:#?}"
+                ),
+                None => assert!(diagnostics.is_empty(), "{schema}: {diagnostics:#?}"),
+            }
+        }
+    }
+
+    /// A format sizes an integer of its schema's own only, and only where the configuration says
+    /// so.
+    #[test_util::test]
+    fn an_integer_format_sizes_nothing_it_does_not_describe() {
+        use crate::config::IntegerWidth;
+
+        // A format beside a union sizes nothing, which is reported.
+        let (_, diagnostics) = shapes_sized(
+            with_schemas(json!({"Count": {
+                "format": "int32", "anyOf": [{"type": "integer"}, {"type": "null"}],
+            }})),
+            IntegerWidth::ByFormat,
+        )?;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.detail().contains("the format sizes nothing")),
+            "{diagnostics:#?}"
+        );
+
+        // Without the setting, a format sizes nothing, and is not reported.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Count": {"type": "integer", "format": "int32"},
+        })))?;
+        assert_eq!(
+            shape_of(&shapes, "Count")?,
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    /// A branch whose format may make it a signed integer is not shown to refuse a negative
+    /// value, however the later branch spells it, whichever way the configuration sizes it.
+    #[test_util::test]
+    fn a_format_that_may_sign_a_branch_keeps_it_from_refusing_a_negative() {
+        for integers in [
+            crate::config::IntegerWidth::Wide,
+            crate::config::IntegerWidth::ByFormat,
+        ] {
+            let (shapes, diagnostics) = shapes_sized(
+                with_schemas(json!({"Either": {"anyOf": [
+                    {"type": "integer", "format": "int32", "minimum": 0, "enum": [0]},
+                    {"type": "number", "enum": [-1.0]},
+                ]}})),
+                integers,
+            )?;
+            let wild = diagnostics
+                .iter()
+                .any(|d| d.class() == crate::BreakageClass::WildUnion);
+            assert!(
+                wild && shape_of(&shapes, "Either")? == &Shape::Any,
+                "{integers:?}"
+            );
+        }
+    }
+
     #[test_util::test]
     fn integers_take_their_sign_from_bounds_and_never_their_width() {
         let (shapes, _) = shapes_of(with_schemas(json!({
@@ -4222,15 +4470,15 @@ mod tests {
         })))?;
         assert_eq!(
             shape_of(&shapes, "Count")?,
-            &Shape::Scalar(Scalar::Integer { signed: false })
+            &Shape::Scalar(Scalar::Integer(IntType::U64))
         );
         assert_eq!(
             shape_of(&shapes, "Offset")?,
-            &Shape::Scalar(Scalar::Integer { signed: true })
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
         );
         assert_eq!(
             shape_of(&shapes, "Plain")?,
-            &Shape::Scalar(Scalar::Integer { signed: true })
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
         );
     }
 }

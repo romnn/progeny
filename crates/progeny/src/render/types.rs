@@ -1085,8 +1085,10 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope)
         }
         TypeRef::Unit => quote! { () },
         TypeRef::Bool => quote! { bool },
-        TypeRef::I64 => quote! { i64 },
-        TypeRef::U64 => quote! { u64 },
+        TypeRef::Integer(integer) => {
+            let integer = format_ident!("{}", integer.rust());
+            quote! { #integer }
+        }
         TypeRef::F64 => quote! { f64 },
         TypeRef::String => quote! { String },
         TypeRef::Format(format) => format_type(*format, config, scope),

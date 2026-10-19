@@ -187,7 +187,7 @@ pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
     let parsed = doc::parse::document(normalized, &mut ctx);
     let resolved = resolve::resolve(parsed, &mut ctx);
-    let shapes = shape::classify(&resolved, &mut ctx);
+    let shapes = shape::classify(&resolved, config.formats.integers, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
     let model = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
 
@@ -497,7 +497,7 @@ fn synthesize(
     Ok(match ty {
         TypeRef::Unit => Value::Null,
         TypeRef::Bool => json!(true),
-        TypeRef::I64 | TypeRef::U64 => json!(7),
+        TypeRef::Integer(_) => json!(7),
         TypeRef::F64 => json!(0.5),
         TypeRef::String => json!("a"),
         TypeRef::Value => json!({"probe": true}),

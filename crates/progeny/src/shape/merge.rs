@@ -149,8 +149,12 @@ pub(crate) struct View {
     pub(crate) max_items: Option<u32>,
     /// Whether some part says the value cannot be negative.
     pub(crate) unsigned: bool,
-    /// Whether some part's lower bound may also rule out zero, which an unsigned type admits.
-    pub(crate) bound_above_zero: bool,
+    /// The least integer every part's `minimum` and `exclusiveMinimum` admit.
+    pub(crate) lower: Option<Bound>,
+    /// The greatest integer every part's `maximum` and `exclusiveMaximum` admit.
+    pub(crate) upper: Option<Bound>,
+    /// Set when two parts name different `format`s, of which [`View::format`] holds the first.
+    pub(crate) formats_disagree: bool,
     pub(crate) format: Option<String>,
     pub(crate) content_encoding: Option<String>,
     pub(crate) content_media_type: Option<String>,
@@ -499,50 +503,115 @@ fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocume
         }
         view.union = Some(branches.iter().map(|&id| key_of(resolved, id)).collect());
     }
+    for (bound, exclusive) in [(&object.minimum, false), (&object.exclusive_minimum, true)] {
+        if let Some(bound) = bound {
+            let at = Bound::lower(bound, exclusive);
+            view.lower = Some(view.lower.map_or(at, |was| was.tighter(at, i128::max)));
+        }
+    }
+    for (bound, exclusive) in [(&object.maximum, false), (&object.exclusive_maximum, true)] {
+        if let Some(bound) = bound {
+            let at = Bound::upper(bound, exclusive);
+            view.upper = Some(view.upper.map_or(at, |was| was.tighter(at, i128::min)));
+        }
+    }
     if object.minimum.as_ref().is_some_and(non_negative)
         || object.exclusive_minimum.as_ref().is_some_and(non_negative)
     {
         view.unsigned = true;
     }
-    // A bound admits zero only when proven to, because `1e-400` reads as `0.0` in `f64`.
-    if object
-        .minimum
-        .as_ref()
-        .is_some_and(|bound| !at_most_zero(bound))
-        || object
-            .exclusive_minimum
-            .as_ref()
-            .is_some_and(|bound| !below_zero(bound))
-    {
-        view.bound_above_zero = true;
+}
+
+/// An integer bound: the least or greatest integer a numeric bound admits, or `Unknown` for a
+/// bound past `i128`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bound {
+    At(i128),
+    Unknown,
+}
+
+impl Bound {
+    /// The least integer `minimum: bound` admits, or `exclusiveMinimum: bound` where `exclusive`.
+    fn lower(bound: &Number, exclusive: bool) -> Self {
+        match rounded(bound) {
+            Some((floor, _)) if exclusive => floor.checked_add(1).map_or(Self::Unknown, Self::At),
+            Some((_, ceil)) => Self::At(ceil),
+            None => Self::Unknown,
+        }
+    }
+
+    /// The greatest integer `maximum: bound` admits, or `exclusiveMaximum: bound` where
+    /// `exclusive`.
+    fn upper(bound: &Number, exclusive: bool) -> Self {
+        match rounded(bound) {
+            Some((_, ceil)) if exclusive => ceil.checked_sub(1).map_or(Self::Unknown, Self::At),
+            Some((floor, _)) => Self::At(floor),
+            None => Self::Unknown,
+        }
+    }
+
+    /// The tighter of two bounds, by `pick`, and `Unknown` where either is.
+    fn tighter(self, other: Self, pick: fn(i128, i128) -> i128) -> Self {
+        match (self, other) {
+            (Self::At(left), Self::At(right)) => Self::At(pick(left, right)),
+            _ => Self::Unknown,
+        }
     }
 }
 
-/// Whether a bound is provably zero or negative.
-fn at_most_zero(bound: &Number) -> bool {
-    bound.as_i64().is_some_and(|value| value <= 0) || is_zero(bound) || below_zero(bound)
-}
-
-/// Whether a bound is zero however it is spelled: `0`, `0.0`, `-0.0` or `0e5`.
+/// A number rounded down and up to integers, read exactly from its text, exponent included, or
+/// `None` for one too large for `i128`.
 ///
-/// Its text decides, so under `exact-numbers` a bound like `1e-400`, which reads as `0.0` in an
-/// `f64`, is not zero.
-/// Without that feature `serde_json` has already read it as `0.0`, the way schemars writes every
-/// zero bound, and the two cannot be told apart.
-fn is_zero(bound: &Number) -> bool {
+/// A number between zero and one too small to scale, such as `1e-400`, rounds to `0` and `1`.
+pub(crate) fn rounded(bound: &Number) -> Option<(i128, i128)> {
     let text = bound.to_string();
-    let mantissa = text.split(['e', 'E']).next().unwrap_or_default();
-    mantissa
-        .chars()
-        .filter(char::is_ascii_digit)
-        .all(|digit| digit == '0')
+    let (negative, magnitude) = text
+        .strip_prefix('-')
+        .map_or((false, text.as_str()), |rest| (true, rest));
+    let (mantissa, exponent) = match magnitude.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+        None => (magnitude, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    // Trailing zeros of the fraction say nothing, and would only make the digits overflow.
+    let fraction = fraction.trim_end_matches('0');
+    let digits = format!("{whole}{fraction}");
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some((0, 0));
+    }
+    // The value is `digits` times ten to `shift`, with the digits' trailing zeros moved into the
+    // shift, so a long spelling of a small number still parses.
+    let significant = digits.trim_end_matches('0');
+    let zeros = i32::try_from(digits.len() - significant.len()).ok()?;
+    let shift = exponent
+        .checked_sub(i32::try_from(fraction.len()).ok()?)?
+        .checked_add(zeros)?;
+    let digits: i128 = significant.parse().ok()?;
+    let (floor, ceil) = if shift >= 0 {
+        let scaled = digits.checked_mul(10_i128.checked_pow(u32::try_from(shift).ok()?)?)?;
+        (scaled, scaled)
+    } else {
+        match u32::try_from(-i64::from(shift))
+            .ok()
+            .and_then(|places| 10_i128.checked_pow(places))
+        {
+            Some(divisor) if digits % divisor == 0 => (digits / divisor, digits / divisor),
+            Some(divisor) => (digits / divisor, (digits / divisor).checked_add(1)?),
+            None => (0, 1),
+        }
+    };
+    Some(if negative {
+        (-ceil, -floor)
+    } else {
+        (floor, ceil)
+    })
 }
 
-/// Whether a bound is provably negative.
-///
-/// A positive literal never rounds to a negative `f64`, so a negative reading is exact enough.
-fn below_zero(bound: &Number) -> bool {
-    bound.as_f64().is_some_and(|value| value < 0.0)
+/// A number's exact value, where it is a whole number an `i128` holds, however it is spelled:
+/// `-1`, `-1.0` and `-1e0` are all `-1`.
+pub(crate) fn integer_value(number: &Number) -> Option<i128> {
+    rounded(number).and_then(|(floor, ceil)| (floor == ceil).then_some(floor))
 }
 
 /// Whether a bound says the value cannot be negative.
@@ -615,6 +684,11 @@ fn fold_annotations(view: &mut View, object: &SchemaObject) {
         view.docs.description.clone_from(&object.description);
     }
     view.docs.deprecated |= object.deprecated.unwrap_or(false);
+    if let (Some(held), Some(other)) = (&view.format, &object.format)
+        && held != other
+    {
+        view.formats_disagree = true;
+    }
     for (slot, value) in [
         (&mut view.format, &object.format),
         (&mut view.content_encoding, &object.content_encoding),

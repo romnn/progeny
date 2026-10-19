@@ -685,8 +685,7 @@ impl Lower<'_> {
         match shape {
             Shape::Null => TypeRef::Unit,
             Shape::Scalar(Scalar::Bool) => TypeRef::Bool,
-            Shape::Scalar(Scalar::Integer { signed: true }) => TypeRef::I64,
-            Shape::Scalar(Scalar::Integer { signed: false }) => TypeRef::U64,
+            Shape::Scalar(Scalar::Integer(integer)) => TypeRef::Integer(*integer),
             Shape::Scalar(Scalar::Number) => TypeRef::F64,
             Shape::Scalar(Scalar::String) => TypeRef::String,
             Shape::Format(format) => TypeRef::Format(*format),
@@ -1095,7 +1094,7 @@ impl Lower<'_> {
                 .map_or_else(|| "Variant".to_owned(), |it| it.rust_name.to_string()),
             TypeRef::Unit => "Null".to_owned(),
             TypeRef::Bool => "Boolean".to_owned(),
-            TypeRef::I64 | TypeRef::U64 => "Integer".to_owned(),
+            TypeRef::Integer(_) => "Integer".to_owned(),
             TypeRef::F64 => "Number".to_owned(),
             TypeRef::String => "Text".to_owned(),
             TypeRef::Format(format) => format_name(*format).to_owned(),

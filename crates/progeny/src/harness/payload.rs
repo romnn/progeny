@@ -54,7 +54,7 @@ pub fn payloads(input: &[u8], config: &crate::Config) -> Result<Payloads, Reject
     let normalized = normalize::normalize(loaded.value, &mut ctx)?;
     let parsed = doc::parse::document(normalized, &mut ctx);
     let resolved = resolve::resolve(parsed, &mut ctx);
-    let shapes = shape::classify(&resolved, &mut ctx);
+    let shapes = shape::classify(&resolved, config.formats.integers, &mut ctx);
     let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
     let model = api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
 

@@ -630,7 +630,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
         let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
         Ok(super::run(&contracts, &api, config))
@@ -1535,7 +1535,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
         let rendered = super::run(&contracts, &api, &config)
@@ -1583,7 +1583,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
         let rendered = super::run(&contracts, &api, &config)
@@ -2052,7 +2052,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
         let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
         let rendered = super::run(&contracts, &api, &config)
@@ -2346,7 +2346,7 @@ mod tests {
         let normalized = normalize::normalize(document, &mut ctx)?;
         let parsed = doc_parse::document(normalized, &mut ctx);
         let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
         let contracts = contract::build(&resolved, &shapes, &module, &mut ctx)?;
         let api = crate::api::build(&resolved, &shapes, &contracts, &module, &mut ctx)?;
         let files = super::run(&contracts, &api, &module);
