@@ -2949,12 +2949,16 @@ mod tests {
                 {"$ref": format!("#/components/schemas/{second}")},
             ]})
         };
+        // A `type` beside its branches keeps `Inner` the type generated for it, so it is not read
+        // as its branches.
+        let mut typed = inner("B", "C");
+        typed["type"] = json!("object");
 
         // `Inner`'s own fallback reads `{"d": …}`, so `D` after it is never reached.
         assert!(degrades_as_wild_union(
             json!({
                 "B": object("b"), "C": object("c"), "D": object("d"),
-                "Inner": inner("B", "C"),
+                "Inner": typed,
                 "Outer": inner("Inner", "D"),
             }),
             "Outer",
@@ -2963,7 +2967,7 @@ mod tests {
         // Last, the same fallback only runs once `D` has turned the payload down.
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "B": object("b"), "C": object("c"), "D": object("d"),
-            "Inner": inner("B", "C"),
+            "Inner": typed,
             "Outer": inner("D", "Inner"),
         })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -2971,6 +2975,154 @@ mod tests {
             panic!("expected a union");
         };
         assert_eq!(outer.variants.len(), 2);
+    }
+
+    /// The closed objects a nested union is read as the branches of, each telling itself apart by
+    /// a member only it requires.
+    fn closed(name: &str) -> Value {
+        json!({
+            "type": "object", "additionalProperties": false, "required": [name],
+            "properties": {name: {"type": "string"}, "note": {"type": "string"}},
+        })
+    }
+
+    /// The keys of a union's variants, in the order they are tried.
+    fn variant_keys(shape: &Shape) -> Vec<ShapeRef> {
+        match shape {
+            Shape::Union(union) => union
+                .variants
+                .iter()
+                .map(|variant| variant.shape.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test_util::test]
+    fn a_nested_union_before_another_branch_is_read_as_its_branches() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "A": closed("a"), "B": closed("b"), "C": closed("c"),
+            // `Inner` is referenced on its own as well, and written inline in `Written`.
+            "Inner": {"anyOf": [reference("A"), reference("B")]},
+            "Holder": {"type": "object", "properties": {"inner": reference("Inner")}},
+            "Outer": {"anyOf": [reference("Inner"), reference("C")]},
+            "Written": {"anyOf": [{"anyOf": [reference("A"), reference("B")]}, reference("C")]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // Each union tries `A`, `B` and then `C`, which reads a `C` payload as a `C`.
+        let leaves = ["A", "B", "C"]
+            .map(|name| shape_key_of(&shapes, name).map(ShapeRef::Key))
+            .into_iter()
+            .collect::<eyre::Result<Vec<_>>>()?;
+        for name in ["Outer", "Written"] {
+            let shape = shape_of(&shapes, name)?;
+            assert!(
+                matches!(shape, Shape::Union(Union { tag: None, .. })),
+                "{shape:?}"
+            );
+            assert_eq!(variant_keys(shape), leaves, "{name}");
+        }
+
+        // `Inner` on its own is the union of its own two branches.
+        assert_eq!(variant_keys(shape_of(&shapes, "Inner")?), leaves[..2]);
+    }
+
+    #[test_util::test]
+    fn a_nested_union_read_as_its_branches_still_has_to_tell_them_apart() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        // `Open` declares no member `C` requires and keeps the ones it does not declare, so it
+        // reads a `C` payload whether or not `Inner` is read as its branches.
+        let open = json!({"type": "object", "properties": {"note": {"type": "string"}}});
+        assert!(degrades_as_wild_union(
+            json!({
+                "Open": open, "B": closed("b"), "C": closed("c"),
+                "Inner": {"anyOf": [reference("Open"), reference("B")]},
+                "Outer": {"anyOf": [reference("Inner"), reference("C")]},
+            }),
+            "Outer",
+        )?);
+    }
+
+    #[test_util::test]
+    fn a_nested_union_is_not_read_as_its_branches_where_that_reads_a_payload_wrongly() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+
+        // An integer both of `Number`'s branches admit is no `Number`, so it is the constant's,
+        // which `Number`'s first branch would take as a float.
+        assert!(degrades_as_wild_union(
+            json!({
+                "Number": {"oneOf": [{"type": "number"}, {"type": "integer"}]},
+                "Outer": {"anyOf": [reference("Number"), {"const": 9_007_199_254_740_993_u64}]},
+            }),
+            "Outer",
+        )?);
+
+        // `V` reads as an optional union once its nested `null` is a branch of its own, so `A`'s
+        // required `x` reads a missing member as `None` and `A` would take `B`'s payloads.
+        assert!(degrades_as_wild_union(
+            json!({
+                "V": {"anyOf": [
+                    {"anyOf": [{"type": "integer"}, {"type": "boolean"}, {"type": "null"}]},
+                    {"type": "string"},
+                ]},
+                "A": {
+                    "type": "object", "required": ["x"],
+                    "properties": {"x": reference("V"), "note": {"type": "string"}},
+                },
+                "B": {
+                    "type": "object", "additionalProperties": false, "required": ["y"],
+                    "properties": {"y": {"type": "string"}},
+                },
+                "Root": {"anyOf": [
+                    {"anyOf": [reference("A"), reference("B")]},
+                    {"type": "boolean"},
+                ]},
+            }),
+            "Root",
+        )?);
+
+        // Read as its branches, `Outer` is told apart by `kind` once `null` makes it optional,
+        // which leaves a tag nothing settles, so it is not read that way.
+        let tagged = |tag: &str| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["kind", "value"],
+                "properties": {"kind": {"const": tag}, "value": {"type": "string"}},
+            })
+        };
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "A": tagged("a"), "B": tagged("b"),
+            "Outer": {"anyOf": [{"anyOf": [reference("A"), {"type": "null"}]}, reference("B")]},
+        })))?;
+        let optional_tag = |shape: &Shape| {
+            matches!(
+                shape,
+                Shape::Optional(ShapeRef::Inline(inner))
+                    if matches!(**inner, Shape::Union(Union { tag: Some(_), .. }))
+            )
+        };
+        let outer = shape_of(&shapes, "Outer")?;
+        assert!(!optional_tag(outer), "{outer:?}");
+
+        // The same holds where `null` is a branch of the outer union, or its `type` admits it.
+        for outer in [
+            json!({"anyOf": [
+                {"anyOf": [reference("A"), reference("B")]},
+                reference("C"),
+                {"type": "null"},
+            ]}),
+            json!({"type": ["object", "null"], "anyOf": [
+                {"anyOf": [reference("A"), reference("B")]},
+                reference("C"),
+            ]}),
+        ] {
+            let (shapes, _) = shapes_of(with_schemas(json!({
+                "A": tagged("a"), "B": tagged("b"), "C": tagged("c"), "Outer": outer,
+            })))?;
+            let shape = shape_of(&shapes, "Outer")?;
+            assert!(!optional_tag(shape), "{shape:?}");
+        }
     }
 
     #[test_util::test]
@@ -3080,10 +3232,11 @@ mod tests {
         };
         // `Maybe` is an `Option<Inner>`, and `Inner`'s fallback reads `{"d": …}` before `D` is
         // tried, however many wrappers stand between them.
+        // `Inner`'s `type` keeps it the type generated for it.
         assert!(degrades_as_wild_union(
             json!({
                 "B": object("b"), "C": object("c"), "D": object("d"),
-                "Inner": {"oneOf": [
+                "Inner": {"type": "object", "oneOf": [
                     {"$ref": "#/components/schemas/B"},
                     {"$ref": "#/components/schemas/C"},
                 ]},
@@ -3445,24 +3598,38 @@ mod tests {
     fn a_nullable_string_branch_is_not_skipped_after_a_plain_string() {
         // The middle union's fallback reads `null` before the last branch is tried, whether that
         // branch lists `null` itself or is a union of strings and `null`.
+        // Its `type` keeps it the type generated for it.
+        let either = |last: &Value| {
+            json!({"Either": {"oneOf": [
+                {"type": "string"},
+                {
+                    "type": ["integer", "boolean"],
+                    "anyOf": [{"type": "integer"}, {"type": "boolean"}],
+                },
+                last,
+            ]}})
+        };
         let last = [
             json!({"type": ["string", "null"], "enum": ["a", null]}),
-            json!({"anyOf": [{"const": "a"}, {"const": "b"}, {"type": "null"}]}),
             json!({"anyOf": [{"enum": ["a", null]}, {"enum": ["b"]}]}),
         ];
         for last in last {
-            assert!(
-                degrades_as_wild_union(
-                    json!({"Either": {"oneOf": [
-                        {"type": "string"},
-                        {"anyOf": [{"type": "integer"}, {"type": "boolean"}]},
-                        last.clone(),
-                    ]}}),
-                    "Either",
-                )?,
-                "{last}"
-            );
+            assert!(degrades_as_wild_union(either(&last), "Either")?, "{last}");
         }
+
+        // A last union that lists `null` as a branch of its own is read as its branches, so the
+        // whole union is optional and reads `null` before any branch is tried.
+        let (shapes, diagnostics) = shapes_of(with_schemas(either(&json!({"anyOf": [
+            {"const": "a"},
+            {"const": "b"},
+            {"type": "null"},
+        ]}))))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            matches!(shape_of(&shapes, "Either")?, Shape::Optional(_)),
+            "{:?}",
+            shape_of(&shapes, "Either")?
+        );
     }
 
     #[test_util::test]
