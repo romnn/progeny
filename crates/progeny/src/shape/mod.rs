@@ -3394,6 +3394,23 @@ mod tests {
             .collect();
         assert_eq!(spellings, [vec!["a"], vec!["b", "c"], vec!["c"]]);
 
+        // `A`'s `x` lists a string beside an integer `type`, which is generated as a string enum,
+        // so it reads `B`'s `x` and refuses nothing.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": object(
+                    listing(&["a", "b"]),
+                    true,
+                    json!({"x": {"type": "integer", "enum": ["oops"]}}),
+                    &["type"],
+                ),
+                "B": object(listing(&["b", "c"]), true, json!({"x": {"type": "string"}}), &["type", "x"]),
+                "C": object(listing(&["c"]), true, json!({"x": {"type": "string"}}), &["type", "x"]),
+                "Field": {"anyOf": branches.clone()},
+            }),
+            "Field",
+        )?);
+
         // `A`'s `type` admits integers alone, so it admits none of the strings it lists.
         assert!(degrades_as_wild_union(
             json!({

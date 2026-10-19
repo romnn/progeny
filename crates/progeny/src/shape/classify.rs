@@ -820,8 +820,9 @@ fn takes_beside(
 /// A member a closed later one does not declare is on none, so an earlier one that insists on it
 /// refuses them all.
 /// A member both declare and the later one requires refuses the payload where the earlier one's
-/// type refuses every value the later one's schema gives it: a value of another kind, or an
-/// object refused in turn, as far as [`MAX_AMBIGUITY_DEPTH`].
+/// type refuses every value the later one's schema gives it: a value of another kind than an
+/// earlier member that lists no values, or an object refused in turn, as far as
+/// [`MAX_AMBIGUITY_DEPTH`].
 /// Unlike [`rejects`], a later object that admits members it does not declare is not taken to
 /// leave them out.
 fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usize) -> bool {
@@ -860,7 +861,11 @@ fn refuses(resolved: &ResolvedDocument, earlier: &View, later: &View, depth: usi
                 (Some(Kind::Object), Some(Kind::Object)) => {
                     refuses(resolved, &mine, &theirs, depth + 1)
                 }
-                (Some(left), Some(right)) => left != right && mine.union.is_none(),
+                // A member that lists values may be generated as a string enum, whatever its
+                // `type` says, so only one that lists none is the kind its `type` names.
+                (Some(left), Some(right)) => {
+                    left != right && mine.union.is_none() && listed_values(&mine).is_none()
+                }
                 _ => false,
             }
         })
