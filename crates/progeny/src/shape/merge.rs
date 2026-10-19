@@ -520,7 +520,22 @@ fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocume
 
 /// Whether a bound is provably zero or negative.
 fn at_most_zero(bound: &Number) -> bool {
-    bound.as_i64().is_some_and(|value| value <= 0) || below_zero(bound)
+    bound.as_i64().is_some_and(|value| value <= 0) || is_zero(bound) || below_zero(bound)
+}
+
+/// Whether a bound is zero however it is spelled: `0`, `0.0`, `-0.0` or `0e5`.
+///
+/// Its text decides, so under `exact-numbers` a bound like `1e-400`, which reads as `0.0` in an
+/// `f64`, is not zero.
+/// Without that feature `serde_json` has already read it as `0.0`, the way schemars writes every
+/// zero bound, and the two cannot be told apart.
+fn is_zero(bound: &Number) -> bool {
+    let text = bound.to_string();
+    let mantissa = text.split(['e', 'E']).next().unwrap_or_default();
+    mantissa
+        .chars()
+        .filter(char::is_ascii_digit)
+        .all(|digit| digit == '0')
 }
 
 /// Whether a bound is provably negative.
