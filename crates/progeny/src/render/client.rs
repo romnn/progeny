@@ -1323,8 +1323,9 @@ fn reserved_query(operation: &OperationContract) -> TokenStream {
             let wire = &param.wire_name;
             let style = style_tokens(param.style.style());
             let explode = param.style.explode();
+            let value_of = param_value(param);
             let body = quote! {
-                let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
+                let value = #value_of;
                 reserved.extend(support::style::query_pairs(#wire, &value, #style, #explode));
             };
             read_param(param, &field, &body)
@@ -1353,8 +1354,9 @@ fn query(operation: &OperationContract) -> TokenStream {
             let wire = &param.wire_name;
             let style = style_tokens(param.style.style());
             let explode = param.style.explode();
+            let value_of = param_value(param);
             let body = quote! {
-                let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
+                let value = #value_of;
                 query.extend(support::style::query_pairs(#wire, &value, #style, #explode));
             };
             read_param(param, &field, &body)
@@ -1395,8 +1397,9 @@ fn headers(operation: &OperationContract) -> TokenStream {
                 request = request.header(#wire, support::style::header_value(&value, #explode));
             }
         };
+        let value_of = param_value(param);
         let body = quote! {
-            let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
+            let value = #value_of;
             #set
         };
         // The flag `body_content_type` reads: a set `Content-Type` parameter means the body's
@@ -1434,8 +1437,9 @@ fn headers(operation: &OperationContract) -> TokenStream {
         .map(|param| {
             let field = ident(&param.rust_name);
             let wire = &param.wire_name;
+            let value_of = param_value(param);
             let body = quote! {
-                let value = ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null);
+                let value = #value_of;
                 cookies.push(support::style::cookie_pair(#wire, &value));
             };
             read_param(param, &field, &body)
@@ -1927,4 +1931,18 @@ fn request_name(operation: &OperationContract) -> proc_macro2::Ident {
 
 fn ident(name: &RustIdent) -> proc_macro2::Ident {
     format_ident!("{}", name.as_str())
+}
+
+/// The JSON value a parameter is serialized from.
+///
+/// A parameter declared with `content` is a JSON document: its value is that document's text,
+/// which the style then writes as it would any string.
+fn param_value(param: &ParamContract) -> TokenStream {
+    if param.style.content() {
+        quote! {
+            ::serde_json::Value::String(::serde_json::to_string(value).unwrap_or_default())
+        }
+    } else {
+        quote! { ::serde_json::to_value(value).unwrap_or(::serde_json::Value::Null) }
+    }
 }

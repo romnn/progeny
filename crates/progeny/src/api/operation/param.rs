@@ -158,7 +158,12 @@ impl Build<'_> {
         // `Option<Vec<String>>` — and the server, told it was reading a scalar, handed the typed
         // read a string it rejected. One source answering both questions is the fix, not a second
         // case in the old match.
-        let shape = param_shape(&ty, self.contracts);
+        // A JSON document is one value on the wire whatever its type, written as its text.
+        let shape = if style::json_content(parameter) {
+            ParamShape::Primitive
+        } else {
+            param_shape(&ty, self.contracts)
+        };
         (ty, shape)
     }
 }

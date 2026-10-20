@@ -445,6 +445,23 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
     }
 }
 
+/// A parameter's extracted value, read as JSON where the parameter is declared with a JSON
+/// `content`: such a parameter arrives as that document's text.
+fn content_source(param: &ParamContract, source: TokenStream) -> TokenStream {
+    if !param.style.content() {
+        return source;
+    }
+    quote! {
+        (#source).map(|found| {
+            found.map(|value| match value {
+                ::serde_json::Value::String(text) => ::serde_json::from_str(&text)
+                    .unwrap_or(::serde_json::Value::String(text)),
+                other => other,
+            })
+        })
+    }
+}
+
 /// The `axum` handler that stands between a request and one trait method.
 ///
 /// Generated as a free function per operation rather than a closure so that its extraction is
@@ -507,6 +524,7 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
                 }
                 Location::Cookie => quote! { incoming.cookie_value(#wire, #array, #object) },
             };
+            let source = content_source(param, source);
             quote! {
                 #field: match support::read(#source, #wire, #required, #operation_label, &[#(#strings),*]) {
                     ::std::result::Result::Ok(value) => value,

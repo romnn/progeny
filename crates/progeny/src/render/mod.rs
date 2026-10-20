@@ -2994,6 +2994,43 @@ mod tests {
         assert!(flat.contains("Self::Ok(body)=>"), "{server}");
     }
 
+    /// A parameter declared with a JSON `content` travels as one value, the document's text, and
+    /// the server reads that text back as JSON.
+    #[test_util::test]
+    fn a_content_parameter_travels_as_its_json_text() {
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/items": {"get": {
+                    "operationId": "list",
+                    "parameters": [{
+                        "name": "filter", "in": "query", "required": true,
+                        "content": {"application/json": {"schema": {
+                            "type": "object", "required": ["x"],
+                            "properties": {"x": {"type": "string"}},
+                        }}},
+                    }],
+                    "responses": {"200": {"description": "ok"}},
+                }}},
+            }),
+            &Config::default(),
+        )?;
+        let read = |path: &str| {
+            generated
+                .get(camino::Utf8Path::new(path))
+                .map(|text| text.split_whitespace().collect::<String>())
+                .ok_or_eyre("a generated file")
+        };
+        let client = read("src/client.rs")?;
+        assert!(
+            client.contains("::serde_json::Value::String(::serde_json::to_string(value)"),
+            "{client}"
+        );
+        let server = read("src/server.rs")?;
+        assert!(server.contains("::serde_json::from_str(&text)"), "{server}");
+        assert!(!server.contains("object:true"), "{server}");
+    }
+
     /// One operation with one request body of the given media type and schema.
     fn body_client(media_type: &str, entry: &Value) -> eyre::Result<String> {
         client(json!({
