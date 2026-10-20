@@ -2962,6 +2962,38 @@ mod tests {
         );
     }
 
+    /// A ranged arm's variant carries the status the handler answers with, which has to fall in
+    /// the range; an exact arm's variant does not.
+    #[test_util::test]
+    fn a_ranged_response_is_answered_with_the_status_the_handler_chose() {
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/pets": {"get": {
+                    "operationId": "listPets",
+                    "responses": {
+                        "200": {"description": "ok"},
+                        "4XX": {"description": "other client error"},
+                    },
+                }}},
+            }),
+            &Config::default(),
+        )?;
+        let server = generated
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?;
+        let flat: String = server.split_whitespace().collect();
+        assert!(
+            flat.contains("Status4xx{status:::std::primitive::u16,"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("Self::Status4xx{status,body}=>{ifstatus/100!=4u16"),
+            "{server}"
+        );
+        assert!(flat.contains("Self::Ok(body)=>"), "{server}");
+    }
+
     /// One operation with one request body of the given media type and schema.
     fn body_client(media_type: &str, entry: &Value) -> eyre::Result<String> {
         client(json!({
