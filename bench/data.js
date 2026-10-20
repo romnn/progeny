@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792452597011,
+  "lastUpdate": 1792457862592,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -922,6 +922,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 336.5546875,
             "range": "± 0",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "43be2e4d4c25c81da0fd45fafe1847f838f0bdcf",
+          "message": "fix(shape): judge a union member by the kind its generated type reads (#82)\n\n* feat(shape): tell closed branches apart by a required member that partitions them\n\nA union of closed objects that each require `type` from a list of their\nown, where several list `string`, degraded to `wild-union`: the generated\nenum for `type` is open, so by shape alone a branch listing `string` reads\n`{\"type\": \"number\"}` as itself. MCP's elicitation schemas are written so.\n\nSuch a union is now a carried-tag union whose variants may share a value.\nA payload is tried, in order, against the variants that list its value of\nthe member, and kept in the open arm where none reads it, in the strict\ndispatcher and the lenient decoder alike. Among the variants sharing a\nvalue, an earlier one may not read a later one's payloads, judged with\nthe member set aside, and an earlier closed struct whose shared members\nare the same schemas as the later one's reads its payloads as the later\none would. The variants are named after their types. A union with a\ndeclared or inherited discriminator is read by it instead.\n\nCorpus: wild-union occurrences fall in cloudflare (56 to 54), klaviyo (48\nto 42) and vapi (62 to 59). A cloudflare default that names no variant is\nnow reported and dropped.\n\nCloses #76\n\n* fix(shape): list a branch's own tag values, and check every variant sharing one\n\nA branch's values of the partitioning member came from its `enum` alone,\nso `{enum: [a, b], const: a}` was tried for `b`. They are now what the\nschema admits: an `enum` narrowed by a `const`, and no reading at all for\na list the merged view could not narrow, a union or a `null`.\n\nDefault and example validation, and the payload harness's expectation,\nlooked at the first variant a tag names; they now take any variant that\nlists it, the expectation in the order the decoders try them.\n\n* fix(shape): prove a partitioned branch refuses a later one only by what that one guarantees\n\nThe rejection test the partition borrowed took a member a later branch\ndoes not declare to be absent from its payloads, though an open branch\nadmits it, so a closed earlier branch's open enum could take a later\nopen branch's payload. The partition now credits only what the later\nschema guarantees: a member it requires is on every payload, and one a\nclosed schema does not declare is on none.\n\nA member's listed values are intersected over every schema it merges,\nso `allOf: [{const: b}, {const: a}]` lists nothing rather than `b`.\n\nCorpus: the cloudflare and klaviyo unions the weaker test typed degrade\nagain.\n\n* fix(shape): keep a partition's values to what a union beside them narrows them to\n\nThe values were intersected over a member's schemas, which restored\nvalues the merged view had narrowed away by a union beside the list.\nThey are now also intersected with the merged view, and a member any of\nwhose schemas is a union lists none.\n\n* fix(shape): list no partition values for a member whose type admits no string\n\nA member typed `integer` that lists strings admits nothing, but its\nlisted strings still put its branch in their groups.\n\n* refactor(shape): judge a partition's values by what the member's schema admits\n\nEach listed string is kept only where every schema the member merges\nadmits it, by the exact admission the list narrowing already uses, and a\nvalue that admission cannot settle refuses the partition. This replaces\nthe hand-written intersections, and reads a list a union narrows as the\nvalues it narrows it to.\n\n* fix(shape): prove two members disjoint by kind only where the earlier lists no values\n\nA member that lists values may be generated as a string enum whatever\nits `type` says, so its declared kind proves nothing about what it reads.\n\n* fix(shape): partition only plain closed branches, proved by their schemas\n\nThe partition leaned on analyses that do not follow the generated types\nclosely enough to prove anything: a branch's whole-payload reading, kinds\ninferred from `type`, merged views of several schemas and a truncated\n`allOf`. It now reads only plain closed objects: one schema with\n`additionalProperties: false` and no keyword beside its members that\nadmits or refuses anything else, whose tag member is one schema too. An\nearlier branch is faithful to a later one only where every member they\nshare is the same schema, and refuses it only where a member one\nrequires is one the other cannot carry, as far as members that are plain\nclosed objects themselves.\n\nA payload no variant listing its value reads is kept in the open arm,\nhowever many variants list it, in the strict and the lenient decoder.\n\n* fix(shape): read a partition member as written, and share a tag only where values repeat\n\nA member's values are read from the schema the branch writes for it,\nfollowed through its `$ref`s, and a member that combines schemas there\nor lists an empty `enum` has none, so an `allOf` too long to merge or an\n`enum` that admits nothing cannot widen them. A nested object is plain\nonly with `type: object`, because without it it admits `null` too.\nA partition whose values no two branches share is a tag like any other.\n\n* fix(shape): partition only where a value is shared, and see a truncated key as more than one schema\n\nA partition whose values no two branches share changed nothing worth\nhaving and could still reject a payload the degraded union kept, so it\nis declined. The walk along a member's references inspects the schema it\nends at, however far that is.\n\n`key_of` keeps the schema it starts from among the parts of a key whose\nexpansion it cut short, so a branch that lost schemas to the cap never\nlooks like the one closed object it kept.\n\n* fix(shape): partition only branches that reference nothing, and tags without a dynamic reference\n\n* fix(shape): keep a schema writing $dynamicRef beside $ref in its key\n\n* feat(render): let the caller leave the document's prose out of doc comments\n\nCloses #78\n\n* fix(render): keep a type's deprecation and a capture's note with the document's prose off\n\n* fix(shape): judge a union member by the kind its generated type reads\n\nCloses #77\n\n* fix(shape): read a member's `type: file` as the string it becomes",
+          "timestamp": "2026-10-20T02:50:30+02:00",
+          "tree_id": "7b4030ad15b6fa1e410180de3d711b9779edbd45",
+          "url": "https://github.com/romnn/progeny/commit/43be2e4d4c25c81da0fd45fafe1847f838f0bdcf"
+        },
+        "date": 1792457862019,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 30.853643333333334,
+            "range": "± 0.22",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2688.899739265442,
+            "range": "± 2.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.382864,
+            "range": "± 0.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1051.454426765442,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.807689,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 230.0625,
+            "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
