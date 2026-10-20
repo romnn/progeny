@@ -228,7 +228,11 @@ pub(crate) fn resolve(mut parsed: ParsedDocument, ctx: &mut Ctx) -> ResolvedDocu
         }
         counts.references += 1;
 
-        match index.resolve(written, &parsed.schemas) {
+        let found = match index.scoped(written, id, &parsed.schemas) {
+            Some(target) => Found::Exactly(target),
+            None => index.resolve(written, &parsed.schemas),
+        };
+        match found {
             Found::Exactly(target) => {
                 counts.resolved += 1;
                 targets.insert(id, target);
@@ -689,6 +693,7 @@ impl Index {
             // the reference named that scope itself. Strict JSON Schema would resolve it against
             // the innermost base URI; every OpenAPI document and every tool that reads one means
             // the root, and the corpus has exactly one non-root `$id` to disagree about.
+            // Where the scope does hold what the pointer names, [`Self::scoped`] reads it there.
             let address = match within {
                 Some(id) => join(store.address(id), &pointer),
                 None => pointer,
@@ -704,6 +709,35 @@ impl Index {
             Some(None) => Err(Reason::Ambiguous),
             None => Err(Reason::Missing),
         }
+    }
+
+    /// The schema a pointer names when it is read against the innermost `$id` around the schema
+    /// that writes it, where that scope is not the document root and the pointer names a schema in
+    /// it.
+    ///
+    /// JSON Schema reads a pointer against that scope, and so does progeny where the scope holds
+    /// what the pointer names: a nested `$id` bundling its own `$defs` means its own.
+    /// Where the scope holds nothing there, the pointer is read from the root, as [`Self::direct`]
+    /// does, because that is what a reference to `#/components/…` inside an `$id` means.
+    fn scoped(&self, written: &str, at: SchemaId, store: &SchemaStore) -> Option<SchemaId> {
+        let ("", Some(fragment)) = split(written) else {
+            return None;
+        };
+        let pointer = JsonPointer::parse(fragment).filter(|pointer| !pointer.is_root())?;
+        let mut scope = store.address(at).clone();
+        while !scope.is_root() {
+            let declares = self.addresses.get(&scope.to_string()).is_some_and(
+                |&id| matches!(store.get(id), Schema::Object(object) if object.id.is_some()),
+            );
+            if declares {
+                return self
+                    .addresses
+                    .get(&join(&scope, &pointer).to_string())
+                    .copied();
+            }
+            scope.pop();
+        }
+        None
     }
 
     /// Look an address up with letter case ignored.
@@ -1372,6 +1406,39 @@ mod tests {
             resolved.schemas().address(tag).to_string(),
             "/components/schemas/Pet/properties/tag"
         );
+    }
+
+    /// A pointer written inside a nested `$id` names what that scope holds there, as JSON Schema
+    /// reads it, and what the document root holds where the scope holds nothing.
+    #[test_util::test]
+    fn a_pointer_inside_a_nested_id_reads_the_scope_where_it_names_something() {
+        let (resolved, diagnostics) = resolve_document(with_schemas(json!({
+            "T": {"type": "string", "enum": ["a", "b"]},
+            "Tag": {
+                "$id": "https://example.test/tag",
+                "$defs": {"T": {"const": "a"}},
+                "properties": {
+                    "own": {"$ref": "#/$defs/T"},
+                    "root": {"$ref": "#/components/schemas/T"},
+                },
+            },
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let address = |member: &str| -> eyre::Result<String> {
+            let at = resolved
+                .schemas()
+                .iter()
+                .find(|(id, _)| {
+                    resolved.schemas().address(*id).to_string()
+                        == format!("/components/schemas/Tag/properties/{member}")
+                })
+                .map(|(id, _)| id)
+                .ok_or_eyre("the member is in the fixture")?;
+            let target = resolved.follow(at).ok_or_eyre("the member resolves")?;
+            Ok(resolved.schemas().address(target).to_string())
+        };
+        assert_eq!(address("own")?, "/components/schemas/Tag/$defs/T");
+        assert_eq!(address("root")?, "/components/schemas/T");
     }
 
     #[test_util::test]
