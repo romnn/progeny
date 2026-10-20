@@ -194,6 +194,9 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
 ///
 /// `None` means the query string did not carry the parameter at all, which is a different answer
 /// from "carried it empty" and the caller decides what each costs.
+///
+/// `reserved` is `allowReserved`: [`reserved_pair`] writes a `+` in the value as itself, so it is
+/// read back as itself rather than as a space.
 #[must_use]
 pub fn from_query(
     query: &str,
@@ -201,8 +204,9 @@ pub fn from_query(
     style: Style,
     explode: bool,
     array: bool,
+    reserved: bool,
 ) -> Option<Value> {
-    let pairs = split_query(query);
+    let pairs = split_query(query, !reserved);
     if style == Style::DeepObject {
         return deep_object(&pairs, name);
     }
@@ -215,13 +219,15 @@ pub fn from_query(
 }
 
 /// A query string as its decoded pairs, in wire order — the one place the splitting happens.
-fn split_query(query: &str) -> Vec<(String, String)> {
+///
+/// `plus` reads a `+` in a value as a space, the form-encoded spelling.
+fn split_query(query: &str, plus: bool) -> Vec<(String, String)> {
     query
         .split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| match pair.split_once('=') {
-            Some((key, value)) => (decode(key), decode(value)),
-            None => (decode(pair), String::new()),
+            Some((key, value)) => (decode(key, true), decode(value, plus)),
+            None => (decode(pair, true), String::new()),
         })
         .collect()
 }
@@ -292,8 +298,8 @@ fn split_one(value: &str, separator: char) -> Value {
     )
 }
 
-/// Undo the percent-encoding a query string carries.
-fn decode(text: &str) -> String {
+/// Undo the percent-encoding a query string carries, and with `plus`, the `+` for a space.
+fn decode(text: &str, plus: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -301,7 +307,7 @@ fn decode(text: &str) -> String {
         match bytes.get(index) {
             // `+` is the older spelling of a space in a form-encoded query. progeny writes `%20`,
             // but it reads both: what arrives was written by somebody else's client.
-            Some(b'+') => out.push(b' '),
+            Some(b'+') if plus => out.push(b' '),
             Some(b'%') => {
                 let hex = text
                     .get(index + 1..index + 3)
@@ -335,7 +341,7 @@ pub fn query_object(query: &str, specs: &[FormSpec]) -> Value {
     // Re-parsing the whole body per distinct name made a form body an unauthenticated
     // CPU-exhaustion vector: a hundred thousand one-byte members cost a hundred thousand full
     // decodes — before any type check ran and inside the byte ceiling.
-    let pairs = split_query(query);
+    let pairs = split_query(query, true);
     let mut grouped: std::collections::BTreeMap<&str, Vec<&str>> =
         std::collections::BTreeMap::new();
     for (key, value) in &pairs {
@@ -713,11 +719,12 @@ fn percent(out: &mut String, byte: u8) {
 /// One `name=value` query pair under `allowReserved: true`.
 ///
 /// RFC 6570's reserved expansion, which is what the flag asks for: the value's RFC 3986
-/// reserved characters — the gen-delims `:/?#[]@` and the sub-delims `!$&'()*+,;=` — reach the
-/// wire unencoded, along with `%` so an already-encoded triplet is not encoded twice. That can
-/// spell `&` and `=` into the value; the document turned the protection off, and re-encoding
-/// them would be exactly the corruption the flag exists to prevent. The name is an ordinary
-/// component and keeps the conservative encoding.
+/// reserved characters reach the wire unencoded, along with `%` so an already-encoded triplet is
+/// not encoded twice.
+/// OpenAPI 3.1.1 keeps the exceptions a query string needs: `[`, `]` and `#`, which a query
+/// cannot carry, and `&` and `+`, which form encoding reads as a pair boundary and a space, are
+/// still encoded, so the value reads back as written.
+/// The name is an ordinary component and keeps the conservative encoding.
 pub fn reserved_pair(name: &str, value: &str) -> String {
     let mut out = encode(name);
     out.push('=');
@@ -731,18 +738,13 @@ pub fn reserved_pair(name: &str, value: &str) -> String {
                     | b':'
                     | b'/'
                     | b'?'
-                    | b'#'
-                    | b'['
-                    | b']'
                     | b'@'
                     | b'!'
                     | b'$'
-                    | b'&'
                     | b'\''
                     | b'('
                     | b')'
                     | b'*'
-                    | b'+'
                     | b','
                     | b';'
                     | b'='
@@ -771,10 +773,39 @@ mod tests {
     fn a_reserved_value_keeps_its_reserved_characters_and_nothing_else() {
         assert_eq!(
             super::reserved_pair("next", "https://example.test/a?x=1&y=%2F z"),
-            "next=https://example.test/a?x=1&y=%2F%20z"
+            "next=https://example.test/a?x=1%26y=%2F%20z"
         );
         // The name is an ordinary component: its reserved characters do not pass.
         assert_eq!(super::reserved_pair("a&b", "c"), "a%26b=c");
+    }
+
+    /// A reserved value survives the trip: `#` would end the query and `&` the pair, so both are
+    /// escaped, and the `+` written as itself is read back as itself.
+    #[test]
+    fn a_reserved_value_reads_back_as_written() {
+        for value in [
+            "a#b",
+            "2024-01-01T00:00:00+02:00",
+            "https://example.test/?x=1&y=2",
+        ] {
+            let pair = super::reserved_pair("q", value);
+            assert!(!pair.contains('#') && !pair.contains('&'), "{pair}");
+            assert_eq!(
+                super::from_query(&pair, "q", Style::Form, true, false, true),
+                Some(json!(value)),
+                "{pair}"
+            );
+        }
+        // A `+` another client sends as itself under the flag is itself, and an ordinary
+        // parameter still reads it as the form-encoded space.
+        assert_eq!(
+            super::from_query("q=a+b", "q", Style::Form, true, false, true),
+            Some(json!("a+b"))
+        );
+        assert_eq!(
+            super::from_query("q=a+b", "q", Style::Form, true, false, false),
+            Some(json!("a b"))
+        );
     }
 
     #[test]
@@ -888,7 +919,7 @@ mod tests {
             .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
             .collect::<Vec<_>>()
             .join("&");
-        super::from_query(&query, "p", style, explode, value.is_array())
+        super::from_query(&query, "p", style, explode, value.is_array(), false)
     }
 
     use serde_json as json_types;
@@ -1031,13 +1062,16 @@ mod tests {
     fn a_parameter_the_query_never_carried_is_absent_rather_than_empty() {
         // The distinction the whole optional-parameter rule rests on: a server has to tell "not
         // sent" from "sent empty", and only `None` says the first.
-        assert_eq!(super::from_query("", "p", Style::Form, true, false), None);
         assert_eq!(
-            super::from_query("q=1", "p", Style::Form, true, false),
+            super::from_query("", "p", Style::Form, true, false, false),
             None
         );
         assert_eq!(
-            super::from_query("p=", "p", Style::Form, true, false),
+            super::from_query("q=1", "p", Style::Form, true, false, false),
+            None
+        );
+        assert_eq!(
+            super::from_query("p=", "p", Style::Form, true, false, false),
             Some(json!(""))
         );
     }
@@ -1045,22 +1079,22 @@ mod tests {
     #[test]
     fn what_arrives_percent_encoded_comes_back_as_it_was_written() {
         assert_eq!(
-            super::from_query("p=a%20b%26c", "p", Style::Form, true, false),
+            super::from_query("p=a%20b%26c", "p", Style::Form, true, false, false),
             Some(json!("a b&c"))
         );
         // `+` is the older spelling of a space. progeny writes `%20` and reads both, because what
         // arrives was written by somebody else's client.
         assert_eq!(
-            super::from_query("p=a+b", "p", Style::Form, true, false),
+            super::from_query("p=a+b", "p", Style::Form, true, false, false),
             Some(json!("a b"))
         );
         assert_eq!(
-            super::from_query("p=100%25", "p", Style::Form, true, false),
+            super::from_query("p=100%25", "p", Style::Form, true, false, false),
             Some(json!("100%"))
         );
         // A `%` that is not an escape is a `%`, which is the only alternative to refusing.
         assert_eq!(
-            super::from_query("p=50%zz", "p", Style::Form, true, false),
+            super::from_query("p=50%zz", "p", Style::Form, true, false, false),
             Some(json!("50%zz"))
         );
     }
