@@ -3125,7 +3125,7 @@ mod tests {
             .get(camino::Utf8Path::new("src/server.rs"))
             .ok_or_eyre("a server")?;
         assert!(
-            server.contains("mismatched_media_type(\"image/*\")"),
+            server.contains("mismatched_media_type(&[\"image/*\", \"application/octet-stream\"])"),
             "{server}"
         );
     }
