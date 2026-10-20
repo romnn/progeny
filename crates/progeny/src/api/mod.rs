@@ -122,6 +122,11 @@ pub(crate) struct OperationContract {
     /// [`ApiModel::schemes`] numbers; empty when the operation requires no scheme the client
     /// sends.
     pub(crate) security: Vec<Vec<usize>>,
+    /// The server the operation or its path item declares in place of the document's, which the
+    /// client sends this operation to instead of its base URL.
+    ///
+    /// Only an absolute URL without variables, as [`ApiModel::default_server_url`] requires.
+    pub(crate) server: Option<String>,
 }
 
 impl OperationContract {
@@ -457,6 +462,53 @@ pub(crate) mod tests {
         assert_eq!(model.operations().len(), 1);
         assert_eq!(model.operations()[0].rust_name.as_str(), "list_pets");
         assert_eq!(model.operations()[0].method, super::Method::Get);
+    }
+
+    /// An operation, or else its path item, may name a server of its own, and the operation goes
+    /// there; one with variables is reported and left to the client's base URL.
+    #[test_util::test]
+    fn an_operation_goes_to_the_server_it_declares() {
+        let ok = json!({"200": {"description": "ok"}});
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/assets": {
+                "servers": [{"url": "https://uploads.example.test/"}],
+                "post": {"operationId": "upload", "responses": ok},
+                "get": {
+                    "operationId": "list",
+                    "servers": [{"url": "https://cdn.example.test"}],
+                    "responses": ok,
+                },
+            },
+            "/regional": {"get": {
+                "operationId": "regional",
+                "servers": [{"url": "https://{region}.example.test"}],
+                "responses": ok,
+            }},
+            "/plain": {"get": {"operationId": "plain", "responses": ok}},
+        })))?;
+        let server = |name: &str| {
+            model
+                .operations()
+                .iter()
+                .find(|operation| operation.rust_name.as_str() == name)
+                .map(|operation| operation.server.clone())
+        };
+        assert_eq!(
+            server("upload"),
+            Some(Some("https://uploads.example.test".to_owned()))
+        );
+        assert_eq!(
+            server("list"),
+            Some(Some("https://cdn.example.test".to_owned()))
+        );
+        assert_eq!(server("regional"), Some(None));
+        assert_eq!(server("plain"), Some(None));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.detail().contains("{region}")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test_util::test]

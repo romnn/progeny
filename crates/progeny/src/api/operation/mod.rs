@@ -283,6 +283,7 @@ impl Build<'_> {
             pagination: None,
             origin: at.clone(),
             security,
+            server: server_of(operation, item, at, ctx),
         };
         // One sibling method per further declared media type. Everything but the name, the body,
         // and the sentence saying which encoding it sends is the primary's: same route, same
@@ -428,6 +429,42 @@ fn docs_of(operation: &Operation) -> Docs {
         description: operation.description.clone(),
         deprecated: operation.deprecated.unwrap_or(false),
     }
+}
+
+/// The server an operation, or else its path item, declares in place of the document's.
+///
+/// Any other URL, relative, templated or of another scheme, is reported and left to the client's
+/// base URL, for the reason [`super::ApiModel::default_server_url`] declines them.
+fn server_of(
+    operation: &Operation,
+    item: &PathItem,
+    at: &JsonPointer,
+    ctx: &mut Ctx,
+) -> Option<String> {
+    let url = operation
+        .servers
+        .as_deref()
+        .or(item.servers.as_deref())?
+        .first()?
+        .url
+        .clone()?;
+    if !url.contains('{') && (url.starts_with("https://") || url.starts_with("http://")) {
+        return Some(url.trim_end_matches('/').to_owned());
+    }
+    // An empty URL is the document's own server, which the client already sends to.
+    if url.is_empty() {
+        return None;
+    }
+    ctx.report(Diagnostic::new(
+        BreakageClass::UnsupportedConstruct,
+        Action::Degrade,
+        at.child("servers"),
+        format!(
+            "the operation declares the server `{url}`, which is not an absolute `http` or `https` \
+             URL without variables; the request goes to the client's base URL instead"
+        ),
+    ));
+    None
 }
 
 #[cfg(test)]
