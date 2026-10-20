@@ -5,8 +5,9 @@ on:
   # request would otherwise run every job twice for one commit.
   push:
     branches: [main]
-  # No `edited`: a run for it could only skip its jobs, and a skipped job takes the place of the
-  # real result for the same commit in the pull request's checks.
+  # No `edited`: a description edit would have to skip its jobs, and a skipped job takes the place
+  # of the real result for the same commit in the pull request's checks. Without it a retargeted
+  # pull request is not rechecked until its next push.
   pull_request:
     types: [opened, synchronize, reopened]
 
