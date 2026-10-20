@@ -49,7 +49,7 @@ pub enum Content<'de> {
     U64(u64),
     F64(f64),
     /// A number `serde_json`'s `arbitrary_precision` handed over as its digits, kept as written
-    /// because neither 64-bit integer holds it exactly.
+    /// because neither a 64-bit integer nor a float holds it exactly.
     Number(String),
     Str(&'de str),
     String(String),
@@ -221,8 +221,17 @@ impl<'de> Visitor<'de> for ContentVisitor {
                     if let Ok(number) = digits.parse::<i64>() {
                         return Ok(Content::I64(number));
                     }
-                    // A float re-spells it and loses the digits a `serde_json::Number` keeps, so
-                    // anything else is replayed as the same token it arrived as.
+                    // A float holds the value of any decimal of at most 15 significant digits,
+                    // and every visitor takes a float, serde's own untagged and flattened
+                    // buffering included. A longer number a float would change, so it is
+                    // replayed as the same token it arrived as, which keeps it exact for a
+                    // `serde_json::Number`.
+                    if let Ok(number) = digits.parse::<f64>()
+                        && number.is_finite()
+                        && significant_digits(digits) <= 15
+                    {
+                        return Ok(Content::F64(number));
+                    }
                     return Ok(Content::Number(digits.to_owned()));
                 }
             }
@@ -438,6 +447,14 @@ where
         bool char bytes byte_buf
         unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
+}
+
+/// How many significant digits a JSON number spells: its mantissa without sign, point, or the
+/// zeros at either end.
+fn significant_digits(number: &str) -> usize {
+    let mantissa = number.split(['e', 'E']).next().unwrap_or(number);
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    digits.trim_start_matches('0').trim_end_matches('0').len()
 }
 
 /// The member name `serde_json`'s `arbitrary_precision` hands a number over under, as the one
@@ -2299,12 +2316,20 @@ mod tests {
         assert_eq!(big, u64::MAX);
     }
 
-    /// A number no 64-bit integer holds keeps its digits through the buffer: arbitrary JSON reads
-    /// it as written, a 128-bit integer reads it exactly, and a float still reads it as a float.
+    /// A number neither a 64-bit integer nor a float holds keeps its digits through the buffer:
+    /// arbitrary JSON reads it as written, a 128-bit integer reads it exactly, and a float still
+    /// reads it as a float.
     /// Without `arbitrary_precision`, `serde_json` hands such a number over as a float itself.
     #[cfg(feature = "exact-numbers")]
     #[test_util::test]
     fn a_number_keeps_its_digits_through_the_buffered_path_under_arbitrary_precision() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(untagged)]
+        enum Amount {
+            Numeric(f64),
+            Other(serde_json::Value),
+        }
+
         let replay =
             |json: &'static str| -> eyre::Result<ContentDeserializer<'static, serde_json::Error>> {
                 let captured: Content<'static> = serde_json::from_str(json)?;
@@ -2312,7 +2337,7 @@ mod tests {
             };
         for written in [
             "12345678901234567890123",
-            "1.10",
+            "0.12345678901234567890",
             "-340282366920938463463374607431768211455",
         ] {
             let value = serde_json::Value::deserialize(replay(written)?)?;
@@ -2325,6 +2350,13 @@ mod tests {
         assert_eq!(
             i128::deserialize(replay("-12345678901234567890123")?)?,
             -12_345_678_901_234_567_890_123
+        );
+        // A number a float holds stays a float, which serde's own untagged buffering reads as
+        // one.
+        assert_eq!(Amount::deserialize(replay("1.5")?)?, Amount::Numeric(1.5));
+        assert_eq!(
+            Amount::deserialize(replay("19.90")?)?,
+            Amount::Numeric(19.9)
         );
         let float = f64::deserialize(replay("1.10")?)?;
         assert!((float - 1.1).abs() < f64::EPSILON);
