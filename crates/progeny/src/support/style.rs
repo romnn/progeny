@@ -139,6 +139,9 @@ pub struct FormSpec {
     /// that guessed `false` there made the reader drop every occurrence after the first. `None`
     /// hands the question to the repetition heuristic, exactly as if the row were absent.
     pub array: Option<bool>,
+    /// Whether the member is a string, or a list of strings, whose text the server keeps as it
+    /// arrived rather than re-reading it as the value it spells.
+    pub text: bool,
 }
 
 /// An `application/x-www-form-urlencoded` body.
@@ -1148,6 +1151,7 @@ mod tests {
             style: Style::SpaceDelimited,
             explode: false,
             array: Some(true),
+            text: false,
         }];
         assert_eq!(form_body(&json!({"tag": ["a", "b"]}), &specs), "tag=a%20b");
     }
@@ -1165,6 +1169,7 @@ mod tests {
             style: Style::Form,
             explode: true,
             array: None,
+            text: false,
         }];
         assert_eq!(
             query_object("tag=a&tag=b", &specs),

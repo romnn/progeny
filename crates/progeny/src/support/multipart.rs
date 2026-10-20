@@ -54,6 +54,9 @@ pub struct PartSpec {
     pub repeated: bool,
     /// The per-part content type, when the body's `encoding` declared one.
     pub content_type: Option<&'static str>,
+    /// Whether the member is a string, or a list of strings, whose text the server keeps as it
+    /// arrived rather than re-reading it as the value it spells.
+    pub text: bool,
 }
 
 /// The `Content-Type` header value and the body bytes.
@@ -644,6 +647,7 @@ mod tests {
             kind: PartKind::File,
             repeated: false,
             content_type: None,
+            text: false,
         }];
         let out = rendered(&json!({"file": "raw bytes"}), &specs)?;
         assert!(out.contains("name=\"file\"; filename=\"file\""), "{out}");
@@ -661,6 +665,7 @@ mod tests {
             kind: PartKind::Json,
             repeated: false,
             content_type: Some("application/json"),
+            text: false,
         }];
         let out = rendered(&json!({"metadata": {"a": 1}}), &specs)?;
         assert!(out.contains("Content-Type: application/json"), "{out}");
@@ -684,6 +689,7 @@ mod tests {
             kind: PartKind::File,
             repeated: true,
             content_type: None,
+            text: false,
         }];
         let out = rendered(&json!({"files": ["first", "second"]}), &specs)?;
         assert_eq!(out.matches("name=\"files\"; filename=\"file\"").count(), 2);
@@ -700,6 +706,7 @@ mod tests {
                 kind: PartKind::Text,
                 repeated: true,
                 content_type: None,
+                text: false,
             }],
         )?;
         assert_eq!(out.matches("name=\"tag\"").count(), 2);
@@ -772,6 +779,7 @@ mod tests {
                 kind: PartKind::Json,
                 repeated: false,
                 content_type: None,
+                text: false,
             }],
         )?;
         assert_eq!(out.matches("name=\"payload\"").count(), 1, "{out}");
@@ -789,6 +797,7 @@ mod tests {
                 kind: PartKind::Text,
                 repeated: true,
                 content_type: None,
+                text: false,
             }],
         )?;
         assert_eq!(out.matches("name=\"tag\"").count(), 1, "{out}");
@@ -806,18 +815,21 @@ mod tests {
                 kind: PartKind::File,
                 repeated: false,
                 content_type: None,
+                text: false,
             },
             PartSpec {
                 name: "tags",
                 kind: PartKind::Text,
                 repeated: true,
                 content_type: None,
+                text: false,
             },
             PartSpec {
                 name: "meta",
                 kind: PartKind::Json,
                 repeated: false,
                 content_type: None,
+                text: false,
             },
         ];
         let original = json!({
@@ -848,6 +860,7 @@ mod tests {
             kind: PartKind::File,
             repeated: false,
             content_type: None,
+            text: false,
         }];
         let (content_type, bytes) = super::body(&value, &specs).ok_or_eyre("a form body")?;
         let boundary = super::boundary_of(&content_type).ok_or_eyre("a declared boundary")?;
@@ -901,6 +914,7 @@ mod tests {
             kind: PartKind::File,
             repeated: false,
             content_type: None,
+            text: false,
         }];
         let (content_type, bytes) = super::body(&value, &specs).ok_or_eyre("a form body")?;
         let boundary = super::boundary_of(&content_type).ok_or_eyre("a declared boundary")?;
@@ -999,6 +1013,7 @@ mod tests {
             kind: PartKind::File,
             repeated: false,
             content_type: None,
+            text: false,
         }];
         // "raw \xFF bytes" — content no UTF-8 string could carry.
         let encoded = "cmF3IP8gYnl0ZXM=";
@@ -1033,6 +1048,7 @@ mod tests {
             kind: PartKind::File,
             repeated: false,
             content_type: None,
+            text: false,
         }];
         let body =
             b"--b\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\ncontent\r\n--b--\r\n";
@@ -1062,6 +1078,7 @@ mod tests {
             kind: PartKind::Text,
             repeated: true,
             content_type: None,
+            text: false,
         }];
         let (content_type, bytes) = super::body(&json!({"tag": ["x", "y"]}), &specs)
             .ok_or_eyre("test fixture should contain this value")?;

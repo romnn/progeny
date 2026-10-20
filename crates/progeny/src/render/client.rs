@@ -1625,6 +1625,7 @@ pub(super) fn part_specs(parts: &[PartSpec]) -> TokenStream {
             }
         );
         let repeated = part.repeated;
+        let text = part.text;
         let content_type = part.content_type.as_ref().map_or_else(
             || quote! { ::std::option::Option::None },
             |content_type| quote! { ::std::option::Option::Some(#content_type) },
@@ -1635,6 +1636,7 @@ pub(super) fn part_specs(parts: &[PartSpec]) -> TokenStream {
                 kind: support::multipart::PartKind::#kind,
                 repeated: #repeated,
                 content_type: #content_type,
+                text: #text,
             }
         }
     });
@@ -1651,8 +1653,11 @@ pub(super) fn form_specs(specs: &[FormSpec]) -> TokenStream {
             || quote! { ::std::option::Option::None },
             |array| quote! { ::std::option::Option::Some(#array) },
         );
+        let text = spec.text;
         quote! {
-            support::style::FormSpec { name: #name, style: #style, explode: #explode, array: #array }
+            support::style::FormSpec {
+                name: #name, style: #style, explode: #explode, array: #array, text: #text,
+            }
         }
     });
     quote! { &[#(#rows),*] }

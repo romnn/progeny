@@ -233,9 +233,15 @@ pub async fn form_body<T: ::serde::de::DeserializeOwned>(
     };
     let text = ::std::string::String::from_utf8_lossy(&bytes);
     // Through the same reading a query parameter gets: a form body carries no types either.
-    Ok(Some(super::serve::typed_body(super::style::query_object(
-        &text, specs,
-    ))?))
+    let strings: Vec<&str> = specs
+        .iter()
+        .filter(|spec| spec.text)
+        .map(|spec| spec.name)
+        .collect();
+    Ok(Some(super::serve::typed_body(
+        super::style::query_object(&text, specs),
+        &strings,
+    )?))
 }
 
 /// A `multipart/form-data` body, read back into the type its parts came from.
@@ -257,7 +263,12 @@ pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
         return Ok(None);
     };
     let value = super::multipart::parse(&bytes, &boundary, specs)?;
-    Ok(Some(super::serve::typed_body(value)?))
+    let strings: Vec<&str> = specs
+        .iter()
+        .filter(|spec| spec.text)
+        .map(|spec| spec.name)
+        .collect();
+    Ok(Some(super::serve::typed_body(value, &strings)?))
 }
 
 /// A text body.
