@@ -127,22 +127,27 @@ impl Incoming {
     /// shape the description gave it and percent-decoded — the writing side encodes every
     /// element so caller data cannot spell a crumb boundary.
     ///
+    /// Every `Cookie` field is searched: an HTTP/2 client may send each cookie in a field of its
+    /// own (RFC 9113 §8.2.3).
+    ///
     /// # Errors
-    /// Returns [`RequestError::Header`] when the header is present and is not valid UTF-8.
+    /// Returns [`RequestError::Header`] when a field is not valid UTF-8.
     pub fn cookie_value(
         &self,
         name: &str,
         array: bool,
         object: bool,
     ) -> Result<Option<Value>, RequestError> {
-        let Some(header) = self.headers.get(::axum::http::header::COOKIE) else {
-            return Ok(None);
-        };
-        let header = header.to_str()?;
-        Ok(header.split(';').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key.trim() == name).then(|| super::style::from_cookie(value.trim(), array, object))
-        }))
+        for header in self.headers.get_all(::axum::http::header::COOKIE) {
+            let found = header.to_str()?.split(';').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key.trim() == name).then(|| super::style::from_cookie(value.trim(), array, object))
+            });
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
     }
 
     /// The base media type the request declares, when it declares one and it is not the one
@@ -388,6 +393,27 @@ mod tests {
             headers,
             body: ::axum::body::Body::empty(),
         }
+    }
+
+    /// An HTTP/2 client may send each cookie in a `Cookie` field of its own.
+    #[test_util::test]
+    fn a_cookie_is_read_from_whichever_field_carries_it() {
+        let mut incoming = incoming_with(None);
+        for field in ["theme=dark", "session=abc; lang=en"] {
+            incoming.headers.append(
+                ::axum::http::header::COOKIE,
+                ::axum::http::HeaderValue::from_static(field),
+            );
+        }
+        assert_eq!(
+            incoming.cookie_value("session", false, false)?,
+            Some(serde_json::Value::String("abc".to_owned()))
+        );
+        assert_eq!(
+            incoming.cookie_value("theme", false, false)?,
+            Some(serde_json::Value::String("dark".to_owned()))
+        );
+        assert_eq!(incoming.cookie_value("missing", false, false)?, None);
     }
 
     #[test_util::test]
