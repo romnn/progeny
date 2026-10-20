@@ -1,0 +1,89 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+name: pages
+on:
+  # Every push to main runs the bench workflow, which deploys the site after it records the
+  # benchmark, so the dashboard at /bench/ shows the new history.
+  # A push trigger here would deploy each commit twice.
+  workflow_call: {}
+  workflow_dispatch: {}
+
+env:
+  MISE_GITHUB_TOKEN: ${{ github.token }}
+  MISE_AUTO_INSTALL: "0"
+
+# Allow the GITHUB_TOKEN to deploy to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment; don't cancel an in-progress production deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # The site as main holds it now, whichever run asked for the deploy.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      # Go and the extended Hugo build come from mise.
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+          cache: true
+          env: false
+      - run: mise install task go "asdf:NeoHsu/asdf-hugo"
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v6
+      # The same `task docs:build` used locally.
+      - name: Build docs
+        run: task docs:build -- --baseURL "${{ steps.pages.outputs.base_url }}/"
+      # The benchmark dashboard beside the documentation, at /bench/, with the history the bench
+      # workflow records on `gh-pages` (read through the API, no checkout).
+      # Installed after the Hugo build, which may clean docs/public.
+      # Before the first benchmark run there is no history yet, and the documentation still deploys.
+      # The settings split each benchmark name into its document, strategy, and metric.
+      - name: Install the benchmark dashboard
+        uses: romnn/benchtrail@v0.3.0
+        with:
+          path: docs/public/bench
+          benchmark-data-dir-path: bench
+          allow-missing-history: true
+          settings: |
+            {
+              "title": "progeny compile cost",
+              "links": [{ "label": "Documentation", "url": "../" }],
+              "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
+              "label": "{{document}} / {{strategy}}",
+              "metrics": {
+                "cpu": { "label": "CPU time", "direction": "lower" },
+                "peak rss": { "label": "Peak RSS", "direction": "lower" }
+              },
+              "dimensions": {
+                "document": { "label": "Document" },
+                "strategy": { "label": "Serde strategy" }
+              },
+              "colorBy": "document"
+            }
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

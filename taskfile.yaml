@@ -150,12 +150,26 @@ tasks:
     cmds:
       - cargo run -p xtask --release -- bench-runtime {{.CLI_ARGS}}
 
-  docs:
+  docs:cargo:
     desc: "open the rustdoc API documentation preview"
     env:
       RUSTDOCFLAGS: "--cfg docsrs"
     cmds:
       - cargo +nightly watchdoc --all-features {{.CLI_ARGS}}
+
+  docs:build:
+    desc: "build the static documentation site into docs/public"
+    dir: docs
+    cmds:
+      - hugo --minify --gc {{.CLI_ARGS}}
+
+  docs:serve:
+    desc: "serve the documentation website with hot reload (needs hugo extended + go)"
+    aliases: [docs]
+    dir: docs
+    interactive: true
+    cmds:
+      - hugo server --disableFastRender {{.CLI_ARGS}}
 
   format:
     desc: "format cargo workspace"

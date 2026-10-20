@@ -10,6 +10,8 @@ extend-exclude = [
   "corpus/snapshots/**",
   # Fuzzer inputs are mangled text by design.
   "fuzz/regressions/**",
+  # The generated catppuccin chroma stylesheet, whose class names like `.nd` trip the spellchecker.
+  "docs/assets/_syntax.scss",
 ]
 
 [default]

@@ -1,0 +1,29 @@
+{{- /* Manual light/dark toggle.
+  Persists to localStorage; falls back to OS preference. */ -}}
+<button type="button" id="pg-theme-btn" class="pg-theme-btn" aria-label="Toggle light and dark theme" aria-pressed="false">
+  <span class="pg-theme-btn__icon" aria-hidden="true">☾</span>
+  <span class="pg-theme-btn__label">Dark</span>
+</button>
+<script>
+(function () {
+  var btn = document.getElementById('pg-theme-btn');
+  if (!btn) return;
+  var root = document.documentElement;
+  var icon = btn.querySelector('.pg-theme-btn__icon');
+  var label = btn.querySelector('.pg-theme-btn__label');
+  function mode() { return root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'; }
+  function render() {
+    var m = mode();
+    icon.textContent = m === 'dark' ? '☀' : '☾';
+    label.textContent = m === 'dark' ? 'Light' : 'Dark';
+    btn.setAttribute('aria-pressed', String(m === 'dark'));
+  }
+  btn.addEventListener('click', function () {
+    var next = mode() === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('pg-theme', next); } catch (e) {}
+    render();
+  });
+  render();
+})();
+</script>

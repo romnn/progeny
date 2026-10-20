@@ -1,0 +1,284 @@
+@import "syntax";
+
+/* Geist + Geist Mono (variable), the same pairing as the sibling projects. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('fonts/geist-sans.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('fonts/geist-mono.woff2') format('woff2');
+}
+
+:root {
+  --pg-sans: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --pg-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/*
+  Theme application.
+  An inline <head> script resolves the effective theme from localStorage or
+  prefers-color-scheme and sets data-theme before first paint, so these two
+  rules cover both the OS default and the manual toggle.
+  The attribute selector also outranks the theme's own `:root { … }` block.
+*/
+@mixin pg-light {
+  @include theme-light;
+  /* Teal accent — distinct from the sibling docs' violet and azure, still restrained. */
+  --pg-brand: #0f766e;
+  --pg-brand-strong: #115e59;
+  --pg-brand-contrast: #ffffff;
+  --color-link: #0f766e;
+  --color-visited-link: #0f766e;
+
+  /* Inline code and code blocks (theme uses --gray-100 bg + --gray-200 border);
+     kept clearly distinct from the white body. */
+  --gray-100: #eef0f4;
+  --gray-200: #dbdfe6;
+
+  --pg-surface: #ffffff;
+  --pg-surface-2: #f6f7f9;
+  --pg-border: #e6e8eb;
+  --pg-muted: #59626d;
+  --pg-scroll-thumb: #c7ccd1;
+}
+
+@mixin pg-dark {
+  @include theme-dark;
+  --pg-brand: #2dd4bf;
+  --pg-brand-strong: #5eead4;
+  --pg-brand-contrast: #0b1220;
+  --color-link: #5eead4;
+  --color-visited-link: #5eead4;
+
+  /* A neutral dark gray — darker and less blue than the theme's Nord default
+     (#2e3440), but not a harsh near-black.
+     Text is softened off-white so the contrast stays comfortable. */
+  --body-background: #1a1c21;
+  --body-font-color: #dce1e7;
+  /* Inline code and code blocks sit one clear step above the body, with a
+     visible border, so they read as distinct surfaces. */
+  --gray-100: #282d37;
+  --gray-200: #3a414e;
+  --gray-500: #bec6cf;
+
+  --pg-surface: #23262d;
+  --pg-surface-2: #1f2228;
+  --pg-border: #313641;
+  --pg-muted: #949dab;
+  --pg-scroll-thumb: #3a414c;
+}
+
+/* Base defaults so every --pg-* variable is defined even when data-theme is not
+   set yet — before the head script runs, on a livereload repaint, or with JS
+   disabled.
+   Without them var(--pg-brand-contrast)/var(--pg-brand) are undefined and the
+   primary hero button renders transparent with black text. */
+:root { @include pg-light; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) { @include pg-dark; }
+}
+:root[data-theme="light"] { @include pg-light; }
+:root[data-theme="dark"] { @include pg-dark; }
+
+/* Keep code blocks on the same neutral "code surface" as inline code (one step
+   above the body), rather than the syntax theme's tinted background.
+   Token colors are unchanged. */
+:root[data-theme="dark"] pre.chroma {
+  background: var(--gray-100);
+}
+
+body {
+  font-family: var(--pg-sans);
+}
+
+/* Thin, theme-aware scrollbars (page, menu, TOC, code blocks, tables). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--pg-scroll-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--pg-scroll-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--pg-brand);
+}
+
+code, kbd, samp, pre, .chroma {
+  font-family: var(--pg-mono);
+}
+
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The book theme forces TOC entries onto a single line (`white-space: nowrap`),
+   so a long entry (e.g. a heading naming a flag) overflows the column instead of
+   wrapping.
+   Allow entries to wrap, but keep each hyphenated flag name whole. */
+.book-toc a {
+  display: block;
+  white-space: normal;
+}
+.book-toc code {
+  white-space: nowrap;
+}
+.book-toc li {
+  margin: 0.2rem 0;
+  line-height: 1.35;
+}
+
+.markdown pre.chroma {
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--gray-200);
+  border-radius: 0.4rem;
+  overflow-x: auto;
+}
+
+.pg-theme-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: var(--font-size-smaller);
+  color: var(--body-font-color);
+  background: var(--pg-surface-2);
+  border: 1px solid var(--pg-border);
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.pg-theme-btn:hover {
+  border-color: var(--pg-brand);
+}
+
+.pg-theme-btn__icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.markdown a.pg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.55rem 1.15rem;
+  border-radius: 0.4rem;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--pg-border);
+  color: var(--body-font-color);
+}
+
+.markdown a.pg-btn:hover {
+  border-color: var(--pg-brand);
+  text-decoration: none;
+}
+
+.markdown a.pg-btn--primary {
+  background: var(--pg-brand);
+  border-color: var(--pg-brand);
+  color: var(--pg-brand-contrast);
+}
+
+.markdown a.pg-btn--primary:hover {
+  background: var(--pg-brand-strong);
+  border-color: var(--pg-brand-strong);
+}
+
+.pg-hero {
+  margin: 0.25rem 0 2.25rem;
+}
+
+.pg-hero__text {
+  max-width: 46rem;
+}
+
+.pg-hero__text h1 {
+  font-size: 2rem;
+  line-height: 1.15;
+  margin: 0 0 0.6rem;
+  border: 0;
+  padding: 0;
+}
+
+.pg-hero__lead {
+  font-size: 1.05rem;
+  color: var(--pg-muted);
+  margin: 0 0 1.3rem;
+  line-height: 1.55;
+}
+
+.pg-hero__cmd {
+  display: inline-block;
+  font-family: var(--pg-mono);
+  background: #0e1116;
+  color: #e6edf3;
+  padding: 0.5rem 0.85rem;
+  border-radius: 0.4rem;
+  margin-bottom: 1.3rem;
+  font-size: 0.9rem;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.pg-hero__cmd::before {
+  content: "$ ";
+  color: #4ade80;
+}
+
+.pg-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-bottom: 2rem;
+}
+
+.pg-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.25rem 0 2rem;
+}
+
+.pg-card {
+  border: 1px solid var(--pg-border);
+  border-radius: 0.5rem;
+  padding: 1rem 1.1rem;
+  background: var(--pg-surface);
+}
+
+.pg-card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.98rem;
+}
+
+.pg-card p {
+  margin: 0;
+  color: var(--pg-muted);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
