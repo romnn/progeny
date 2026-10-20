@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792505551751,
+  "lastUpdate": 1792524053927,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1515,6 +1515,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 230.8138017654419,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0e125b0e34a59e0b9a3d775cd88d712bad148a3d",
+          "message": "fix(support): keep allowReserved query values intact between client and server (#103)\n\n* fix(support): keep a number no 64-bit integer holds as its digits through the buffer\n\nCloses #86\n\n* fix(api): send a multipart member that is a string enum or a named scalar as text\n\nCloses #88\n\n* fix(support): read a cookie parameter from every Cookie header field\n\nCloses #94\n\n* fix(server): send a JSON null response as JSON rather than an empty body\n\nCloses #95\n\n* fix(support): keep allowReserved query values intact between client and server\n\nCloses #93\n\n* fix(support): escape the reserved characters a query cannot carry under allowReserved",
+          "timestamp": "2026-10-20T21:14:19+02:00",
+          "tree_id": "f87b17459752c74263107fa027b716950591262f",
+          "url": "https://github.com/romnn/progeny/commit/0e125b0e34a59e0b9a3d775cd88d712bad148a3d"
+        },
+        "date": 1792524053179,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 31.378478666666666,
+            "range": "± 0.55",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2690.979166030884,
+            "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.522296666666668,
+            "range": "± 0.07",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1052.177083015442,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.8269890000000001,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 231.00390625,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
