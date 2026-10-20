@@ -440,7 +440,7 @@ fn server_of(
     item: &PathItem,
     at: &JsonPointer,
     ctx: &mut Ctx,
-) -> Option<String> {
+) -> Option<super::ServerOverride> {
     let url = operation
         .servers
         .as_deref()
@@ -449,7 +449,11 @@ fn server_of(
         .url
         .clone()?;
     if !url.contains('{') && (url.starts_with("https://") || url.starts_with("http://")) {
-        return Some(url.trim_end_matches('/').to_owned());
+        // The document's server is filled in once the whole model exists.
+        return Some(super::ServerOverride {
+            url: url.trim_end_matches('/').to_owned(),
+            replaces: String::new(),
+        });
     }
     // An empty URL is the document's own server, which the client already sends to.
     if url.is_empty() {

@@ -3130,7 +3130,8 @@ mod tests {
         );
     }
 
-    /// An operation that declares its own server is sent there rather than to the base URL.
+    /// An operation that declares its own server is sent there while the client points at the
+    /// document's server, and wherever the client points otherwise.
     #[test_util::test]
     fn an_operation_with_its_own_server_is_sent_there() {
         let rendered = client(json!({
@@ -3142,8 +3143,11 @@ mod tests {
                 "responses": {"200": {"description": "ok"}},
             }}},
         }))?;
+        let flat: String = rendered.split_whitespace().collect();
         assert!(
-            rendered.contains("String::from(\"https://uploads.example.test\")"),
+            flat.contains(
+                "self.client.base_url()==\"https://api.example.test\"{\"https://uploads.example.test\"}"
+            ),
             "{rendered}"
         );
     }

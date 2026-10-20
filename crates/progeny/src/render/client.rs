@@ -1283,10 +1283,20 @@ fn path_expression(operation: &OperationContract) -> TokenStream {
         });
     }
     let reserved = reserved_query(operation);
-    // An operation that declares its own server is sent there, whatever base URL the client has.
+    // An operation that declares its own server is sent there while the client still points at
+    // the document's server; a client pointed anywhere else keeps the request there.
     let base = operation.server.as_ref().map_or_else(
         || quote! { self.client.base_url() },
-        |server| quote! { #server },
+        |server| {
+            let (url, replaces) = (&server.url, &server.replaces);
+            quote! {
+                if self.client.base_url() == #replaces {
+                    #url
+                } else {
+                    self.client.base_url()
+                }
+            }
+        },
     );
     quote! {
         {
