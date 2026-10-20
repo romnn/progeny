@@ -6,7 +6,7 @@ use super::Build;
 use super::param::param_shape;
 use crate::api::style::{self, ParamShape};
 use crate::api::{BodyContract, FormSpec, PartKind, PartSpec, Style};
-use crate::contract::{ContractKind, Format, TypeRef};
+use crate::contract::{ContractKind, Contracts, Format, TypeContract, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
 
@@ -305,7 +305,7 @@ impl Build<'_> {
         fields
             .iter()
             .map(|field| {
-                let (kind, repeated) = part_of(&field.ty);
+                let (kind, repeated) = part_of(&field.ty, self.contracts);
                 PartSpec {
                     kind,
                     repeated,
@@ -481,20 +481,34 @@ fn preference(media_type: &str) -> u8 {
 /// the type layer left as `String` — a base64 (`format: byte`) member, or a schema the
 /// encoding-collapse rule kept on the JSON spelling — is a text part whose bytes are the
 /// string's, with the stated consequence that such a part cannot carry invalid UTF-8.
-fn part_of(ty: &TypeRef) -> (PartKind, bool) {
+fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
     match ty {
         TypeRef::Upload => (PartKind::File, false),
-        // An option says nothing about the shape on the wire; a box says nothing at all.
-        TypeRef::Option(inner) | TypeRef::Boxed(inner) => part_of(inner),
+        // An option or a presence says nothing about the shape on the wire; a box says nothing at
+        // all.
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            part_of(inner, contracts)
+        }
         // The one wrapper that does say something: each element is its own part.
-        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => (part_of(inner).0, true),
+        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => (part_of(inner, contracts).0, true),
         TypeRef::Bool
         | TypeRef::Integer(_)
         | TypeRef::F64
         | TypeRef::String
         | TypeRef::Format(_) => (PartKind::Text, false),
-        // A named type, a map, a tuple or a degraded `Value` is structured, and structured members
-        // have no faithful text form.
+        // A string enum is a string on the wire, an alias is what it names, and a newtype is the
+        // one value it wraps.
+        TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
+            Some(ContractKind::StringEnum { .. }) => (PartKind::Text, false),
+            Some(ContractKind::Alias { target }) => part_of(target, contracts),
+            Some(ContractKind::Newtype { inner }) => match part_of(inner, contracts) {
+                (PartKind::Text, false) => (PartKind::Text, false),
+                _ => (PartKind::Json, false),
+            },
+            _ => (PartKind::Json, false),
+        },
+        // A map, a tuple or a degraded `Value` is structured, and structured members have no
+        // faithful text form.
         _ => (PartKind::Json, false),
     }
 }
@@ -545,6 +559,52 @@ mod tests {
                 .collect(),
             ..Config::default()
         }
+    }
+
+    /// A member whose type is named is a text part when the name stands for a scalar: a string
+    /// enum, or a component that is a scalar; and a file stays a file under `Presence`.
+    #[test_util::test]
+    fn a_named_scalar_member_is_a_text_part() {
+        use crate::api::PartKind::{File, Json, Text};
+        let mut document = with_paths(json!({
+            "/files": {
+                "post": {
+                    "operationId": "upload",
+                    "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {
+                        "type": "object",
+                        "required": ["purpose"],
+                        "properties": {
+                            "purpose": {"type": "string", "enum": ["assistants", "batch"]},
+                            "id": {"$ref": "#/components/schemas/Id"},
+                            "modes": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}},
+                            "meta": {"type": "object", "properties": {"k": {"type": "string"}}},
+                            "file": {"type": ["string", "null"], "format": "binary"},
+                        },
+                    }}}},
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+        }));
+        document["components"] = json!({"schemas": {"Id": {"type": "string", "pattern": "^f"}}});
+        let config = Config {
+            preserve_optional_nullable: true,
+            ..Config::default()
+        };
+        let (model, _) = model_with(document, &config)?;
+        let Some(BodyContract::Multipart { parts, .. }) = &model.operations()[0].body else {
+            eyre::bail!("the body is multipart");
+        };
+        let part = |wire: &str| {
+            parts
+                .iter()
+                .find(|part| part.wire_name == wire)
+                .map(|part| (part.kind, part.repeated))
+        };
+        assert_eq!(part("purpose"), Some((Text, false)));
+        assert_eq!(part("id"), Some((Text, false)));
+        assert_eq!(part("modes"), Some((Text, true)));
+        assert_eq!(part("meta"), Some((Json, false)));
+        assert_eq!(part("file"), Some((File, false)));
     }
 
     #[test_util::test]
