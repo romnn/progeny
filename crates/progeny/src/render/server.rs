@@ -538,17 +538,25 @@ fn body_extraction(
             quote! { support::json_body(incoming).await },
         ),
         BodyContract::Form { specs, .. } => {
+            let strings = specs
+                .iter()
+                .filter(|spec| spec.text)
+                .map(|spec| spec.wire_name.as_str());
             let specs = super::client::form_specs(specs);
             (
                 "application/x-www-form-urlencoded".to_owned(),
-                quote! { support::form_body(incoming, #specs).await },
+                quote! { support::form_body(incoming, #specs, &[#(#strings),*]).await },
             )
         }
         BodyContract::Multipart { parts, .. } => {
+            let strings = parts
+                .iter()
+                .filter(|part| part.text)
+                .map(|part| part.wire_name.as_str());
             let specs = super::client::part_specs(parts);
             (
                 "multipart/form-data".to_owned(),
-                quote! { support::multipart_body(incoming, #specs).await },
+                quote! { support::multipart_body(incoming, #specs, &[#(#strings),*]).await },
             )
         }
         BodyContract::Text { content_type, .. } => (
