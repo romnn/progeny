@@ -6,17 +6,6 @@ on:
   # A push trigger here would deploy each commit twice.
   workflow_call: {}
   workflow_dispatch: {}
-  # A pull request that touches the site builds it, so a broken page fails there rather than in the
-  # deploy after the merge.
-  # Only main deploys.
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "docs/**"
-      - "mise.toml"
-      - "mise.lock"
-      - "taskfile.yaml"
-      - ".github/workflows/pages.yaml"
 
 env:
   MISE_GITHUB_TOKEN: ${{ github.token }}
@@ -29,10 +18,8 @@ permissions:
   id-token: write
 
 # Allow only one concurrent deployment; don't cancel an in-progress production deploy.
-# A pull request's build deploys nothing, so it gets a group of its own rather than displacing a
-# pending deployment from the shared one.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('pages-{0}', github.ref) || 'pages' }}
+  group: pages
   cancel-in-progress: false
 
 jobs:
@@ -40,11 +27,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      # A deployment builds the site as main holds it now, whichever run asked for it; a pull request
-      # builds its own merge commit.
+      # The site as main holds it now, whichever run asked for the deploy.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name != 'pull_request' && 'main' || '' }}
+          ref: main
       # Go and the extended Hugo build come from mise.
       - uses: jdx/mise-action@v5
         with:
@@ -91,7 +77,6 @@ jobs:
           path: docs/public
 
   deploy:
-    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
