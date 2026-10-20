@@ -284,9 +284,8 @@ fn response_enum(
             NoContent,
         }
     });
-    let empty_match = (arms.is_empty() && operation.responses.default.is_none()).then(
-        || quote! { Self::NoContent => support::respond_json(204u16, "application/json", &()), },
-    );
+    let empty_match = (arms.is_empty() && operation.responses.default.is_none())
+        .then(|| quote! { Self::NoContent => support::respond_empty(204u16, ()), });
 
     quote! {
         #[doc = #doc]
@@ -314,9 +313,7 @@ fn response(arm: &ResponseArm, status: &TokenStream, body: &TokenStream) -> Toke
         ResponseBody::Json { content_type, .. } => {
             quote! { support::respond_json(#status, #content_type, &#body) }
         }
-        ResponseBody::Empty => {
-            quote! { support::respond_json(#status, "application/json", &#body) }
-        }
+        ResponseBody::Empty => quote! { support::respond_empty(#status, #body) },
         ResponseBody::Text { content_type } => {
             quote! { support::respond_text(#status, #content_type, *#body) }
         }

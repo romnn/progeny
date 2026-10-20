@@ -571,8 +571,13 @@ fn server_use(api: &ApiModel) -> crate::support::ServerUse {
             match arm.body {
                 crate::api::ResponseBody::Text { .. } => used.text_response = true,
                 crate::api::ResponseBody::Bytes { .. } => used.byte_response = true,
-                crate::api::ResponseBody::Json { .. } | crate::api::ResponseBody::Empty => {}
+                crate::api::ResponseBody::Json { .. } => used.json_response = true,
+                crate::api::ResponseBody::Empty => used.empty_response = true,
             }
+        }
+        // An operation that declares no responses answers `204` with nothing.
+        if operation.responses.arms.is_empty() && operation.responses.default.is_none() {
+            used.empty_response = true;
         }
     }
     used

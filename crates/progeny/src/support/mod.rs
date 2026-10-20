@@ -112,6 +112,9 @@ pub(crate) struct ServerUse {
     pub(crate) query: bool,
     pub(crate) header: bool,
     pub(crate) cookie: bool,
+    pub(crate) json_response: bool,
+    /// Any arm that declares no content, or an operation that declares no responses at all.
+    pub(crate) empty_response: bool,
     pub(crate) text_response: bool,
     pub(crate) byte_response: bool,
     pub(crate) styles: StyleUse,
@@ -130,6 +133,8 @@ impl ServerUse {
         query: true,
         header: true,
         cookie: true,
+        json_response: true,
+        empty_response: true,
         text_response: true,
         byte_response: true,
         styles: StyleUse::ALL,
@@ -917,6 +922,8 @@ fn unused_parameter_reader(name: &syn::Ident, used: ServerUse) -> Option<&'stati
 
 fn unused_response_writer(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
     match name.to_string().as_str() {
+        "respond_json" if !used.json_response => Some("JSON"),
+        "respond_empty" if !used.empty_response => Some("empty"),
         "respond_text" if !used.text_response => Some("text"),
         "respond_bytes" if !used.byte_response => Some("raw-byte"),
         "respond_raw" if !used.text_response && !used.byte_response => Some("non-JSON"),

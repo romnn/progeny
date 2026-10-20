@@ -285,14 +285,13 @@ pub fn respond_json<T: ::serde::Serialize>(
     use ::axum::response::IntoResponse as _;
     let code = ::axum::http::StatusCode::from_u16(status)
         .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    // A `204` carries no body by definition, and `serde_json` renders a unit arm as `null`.
-    // Sending `null` under a status that promises nothing is a body a client has to learn to
-    // ignore, so it is not sent.
+    // A `204` carries no body by definition, whatever the arm declares.
     if code == ::axum::http::StatusCode::NO_CONTENT {
         return code.into_response();
     }
+    // A JSON `null` is a body like any other: the arm declared JSON, and an empty reply would
+    // say it declared nothing.
     match ::serde_json::to_value(body) {
-        Ok(Value::Null) => code.into_response(),
         Ok(value) => {
             let mut response = (code, ::axum::Json(value)).into_response();
             // The declared spelling is the wire contract; `axum::Json` writes the plain
@@ -317,6 +316,14 @@ pub fn respond_json<T: ::serde::Serialize>(
         )
             .into_response(),
     }
+}
+
+/// One declared arm's reply when the arm declares no content: the status alone.
+pub fn respond_empty(status: u16, (): ()) -> ::axum::response::Response {
+    use ::axum::response::IntoResponse as _;
+    ::axum::http::StatusCode::from_u16(status)
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
 }
 
 /// One declared text arm's reply.
@@ -440,6 +447,25 @@ mod tests {
             incoming_with(None).mismatched_media_type("application/json"),
             None
         );
+    }
+
+    /// A JSON arm's `null` is sent as JSON; only an arm that declares no content, and a `204`,
+    /// are sent without a body.
+    #[test_util::test]
+    fn a_json_null_is_a_body_and_an_empty_arm_is_not() {
+        let content_type = |response: &::axum::response::Response| {
+            response
+                .headers()
+                .get(::axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned)
+        };
+        let null = super::respond_json(200, "application/json", &None::<String>);
+        assert_eq!(content_type(&null).as_deref(), Some("application/json"));
+        let empty = super::respond_empty(200, ());
+        assert_eq!(content_type(&empty), None);
+        let no_content = super::respond_json(204, "application/json", &None::<String>);
+        assert_eq!(content_type(&no_content), None);
     }
 
     #[test_util::test]
