@@ -82,6 +82,19 @@ impl ApiModel {
     }
 }
 
+/// A server an operation declares in place of the document's own.
+///
+/// It replaces the document's server, not the caller's: the client sends the operation to `url`
+/// only while its base URL is still `replaces`, so a client pointed at a mock server or a proxy
+/// keeps every request there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServerOverride {
+    /// Absolute and without variables, as [`ApiModel::default_server_url`] requires.
+    pub(crate) url: String,
+    /// The document's default server, which the generated `Default` points the client at.
+    pub(crate) replaces: String,
+}
+
 /// A base URL the document offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServerEntry {
@@ -122,6 +135,8 @@ pub(crate) struct OperationContract {
     /// [`ApiModel::schemes`] numbers; empty when the operation requires no scheme the client
     /// sends.
     pub(crate) security: Vec<Vec<usize>>,
+    /// The server the operation or its path item declares in place of the document's.
+    pub(crate) server: Option<ServerOverride>,
 }
 
 impl OperationContract {
@@ -386,6 +401,19 @@ pub(crate) fn build(
 ) -> Result<ApiModel, crate::diag::RejectError> {
     let mut model = operation::run(resolved, contracts, config, ctx)?;
     model.servers = servers(resolved);
+    // An override replaces the document's own server, so it means nothing where the document
+    // names none the client could be pointed at by default.
+    let default = model.default_server_url().map(ToOwned::to_owned);
+    for operation in &mut model.operations {
+        operation.server = match (operation.server.take(), &default) {
+            (Some(server), Some(default)) => Some(ServerOverride {
+                // Trimmed as the client trims the base URL it compares against.
+                replaces: default.trim_end_matches('/').to_owned(),
+                ..server
+            }),
+            _ => None,
+        };
+    }
     // After the operations exist and before anything renders: a declaration that the document
     // cannot support has to stop generation rather than produce a method that cannot work.
     pagination::attach(&mut model.operations, contracts, config)?;
@@ -457,6 +485,66 @@ pub(crate) mod tests {
         assert_eq!(model.operations().len(), 1);
         assert_eq!(model.operations()[0].rust_name.as_str(), "list_pets");
         assert_eq!(model.operations()[0].method, super::Method::Get);
+    }
+
+    /// An operation, or else its path item, may name a server of its own, and the operation goes
+    /// there; one with variables is reported and left to the client's base URL.
+    #[test_util::test]
+    fn an_operation_goes_to_the_server_it_declares() {
+        let ok = json!({"200": {"description": "ok"}});
+        let mut document = with_paths(json!({
+            "/assets": {
+                "servers": [{"url": "https://uploads.example.test/"}],
+                "post": {"operationId": "upload", "responses": ok},
+                "get": {
+                    "operationId": "list",
+                    "servers": [{"url": "https://cdn.example.test"}],
+                    "responses": ok,
+                },
+            },
+            "/regional": {"get": {
+                "operationId": "regional",
+                "servers": [{"url": "https://{region}.example.test"}],
+                "responses": ok,
+            }},
+            "/plain": {"get": {"operationId": "plain", "responses": ok}},
+        }));
+        let without_root = model_of(document.clone())?.0;
+        document["servers"] = json!([{"url": "https://api.example.test/"}]);
+        let (model, diagnostics) = model_of(document)?;
+        let server = |model: &ApiModel, name: &str| {
+            model
+                .operations()
+                .iter()
+                .find(|operation| operation.rust_name.as_str() == name)
+                .map(|operation| {
+                    operation
+                        .server
+                        .as_ref()
+                        .map(|server| (server.url.clone(), server.replaces.clone()))
+                })
+        };
+        let over = |url: &str| {
+            Some(Some((
+                url.to_owned(),
+                "https://api.example.test".to_owned(),
+            )))
+        };
+        assert_eq!(
+            server(&model, "upload"),
+            over("https://uploads.example.test")
+        );
+        assert_eq!(server(&model, "list"), over("https://cdn.example.test"));
+        assert_eq!(server(&model, "regional"), Some(None));
+        assert_eq!(server(&model, "plain"), Some(None));
+        // With no server of the document's own, there is nothing for an override to replace.
+        assert_eq!(server(&without_root, "upload"), Some(None));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.detail().contains("{region}")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test_util::test]

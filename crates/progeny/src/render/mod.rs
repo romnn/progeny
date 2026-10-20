@@ -3130,6 +3130,28 @@ mod tests {
         );
     }
 
+    /// An operation that declares its own server is sent there while the client points at the
+    /// document's server, and wherever the client points otherwise.
+    #[test_util::test]
+    fn an_operation_with_its_own_server_is_sent_there() {
+        let rendered = client(json!({
+            "openapi": "3.1.0",
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {"/assets": {"post": {
+                "operationId": "upload",
+                "servers": [{"url": "https://uploads.example.test"}],
+                "responses": {"200": {"description": "ok"}},
+            }}},
+        }))?;
+        let flat: String = rendered.split_whitespace().collect();
+        assert!(
+            flat.contains(
+                "self.client.base_url()==\"https://api.example.test\"{\"https://uploads.example.test\"}"
+            ),
+            "{rendered}"
+        );
+    }
+
     #[test_util::test]
     fn a_wildcard_over_a_real_schema_keeps_the_type_the_document_gave() {
         // `telnyx` writes `*/*` over a `$ref` to an object. A wildcard permits every content type,
