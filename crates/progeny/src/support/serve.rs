@@ -193,7 +193,7 @@ pub fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ServerDe
         Ok(parsed) => return Ok(parsed),
         Err(source) => ServerDecodeError::from(source),
     };
-    serde_json::from_value(retyped(value)).map_err(|_| first)
+    T::deserialize(Spelled(value)).map_err(|_| first)
 }
 
 /// Every string leaf re-read as the JSON value it spells, where it spells one.
@@ -236,14 +236,167 @@ pub fn typed_body<T: serde::de::DeserializeOwned>(members: Value) -> Result<T, S
         Ok(parsed) => return Ok(parsed),
         Err(source) => ServerDecodeError::from(source),
     };
-    let Value::Object(fields) = members else {
-        return Err(first);
-    };
-    let retyped: serde_json::Map<String, Value> = fields
-        .into_iter()
-        .map(|(name, value)| (name, retyped(value)))
-        .collect();
-    serde_json::from_value(Value::Object(retyped)).map_err(|_| first)
+    T::deserialize(Spelled(members)).map_err(|_| first)
+}
+
+/// A value assembled from text, read by the type serde asks it for.
+///
+/// A member asked for as a string is its text, and one asked for as a number, a boolean, a list
+/// or a struct is what its text spells, so each member of a body or an object gets the reading
+/// its own type wants. Re-reading every leaf at once instead made a string member that spells a
+/// number fail as soon as any other member needed re-reading.
+/// A position that names no type of its own, such as an untagged union or `serde_json::Value`,
+/// gets [`retyped`]'s reading.
+struct Spelled(Value);
+
+impl Spelled {
+    /// The value a text leaf spells, where it spells one.
+    fn parsed(self) -> Value {
+        match self.0 {
+            Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+            other => other,
+        }
+    }
+}
+
+impl serde::de::IntoDeserializer<'_, serde_json::Error> for Spelled {
+    type Deserializer = Self;
+
+    fn into_deserializer(self) -> Self {
+        self
+    }
+}
+
+macro_rules! spelled_scalar {
+    ($($method:ident)*) => {$(
+        fn $method<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            self.parsed().$method(visitor)
+        }
+    )*};
+}
+
+impl<'de> serde::Deserializer<'de> for Spelled {
+    type Error = serde_json::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::Array(items) => {
+                let mut items =
+                    serde::de::value::SeqDeserializer::new(items.into_iter().map(Spelled));
+                let value = visitor.visit_seq(&mut items)?;
+                items.end()?;
+                Ok(value)
+            }
+            Value::Object(members) => {
+                let mut members = serde::de::value::MapDeserializer::new(
+                    members
+                        .into_iter()
+                        .map(|(name, value)| (name, Spelled(value))),
+                );
+                let value = visitor.visit_map(&mut members)?;
+                members.end()?;
+                Ok(value)
+            }
+            other => retyped(other).deserialize_any(visitor),
+        }
+    }
+
+    fn deserialize_str<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::String(text) => visitor.visit_string(text),
+            other => Spelled(other).deserialize_any(visitor),
+        }
+    }
+
+    fn deserialize_string<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_str(visitor)
+    }
+
+    fn deserialize_option<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::Null => visitor.visit_none(),
+            other => visitor.visit_some(Spelled(other)),
+        }
+    }
+
+    fn deserialize_newtype_struct<V: serde::de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_enum<V: serde::de::Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.deserialize_enum(name, variants, visitor)
+    }
+
+    fn deserialize_seq<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        Spelled(self.parsed()).deserialize_any(visitor)
+    }
+
+    fn deserialize_map<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        Spelled(self.parsed()).deserialize_any(visitor)
+    }
+
+    fn deserialize_struct<V: serde::de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_tuple<V: serde::de::Visitor<'de>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: serde::de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_seq(visitor)
+    }
+
+    spelled_scalar! {
+        deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+        deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
+        deserialize_u128 deserialize_f32 deserialize_f64
+    }
+
+    serde::forward_to_deserialize_any! {
+        char bytes byte_buf unit unit_struct identifier ignored_any
+    }
 }
 
 /// A body the description marked required.
@@ -433,6 +586,42 @@ mod tests {
             Upload {
                 note: "a note".to_owned(),
                 rating: 4,
+            }
+        );
+    }
+
+    /// Each member is read by its own type: a string member that spells a number stays text
+    /// while its neighbour is re-read, and so do the members of an object parameter.
+    #[test_util::test]
+    fn each_member_is_read_by_its_own_type() {
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Login {
+            label: String,
+            count: i64,
+            remember: Option<bool>,
+        }
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Page {
+            number: i64,
+            cursor: String,
+        }
+        let parsed: Login = super::typed_body(json!({
+            "label": "true", "count": "4", "remember": "false",
+        }))?;
+        assert_eq!(
+            parsed,
+            Login {
+                label: "true".to_owned(),
+                count: 4,
+                remember: Some(false),
+            }
+        );
+        let page: Page = typed(json!({"number": "2", "cursor": "20"}))?;
+        assert_eq!(
+            page,
+            Page {
+                number: 2,
+                cursor: "20".to_owned(),
             }
         );
     }
