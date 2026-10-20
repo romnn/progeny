@@ -8,10 +8,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch: {}
-  # `edited` checks a pull request retargeted onto a new base, as a stacked one is when the one below
-  # it merges. Every job skips the other edits, to a title or a body.
+  # No `edited`: a description edit would have to skip its jobs, and a skipped job takes the place
+  # of the real result for the same commit in the pull request's checks. Without it a retargeted
+  # pull request is not rechecked until its next push.
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 env:
   MISE_GITHUB_TOKEN: ${{ github.token }}
@@ -19,7 +20,6 @@ env:
 
 jobs:
   fuzz:
-    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
