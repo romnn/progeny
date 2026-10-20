@@ -65,6 +65,11 @@ checksum = "sha256:0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be271
 url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
 url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439294720"
 
+[[tools."asdf:NeoHsu/asdf-hugo"]]
+version = "extended-0.163.3"
+backend = "asdf:NeoHsu/asdf-hugo"
+specifiers = ["extended-0.163.3"]
+
 [[tools."cargo:cargo-fuzz"]]
 version = "0.13.2"
 backend = "cargo:cargo-fuzz"
@@ -195,6 +200,23 @@ url_api = "https://api.github.com/repos/rust-cross/cargo-zigbuild/releases/asset
 checksum = "sha256:cd1226091f9f99ac7b46fb413968fb0b46edbe3ea961817d31b968352de4d4a6"
 url = "https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.23.4/cargo-zigbuild-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/rust-cross/cargo-zigbuild/releases/assets/541272877"
+
+[[tools.go]]
+version = "1.27.2"
+backend = "core:go"
+specifiers = ["latest"]
+
+[tools.go."platforms.linux-x64"]
+checksum = "sha256:ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5"
+url = "https://dl.google.com/go/go1.27.2.linux-amd64.tar.gz"
+
+[tools.go."platforms.macos-arm64"]
+checksum = "sha256:76812b213b1b2302c978d28fa52fa92d541704b9e7d9d5db8002c50e4018c4c5"
+url = "https://dl.google.com/go/go1.27.2.darwin-arm64.tar.gz"
+
+[tools.go."platforms.windows-x64"]
+checksum = "sha256:1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f"
+url = "https://dl.google.com/go/go1.27.2.windows-amd64.zip"
 
 [[tools.task]]
 version = "3.54.0"
