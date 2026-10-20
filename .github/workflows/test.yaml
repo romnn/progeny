@@ -10,10 +10,10 @@ on:
   schedule:
     # Nightly, for the full-corpus compile the pull-request tier cannot afford.
     - cron: "0 3 * * *"
-  # `edited` checks a pull request retargeted onto a new base, as a stacked one is when the one below
-  # it merges. Every job skips the other edits, to a title or a body.
+  # No `edited`: a run for it could only skip its jobs, and a skipped job takes the place of the
+  # real result for the same commit in the pull request's checks.
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 env:
   MISE_GITHUB_TOKEN: ${{ github.token }}
@@ -21,7 +21,6 @@ env:
 
 jobs:
   test:
-    if: github.event.action != 'edited' || github.event.changes.base
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -49,7 +48,6 @@ jobs:
         run: task test:doc
 
   corpus:
-    if: github.event.action != 'edited' || github.event.changes.base
     name: conformance corpus
     runs-on: ubuntu-24.04
     # Generated crates are compiled one cargo job at a time, because the largest of them need more
@@ -156,7 +154,6 @@ jobs:
         run: task probe
 
   publish:
-    if: github.event.action != 'edited' || github.event.changes.base
     name: publish (dry-run)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
