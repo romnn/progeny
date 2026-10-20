@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792525346702,
+  "lastUpdate": 1792525670019,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1780,6 +1780,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 338.0598955154419,
             "range": "± 2.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fce748e75230dac424bd62a4a32de9cb82dc8ef4",
+          "message": "docs(site): publish a documentation website with the benchmarks beside it (#110)\n\n* docs(site): add a Hugo documentation site\n\nThe hugo-book site under docs/ covers what progeny is, a quick start for\nthe CLI and a build script, every progeny.toml key, the generated code and\nits soundness rule, diagnostics, and the conformance corpus, and links the\nbenchmark dashboard at /bench/. `task docs:build` and `task docs:serve`\nbuild and serve it; the rustdoc preview moves to `task docs:cargo`.\n\n* ci(pages): deploy the docs site with the benchmark dashboard at /bench/\n\nThe pages workflow builds the site and installs the benchtrail dashboard\ninto it, and the bench workflow deploys that combined site after recording\nthe history instead of benchtrail's chart-only page, so /bench/ keeps\nworking. A pull request that touches the site builds it without deploying.\n\n* ci(pages): build and deploy from main alone, as the sibling repos do\n\n* docs(site): correct strict decoding, read forms, package keys and corpus gates",
+          "timestamp": "2026-10-20T21:15:02+02:00",
+          "tree_id": "3139d86d89390f814f2ffc40528a1178e46f354f",
+          "url": "https://github.com/romnn/progeny/commit/fce748e75230dac424bd62a4a32de9cb82dc8ef4"
+        },
+        "date": 1792525669442,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 23.979299,
+            "range": "± 0.34",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3001.833333015442,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.230089,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1254.39453125,
+            "range": "± 1.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6656663333333334,
+            "range": "± 0.03",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 335.7239580154419,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
