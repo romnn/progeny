@@ -1,7 +1,12 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
 name: build
 on:
-  push: {}
+  # A branch is checked through its pull request, so only `main` runs on push; a branch with a pull
+  # request would otherwise run every job twice for one commit.
+  push:
+    branches: [main]
+  # `edited` checks a pull request retargeted onto a new base, as a stacked one is when the one below
+  # it merges. Every job skips the other edits, to a title or a body.
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
@@ -11,6 +16,7 @@ env:
 
 jobs:
   goreleaser:
+    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

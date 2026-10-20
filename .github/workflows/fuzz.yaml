@@ -3,8 +3,13 @@ name: fuzz
 # A workflow of its own rather than a job in `test`: it runs on nightly, and `release` calls `test`,
 # so a nightly regression here must not be able to block a release.
 on:
-  push: {}
+  # A branch is checked through its pull request, so only `main` runs on push; a branch with a pull
+  # request would otherwise run every job twice for one commit.
+  push:
+    branches: [main]
   workflow_dispatch: {}
+  # `edited` checks a pull request retargeted onto a new base, as a stacked one is when the one below
+  # it merges. Every job skips the other edits, to a title or a body.
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
@@ -14,6 +19,7 @@ env:
 
 jobs:
   fuzz:
+    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

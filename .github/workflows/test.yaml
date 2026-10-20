@@ -1,12 +1,17 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
 name: test
 on:
-  push: {}
+  # A branch is checked through its pull request, so only `main` runs on push; a branch with a pull
+  # request would otherwise run every job twice for one commit.
+  push:
+    branches: [main]
   workflow_call: {}
   workflow_dispatch: {}
   schedule:
     # Nightly, for the full-corpus compile the pull-request tier cannot afford.
     - cron: "0 3 * * *"
+  # `edited` checks a pull request retargeted onto a new base, as a stacked one is when the one below
+  # it merges. Every job skips the other edits, to a title or a body.
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
@@ -16,6 +21,7 @@ env:
 
 jobs:
   test:
+    if: github.event.action != 'edited' || github.event.changes.base
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -43,6 +49,7 @@ jobs:
         run: task test:doc
 
   corpus:
+    if: github.event.action != 'edited' || github.event.changes.base
     name: conformance corpus
     runs-on: ubuntu-24.04
     # Generated crates are compiled one cargo job at a time, because the largest of them need more
@@ -149,6 +156,7 @@ jobs:
         run: task probe
 
   publish:
+    if: github.event.action != 'edited' || github.event.changes.base
     name: publish (dry-run)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
