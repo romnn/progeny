@@ -457,9 +457,10 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
                     }
                 }
                 Location::Query => {
+                    let reserved = param.style.allow_reserved();
                     quote! {
                         ::std::result::Result::<_, ::std::convert::Infallible>::Ok(
-                            incoming.query_value(#wire, #style, #explode, #array)
+                            incoming.query_value(#wire, #style, #explode, #array, #reserved)
                         )
                     }
                 }
