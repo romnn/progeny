@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792457862592,
+  "lastUpdate": 1792461385231,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -987,6 +987,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 230.0625,
+            "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "085bbb6540e381f5935e63f3cbdd7bb01be7e3bb",
+          "message": "fix(ci): run each check once per commit, and skip pull request edits that change no base (#84)",
+          "timestamp": "2026-10-20T03:51:19+02:00",
+          "tree_id": "5daf4d663451458480d69fe884fea7f0da24f48e",
+          "url": "https://github.com/romnn/progeny/commit/085bbb6540e381f5935e63f3cbdd7bb01be7e3bb"
+        },
+        "date": 1792461384439,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 23.21041633333333,
+            "range": "± 0.15",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2689.483072280884,
+            "range": "± 1.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 7.839091333333333,
+            "range": "± 0.14",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1052.516926765442,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6066473333333333,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 230.0651035308838,
             "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
