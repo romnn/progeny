@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792464031706,
+  "lastUpdate": 1792464359610,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1120,6 +1120,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 335.32421875,
             "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2c04aca2393450e2d32098bc872eeb79fef6cae4",
+          "message": "ci(bench): draw the compile-cost chart with benchtrail (#83)\n\n* ci(bench): draw the compile-cost chart with benchtrail\n\nThe deploy job installs a pinned, checksummed benchtrail release over the\npage github-action-benchmark committed beside the history, and fills its\nsettings from `.github/benchtrail.json`, which splits each benchmark name\ninto its document, strategy, and metric.\n\n* ci(bench): escape every angle bracket in the chart settings\n\n* ci(bench): install the chart page with the benchtrail action\n\nThe deploy job now hands its settings to `romnn/benchtrail`, which\ninstalls the page and checks them, in place of downloading the release\nand rewriting its markup in a script.\n\n* ci(bench): deploy the chart with benchtrail's Pages workflow\n\nThe deploy job becomes a call to `romnn/benchtrail`'s reusable workflow\nwith progeny's path and settings, which checks out the history, installs\nthe page, and deploys it.\n\n* ci(bench): deploy the chart with benchtrail 0.3.0, reading the history from gh-pages",
+          "timestamp": "2026-10-20T04:36:46+02:00",
+          "tree_id": "844f3536ada4dbb23e550c46f66f2c37ddc494d5",
+          "url": "https://github.com/romnn/progeny/commit/2c04aca2393450e2d32098bc872eeb79fef6cae4"
+        },
+        "date": 1792464358757,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 24.084392666666663,
+            "range": "± 0.06",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3000.798176765442,
+            "range": "± 1.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.218766,
+            "range": "± 0.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1249.8671875,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6236303333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 336.6979160308838,
+            "range": "± 2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
