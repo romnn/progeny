@@ -48,6 +48,9 @@ pub enum Content<'de> {
     I64(i64),
     U64(u64),
     F64(f64),
+    /// A number `serde_json`'s `arbitrary_precision` handed over as its digits, kept as written
+    /// because neither 64-bit integer holds it exactly.
+    Number(String),
     Str(&'de str),
     String(String),
     Bytes(&'de [u8]),
@@ -68,6 +71,7 @@ impl Content<'_> {
             Content::I64(value) => de::Unexpected::Signed(*value),
             Content::U64(value) => de::Unexpected::Unsigned(*value),
             Content::F64(value) => de::Unexpected::Float(*value),
+            Content::Number(_) => de::Unexpected::Other("number"),
             Content::Str(value) => de::Unexpected::Str(value),
             Content::String(value) => de::Unexpected::Str(value),
             Content::Bytes(value) => de::Unexpected::Bytes(value),
@@ -204,7 +208,7 @@ impl<'de> Visitor<'de> for ContentVisitor {
                 Content::String(text) => Some(text.as_str()),
                 _ => None,
             };
-            if token == Some("$serde_json::private::Number") {
+            if token == Some(NUMBER_TOKEN) {
                 let digits = match value {
                     Content::Str(text) => Some(*text),
                     Content::String(text) => Some(text.as_str()),
@@ -217,9 +221,9 @@ impl<'de> Visitor<'de> for ContentVisitor {
                     if let Ok(number) = digits.parse::<i64>() {
                         return Ok(Content::I64(number));
                     }
-                    if let Ok(number) = digits.parse::<f64>() {
-                        return Ok(Content::F64(number));
-                    }
+                    // A float re-spells it and loses the digits a `serde_json::Number` keeps, so
+                    // anything else is replayed as the same token it arrived as.
+                    return Ok(Content::Number(digits.to_owned()));
                 }
             }
         }
@@ -257,6 +261,13 @@ where
             Content::I64(value) => visitor.visit_i64(value),
             Content::U64(value) => visitor.visit_u64(value),
             Content::F64(value) => visitor.visit_f64(value),
+            Content::Number(digits) => {
+                let entry = std::iter::once((NUMBER_TOKEN, digits));
+                let mut map = de::value::MapDeserializer::new(entry);
+                let value = visitor.visit_map(&mut map)?;
+                map.end()?;
+                Ok(value)
+            }
             Content::Str(value) => visitor.visit_borrowed_str(value),
             Content::String(value) => visitor.visit_string(value),
             Content::Bytes(value) => visitor.visit_borrowed_bytes(value),
@@ -375,10 +386,111 @@ where
         })
     }
 
+    fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_i128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::Signed)
+    }
+
+    fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::No)
+    }
+
+    fn deserialize_u128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        self.number(visitor, Wide::Unsigned)
+    }
+
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char bytes byte_buf
+        bool char bytes byte_buf
         unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
+}
+
+/// The member name `serde_json`'s `arbitrary_precision` hands a number over under, as the one
+/// entry of a map.
+///
+/// The token is stable public behavior: `serde_json`'s own `Number::deserialize` matches on it.
+const NUMBER_TOKEN: &str = "$serde_json::private::Number";
+
+impl<'de, E> ContentDeserializer<'de, E>
+where
+    E: de::Error,
+{
+    /// A number kept as its digits, read by a visitor that asked for one primitive.
+    ///
+    /// A 128-bit integer reads the digits exactly where they fit one.
+    /// Otherwise the number is the float it always read as, which a visitor that cannot take a
+    /// float refuses as `serde_json` does; any other value is replayed as usual.
+    fn number<V>(self, visitor: V, wide: Wide) -> Result<V::Value, E>
+    where
+        V: Visitor<'de>,
+    {
+        let Content::Number(digits) = self.content else {
+            return self.deserialize_any(visitor);
+        };
+        match wide {
+            Wide::Signed => {
+                if let Ok(value) = digits.parse() {
+                    return visitor.visit_i128(value);
+                }
+            }
+            Wide::Unsigned => {
+                if let Ok(value) = digits.parse() {
+                    return visitor.visit_u128(value);
+                }
+            }
+            Wide::No => {}
+        }
+        match digits.parse() {
+            Ok(value) => visitor.visit_f64(value),
+            Err(_) => Err(de::Error::invalid_value(
+                de::Unexpected::Str(&digits),
+                &visitor,
+            )),
+        }
+    }
+}
+
+/// Which 128-bit integer a primitive visitor reads, if it reads one.
+#[derive(Clone, Copy)]
+enum Wide {
+    Signed,
+    Unsigned,
+    No,
 }
 
 impl<'de, E> IntoDeserializer<'de, E> for ContentDeserializer<'de, E>
@@ -2185,6 +2297,38 @@ mod tests {
         assert_eq!(count, 3);
         let big = u64::deserialize(ContentDeserializer::<serde_json::Error>::new(read("big")?))?;
         assert_eq!(big, u64::MAX);
+    }
+
+    /// A number no 64-bit integer holds keeps its digits through the buffer: arbitrary JSON reads
+    /// it as written, a 128-bit integer reads it exactly, and a float still reads it as a float.
+    /// Without `arbitrary_precision`, `serde_json` hands such a number over as a float itself.
+    #[cfg(feature = "exact-numbers")]
+    #[test_util::test]
+    fn a_number_keeps_its_digits_through_the_buffered_path_under_arbitrary_precision() {
+        let replay =
+            |json: &'static str| -> eyre::Result<ContentDeserializer<'static, serde_json::Error>> {
+                let captured: Content<'static> = serde_json::from_str(json)?;
+                Ok(ContentDeserializer::new(captured))
+            };
+        for written in [
+            "12345678901234567890123",
+            "1.10",
+            "-340282366920938463463374607431768211455",
+        ] {
+            let value = serde_json::Value::deserialize(replay(written)?)?;
+            assert_eq!(value.to_string(), written);
+        }
+        assert_eq!(
+            u128::deserialize(replay("12345678901234567890123")?)?,
+            12_345_678_901_234_567_890_123
+        );
+        assert_eq!(
+            i128::deserialize(replay("-12345678901234567890123")?)?,
+            -12_345_678_901_234_567_890_123
+        );
+        let float = f64::deserialize(replay("1.10")?)?;
+        assert!((float - 1.1).abs() < f64::EPSILON);
+        assert!(u64::deserialize(replay("1.10")?).is_err());
     }
 
     use super::{Content, ContentDeserializer};
