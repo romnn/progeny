@@ -163,14 +163,25 @@ impl Incoming {
     /// `text/plain` with the victim's cookies and no preflight, and a JSON endpoint that
     /// parses whatever arrived is exactly the CSRF surface `axum::Json`'s own `415` exists to
     /// close.
-    pub fn mismatched_media_type(&self, declared: &str) -> Option<String> {
+    pub fn mismatched_media_type(&self, declared: &[&str]) -> Option<String> {
         let sent = self.headers.get(::axum::http::header::CONTENT_TYPE)?;
         // A header outside UTF-8 names no media type this server accepts.
         let Ok(sent) = sent.to_str() else {
             return Some("(unreadable)".to_owned());
         };
         let sent_base = base_media_type(sent);
-        (sent_base != base_media_type(declared)).then_some(sent_base)
+        // A declared wildcard admits every type it matches: `image/*` any image, `*/*` anything.
+        let admits = |declared: &&str| {
+            let declared = base_media_type(declared);
+            match declared.strip_suffix("/*") {
+                Some("*") => true,
+                Some(kind) => sent_base
+                    .split_once('/')
+                    .is_some_and(|(sent_kind, _)| sent_kind == kind),
+                None => sent_base == declared,
+            }
+        };
+        (!declared.iter().any(admits)).then_some(sent_base)
     }
 
     /// The whole body, or nothing when the request carried none.
@@ -438,23 +449,42 @@ mod tests {
         // The browser "simple request": JSON-shaped text posted as `text/plain` cross-origin,
         // no preflight. The declared type is the contract.
         assert_eq!(
-            incoming_with(Some("text/plain")).mismatched_media_type("application/json"),
+            incoming_with(Some("text/plain")).mismatched_media_type(&["application/json"]),
             Some("text/plain".to_owned())
         );
         // Parameters never distinguish.
         assert_eq!(
             incoming_with(Some("application/json; charset=utf-8"))
-                .mismatched_media_type("application/json"),
+                .mismatched_media_type(&["application/json"]),
             None
         );
         assert_eq!(
             incoming_with(Some("multipart/form-data; boundary=b"))
-                .mismatched_media_type("multipart/form-data"),
+                .mismatched_media_type(&["multipart/form-data"]),
+            None
+        );
+        // A declared wildcard admits every type it matches, and nothing else.
+        assert_eq!(
+            incoming_with(Some("image/png")).mismatched_media_type(&["image/*"]),
+            None
+        );
+        assert_eq!(
+            incoming_with(Some("text/plain")).mismatched_media_type(&["image/*"]),
+            Some("text/plain".to_owned())
+        );
+        assert_eq!(
+            incoming_with(Some("application/zip")).mismatched_media_type(&["*/*"]),
+            None
+        );
+        // The type the generated client sends for a wildcard is admitted beside it.
+        assert_eq!(
+            incoming_with(Some("application/octet-stream"))
+                .mismatched_media_type(&["image/*", "application/octet-stream"]),
             None
         );
         // No header says nothing — an optional body is often sent without one.
         assert_eq!(
-            incoming_with(None).mismatched_media_type("application/json"),
+            incoming_with(None).mismatched_media_type(&["application/json"]),
             None
         );
     }

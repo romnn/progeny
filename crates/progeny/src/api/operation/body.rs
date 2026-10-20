@@ -50,6 +50,7 @@ impl Build<'_> {
                     ty: TypeRef::Value,
                     required: false,
                     content_type: "application/json".to_owned(),
+                    accepts: None,
                 },
                 variants: Vec::new(),
             });
@@ -143,6 +144,7 @@ impl Build<'_> {
                 ty,
                 required,
                 content_type: media_type.trim().to_owned(),
+                accepts: None,
             };
         }
         match base.as_str() {
@@ -190,11 +192,13 @@ impl Build<'_> {
                         ty,
                         required,
                         content_type: "application/json".to_owned(),
+                        accepts: Some(wildcard.to_owned()),
                     }
                 } else {
                     BodyContract::Bytes {
                         content_type: chosen.to_owned(),
                         required,
+                        accepts: Some(wildcard.to_owned()),
                     }
                 }
             }
@@ -207,6 +211,7 @@ impl Build<'_> {
             _ => BodyContract::Bytes {
                 content_type: media_type.to_owned(),
                 required,
+                accepts: None,
             },
         }
     }

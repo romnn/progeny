@@ -529,8 +529,12 @@ fn body_extraction(
 ) -> TokenStream {
     let required = body.required();
     let (declared, read) = match body {
-        BodyContract::Json { content_type, .. } => (
-            content_type.clone(),
+        BodyContract::Json {
+            content_type,
+            accepts,
+            ..
+        } => (
+            accepts.clone().unwrap_or_else(|| content_type.clone()),
             quote! { support::json_body(incoming).await },
         ),
         BodyContract::Form { specs, .. } => {
@@ -559,7 +563,11 @@ fn body_extraction(
             content_type.clone(),
             quote! { support::text_body(incoming).await },
         ),
-        BodyContract::Bytes { content_type, .. } => {
+        BodyContract::Bytes {
+            content_type,
+            accepts,
+            ..
+        } => {
             // The handler's argument comes from `client::body_type`, which under
             // `formats.bytes = "bytes"` says `::bytes::Bytes`; the reader hands back `Vec<u8>`,
             // so the seam converts — or the generated crate does not compile.
@@ -571,7 +579,10 @@ fn body_extraction(
                 },
                 crate::config::BytesRepr::Vec => quote! { support::byte_body(incoming).await },
             };
-            (content_type.clone(), read)
+            (
+                accepts.clone().unwrap_or_else(|| content_type.clone()),
+                read,
+            )
         }
     };
     let reader = if required {
@@ -583,13 +594,27 @@ fn body_extraction(
     // parameter: the document made the request's type caller data (cloudflare's R2 object
     // upload stores it), and refusing what the description invites would reject the generated
     // client's own requests.
+    // A wildcard admits what it matches, and the type the generated client sends in its place.
+    let admitted = match body {
+        BodyContract::Json {
+            content_type,
+            accepts: Some(wildcard),
+            ..
+        }
+        | BodyContract::Bytes {
+            content_type,
+            accepts: Some(wildcard),
+            ..
+        } => vec![wildcard.clone(), content_type.clone()],
+        _ => vec![declared.clone()],
+    };
     let gate = (!content_type_declared).then(|| {
         quote! {
             // The declared media type is part of the contract: a body claiming another type is
             // refused `415` before it is parsed, which is the same protection `axum::Json`
             // gives a hand-written handler against a cross-origin form's `text/plain` "simple
             // request".
-            if let ::std::option::Option::Some(sent) = incoming.mismatched_media_type(#declared) {
+            if let ::std::option::Option::Some(sent) = incoming.mismatched_media_type(&[#(#admitted),*]) {
                 return api
                     .on_rejection(support::Rejection::UnsupportedMediaType {
                         operation: #operation,

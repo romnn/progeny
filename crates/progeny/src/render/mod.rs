@@ -3105,6 +3105,29 @@ mod tests {
         assert!(!binary.contains("\"image/*\""), "{binary}");
         assert!(binary.contains("application/octet-stream"), "{binary}");
         assert!(binary.contains("::std::vec::Vec<u8>"), "{binary}");
+
+        // The generated server accepts every type the wildcard matches, not the one the client
+        // happens to send.
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/upload": {"post": {
+                    "operationId": "upload",
+                    "requestBody": {"required": true, "content": {"image/*": {
+                        "schema": {"type": "string", "format": "binary"},
+                    }}},
+                    "responses": {"200": {"description": "ok"}},
+                }}},
+            }),
+            &Config::default(),
+        )?;
+        let server = generated
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?;
+        assert!(
+            server.contains("mismatched_media_type(&[\"image/*\", \"application/octet-stream\"])"),
+            "{server}"
+        );
     }
 
     #[test_util::test]
