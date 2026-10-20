@@ -3599,6 +3599,68 @@ mod tests {
         }
     }
 
+    /// A member is judged by the type generated for it, so a branch is not proved to refuse
+    /// another by a kind its member's type does not have.
+    #[test_util::test]
+    fn a_member_is_the_kind_its_generated_type_reads() {
+        let required =
+            |kind: Value, x: Value| tagged_object(kind, true, json!({"x": x}), &["type", "x"]);
+        let cases = [
+            // `B`'s `x` lists strings beside members, which makes it a string enum that `A`'s
+            // string reads too.
+            (
+                json!({"type": "string"}),
+                json!({"enum": ["keep"], "properties": {"ignored": {"type": "string"}}}),
+            ),
+            // `A`'s `x` has items beside patterns, which makes it a list of floats that reads
+            // `B`'s integers, rounding the ones past 2^53.
+            (
+                json!({
+                    "items": {"type": "number"},
+                    "patternProperties": {".*": {"type": "string"}},
+                }),
+                json!({"type": "array", "items": {"type": "integer"}}),
+            ),
+        ];
+        for (case, (a, b)) in cases.into_iter().enumerate() {
+            assert!(
+                degrades_as_wild_union(
+                    json!({
+                        "A": required(listing(&["a", "b"]), a),
+                        "B": required(listing(&["b", "c"]), b),
+                        "C": tagged_object(listing(&["c"]), true, json!({}), &["type"]),
+                        "Field": {"anyOf": abc()},
+                    }),
+                    "Field",
+                )?,
+                "case {case}"
+            );
+        }
+
+        // `A`'s `x` is a `type: file`, which is read as a string whatever members it declares,
+        // and `A` is open, so it reads `B`'s payloads and drops `keep`.
+        assert!(degrades_as_wild_union(
+            json!({
+                "A": {
+                    "type": "object", "required": ["x"],
+                    "properties": {"x": {"type": "file", "properties": {"ignored": {}}}},
+                },
+                "B": {
+                    "type": "object", "required": ["x", "keep"],
+                    "properties": {
+                        "x": {"enum": ["keep"], "properties": {"ignored": {}}},
+                        "keep": {"type": "integer"},
+                    },
+                },
+                "Field": {"anyOf": [
+                    {"$ref": "#/components/schemas/A"},
+                    {"$ref": "#/components/schemas/B"},
+                ]},
+            }),
+            "Field",
+        )?);
+    }
+
     #[test_util::test]
     fn a_nested_union_of_strings_is_one_string_branch() {
         // `Mode` becomes one string enum, which turns every object down, so it can sit first.
