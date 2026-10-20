@@ -529,8 +529,12 @@ fn body_extraction(
 ) -> TokenStream {
     let required = body.required();
     let (declared, read) = match body {
-        BodyContract::Json { content_type, .. } => (
-            content_type.clone(),
+        BodyContract::Json {
+            content_type,
+            accepts,
+            ..
+        } => (
+            accepts.clone().unwrap_or_else(|| content_type.clone()),
             quote! { support::json_body(incoming).await },
         ),
         BodyContract::Form { specs, .. } => {
@@ -551,7 +555,11 @@ fn body_extraction(
             content_type.clone(),
             quote! { support::text_body(incoming).await },
         ),
-        BodyContract::Bytes { content_type, .. } => {
+        BodyContract::Bytes {
+            content_type,
+            accepts,
+            ..
+        } => {
             // The handler's argument comes from `client::body_type`, which under
             // `formats.bytes = "bytes"` says `::bytes::Bytes`; the reader hands back `Vec<u8>`,
             // so the seam converts — or the generated crate does not compile.
@@ -563,7 +571,10 @@ fn body_extraction(
                 },
                 crate::config::BytesRepr::Vec => quote! { support::byte_body(incoming).await },
             };
-            (content_type.clone(), read)
+            (
+                accepts.clone().unwrap_or_else(|| content_type.clone()),
+                read,
+            )
         }
     };
     let reader = if required {

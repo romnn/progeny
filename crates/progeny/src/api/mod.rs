@@ -174,6 +174,9 @@ pub(crate) enum BodyContract {
         /// a versioned vendor type) is the position's actual wire contract, and the client
         /// sends the declared spelling rather than the family default.
         content_type: String,
+        /// The wildcard the document declared in place of a content type, such as `*/*`, which
+        /// the generated server accepts where it would otherwise require `content_type`.
+        accepts: Option<String>,
     },
     /// `application/x-www-form-urlencoded`: the same typed value as a JSON body, encoded with the
     /// form style row instead of as JSON. 109 bodies across 11 corpus documents, 103 of them an
@@ -206,6 +209,9 @@ pub(crate) enum BodyContract {
     Bytes {
         content_type: String,
         required: bool,
+        /// The wildcard the document declared in place of a content type, such as `image/*`,
+        /// which the generated server accepts where it would otherwise require `content_type`.
+        accepts: Option<String>,
     },
 }
 

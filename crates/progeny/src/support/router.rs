@@ -170,7 +170,16 @@ impl Incoming {
             return Some("(unreadable)".to_owned());
         };
         let sent_base = base_media_type(sent);
-        (sent_base != base_media_type(declared)).then_some(sent_base)
+        let declared = base_media_type(declared);
+        // A declared wildcard admits every type it matches: `image/*` any image, `*/*` anything.
+        let admitted = match declared.strip_suffix("/*") {
+            Some("*") => true,
+            Some(kind) => sent_base
+                .split_once('/')
+                .is_some_and(|(sent_kind, _)| sent_kind == kind),
+            None => sent_base == declared,
+        };
+        (!admitted).then_some(sent_base)
     }
 
     /// The whole body, or nothing when the request carried none.
@@ -454,6 +463,19 @@ mod tests {
         assert_eq!(
             incoming_with(Some("multipart/form-data; boundary=b"))
                 .mismatched_media_type("multipart/form-data"),
+            None
+        );
+        // A declared wildcard admits every type it matches, and nothing else.
+        assert_eq!(
+            incoming_with(Some("image/png")).mismatched_media_type("image/*"),
+            None
+        );
+        assert_eq!(
+            incoming_with(Some("text/plain")).mismatched_media_type("image/*"),
+            Some("text/plain".to_owned())
+        );
+        assert_eq!(
+            incoming_with(Some("application/zip")).mismatched_media_type("*/*"),
             None
         );
         // No header says nothing — an optional body is often sent without one.
