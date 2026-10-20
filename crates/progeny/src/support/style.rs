@@ -719,11 +719,12 @@ fn percent(out: &mut String, byte: u8) {
 /// One `name=value` query pair under `allowReserved: true`.
 ///
 /// RFC 6570's reserved expansion, which is what the flag asks for: the value's RFC 3986
-/// reserved characters — the gen-delims `:/?#[]@` and the sub-delims `!$&'()*+,;=` — reach the
-/// wire unencoded, along with `%` so an already-encoded triplet is not encoded twice. That can
-/// spell `&` and `=` into the value; the document turned the protection off, and re-encoding
-/// them would be exactly the corruption the flag exists to prevent. The name is an ordinary
-/// component and keeps the conservative encoding.
+/// reserved characters reach the wire unencoded, along with `%` so an already-encoded triplet is
+/// not encoded twice.
+/// OpenAPI 3.1.1 keeps the exceptions a query string needs: `[`, `]` and `#`, which a query
+/// cannot carry, and `&` and `+`, which form encoding reads as a pair boundary and a space, are
+/// still encoded, so the value reads back as written.
+/// The name is an ordinary component and keeps the conservative encoding.
 pub fn reserved_pair(name: &str, value: &str) -> String {
     let mut out = encode(name);
     out.push('=');
@@ -737,17 +738,13 @@ pub fn reserved_pair(name: &str, value: &str) -> String {
                     | b':'
                     | b'/'
                     | b'?'
-                    | b'['
-                    | b']'
                     | b'@'
                     | b'!'
                     | b'$'
-                    | b'&'
                     | b'\''
                     | b'('
                     | b')'
                     | b'*'
-                    | b'+'
                     | b','
                     | b';'
                     | b'='
@@ -776,26 +773,35 @@ mod tests {
     fn a_reserved_value_keeps_its_reserved_characters_and_nothing_else() {
         assert_eq!(
             super::reserved_pair("next", "https://example.test/a?x=1&y=%2F z"),
-            "next=https://example.test/a?x=1&y=%2F%20z"
+            "next=https://example.test/a?x=1%26y=%2F%20z"
         );
         // The name is an ordinary component: its reserved characters do not pass.
         assert_eq!(super::reserved_pair("a&b", "c"), "a%26b=c");
     }
 
-    /// A reserved value survives the trip: `#` would end the query, so it is escaped, and the
-    /// `+` written as itself is read back as itself.
+    /// A reserved value survives the trip: `#` would end the query and `&` the pair, so both are
+    /// escaped, and the `+` written as itself is read back as itself.
     #[test]
     fn a_reserved_value_reads_back_as_written() {
-        for value in ["a#b", "2024-01-01T00:00:00+02:00"] {
+        for value in [
+            "a#b",
+            "2024-01-01T00:00:00+02:00",
+            "https://example.test/?x=1&y=2",
+        ] {
             let pair = super::reserved_pair("q", value);
-            assert!(!pair.contains('#'), "{pair}");
+            assert!(!pair.contains('#') && !pair.contains('&'), "{pair}");
             assert_eq!(
                 super::from_query(&pair, "q", Style::Form, true, false, true),
                 Some(json!(value)),
                 "{pair}"
             );
         }
-        // An ordinary parameter still reads a `+` as the form-encoded space.
+        // A `+` another client sends as itself under the flag is itself, and an ordinary
+        // parameter still reads it as the form-encoded space.
+        assert_eq!(
+            super::from_query("q=a+b", "q", Style::Form, true, false, true),
+            Some(json!("a+b"))
+        );
         assert_eq!(
             super::from_query("q=a+b", "q", Style::Form, true, false, false),
             Some(json!("a b"))
