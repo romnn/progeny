@@ -448,6 +448,7 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
             // is an array or a scalar with a comma in it.
             let array = param.style.array();
             let object = param.style.object();
+            let strings = param.strings.iter().map(String::as_str);
             let source = match location {
                 Location::Path => {
                     quote! {
@@ -460,7 +461,16 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
                     let reserved = param.style.allow_reserved();
                     quote! {
                         ::std::result::Result::<_, ::std::convert::Infallible>::Ok(
-                            incoming.query_value(#wire, #style, #explode, #array, #reserved)
+                            incoming.query_value(
+                                #wire,
+                                support::style::QueryRow {
+                                    style: #style,
+                                    explode: #explode,
+                                    array: #array,
+                                    reserved: #reserved,
+                                    object: #object,
+                                },
+                            )
                         )
                     }
                 }
@@ -470,7 +480,7 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
                 Location::Cookie => quote! { incoming.cookie_value(#wire, #array, #object) },
             };
             quote! {
-                #field: match support::read(#source, #wire, #required, #operation_label) {
+                #field: match support::read(#source, #wire, #required, #operation_label, &[#(#strings),*]) {
                     ::std::result::Result::Ok(value) => value,
                     ::std::result::Result::Err(rejection) => {
                         return api.on_rejection(rejection).into_response();

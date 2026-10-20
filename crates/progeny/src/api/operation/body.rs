@@ -525,7 +525,7 @@ fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
 ///
 /// Only one list deep: an element that is itself a list arrives as its JSON spelling, which the
 /// server has to re-read.
-fn is_text(ty: &TypeRef, contracts: &Contracts) -> bool {
+pub(super) fn is_text(ty: &TypeRef, contracts: &Contracts) -> bool {
     match ty {
         TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
             is_text(inner, contracts)
