@@ -5,7 +5,7 @@ weight: 2
 
 # Configuration
 
-`progeny.toml` is everything a caller can say, as a closed set of typed values. It is strict: an unknown key or value is a parse error, and a setting the document cannot honour stops generation rather than being ignored. Every key is optional; an empty file is the default configuration.
+`progeny.toml` is everything a caller can say, as a closed set of typed values. It is strict: an unknown key or value is a parse error, and a setting the document cannot honour stops generation rather than being ignored. Every top-level key is optional, and an empty file is the default configuration; a table that is present may still require some of its own keys, as noted below.
 
 The CLI reads it with `--config`. A library caller deserializes the same TOML into `progeny::Config`, or builds one in Rust.
 
@@ -27,7 +27,7 @@ Whether to emit a crate, a workspace, or a module. See [packaging]({{< relref ".
 
 ### `package`
 
-What to call the emitted crate. `name` defaults to `"api"` and `version` to `"0.1.0"`. A name that is not a legal crate name or a version Cargo would refuse stops generation.
+What to call the emitted crate. Without the table, the crate is `api` at version `0.1.0`. Once the table is present, `name` and `version` are both required. A name that is not a legal crate name or a version Cargo would refuse stops generation.
 
 ```toml
 [package]
@@ -61,11 +61,11 @@ Which `Serialize`/`Deserialize` implementation strategy to use.
 
 ### `decoding`
 
-How a generated client reads responses. `"lenient"`, the default, decodes as far as the payload allows into read forms and reports what did not match. `"strict"` decodes exactly what the description declares and fails the response on the first deviation; it leaves out `types::read`, so the response types change with it. The CLI's `--decoding` overrides this key. See [reading responses]({{< relref "../generated-code.md#reading-responses" >}}).
+How a generated client reads responses. `"lenient"`, the default, decodes as far as the payload allows into read forms and reports what did not match. `"strict"` decodes into the strict types and fails the response on a deviation such as a missing required member or a value of the wrong type; it leaves out `types::read`, so the response types change with it. String enums and unions stay open under either setting, keeping a value the description does not list in their fallback variant, and undeclared members follow [`unknown-fields`](#unknown-fields-and-type-unknown-fields). The CLI's `--decoding` overrides this key. See [reading responses]({{< relref "../generated-code.md#reading-responses" >}}).
 
 ### `unknown-fields` and `type-unknown-fields`
 
-What to do with members a payload has and the document did not declare, under strict decoding: the request bodies a generated server reads, and the strict form of every type. Read forms always keep undeclared members.
+What to do with members a payload has and the document did not declare, under strict decoding: the request bodies a generated server reads, the strict form of every type, and so every response under `decoding = "strict"`. Under lenient decoding a read form with a twin of its own keeps undeclared members in `extra`; a type shared by requests and responses reports them and does not keep them, because the same type is what a request sends.
 
 | Value | Meaning |
 | --- | --- |

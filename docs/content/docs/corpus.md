@@ -28,7 +28,7 @@ Beside the corpus, `corpus/convergence/` describes one API by hand in both the 3
 
 ## The quick tier
 
-Compiling a generated crate is not cheap, so the expensive checks run over eight documents on every pull request, listed in `corpus/tier.toml`:
+Compiling a generated crate is not cheap, so the compile and payload checks run over eight documents on every pull request, listed in `corpus/tier.toml`:
 
 | Document | Why |
 | --- | --- |
@@ -41,12 +41,12 @@ Compiling a generated crate is not cheap, so the expensive checks run over eight
 | `jellyfin` | 3.0, 77 `format: binary` and octet-stream bodies |
 | `oxide` | 3.0, the predecessor's flagship consumer document |
 
-Over the tier, each pull request:
+Each pull request:
 
-- **compiles and lints** the generated crates with Clippy warnings denied (`task corpus:compile`), through the hand-written serde path, the derive, and strict decoding — a warning in generated code is a defect its consumer meets in their own build;
-- **round-trips payloads** (`task payloads`): every example payload a document carries is deserialized into the type generated for it, through both serde strategies;
+- **compiles and lints** the tier's generated crates with Clippy warnings denied (`task corpus:compile`), through the hand-written serde path, the derive, and strict decoding — a warning in generated code is a defect its consumer meets in their own build;
+- **round-trips payloads** (`task payloads`): every example payload a tier document carries is deserialized into the type generated for it, through both serde strategies;
 - **runs the differential harness** (`task differential`), asserting the two serde renderings agree on the wire;
-- **sends requests** (`task example`, `task probe`): a generated client against the generated server of the same description, over a real socket.
+- **sends requests**: a generated client against the generated server of the same description, over a real socket — `petstore-31` in `task example`, and every servable operation of `petstore-31` and `oxide` in `task probe`, with `petstore-31` probed through the derive as well.
 
 Nightly, the full corpus is compiled and linted (`task corpus:compile:all`) and the wire probe runs over the whole tier, because a shape that occurs in one document is a shape the tier is blind to.
 

@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 include!(concat!(env!("OUT_DIR"), "/progeny.rs"));
 ```
 
-The file is edition 2024 source, like the generated crates, so the crate that includes it has to be on edition 2024 and Rust 1.88 or later, and it declares the dependencies the generated code uses itself. `Output::diagnostics` is not optional: the only way to obtain generated source is to obtain the diagnostics with it. A document progeny cannot use at all — unparsable bytes, a version it does not implement, no operations — is a `RejectError` instead, and there is no partial rejection.
+The file is edition 2024 source, like the generated crates, so the crate that includes it has to be on edition 2024 and Rust 1.88 or later, and it declares the dependencies the generated code uses itself. `Output::diagnostics` is not optional: the only way to obtain generated source is to obtain the diagnostics with it. A document progeny cannot use at all — unparsable bytes, a version it does not implement, neither `paths` nor `webhooks` — is a `RejectError` instead, and there is no partial rejection.
 
 ### Numbers
 

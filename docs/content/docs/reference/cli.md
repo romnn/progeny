@@ -17,7 +17,7 @@ progeny <description> [--config <progeny.toml>] [--out-dir <directory>]
 | `<description>` | The OpenAPI document, JSON or YAML. |
 | `--config <path>` | A [`progeny.toml`]({{< relref "configuration.md" >}}). Without one, every key takes its default. |
 | `--out-dir <path>` | Where to write the generated files. Required whenever there is anything to write. |
-| `--decoding <mode>` | How the client reads responses, overriding the configuration: `lenient` (the default) tolerates and reports drift, `strict` refuses it. `strict` also leaves out the `types::read` module, so the generated response types change with it. |
+| `--decoding <mode>` | How the client reads responses, overriding the configuration: `lenient` (the default) tolerates and reports drift, `strict` fails a response that deviates from the strict types, while enums and unions stay open. `strict` also leaves out the `types::read` module, so the generated response types change with it. |
 | `-h`, `--help` | Print the usage text. |
 | `-V`, `--version` | Print the version of the library that would generate the output. |
 
