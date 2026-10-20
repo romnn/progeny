@@ -223,8 +223,12 @@ pub(crate) fn classify(
 }
 
 /// Whether a parameter is declared with a JSON `content` in place of a `schema`.
+///
+/// Not in the path, whose segments keep the style serialization: a document there would be
+/// written segment by segment and read back as one.
 pub(crate) fn json_content(parameter: &Parameter) -> bool {
-    parameter.schema.is_none()
+    parameter.location.as_deref() != Some("path")
+        && parameter.schema.is_none()
         && parameter.content.as_ref().is_some_and(|content| {
             content
                 .keys()
