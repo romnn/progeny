@@ -518,19 +518,29 @@ fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
 
 /// Whether a member is a string or a list of strings, whose text is the value as it arrived.
 ///
-/// A format is a string on the wire whatever Rust type it becomes.
+/// Only one list deep: an element that is itself a list arrives as its JSON spelling, which the
+/// server has to re-read.
 fn is_text(ty: &TypeRef, contracts: &Contracts) -> bool {
     match ty {
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            is_text(inner, contracts)
+        }
+        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => is_string(inner, contracts),
+        _ => is_string(ty, contracts),
+    }
+}
+
+/// Whether a value is a string on the wire; a format is one whatever Rust type it becomes.
+fn is_string(ty: &TypeRef, contracts: &Contracts) -> bool {
+    match ty {
         TypeRef::String | TypeRef::Format(_) => true,
-        TypeRef::Option(inner)
-        | TypeRef::Presence(inner)
-        | TypeRef::Boxed(inner)
-        | TypeRef::Vec(inner)
-        | TypeRef::Array(inner, _) => is_text(inner, contracts),
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            is_string(inner, contracts)
+        }
         TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
             Some(ContractKind::StringEnum { .. }) => true,
             Some(ContractKind::Alias { target } | ContractKind::Newtype { inner: target }) => {
-                is_text(target, contracts)
+                is_string(target, contracts)
             }
             _ => false,
         },
@@ -603,6 +613,7 @@ mod tests {
                             "id": {"$ref": "#/components/schemas/Id"},
                             "modes": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}},
                             "count": {"type": "integer"},
+                            "grid": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
                             "meta": {"type": "object", "properties": {"k": {"type": "string"}}},
                             "file": {"type": ["string", "null"], "format": "binary"},
                         },
@@ -630,6 +641,7 @@ mod tests {
         assert_eq!(part("id"), Some((Text, false, true)));
         assert_eq!(part("modes"), Some((Text, true, true)));
         assert_eq!(part("count"), Some((Text, false, false)));
+        assert_eq!(part("grid"), Some((Text, true, false)));
         assert_eq!(part("meta"), Some((Json, false, false)));
         assert_eq!(part("file"), Some((File, false, false)));
     }
