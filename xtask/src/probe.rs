@@ -332,11 +332,16 @@ fn handler(operation: &ProbeOp) -> String {
     } else {
         value
     };
-    let _ = writeln!(
-        out,
-        "        server::{}::{}({payload})",
-        operation.response.enum_name, answer.variant,
-    );
+    let (enum_name, variant) = (&operation.response.enum_name, &answer.variant);
+    let _ = if answer.ranged {
+        writeln!(
+            out,
+            "        server::{enum_name}::{variant} {{ status: {}, body: {payload} }}",
+            answer.status,
+        )
+    } else {
+        writeln!(out, "        server::{enum_name}::{variant}({payload})")
+    };
     out.push_str("    }\n");
     out
 }
