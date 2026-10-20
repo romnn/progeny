@@ -63,33 +63,16 @@ jobs:
           fail-on-alert: false
           summary-always: true
 
-  # benchtrail's workflow reads the history from `gh-pages` and deploys the chart page with it at
-  # `/bench/`, and Pages is set to publish from Actions.
-  # A docs site deployed by Actions later can install the chart into its own build with the
-  # `romnn/benchtrail` action, keep that URL, and be what this job deploys instead.
-  # The settings split each benchmark name into its document, strategy, and metric.
+  # The pages workflow builds the documentation and installs the benchtrail dashboard, with the
+  # history this run recorded, at `/bench/`.
+  # It deploys even when the benchmark failed, so a failed measurement never holds back the
+  # documentation of the commit.
   deploy:
-    name: deploy the chart
+    name: deploy the site
     needs: compile-cost
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       pages: write
       id-token: write
-    uses: romnn/benchtrail/.github/workflows/pages.yaml@v0.3.0
-    with:
-      benchmark-data-dir-path: bench
-      settings: |
-        {
-          "title": "progeny compile cost",
-          "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
-          "label": "{{document}} / {{strategy}}",
-          "metrics": {
-            "cpu": { "label": "CPU time", "direction": "lower" },
-            "peak rss": { "label": "Peak RSS", "direction": "lower" }
-          },
-          "dimensions": {
-            "document": { "label": "Document" },
-            "strategy": { "label": "Serde strategy" }
-          },
-          "colorBy": "document"
-        }
+    uses: ./.github/workflows/pages.yaml

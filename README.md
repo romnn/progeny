@@ -9,6 +9,12 @@ description cannot disagree. Every deviation from the input document is a struct
 diagnostic rather than silence, and the cost of compiling the generated crate is a measured
 property rather than folklore.
 
+📖 **[Documentation](https://romnn.github.io/progeny/)** — introduction, quick start, generated code,
+diagnostics, the conformance corpus, and every `progeny.toml` key.
+
+📈 **[Benchmarks](https://romnn.github.io/progeny/bench/)** — the compile-cost history of the
+generated crates.
+
 ## Status
 
 Under construction. What exists today:
