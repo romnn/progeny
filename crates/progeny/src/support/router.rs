@@ -224,27 +224,34 @@ pub async fn json_body<T: ::serde::de::DeserializeOwned>(
 ///
 /// # Errors
 /// When the body cannot be read, or its members do not match the description.
+///
+/// `strings` names the members the description types as strings, which keep their text.
 pub async fn form_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::style::FormSpec],
+    strings: &[&str],
 ) -> Result<Option<T>, RequestError> {
     let Some(bytes) = incoming.bytes().await? else {
         return Ok(None);
     };
     let text = ::std::string::String::from_utf8_lossy(&bytes);
     // Through the same reading a query parameter gets: a form body carries no types either.
-    Ok(Some(super::serve::typed_body(super::style::query_object(
-        &text, specs,
-    ))?))
+    Ok(Some(super::serve::typed_body(
+        super::style::query_object(&text, specs),
+        strings,
+    )?))
 }
 
 /// A `multipart/form-data` body, read back into the type its parts came from.
 ///
 /// # Errors
 /// When the body cannot be read, is not well-formed multipart, or does not match the description.
+///
+/// `strings` names the members the description types as strings, which keep their text.
 pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::multipart::PartSpec],
+    strings: &[&str],
 ) -> Result<Option<T>, RequestError> {
     let content_type = incoming
         .headers
@@ -257,7 +264,7 @@ pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
         return Ok(None);
     };
     let value = super::multipart::parse(&bytes, &boundary, specs)?;
-    Ok(Some(super::serve::typed_body(value)?))
+    Ok(Some(super::serve::typed_body(value, strings)?))
 }
 
 /// A text body.

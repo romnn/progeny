@@ -229,9 +229,16 @@ fn retyped(value: Value) -> Value {
 
 /// The same reading for a whole body assembled from text — a form or a multipart request.
 ///
+/// `strings` names the members the description types as strings, which keep their text when the
+/// others are re-read: a string member that spells a number would otherwise fail its type as soon
+/// as any other member needed re-reading.
+///
 /// # Errors
 /// Returns [`ServerDecodeError`] when the body does not match the description under either reading.
-pub fn typed_body<T: serde::de::DeserializeOwned>(members: Value) -> Result<T, ServerDecodeError> {
+pub fn typed_body<T: serde::de::DeserializeOwned>(
+    members: Value,
+    strings: &[&str],
+) -> Result<T, ServerDecodeError> {
     let first = match serde_json::from_value(members.clone()) {
         Ok(parsed) => return Ok(parsed),
         Err(source) => ServerDecodeError::from(source),
@@ -241,7 +248,14 @@ pub fn typed_body<T: serde::de::DeserializeOwned>(members: Value) -> Result<T, S
     };
     let retyped: serde_json::Map<String, Value> = fields
         .into_iter()
-        .map(|(name, value)| (name, retyped(value)))
+        .map(|(name, value)| {
+            let value = if strings.contains(&name.as_str()) {
+                value
+            } else {
+                retyped(value)
+            };
+            (name, value)
+        })
         .collect();
     serde_json::from_value(Value::Object(retyped)).map_err(|_| first)
 }
@@ -427,12 +441,31 @@ mod tests {
             note: String,
             rating: i32,
         }
-        let parsed: Upload = super::typed_body(json!({"note": "a note", "rating": "4"}))?;
+        let parsed: Upload = super::typed_body(json!({"note": "a note", "rating": "4"}), &[])?;
         assert_eq!(
             parsed,
             Upload {
                 note: "a note".to_owned(),
                 rating: 4,
+            }
+        );
+    }
+
+    /// A string member keeps its text while the others are re-read, so a string that spells a
+    /// number or a boolean does not fail beside a member that needed re-reading.
+    #[test_util::test]
+    fn a_string_member_keeps_its_text_while_the_others_are_re_read() {
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Login {
+            label: String,
+            count: i64,
+        }
+        let parsed: Login = super::typed_body(json!({"label": "true", "count": "4"}), &["label"])?;
+        assert_eq!(
+            parsed,
+            Login {
+                label: "true".to_owned(),
+                count: 4,
             }
         );
     }

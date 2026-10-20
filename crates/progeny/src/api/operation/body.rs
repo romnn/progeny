@@ -256,6 +256,7 @@ impl Build<'_> {
                         param_shape(&field.ty, self.contracts),
                         ParamShape::Array
                     )),
+                    text: is_text(&field.ty, self.contracts),
                 });
             }
         }
@@ -270,6 +271,7 @@ impl Build<'_> {
                 style,
                 explode,
                 array: None,
+                text: false,
             });
         }
         specs
@@ -317,6 +319,7 @@ impl Build<'_> {
                         .filter(|declared| !declared.contains(','))
                         .map(|declared| (*declared).to_owned()),
                     wire_name: field.wire_name.clone(),
+                    text: is_text(&field.ty, self.contracts),
                 }
             })
             .collect()
@@ -513,6 +516,44 @@ fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
     }
 }
 
+/// Whether a member is a string or a list of strings, whose text is the value as it arrived.
+///
+/// Only one list deep: an element that is itself a list arrives as its JSON spelling, which the
+/// server has to re-read.
+fn is_text(ty: &TypeRef, contracts: &Contracts) -> bool {
+    match ty {
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            is_text(inner, contracts)
+        }
+        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => is_string(inner, contracts),
+        TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
+            Some(ContractKind::Alias { target } | ContractKind::Newtype { inner: target }) => {
+                is_text(target, contracts)
+            }
+            _ => is_string(ty, contracts),
+        },
+        _ => is_string(ty, contracts),
+    }
+}
+
+/// Whether a value is a string on the wire; a format is one whatever Rust type it becomes.
+fn is_string(ty: &TypeRef, contracts: &Contracts) -> bool {
+    match ty {
+        TypeRef::String | TypeRef::Format(_) => true,
+        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+            is_string(inner, contracts)
+        }
+        TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
+            Some(ContractKind::StringEnum { .. }) => true,
+            Some(ContractKind::Alias { target } | ContractKind::Newtype { inner: target }) => {
+                is_string(target, contracts)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// The JSON family: `application/json` and the `+json` structured suffix.
 pub(super) fn is_json(media_type: &str) -> bool {
     crate::doc::is_json_media_type(media_type)
@@ -577,6 +618,9 @@ mod tests {
                             "purpose": {"type": "string", "enum": ["assistants", "batch"]},
                             "id": {"$ref": "#/components/schemas/Id"},
                             "modes": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}},
+                            "count": {"type": "integer"},
+                            "tags": {"$ref": "#/components/schemas/Tags"},
+                            "grid": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
                             "meta": {"type": "object", "properties": {"k": {"type": "string"}}},
                             "file": {"type": ["string", "null"], "format": "binary"},
                         },
@@ -585,7 +629,10 @@ mod tests {
                 },
             },
         }));
-        document["components"] = json!({"schemas": {"Id": {"type": "string", "pattern": "^f"}}});
+        document["components"] = json!({"schemas": {
+            "Id": {"type": "string", "pattern": "^f"},
+            "Tags": {"type": "array", "items": {"type": "string"}},
+        }});
         let config = Config {
             preserve_optional_nullable: true,
             ..Config::default()
@@ -598,13 +645,16 @@ mod tests {
             parts
                 .iter()
                 .find(|part| part.wire_name == wire)
-                .map(|part| (part.kind, part.repeated))
+                .map(|part| (part.kind, part.repeated, part.text))
         };
-        assert_eq!(part("purpose"), Some((Text, false)));
-        assert_eq!(part("id"), Some((Text, false)));
-        assert_eq!(part("modes"), Some((Text, true)));
-        assert_eq!(part("meta"), Some((Json, false)));
-        assert_eq!(part("file"), Some((File, false)));
+        assert_eq!(part("purpose"), Some((Text, false, true)));
+        assert_eq!(part("id"), Some((Text, false, true)));
+        assert_eq!(part("modes"), Some((Text, true, true)));
+        assert_eq!(part("count"), Some((Text, false, false)));
+        assert_eq!(part("tags"), Some((Text, true, true)));
+        assert_eq!(part("grid"), Some((Text, true, false)));
+        assert_eq!(part("meta"), Some((Json, false, false)));
+        assert_eq!(part("file"), Some((File, false, false)));
     }
 
     #[test_util::test]

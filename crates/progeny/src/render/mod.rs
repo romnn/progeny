@@ -3054,8 +3054,9 @@ mod tests {
                 "encoding": {"metadata": {"contentType": "application/json"}},
             }),
         )?;
+        let flat: String = rendered.split_whitespace().collect();
         assert!(
-            rendered.contains("content_type: ::std::option::Option::Some(\"application/json\")"),
+            flat.contains("content_type:::std::option::Option::Some(\"application/json\""),
             "{rendered}"
         );
     }
@@ -3073,8 +3074,9 @@ mod tests {
             }),
         )?;
         assert!(!rendered.contains("application/wasm"), "{rendered}");
+        let flat: String = rendered.split_whitespace().collect();
         assert!(
-            rendered.contains("content_type: ::std::option::Option::None"),
+            flat.contains("content_type:::std::option::Option::None"),
             "{rendered}"
         );
     }

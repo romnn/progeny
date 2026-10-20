@@ -254,6 +254,9 @@ pub(crate) struct PartSpec {
     pub(crate) repeated: bool,
     /// The per-part content type the body's `encoding` declared, if it declared one.
     pub(crate) content_type: Option<String>,
+    /// Whether the member is a string, or a list of strings, whose text the generated server keeps
+    /// as it arrived rather than re-reading it as the value it spells.
+    pub(crate) text: bool,
 }
 
 /// What the document's `encoding` said about one member of a form body.
@@ -270,6 +273,9 @@ pub(crate) struct FormSpec {
     /// member captured only through `additionalProperties` — and the reader falls back to the
     /// repetition heuristic rather than trusting a guess.
     pub(crate) array: Option<bool>,
+    /// Whether the member is a string, or a list of strings, whose text the generated server keeps
+    /// as it arrived rather than re-reading it as the value it spells.
+    pub(crate) text: bool,
 }
 
 /// What each declared status yields.
