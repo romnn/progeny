@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792469704550,
+  "lastUpdate": 1792494182764,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1252,6 +1252,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 335.40625,
             "range": "± 0.9",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e87a00e8df12f3184f4021cd5651d0a53aa831e5",
+          "message": "fix(api): send a multipart member that is a string enum or a named scalar as text (#100)\n\n* fix(support): keep a number no 64-bit integer holds as its digits through the buffer\n\nCloses #86\n\n* fix(api): send a multipart member that is a string enum or a named scalar as text\n\nCloses #88",
+          "timestamp": "2026-10-20T12:57:45+02:00",
+          "tree_id": "e207d2d1178e025aa3b1b4d90f8edf1b8452ecbc",
+          "url": "https://github.com/romnn/progeny/commit/e87a00e8df12f3184f4021cd5651d0a53aa831e5"
+        },
+        "date": 1792494182264,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 26.427820333333333,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3001.733072280884,
+            "range": "± 1.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.976648666666668,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.8893222808838,
+            "range": "± 1.9",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6931993333333333,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 335.5234375,
+            "range": "± 1.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
