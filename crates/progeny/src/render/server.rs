@@ -266,16 +266,22 @@ fn response_enum(
             }
             StatusPattern::Range(class) => {
                 let response = response(arm, &quote! { status }, &body);
+                // A code with an exact arm of its own belongs to that arm, whose body a client
+                // decodes it by.
+                let exact = arms.iter().filter_map(|other| match other.status {
+                    StatusPattern::Exact(code) if code / 100 == u16::from(class) => Some(code),
+                    StatusPattern::Exact(_) | StatusPattern::Range(_) => None,
+                });
                 let class = u16::from(class);
                 // A status outside the arm's range would be one the description does not declare,
                 // which this server never sends: it is the handler's defect, so a `500`.
                 quote! {
                     Self::#variant { status, body } => {
-                        if status / 100 != #class {
+                        if status / 100 != #class #(|| status == #exact)* {
                             return ::axum::response::IntoResponse::into_response((
                                 ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                                 ::std::format!(
-                                    "the handler answered with {status}, outside the declared {}XX range",
+                                    "the handler answered with {status}, which the declared {}XX range does not cover",
                                     #class,
                                 ),
                             ));

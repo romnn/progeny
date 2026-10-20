@@ -2973,6 +2973,7 @@ mod tests {
                     "operationId": "listPets",
                     "responses": {
                         "200": {"description": "ok"},
+                        "400": {"description": "bad request"},
                         "4XX": {"description": "other client error"},
                     },
                 }}},
@@ -2987,8 +2988,9 @@ mod tests {
             flat.contains("Status4xx{status:::std::primitive::u16,"),
             "{server}"
         );
+        // A code with its own exact arm is that arm's, not the range's.
         assert!(
-            flat.contains("Self::Status4xx{status,body}=>{ifstatus/100!=4u16"),
+            flat.contains("Self::Status4xx{status,body}=>{ifstatus/100!=4u16||status==400u16"),
             "{server}"
         );
         assert!(flat.contains("Self::Ok(body)=>"), "{server}");
