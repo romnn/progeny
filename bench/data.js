@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792525670019,
+  "lastUpdate": 1792531962872,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1846,6 +1846,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 335.7239580154419,
             "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9e83a0221ffe3311ed0a92f642357310a89aed82",
+          "message": "fix(client): send each operation to the server its path item or operation declares (#111)\n\n* fix(support): keep a number no 64-bit integer holds as its digits through the buffer\n\nCloses #86\n\n* fix(api): send a multipart member that is a string enum or a named scalar as text\n\nCloses #88\n\n* fix(support): read a cookie parameter from every Cookie header field\n\nCloses #94\n\n* fix(server): send a JSON null response as JSON rather than an empty body\n\nCloses #95\n\n* fix(support): keep allowReserved query values intact between client and server\n\nCloses #93\n\n* fix(support): escape the reserved characters a query cannot carry under allowReserved\n\n* fix(support): read each text-assembled member by the type serde asks it for\n\nCloses #91\n\n* fix(support): keep string members as text by their declared type instead of by request\n\n* fix(api): keep only one list level of strings as text\n\n* fix(api): read a member's alias of a string list as text\n\n* fix(server): accept every content type a wildcard-only request body admits\n\nCloses #92\n\n* fix(server): admit the type the generated client sends for a wildcard body\n\n* fix(server): name the string members to the body readers instead of shipping a spec field\n\n* fix(client): send each operation to the server its path item or operation declares\n\nCloses #89\n\n* fix(client): let an operation's server replace only the document's, not the caller's",
+          "timestamp": "2026-10-20T23:26:36+02:00",
+          "tree_id": "b6178400e5d2251c7f450989326f3dc96b8ef27b",
+          "url": "https://github.com/romnn/progeny/commit/9e83a0221ffe3311ed0a92f642357310a89aed82"
+        },
+        "date": 1792531962074,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 29.312254333333332,
+            "range": "± 0.14",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3003.3046875,
+            "range": "± 2.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.107815666666667,
+            "range": "± 0.13",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1250.481770515442,
+            "range": "± 1.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7828716666666667,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 336.3203125,
+            "range": "± 1.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
