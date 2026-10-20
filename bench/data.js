@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792524053927,
+  "lastUpdate": 1792524523474,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1582,6 +1582,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 231.00390625,
             "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3439f1a8848b0db36e8daf1b9abf923ad7cc6422",
+          "message": "fix(support): read each text-assembled member by the type serde asks it for (#106)\n\n* fix(support): keep a number no 64-bit integer holds as its digits through the buffer\n\nCloses #86\n\n* fix(api): send a multipart member that is a string enum or a named scalar as text\n\nCloses #88\n\n* fix(support): read a cookie parameter from every Cookie header field\n\nCloses #94\n\n* fix(server): send a JSON null response as JSON rather than an empty body\n\nCloses #95\n\n* fix(support): keep allowReserved query values intact between client and server\n\nCloses #93\n\n* fix(support): escape the reserved characters a query cannot carry under allowReserved\n\n* fix(support): read each text-assembled member by the type serde asks it for\n\nCloses #91\n\n* fix(support): keep string members as text by their declared type instead of by request\n\n* fix(api): keep only one list level of strings as text\n\n* fix(api): read a member's alias of a string list as text\n\n* fix(server): name the string members to the body readers instead of shipping a spec field",
+          "timestamp": "2026-10-20T21:14:37+02:00",
+          "tree_id": "801d7e2bd246ab3422c18611413fb382b540dd03",
+          "url": "https://github.com/romnn/progeny/commit/3439f1a8848b0db36e8daf1b9abf923ad7cc6422"
+        },
+        "date": 1792524522487,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.222522666666666,
+            "range": "± 0.12",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3001.4609375,
+            "range": "± 1.8",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.627163,
+            "range": "± 0.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1251.298176765442,
+            "range": "± 1.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6697156666666667,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 335.5130205154419,
+            "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
