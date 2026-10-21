@@ -173,6 +173,9 @@ pub(crate) struct ParamContract {
     ///
     /// Only ever true for a header parameter.
     pub(crate) credential: bool,
+    /// The members of an object parameter the description types as strings, whose text the
+    /// generated server keeps while it re-reads the others as the values they spell.
+    pub(crate) strings: Vec<String>,
 }
 
 /// The one body a request carries, and how.
@@ -485,6 +488,29 @@ pub(crate) mod tests {
         assert_eq!(model.operations().len(), 1);
         assert_eq!(model.operations()[0].rust_name.as_str(), "list_pets");
         assert_eq!(model.operations()[0].method, super::Method::Get);
+    }
+
+    /// An object parameter records which of its members are strings, for the server's reading.
+    #[test_util::test]
+    fn an_object_parameter_names_its_string_members() {
+        let mut document = with_paths(json!({"/items": {"get": {
+            "operationId": "list",
+            "parameters": [{
+                "name": "page", "in": "query", "style": "deepObject", "explode": true,
+                "schema": {"$ref": "#/components/schemas/Page"},
+            }],
+            "responses": {"200": {"description": "ok"}},
+        }}}));
+        document["components"] = json!({"schemas": {"Page": {
+            "type": "object",
+            "properties": {"number": {"type": "integer"}, "cursor": {"type": "string"}},
+        }}});
+        let (model, _) = model_of(document)?;
+        let param = model.operations()[0]
+            .params
+            .first()
+            .ok_or_eyre("the parameter")?;
+        assert_eq!(param.strings, ["cursor"]);
     }
 
     /// An operation, or else its path item, may name a server of its own, and the operation goes

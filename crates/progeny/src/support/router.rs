@@ -89,17 +89,8 @@ impl Incoming {
     }
 
     /// A query parameter, read by the row the description gave it.
-    ///
-    /// `reserved` is `allowReserved`, whose `+` is the character itself rather than a space.
-    pub fn query_value(
-        &self,
-        name: &str,
-        style: super::style::Style,
-        explode: bool,
-        array: bool,
-        reserved: bool,
-    ) -> Option<Value> {
-        super::style::from_query(&self.query, name, style, explode, array, reserved)
+    pub fn query_value(&self, name: &str, row: super::style::QueryRow) -> Option<Value> {
+        super::style::from_query(&self.query, name, row)
     }
 
     /// A header, read by the row the description gave it: the raw text alone satisfied serde

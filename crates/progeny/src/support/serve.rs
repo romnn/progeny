@@ -134,6 +134,8 @@ impl RejectionResponse {
 /// the description marked it required. This is the one place that rule lives, so an optional
 /// parameter cannot become required by an accident in a renderer.
 ///
+/// `strings` names the members of an object parameter the description types as strings.
+///
 /// # Errors
 /// When the parameter is required and absent, or present and unparsable.
 pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
@@ -141,6 +143,7 @@ pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
     parameter: &'static str,
     required: bool,
     operation: &'static str,
+    strings: &[&str],
 ) -> Result<T, Rejection> {
     let value = match found {
         Ok(Some(value)) => value,
@@ -162,7 +165,7 @@ pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
             });
         }
     };
-    typed(value).map_err(|source| Rejection::InvalidParameter {
+    typed(value, strings).map_err(|source| Rejection::InvalidParameter {
         operation,
         parameter,
         detail: source.to_string(),
@@ -188,7 +191,16 @@ pub struct ServerDecodeError(#[from] serde_json::Error);
 /// # Errors
 /// Returns [`ServerDecodeError`] when the value does not match the description under either
 /// reading.
-pub fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ServerDecodeError> {
+///
+/// An object's members are re-read one by one, except the ones `strings` names, which the
+/// description types as strings and which keep their text.
+pub fn typed<T: serde::de::DeserializeOwned>(
+    value: Value,
+    strings: &[&str],
+) -> Result<T, ServerDecodeError> {
+    if value.is_object() {
+        return typed_body(value, strings);
+    }
     let first = match serde_json::from_value(value.clone()) {
         Ok(parsed) => return Ok(parsed),
         Err(source) => ServerDecodeError::from(source),
@@ -321,7 +333,7 @@ mod tests {
             key: String,
         }
         let arrived = json!(["{\"key\":\"a\"}"]);
-        let parsed: Vec<Filter> = typed(arrived)?;
+        let parsed: Vec<Filter> = typed(arrived, &[])?;
         assert_eq!(
             parsed,
             vec![Filter {
@@ -329,17 +341,17 @@ mod tests {
             }]
         );
 
-        let stays_text: String = typed(json!("{\"key\":\"a\"}"))?;
+        let stays_text: String = typed(json!("{\"key\":\"a\"}"), &[])?;
         assert_eq!(stays_text, "{\"key\":\"a\"}");
     }
 
     #[test_util::test]
     fn an_absent_optional_parameter_is_none_and_an_absent_required_one_is_a_rejection() {
         let absent = Ok::<_, Infallible>(None);
-        let optional: Option<String> = read(absent.clone(), "limit", false, "listPets")?;
+        let optional: Option<String> = read(absent.clone(), "limit", false, "listPets", &[])?;
         assert_eq!(optional, None);
 
-        let rejected = read::<String, _>(absent, "limit", true, "listPets")
+        let rejected = read::<String, _>(absent, "limit", true, "listPets", &[])
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(
@@ -361,6 +373,7 @@ mod tests {
             "limit",
             true,
             "listPets",
+            &[],
         )?;
         assert_eq!(number, 3);
         let flag: bool = read(
@@ -368,6 +381,7 @@ mod tests {
             "deep",
             true,
             "listPets",
+            &[],
         )?;
         assert!(flag);
         // An exploded array is a list of strings, and every element needs the same reading.
@@ -376,6 +390,7 @@ mod tests {
             "ids",
             true,
             "listPets",
+            &[],
         )?;
         assert_eq!(numbers, [1, 2]);
     }
@@ -390,6 +405,7 @@ mod tests {
             "version",
             true,
             "listPets",
+            &[],
         )?;
         assert_eq!(text, "9");
         let text: String = read(
@@ -397,6 +413,7 @@ mod tests {
             "mode",
             true,
             "listPets",
+            &[],
         )?;
         assert_eq!(text, "true");
         let text: String = read(
@@ -404,6 +421,7 @@ mod tests {
             "code",
             true,
             "listPets",
+            &[],
         )?;
         assert_eq!(text, "007");
     }
@@ -417,7 +435,8 @@ mod tests {
                 Ok::<_, Infallible>(Some(json!("many"))),
                 "limit",
                 true,
-                "listPets"
+                "listPets",
+                &[],
             )
             .is_err()
         );
@@ -428,6 +447,7 @@ mod tests {
             "filter",
             true,
             "listPets",
+            &[],
         )?;
         assert_eq!(text, "{\"a\":1}");
     }
@@ -470,10 +490,29 @@ mod tests {
         );
     }
 
+    /// An object parameter's members are re-read one by one, and its string members keep their
+    /// text.
+    #[test_util::test]
+    fn an_object_parameter_is_read_member_by_member() {
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Page {
+            number: i64,
+            cursor: String,
+        }
+        let page: Page = typed(json!({"number": "2", "cursor": "20"}), &["cursor"])?;
+        assert_eq!(
+            page,
+            Page {
+                number: 2,
+                cursor: "20".to_owned(),
+            }
+        );
+    }
+
     #[test_util::test]
     fn a_parameter_that_does_not_parse_says_which_one_and_why() {
         let found = Ok::<_, Infallible>(Some(serde_json::json!("not a number")));
-        let rejected = read::<i64, _>(found, "limit", true, "listPets")
+        let rejected = read::<i64, _>(found, "limit", true, "listPets", &[])
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
         let Rejection::InvalidParameter {

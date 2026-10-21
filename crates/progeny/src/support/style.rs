@@ -185,6 +185,19 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
         .join("&")
 }
 
+/// How the description serializes one query parameter: the row [`from_query`] reads it by.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryRow {
+    pub style: Style,
+    pub explode: bool,
+    /// Whether the schema declares an array, which the wire alone cannot say.
+    pub array: bool,
+    /// `allowReserved`, whose `+` is the character itself rather than a space.
+    pub reserved: bool,
+    /// Whether the schema declares an object, whose members a flat spelling alternates.
+    pub object: bool,
+}
+
 /// Read one parameter back out of a query string.
 ///
 /// The inverse of [`query_pairs`], and it lives beside it for the reason the encoder lives in one
@@ -195,20 +208,26 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
 /// `None` means the query string did not carry the parameter at all, which is a different answer
 /// from "carried it empty" and the caller decides what each costs.
 ///
-/// `reserved` is `allowReserved`: [`reserved_pair`] writes a `+` in the value as itself, so it is
-/// read back as itself rather than as a space.
+/// Under `allowReserved`, [`reserved_pair`] writes a `+` in the value as itself, so it is read back
+/// as itself rather than as a space.
 #[must_use]
-pub fn from_query(
-    query: &str,
-    name: &str,
-    style: Style,
-    explode: bool,
-    array: bool,
-    reserved: bool,
-) -> Option<Value> {
+pub fn from_query(query: &str, name: &str, row: QueryRow) -> Option<Value> {
+    let QueryRow {
+        style,
+        explode,
+        array,
+        reserved,
+        object,
+    } = row;
     let pairs = split_query(query, !reserved);
     if style == Style::DeepObject {
         return deep_object(&pairs, name);
+    }
+    // A non-exploded `form` object is one pair alternating `k,v,k2,v2`; an exploded one names no
+    // pair after the parameter, and the model reports it as unservable.
+    if object && style == Style::Form && !explode {
+        let (_, value) = pairs.iter().find(|(key, _)| key == name)?;
+        return Some(flat_pairs(value.split(',').map(ToOwned::to_owned)));
     }
     let mine: Vec<&str> = pairs
         .iter()
@@ -791,7 +810,17 @@ mod tests {
             let pair = super::reserved_pair("q", value);
             assert!(!pair.contains('#') && !pair.contains('&'), "{pair}");
             assert_eq!(
-                super::from_query(&pair, "q", Style::Form, true, false, true),
+                super::from_query(
+                    &pair,
+                    "q",
+                    super::QueryRow {
+                        style: Style::Form,
+                        explode: true,
+                        array: false,
+                        reserved: true,
+                        object: false
+                    }
+                ),
                 Some(json!(value)),
                 "{pair}"
             );
@@ -799,12 +828,51 @@ mod tests {
         // A `+` another client sends as itself under the flag is itself, and an ordinary
         // parameter still reads it as the form-encoded space.
         assert_eq!(
-            super::from_query("q=a+b", "q", Style::Form, true, false, true),
+            super::from_query(
+                "q=a+b",
+                "q",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: true,
+                    object: false
+                }
+            ),
             Some(json!("a+b"))
         );
         assert_eq!(
-            super::from_query("q=a+b", "q", Style::Form, true, false, false),
+            super::from_query(
+                "q=a+b",
+                "q",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             Some(json!("a b"))
+        );
+    }
+
+    /// A non-exploded `form` object alternates its members' names and values in one pair.
+    #[test]
+    fn a_flat_form_object_is_read_back_into_its_members() {
+        assert_eq!(
+            super::from_query(
+                "color=R,100,G,200",
+                "color",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: false,
+                    array: false,
+                    reserved: false,
+                    object: true,
+                },
+            ),
+            Some(json!({"R": "100", "G": "200"}))
         );
     }
 
@@ -919,7 +987,17 @@ mod tests {
             .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
             .collect::<Vec<_>>()
             .join("&");
-        super::from_query(&query, "p", style, explode, value.is_array(), false)
+        super::from_query(
+            &query,
+            "p",
+            super::QueryRow {
+                style,
+                explode,
+                array: value.is_array(),
+                reserved: false,
+                object: false,
+            },
+        )
     }
 
     use serde_json as json_types;
@@ -1063,15 +1141,45 @@ mod tests {
         // The distinction the whole optional-parameter rule rests on: a server has to tell "not
         // sent" from "sent empty", and only `None` says the first.
         assert_eq!(
-            super::from_query("", "p", Style::Form, true, false, false),
+            super::from_query(
+                "",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             None
         );
         assert_eq!(
-            super::from_query("q=1", "p", Style::Form, true, false, false),
+            super::from_query(
+                "q=1",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             None
         );
         assert_eq!(
-            super::from_query("p=", "p", Style::Form, true, false, false),
+            super::from_query(
+                "p=",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             Some(json!(""))
         );
     }
@@ -1079,22 +1187,62 @@ mod tests {
     #[test]
     fn what_arrives_percent_encoded_comes_back_as_it_was_written() {
         assert_eq!(
-            super::from_query("p=a%20b%26c", "p", Style::Form, true, false, false),
+            super::from_query(
+                "p=a%20b%26c",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             Some(json!("a b&c"))
         );
         // `+` is the older spelling of a space. progeny writes `%20` and reads both, because what
         // arrives was written by somebody else's client.
         assert_eq!(
-            super::from_query("p=a+b", "p", Style::Form, true, false, false),
+            super::from_query(
+                "p=a+b",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             Some(json!("a b"))
         );
         assert_eq!(
-            super::from_query("p=100%25", "p", Style::Form, true, false, false),
+            super::from_query(
+                "p=100%25",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             Some(json!("100%"))
         );
         // A `%` that is not an escape is a `%`, which is the only alternative to refusing.
         assert_eq!(
-            super::from_query("p=50%zz", "p", Style::Form, true, false, false),
+            super::from_query(
+                "p=50%zz",
+                "p",
+                super::QueryRow {
+                    style: Style::Form,
+                    explode: true,
+                    array: false,
+                    reserved: false,
+                    object: false
+                }
+            ),
             Some(json!("50%zz"))
         );
     }
