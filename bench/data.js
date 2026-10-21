@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792544658089,
+  "lastUpdate": 1792544964454,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -1977,6 +1977,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 335.67578125,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "985be95aab1d93e701e707e79abfae53ef7df1bd",
+          "message": "fix(server): let a ranged response variant carry the status it is answered with (#113)\n\n* fix(support): keep a number no 64-bit integer holds as its digits through the buffer\n\nCloses #86\n\n* fix(api): send a multipart member that is a string enum or a named scalar as text\n\nCloses #88\n\n* fix(support): read a cookie parameter from every Cookie header field\n\nCloses #94\n\n* fix(server): send a JSON null response as JSON rather than an empty body\n\nCloses #95\n\n* fix(support): keep allowReserved query values intact between client and server\n\nCloses #93\n\n* fix(support): escape the reserved characters a query cannot carry under allowReserved\n\n* fix(support): read each text-assembled member by the type serde asks it for\n\nCloses #91\n\n* fix(support): keep string members as text by their declared type instead of by request\n\n* fix(api): keep only one list level of strings as text\n\n* fix(api): read a member's alias of a string list as text\n\n* fix(server): accept every content type a wildcard-only request body admits\n\nCloses #92\n\n* fix(server): admit the type the generated client sends for a wildcard body\n\n* fix(server): name the string members to the body readers instead of shipping a spec field\n\n* fix(client): send each operation to the server its path item or operation declares\n\nCloses #89\n\n* fix(client): let an operation's server replace only the document's, not the caller's\n\n* fix(server): read object parameters member by member, and rebuild a flat form object\n\nCloses #90\n\n* fix(server): let a ranged response variant carry the status it is answered with\n\nCloses #98\n\n* fix(server): refuse a ranged status with an exact arm of its own, and answer the probe's ranged arms",
+          "timestamp": "2026-10-21T02:58:56+02:00",
+          "tree_id": "91cfaed751449453003a4f6caf5ff1973d08b2ff",
+          "url": "https://github.com/romnn/progeny/commit/985be95aab1d93e701e707e79abfae53ef7df1bd"
+        },
+        "date": 1792544963686,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 19.935353666666668,
+            "range": "± 0.09",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2699.708333015442,
+            "range": "± 1.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 7.030565666666667,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1082.50390625,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.5393946666666666,
+            "range": "± 0.03",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 231.5703125,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
