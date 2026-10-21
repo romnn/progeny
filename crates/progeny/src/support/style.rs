@@ -175,8 +175,15 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
         // wire probe demonstrated on `posthog`'s `Table`: three nested members exploded into each
         // other. JSON text is the one spelling whose reader is exact, and it is the same rule a
         // compound query element already follows. `deepObject` keeps its addressable form, and a
-        // row that asks for non-exploded `form` gets the flat `k,v` spelling it names.
-        let flat = style == Style::Form && !explode;
+        // member the schema declares an object, under a row that asks for non-exploded `form`,
+        // gets the flat `k,v` spelling it names; the reader rebuilds it knowing the same.
+        let flat = style == Style::Form
+            && !explode
+            && specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .and_then(|spec| spec.object)
+                == Some(true);
         if matches!(member, Value::Object(_)) && style != Style::DeepObject && !flat {
             pairs.push((name.clone(), scalar(member)));
             continue;
@@ -875,8 +882,17 @@ mod tests {
 
     /// A form body member whose row asks for non-exploded `form` is spelled `k,v` rather than as
     /// JSON, and read back into the object.
-    #[test]
+    #[test_util::test]
     fn a_flat_form_body_member_round_trips() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Body {
+            cfg: Cfg,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Cfg {
+            k: String,
+            n: i64,
+        }
         let specs = [FormSpec {
             name: "cfg",
             style: Style::Form,
@@ -887,6 +903,30 @@ mod tests {
         let body = form_body(&json!({"cfg": {"k": "v"}}), &specs);
         assert_eq!(body, "cfg=k%2Cv");
         assert_eq!(query_object(&body, &specs), json!({"cfg": {"k": "v"}}));
+
+        // A member that is not a string is re-read as the value it spells.
+        let body = form_body(&json!({"cfg": {"k": "v", "n": 1}}), &specs);
+        let read: Body = super::super::serve::typed_body(query_object(&body, &specs), &[])?;
+        assert_eq!(
+            read,
+            Body {
+                cfg: Cfg {
+                    k: "v".to_owned(),
+                    n: 1,
+                },
+            }
+        );
+
+        // A row the schema says nothing about keeps the JSON spelling its reader can rebuild.
+        let unknown = [FormSpec {
+            object: None,
+            ..specs[0]
+        }];
+        let body = form_body(&json!({"cfg": {"k": "v"}}), &unknown);
+        assert_eq!(
+            query_object(&body, &unknown),
+            json!({"cfg": "{\"k\":\"v\"}"})
+        );
     }
 
     /// A non-exploded `form` object alternates its members' names and values in one pair.
