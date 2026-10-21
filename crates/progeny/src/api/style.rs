@@ -100,6 +100,9 @@ pub(crate) struct StyleContract {
     /// `allowReserved: true` — the value's RFC 3986 reserved characters go on the wire
     /// unencoded. Defined by OpenAPI for query parameters only; false everywhere else.
     allow_reserved: bool,
+    /// The parameter is declared with a JSON `content` rather than a `schema`: its value is one
+    /// JSON document, written as its text.
+    content: bool,
 }
 
 impl StyleContract {
@@ -140,6 +143,10 @@ impl StyleContract {
 
     pub(crate) fn allow_reserved(self) -> bool {
         self.allow_reserved
+    }
+
+    pub(crate) fn content(self) -> bool {
+        self.content
     }
 }
 
@@ -211,7 +218,22 @@ pub(crate) fn classify(
         explode,
         shape,
         allow_reserved: location == Location::Query && parameter.allow_reserved == Some(true),
+        content: json_content(parameter),
     })
+}
+
+/// Whether a parameter is declared with a JSON `content` in place of a `schema`.
+///
+/// Not in the path, whose segments keep the style serialization: a document there would be
+/// written segment by segment and read back as one.
+pub(crate) fn json_content(parameter: &Parameter) -> bool {
+    parameter.location.as_deref() != Some("path")
+        && parameter.schema.is_none()
+        && parameter.content.as_ref().is_some_and(|content| {
+            content
+                .keys()
+                .any(|media| crate::doc::is_json_media_type(media))
+        })
 }
 
 /// Classify one member of an `application/x-www-form-urlencoded` body's `encoding`.
