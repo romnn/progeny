@@ -152,6 +152,8 @@ pub struct ProbeAnswer {
     pub value: ProbeValue,
     /// The status the client must see.
     pub status: u16,
+    /// Whether the arm is a status range, whose variant carries the status it is answered with.
+    pub ranged: bool,
 }
 
 /// A synthesized response payload, distinguished by its wire representation.
@@ -349,6 +351,7 @@ fn probe_answer(
         boxed: crate::render::types::response_body_is_boxed(&arm.body),
         value,
         status,
+        ranged: matches!(arm.status, StatusPattern::Range(_)),
     })
 }
 

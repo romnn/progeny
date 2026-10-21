@@ -238,15 +238,59 @@ fn response_enum(
         let variant = format_ident!("{}", arm.rust_name.as_str());
         let ty = response_enum_type_path(&arm.body, contracts, config);
         let docs = docs_of(&arm.docs, config.docs);
-        quote! { #docs #variant(#ty), }
+        match arm.status {
+            StatusPattern::Exact(_) => quote! { #docs #variant(#ty), },
+            // A range is not a status, so the handler says which one it answers with, as it does
+            // for `default`.
+            StatusPattern::Range(class) => {
+                let range = format!(" Answered with `status`, which is in the `{class}XX` range.");
+                quote! {
+                    #docs
+                    #[doc = ""]
+                    #[doc = #range]
+                    #variant {
+                        status: ::std::primitive::u16,
+                        body: #ty,
+                    },
+                }
+            }
+        }
     });
     let matches = arms.iter().map(|arm| {
         let variant = format_ident!("{}", arm.rust_name.as_str());
-        let status = status_code(arm.status);
-        let status = quote! { #status };
         let body = quote! { body };
-        let response = response(arm, &status, &body);
-        quote! { Self::#variant(body) => #response, }
+        match arm.status {
+            StatusPattern::Exact(code) => {
+                let response = response(arm, &quote! { #code }, &body);
+                quote! { Self::#variant(body) => #response, }
+            }
+            StatusPattern::Range(class) => {
+                let response = response(arm, &quote! { status }, &body);
+                // A code with an exact arm of its own belongs to that arm, whose body a client
+                // decodes it by.
+                let exact = arms.iter().filter_map(|other| match other.status {
+                    StatusPattern::Exact(code) if code / 100 == u16::from(class) => Some(code),
+                    StatusPattern::Exact(_) | StatusPattern::Range(_) => None,
+                });
+                let class = u16::from(class);
+                // A status outside the arm's range would be one the description does not declare,
+                // which this server never sends: it is the handler's defect, so a `500`.
+                quote! {
+                    Self::#variant { status, body } => {
+                        if status / 100 != #class #(|| status == #exact)* {
+                            return ::axum::response::IntoResponse::into_response((
+                                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                ::std::format!(
+                                    "the handler answered with {status}, which the declared {}XX range does not cover",
+                                    #class,
+                                ),
+                            ));
+                        }
+                        #response
+                    }
+                }
+            }
+        }
     });
 
     // The `default` arm carries its status, because `default` means "any status this description
@@ -320,16 +364,6 @@ fn response(arm: &ResponseArm, status: &TokenStream, body: &TokenStream) -> Toke
         ResponseBody::Bytes { content_type } => {
             quote! { support::respond_bytes(#status, #content_type, *#body) }
         }
-    }
-}
-
-/// The number a declared arm answers with.
-fn status_code(status: StatusPattern) -> u16 {
-    match status {
-        StatusPattern::Exact(code) => code,
-        // The first code the range covers, because a range is not a status and a server has to send
-        // one number. `4XX` becomes `400`, which is the reading every server already gives it.
-        StatusPattern::Range(class) => u16::from(class) * 100,
     }
 }
 
