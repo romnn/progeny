@@ -261,6 +261,10 @@ impl Build<'_> {
                         param_shape(&field.ty, self.contracts),
                         ParamShape::Array
                     )),
+                    object: Some(matches!(
+                        param_shape(&field.ty, self.contracts),
+                        ParamShape::Object
+                    )),
                     text: is_text(&field.ty, self.contracts),
                 });
             }
@@ -276,6 +280,7 @@ impl Build<'_> {
                 style,
                 explode,
                 array: None,
+                object: None,
                 text: false,
             });
         }

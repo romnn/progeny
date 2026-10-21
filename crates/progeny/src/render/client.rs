@@ -1670,8 +1670,14 @@ pub(super) fn form_specs(specs: &[FormSpec]) -> TokenStream {
             || quote! { ::std::option::Option::None },
             |array| quote! { ::std::option::Option::Some(#array) },
         );
+        let object = spec.object.map_or_else(
+            || quote! { ::std::option::Option::None },
+            |object| quote! { ::std::option::Option::Some(#object) },
+        );
         quote! {
-            support::style::FormSpec { name: #name, style: #style, explode: #explode, array: #array }
+            support::style::FormSpec {
+                name: #name, style: #style, explode: #explode, array: #array, object: #object,
+            }
         }
     });
     quote! { &[#(#rows),*] }

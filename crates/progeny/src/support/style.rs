@@ -139,6 +139,9 @@ pub struct FormSpec {
     /// that guessed `false` there made the reader drop every occurrence after the first. `None`
     /// hands the question to the repetition heuristic, exactly as if the row were absent.
     pub array: Option<bool>,
+    /// Whether the member's schema declares an object, which a non-exploded `form` row spells as
+    /// its alternating names and values; `None` where the schema does not declare the member.
+    pub object: Option<bool>,
 }
 
 /// An `application/x-www-form-urlencoded` body.
@@ -171,8 +174,17 @@ pub fn form_body(value: &Value, specs: &[FormSpec]) -> String {
         // it writes the member's contents under bare keys no reader can ever reassemble, which the
         // wire probe demonstrated on `posthog`'s `Table`: three nested members exploded into each
         // other. JSON text is the one spelling whose reader is exact, and it is the same rule a
-        // compound query element already follows. `deepObject` keeps its addressable form.
-        if matches!(member, Value::Object(_)) && style != Style::DeepObject {
+        // compound query element already follows. `deepObject` keeps its addressable form, and a
+        // member the schema declares an object, under a row that asks for non-exploded `form`,
+        // gets the flat `k,v` spelling it names; the reader rebuilds it knowing the same.
+        let flat = style == Style::Form
+            && !explode
+            && specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .and_then(|spec| spec.object)
+                == Some(true);
+        if matches!(member, Value::Object(_)) && style != Style::DeepObject && !flat {
             pairs.push((name.clone(), scalar(member)));
             continue;
         }
@@ -388,6 +400,17 @@ pub fn query_object(query: &str, specs: &[FormSpec]) -> Value {
         // survives only where no schema answered: a member outside the table, or a row whose
         // member the schema only captures — repetition is the one signal the wire itself
         // offers there.
+        if style == Style::Form
+            && !explode
+            && spec.and_then(|spec| spec.object) == Some(true)
+            && let Some(first) = values.first()
+        {
+            members.insert(
+                name.clone(),
+                flat_pairs(first.split(',').map(ToOwned::to_owned)),
+            );
+            continue;
+        }
         let array = spec.and_then(|spec| spec.array).unwrap_or(values.len() > 1);
         if let Some(value) = read_values(values, style, explode, array) {
             members.insert(name.clone(), value);
@@ -857,6 +880,55 @@ mod tests {
         );
     }
 
+    /// A form body member whose row asks for non-exploded `form` is spelled `k,v` rather than as
+    /// JSON, and read back into the object.
+    #[test_util::test]
+    fn a_flat_form_body_member_round_trips() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Body {
+            cfg: Cfg,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Cfg {
+            k: String,
+            n: i64,
+        }
+        let specs = [FormSpec {
+            name: "cfg",
+            style: Style::Form,
+            explode: false,
+            array: Some(false),
+            object: Some(true),
+        }];
+        let body = form_body(&json!({"cfg": {"k": "v"}}), &specs);
+        assert_eq!(body, "cfg=k%2Cv");
+        assert_eq!(query_object(&body, &specs), json!({"cfg": {"k": "v"}}));
+
+        // A member that is not a string is re-read as the value it spells.
+        let body = form_body(&json!({"cfg": {"k": "v", "n": 1}}), &specs);
+        let read: Body = super::super::serve::typed_body(query_object(&body, &specs), &[])?;
+        assert_eq!(
+            read,
+            Body {
+                cfg: Cfg {
+                    k: "v".to_owned(),
+                    n: 1,
+                },
+            }
+        );
+
+        // A row the schema says nothing about keeps the JSON spelling its reader can rebuild.
+        let unknown = [FormSpec {
+            object: None,
+            ..specs[0]
+        }];
+        let body = form_body(&json!({"cfg": {"k": "v"}}), &unknown);
+        assert_eq!(
+            query_object(&body, &unknown),
+            json!({"cfg": "{\"k\":\"v\"}"})
+        );
+    }
+
     /// A non-exploded `form` object alternates its members' names and values in one pair.
     #[test]
     fn a_flat_form_object_is_read_back_into_its_members() {
@@ -1296,6 +1368,7 @@ mod tests {
             style: Style::SpaceDelimited,
             explode: false,
             array: Some(true),
+            object: None,
         }];
         assert_eq!(form_body(&json!({"tag": ["a", "b"]}), &specs), "tag=a%20b");
     }
@@ -1313,6 +1386,7 @@ mod tests {
             style: Style::Form,
             explode: true,
             array: None,
+            object: None,
         }];
         assert_eq!(
             query_object("tag=a&tag=b", &specs),

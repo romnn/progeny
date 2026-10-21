@@ -297,6 +297,9 @@ pub(crate) struct FormSpec {
     /// member captured only through `additionalProperties` — and the reader falls back to the
     /// repetition heuristic rather than trusting a guess.
     pub(crate) array: Option<bool>,
+    /// Whether the member's schema says it is an object, which a flat spelling alternates the
+    /// members of; `None` where the schema does not declare the member.
+    pub(crate) object: Option<bool>,
     /// Whether the member is a string, or a list of strings, whose text the generated server keeps
     /// as it arrived rather than re-reading it as the value it spells.
     pub(crate) text: bool,

@@ -235,6 +235,18 @@ fn retyped(value: Value) -> Value {
             _ => Value::String(text),
         },
         Value::Array(items) => Value::Array(items.into_iter().map(retyped).collect()),
+        // An object that arrived as an object was rebuilt from text member by member — a
+        // `deepObject` or a flat `form` spelling — so its members are text to re-read, one level
+        // deep as the writer spelled them.
+        Value::Object(members) => Value::Object(
+            members
+                .into_iter()
+                .map(|(name, member)| match member {
+                    Value::String(_) => (name, retyped(member)),
+                    other => (name, other),
+                })
+                .collect(),
+        ),
         other => other,
     }
 }
