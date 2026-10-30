@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793332499779,
+  "lastUpdate": 1793332868629,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2242,6 +2242,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 233.3893222808838,
             "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c6bce85bb37d0341d5fa766161a58aea3959d6a9",
+          "message": "fix(server): refuse a multipart part that carries a header or parameter twice (#118)\n\n* fix(server): keep multipart file and json parts as the parser built them\n\nWhen a multipart body needed the second, re-reading pass, every member\nnot typed as a string was re-read, including the upload objects and\nparsed JSON values the parser had already built. A filename or base64\ncontent spelling a number, or a JSON part's string members, turned into\nnumbers and a valid request was refused with 400.\n\nOnly text parts carry no types, so file and JSON parts now keep their\nvalues. The captured additionalProperties field also no longer gets a\npart or form row: its empty wire name described a member literally\nnamed \"\".\n\n* fix(server): refuse a multipart part that carries a header or parameter twice\n\nA part with two Content-Disposition headers was read by the first, while\nmulter, which axum uses, keeps the last, so a gateway and the generated\nserver could read one body as different members. The same held for a\npart's Content-Type and for a disposition parameter named twice.\n\nEach part's headers are now read once into PartHeaders, which refuses a\nsecond Content-Disposition or Content-Type and any disposition parameter\nnamed twice in any case, counted before values are decoded.",
+          "timestamp": "2026-10-30T04:49:14+01:00",
+          "tree_id": "69f1d5293af57097bcaad1f59cf879ba86297de4",
+          "url": "https://github.com/romnn/progeny/commit/c6bce85bb37d0341d5fa766161a58aea3959d6a9"
+        },
+        "date": 1793332867557,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 26.711416,
+            "range": "± 0.5",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2700.78515625,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.240391666666667,
+            "range": "± 0.28",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1081.528645515442,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6870783333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 232.9322910308838,
+            "range": "± 0",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
