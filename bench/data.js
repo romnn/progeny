@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792549865846,
+  "lastUpdate": 1793332499779,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2176,6 +2176,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 336.5442705154419,
             "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "baf49d4f756a5109623b0e2c3fc07838b42f26c6",
+          "message": "fix(server): keep multipart file and json parts as the parser built them (#117)\n\nWhen a multipart body needed the second, re-reading pass, every member\nnot typed as a string was re-read, including the upload objects and\nparsed JSON values the parser had already built. A filename or base64\ncontent spelling a number, or a JSON part's string members, turned into\nnumbers and a valid request was refused with 400.\n\nOnly text parts carry no types, so file and JSON parts now keep their\nvalues. The captured additionalProperties field also no longer gets a\npart or form row: its empty wire name described a member literally\nnamed \"\".",
+          "timestamp": "2026-10-30T04:48:26+01:00",
+          "tree_id": "f03f55b1540912852cd922d90d1c3239d3b7f2ac",
+          "url": "https://github.com/romnn/progeny/commit/baf49d4f756a5109623b0e2c3fc07838b42f26c6"
+        },
+        "date": 1793332498531,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 28.182939666666666,
+            "range": "± 0.22",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2701.057291030884,
+            "range": "± 2.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.541653666666667,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1081.125,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7315699999999999,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 233.3893222808838,
+            "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
