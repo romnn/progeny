@@ -158,9 +158,11 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
         // slightly non-conforming body as an empty member — silent data loss, where this
         // module's rule is to read faithfully or refuse out loud.
         let content = content.strip_suffix(b"\r\n").unwrap_or(content);
-        let Some(name) = disposition_name(&headers) else {
-            return Err(ParseError::MissingName);
-        };
+        let PartHeaders {
+            name,
+            filename,
+            content_type,
+        } = PartHeaders::read(&headers)?;
         let kind = specs
             .iter()
             .find(|spec| spec.name == name)
@@ -184,10 +186,10 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
                     "bytes".to_owned(),
                     Value::String(super::base64_encode(content)),
                 );
-                if let Some(filename) = disposition_filename(&headers) {
+                if let Some(filename) = filename {
                     members.insert("filename".to_owned(), Value::String(filename));
                 }
-                if let Some(content_type) = content_type_of(&headers) {
+                if let Some(content_type) = content_type {
                     members.insert("content_type".to_owned(), Value::String(content_type));
                 }
                 Value::Object(members)
@@ -235,36 +237,95 @@ pub enum ParseError {
     /// A part declared as JSON did not contain JSON.
     #[error("a multipart JSON part is invalid")]
     InvalidJson(#[source] serde_json::Error),
+    /// A part carried a header it may carry only once, which parsers disagree on how to read.
+    #[error("a multipart section carries `{0}` more than once")]
+    DuplicateHeader(&'static str),
+    /// A part's `Content-Disposition` named a parameter more than once.
+    #[error("a multipart section's disposition names `{0}` more than once")]
+    DuplicateParameter(String),
 }
 
-/// The `name` of a section, from its `Content-Disposition`.
-fn disposition_name(headers: &str) -> Option<String> {
-    disposition_parameter(headers, "name")
+/// What a part's header block says about the part, each header read exactly once.
+struct PartHeaders {
+    /// The `name` parameter of the part's `Content-Disposition`.
+    name: String,
+    /// The `filename` parameter, when the sender included one.
+    filename: Option<String>,
+    /// The part's own `Content-Type`, when the sender wrote one.
+    content_type: Option<String>,
 }
 
-/// The `filename` parameter of the part's disposition, when the sender included one.
-fn disposition_filename(headers: &str) -> Option<String> {
-    disposition_parameter(headers, "filename")
+impl PartHeaders {
+    /// Reads a part's header block, refusing a header or disposition parameter it carries twice.
+    ///
+    /// RFC 7578 gives each part one `Content-Disposition`, and a part with two, or with a
+    /// parameter named twice, is a different member depending on which copy a parser keeps.
+    /// `multer`, which axum uses, keeps the last header, so a gateway reading the body with it
+    /// and this reader would disagree about what the request says.
+    /// The part's own `Content-Type` becomes upload metadata and is refused twice for the same
+    /// reason.
+    ///
+    /// Copies are counted as they occur, before any value is decoded, so an empty or
+    /// unterminated copy is still a second one.
+    fn read(block: &str) -> Result<Self, ParseError> {
+        // Headers
+        let mut disposition = None;
+        let mut content_type = None;
+        for line in block.lines() {
+            let Some((field, value)) = line.split_once(':') else {
+                continue;
+            };
+            let field = field.trim();
+            let (slot, header) = if field.eq_ignore_ascii_case("content-disposition") {
+                (&mut disposition, "Content-Disposition")
+            } else if field.eq_ignore_ascii_case("content-type") {
+                (&mut content_type, "Content-Type")
+            } else {
+                continue;
+            };
+            if slot.replace(value).is_some() {
+                return Err(ParseError::DuplicateHeader(header));
+            }
+        }
+
+        // Disposition parameters, matched by their whole key so `name` never matches inside
+        // `filename`.
+        let mut name = None;
+        let mut filename = None;
+        let mut seen = std::collections::BTreeSet::new();
+        for parameter in parameters(disposition.unwrap_or_default()) {
+            let Some((key, value)) = parameter.split_once('=') else {
+                continue;
+            };
+            let key = key.trim().to_ascii_lowercase();
+            if seen.contains(&key) {
+                return Err(ParseError::DuplicateParameter(key));
+            }
+            match key.as_str() {
+                "name" => name = unquoted(value),
+                "filename" => filename = unquoted(value),
+                _ => {}
+            }
+            seen.insert(key);
+        }
+        Ok(Self {
+            name: name.ok_or(ParseError::MissingName)?,
+            filename,
+            content_type: content_type
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        })
+    }
 }
 
-/// One parameter of the part's `Content-Disposition` line, matched by its whole key.
-///
-/// The line is tokenized into `;`-separated parameters with quoting respected, and each key is
-/// compared exactly. A substring search over the whole line found the `name="` *inside*
-/// `filename="` whenever the sender wrote the filename first — a legal ordering — and filed the
-/// part's bytes under its filename.
-fn disposition_parameter(headers: &str, key: &str) -> Option<String> {
-    let line = headers.lines().find(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|name| name.trim().eq_ignore_ascii_case("content-disposition"))
-    })?;
-    let (_, parameters) = line.split_once(':')?;
+/// A header value's `;`-separated parameters, with a `;` inside quotes left in its parameter.
+fn parameters(value: &str) -> Vec<String> {
     let mut split: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
     let mut escaped = false;
-    for character in parameters.chars() {
+    for character in value.chars() {
         if escaped {
             current.push(character);
             escaped = false;
@@ -284,44 +345,28 @@ fn disposition_parameter(headers: &str, key: &str) -> Option<String> {
         }
     }
     split.push(current);
-    for parameter in split {
-        let Some((name, value)) = parameter.split_once('=') else {
-            continue;
-        };
-        if !name.trim().eq_ignore_ascii_case(key) {
-            continue;
-        }
-        let value = value.trim();
-        let Some(rest) = value.strip_prefix('"') else {
-            // An unquoted value ends at the parameter, which the tokenizer already bounded.
-            return Some(value.to_owned());
-        };
-        // Undo the escaping the writer applies, so a name with a quote in it survives the
-        // round trip.
-        let mut out = String::new();
-        let mut characters = rest.chars();
-        while let Some(character) = characters.next() {
-            match character {
-                '"' => return Some(out),
-                '\\' => out.push(characters.next()?),
-                other => out.push(other),
-            }
-        }
-        return None;
-    }
-    None
+    split
 }
 
-/// The part's own `Content-Type` header, when the sender wrote one.
-fn content_type_of(headers: &str) -> Option<String> {
-    let line = headers.lines().find(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|name| name.trim().eq_ignore_ascii_case("content-type"))
-    })?;
-    let (_, value) = line.split_once(':')?;
+/// A parameter's value with its quoting undone, or `None` when an opening quote never closes.
+fn unquoted(value: &str) -> Option<String> {
     let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
+    let Some(rest) = value.strip_prefix('"') else {
+        // An unquoted value ends at the parameter, which the tokenizer already bounded.
+        return Some(value.to_owned());
+    };
+    // Undo the escaping the writer applies, so a name with a quote in it survives the round
+    // trip.
+    let mut out = String::new();
+    let mut characters = rest.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => return Some(out),
+            '\\' => out.push(characters.next()?),
+            other => out.push(other),
+        }
+    }
+    None
 }
 
 /// The body split on a delimiter, each piece with its leading `\r\n` removed.
@@ -1132,6 +1177,93 @@ mod tests {
         }
         body.extend_from_slice(b"--b--\r\n");
         body
+    }
+
+    /// A part that names its member or its metadata twice is refused, because which copy wins
+    /// depends on the parser reading it.
+    #[test_util::test]
+    fn a_part_that_says_something_twice_is_refused() {
+        let specs = [spec("file", PartKind::File, false)];
+        let refused = |headers: &str| super::parse(&foreign_body(&[(headers, b"x")]), "b", &specs);
+
+        // Two dispositions, even identical ones
+        for headers in [
+            indoc::indoc! {r#"
+                Content-Disposition: form-data; name="file"
+                Content-Disposition: form-data; name="shadow""#},
+            indoc::indoc! {r#"
+                Content-Disposition: form-data; name="file"
+                content-disposition: form-data; name="file""#},
+        ] {
+            assert!(
+                matches!(
+                    refused(headers),
+                    Err(super::ParseError::DuplicateHeader("Content-Disposition"))
+                ),
+                "{headers}"
+            );
+        }
+
+        // Two content types, even when the first is empty and would read as absent
+        let headers = indoc::indoc! {r#"
+            Content-Disposition: form-data; name="file"; filename="a"
+            Content-Type:
+            Content-Type: image/png"#};
+        assert!(matches!(
+            refused(headers),
+            Err(super::ParseError::DuplicateHeader("Content-Type"))
+        ));
+
+        // A parameter named twice in any case, even when one copy never decodes
+        for (headers, parameter) in [
+            (
+                r#"Content-Disposition: form-data; Name="a"; name="b""#,
+                "name",
+            ),
+            (
+                r#"Content-Disposition: form-data; name="file"; filename=ok; filename="open"#,
+                "filename",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    refused(headers),
+                    Err(super::ParseError::DuplicateParameter(ref found)) if found == parameter
+                ),
+                "{headers}"
+            );
+        }
+    }
+
+    /// A part that says everything once keeps the reader's leniencies: a space before a header's
+    /// colon, a missing disposition type, an empty name, and an unterminated filename.
+    #[test_util::test]
+    fn a_part_that_says_everything_once_reads_as_it_always_did() -> eyre::Result<()> {
+        let specs = [spec("file", PartKind::File, false)];
+        let read = |headers: &str| super::parse(&foreign_body(&[(headers, b"x")]), "b", &specs);
+
+        // Space before the colon, a missing disposition type, and an empty name
+        assert_eq!(
+            read(r#"Content-Disposition : form-data; name="a""#)?,
+            json!({"a": "x"})
+        );
+        assert_eq!(read(r#"Content-Disposition: name="a""#)?, json!({"a": "x"}));
+        assert_eq!(
+            read(r#"Content-Disposition: form-data; name="""#)?,
+            json!({"": "x"})
+        );
+        // An unterminated filename is absent, and `filename*` is a parameter of its own
+        assert_eq!(
+            read(r#"Content-Disposition: form-data; name="file"; filename="open"#)?,
+            json!({"file": {"bytes": "eA=="}})
+        );
+        assert_eq!(
+            read(
+                r#"Content-Disposition: form-data; name="file"; filename="a"; filename*=UTF-8''b"#
+            )?,
+            json!({"file": {"bytes": "eA==", "filename": "a"}})
+        );
+        Ok(())
     }
 
     /// File and JSON parts keep the values the parser built while a text part beside them is
