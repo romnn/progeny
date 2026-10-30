@@ -163,14 +163,9 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
             filename,
             content_type,
         } = PartHeaders::read(&headers)?;
-        let kind = specs
-            .iter()
-            .find(|spec| spec.name == name)
-            .map_or(PartKind::Text, |spec| spec.kind);
-        let repeated = specs
-            .iter()
-            .find(|spec| spec.name == name)
-            .is_some_and(|spec| spec.repeated);
+        let spec = specs.iter().find(|spec| spec.name == name);
+        let kind = spec.map_or(PartKind::Text, |spec| spec.kind);
+        let repeated = spec.is_some_and(|spec| spec.repeated);
         let value = match kind {
             PartKind::Json => {
                 let text = String::from_utf8_lossy(content).into_owned();
@@ -196,8 +191,14 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
             }
         };
         match members.get_mut(&name) {
-            // A name seen twice is a repeated member, whatever the table said: what arrived is what
-            // arrived, and dropping the first would lose a part the client meant to send.
+            // A member the table declares single is refused a second part.
+            // Appending would fold the second into the first part's own value, such as a JSON
+            // array, and dropping either would lose a part the client meant to send.
+            Some(_) if spec.is_some_and(|spec| !spec.repeated) => {
+                return Err(ParseError::RepeatedMember(name));
+            }
+            // A name nobody described that is seen twice is a repeated member: what arrived is
+            // what arrived, and its parts are text, so an array here holds only earlier parts.
             Some(Value::Array(existing)) => existing.push(value),
             Some(existing) => *existing = Value::Array(vec![existing.take(), value]),
             None if repeated => {
@@ -243,6 +244,9 @@ pub enum ParseError {
     /// A part's `Content-Disposition` named a parameter more than once.
     #[error("a multipart section's disposition names `{0}` more than once")]
     DuplicateParameter(String),
+    /// A member the description declares single arrived in more than one part.
+    #[error("the multipart member `{0}` is single, and the body carries it more than once")]
+    RepeatedMember(String),
 }
 
 /// What a part's header block says about the part, each header read exactly once.
@@ -1177,6 +1181,48 @@ mod tests {
         }
         body.extend_from_slice(b"--b--\r\n");
         body
+    }
+
+    /// A member the table declares single is refused a second part rather than folded into the
+    /// first part's own value, while undescribed and repeated members still collect their parts.
+    #[test_util::test]
+    fn a_single_member_that_arrives_twice_is_refused() -> eyre::Result<()> {
+        let parts: [(&str, &[u8]); 2] = [
+            (
+                r#"Content-Disposition: form-data; name="payload""#,
+                br#"["a"]"#,
+            ),
+            (
+                r#"Content-Disposition: form-data; name="payload""#,
+                br#"["b"]"#,
+            ),
+        ];
+        let body = foreign_body(&parts);
+
+        // Declared single: two JSON arrays would otherwise read as `["a", ["b"]]`
+        let single = [spec("payload", PartKind::Json, false)];
+        assert!(
+            matches!(
+                super::parse(&body, "b", &single),
+                Err(super::ParseError::RepeatedMember(ref name)) if name == "payload"
+            ),
+            "{:?}",
+            super::parse(&body, "b", &single)
+        );
+
+        // Declared repeated: one element per part
+        let repeated = [spec("payload", PartKind::Json, true)];
+        assert_eq!(
+            super::parse(&body, "b", &repeated)?,
+            json!({"payload": [["a"], ["b"]]})
+        );
+
+        // Undescribed: the parts are text, collected in order
+        assert_eq!(
+            super::parse(&body, "b", &[])?,
+            json!({"payload": [r#"["a"]"#, r#"["b"]"#]})
+        );
+        Ok(())
     }
 
     /// A part that names its member or its metadata twice is refused, because which copy wins
