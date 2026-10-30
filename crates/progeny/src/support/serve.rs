@@ -253,15 +253,17 @@ fn retyped(value: Value) -> Value {
 
 /// The same reading for a whole body assembled from text — a form or a multipart request.
 ///
-/// `strings` names the members the description types as strings, which keep their text when the
-/// others are re-read: a string member that spells a number would otherwise fail its type as soon
-/// as any other member needed re-reading.
+/// `kept` names the members that keep the value they arrived with when the others are re-read.
+/// Those are the members the description types as strings, since a string member that spells a
+/// number would otherwise fail its type as soon as any other member needed re-reading.
+/// They are also the members the caller already built typed, such as a multipart file part, whose
+/// strings are not text the schema still has to type.
 ///
 /// # Errors
 /// Returns [`ServerDecodeError`] when the body does not match the description under either reading.
 pub fn typed_body<T: serde::de::DeserializeOwned>(
     members: Value,
-    strings: &[&str],
+    kept: &[&str],
 ) -> Result<T, ServerDecodeError> {
     let first = match serde_json::from_value(members.clone()) {
         Ok(parsed) => return Ok(parsed),
@@ -273,7 +275,7 @@ pub fn typed_body<T: serde::de::DeserializeOwned>(
     let retyped: serde_json::Map<String, Value> = fields
         .into_iter()
         .map(|(name, value)| {
-            let value = if strings.contains(&name.as_str()) {
+            let value = if kept.contains(&name.as_str()) {
                 value
             } else {
                 retyped(value)

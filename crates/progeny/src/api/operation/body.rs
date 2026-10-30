@@ -249,7 +249,9 @@ impl Build<'_> {
             && let Some(contract) = self.contracts.get(*index)
             && let ContractKind::Struct { fields } = contract.kind()
         {
-            for field in fields {
+            // A captured `additionalProperties` field is not a member, as in `part_specs`: its
+            // entries arrive under their own names and fall back to the repetition heuristic.
+            for field in fields.iter().filter(|field| field.capture.is_none()) {
                 let (style, explode) = declared
                     .remove(field.wire_name.as_str())
                     .unwrap_or((Style::Form, true));
@@ -314,8 +316,12 @@ impl Build<'_> {
         let ContractKind::Struct { fields } = contract.kind() else {
             return Vec::new();
         };
+        // A captured `additionalProperties` field is not a member: its entries arrive under their
+        // own names, which no row can describe, and its empty wire name would claim a part
+        // literally named `""`.
         fields
             .iter()
+            .filter(|field| field.capture.is_none())
             .map(|field| {
                 let (kind, repeated) = part_of(&field.ty, self.contracts);
                 PartSpec {
@@ -665,6 +671,52 @@ mod tests {
         assert_eq!(part("grid"), Some((Text, true, false)));
         assert_eq!(part("meta"), Some((Json, false, false)));
         assert_eq!(part("file"), Some((File, false, false)));
+    }
+
+    /// The field that captures `additionalProperties` has no row in either body's table, so its
+    /// empty wire name describes no member, not even one a client named `""`.
+    #[test_util::test]
+    fn captured_members_have_no_row() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "additionalProperties": {"type": "array", "items": {"type": "string"}},
+        });
+        let (model, _) = model_of(with_paths(json!({
+            "/files": {
+                "post": {
+                    "operationId": "upload",
+                    "requestBody": {"required": true, "content": {
+                        "multipart/form-data": {"schema": schema},
+                    }},
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+            "/forms": {
+                "post": {
+                    "operationId": "submit",
+                    "requestBody": {"required": true, "content": {
+                        "application/x-www-form-urlencoded": {"schema": schema},
+                    }},
+                    "responses": {"201": {"description": "made"}},
+                },
+            },
+        })))?;
+        let mut tables = Vec::new();
+        for operation in model.operations() {
+            let names: Vec<&str> = match &operation.body {
+                Some(BodyContract::Multipart { parts, .. }) => {
+                    parts.iter().map(|part| part.wire_name.as_str()).collect()
+                }
+                Some(BodyContract::Form { specs, .. }) => {
+                    specs.iter().map(|spec| spec.wire_name.as_str()).collect()
+                }
+                _ => eyre::bail!("every operation has a multipart or form body"),
+            };
+            tables.push(names);
+        }
+        // One multipart table and one form table, each describing only the declared member.
+        assert_eq!(tables, [["count"], ["count"]]);
     }
 
     #[test_util::test]

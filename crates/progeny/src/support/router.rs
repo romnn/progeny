@@ -250,6 +250,7 @@ pub async fn form_body<T: ::serde::de::DeserializeOwned>(
 /// When the body cannot be read, is not well-formed multipart, or does not match the description.
 ///
 /// `strings` names the members the description types as strings, which keep their text.
+/// File and JSON parts keep the values the parser built for them.
 pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::multipart::PartSpec],
@@ -266,7 +267,12 @@ pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
         return Ok(None);
     };
     let value = super::multipart::parse(&bytes, &boundary, specs)?;
-    Ok(Some(super::serve::typed_body(value, strings)?))
+    let kept: ::std::vec::Vec<&str> = strings
+        .iter()
+        .copied()
+        .chain(super::multipart::typed_members(specs))
+        .collect();
+    Ok(Some(super::serve::typed_body(value, &kept)?))
 }
 
 /// A text body.
