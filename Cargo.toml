@@ -109,6 +109,9 @@ thiserror = "2"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 toml = "1"
 ureq = "3"
+# One corpus source is published only gzip-compressed: Anthropic's spec, which its SDK repository
+# keeps as `scripts/mock-spec.json.gz`.
+flate2 = "1"
 # Snapshots are keyed by the hash of the document they were taken from, which is what tells
 # "upstream republished" apart from "we regressed" for documents that are fetched, not committed.
 sha2 = "0.11.0"

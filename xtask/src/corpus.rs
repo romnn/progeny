@@ -23,6 +23,9 @@ pub struct Args {
     fetch: bool,
 
     /// Re-download even documents that are already cached.
+    ///
+    /// A download that fails keeps the cached copy, which is what lets CI fall back to its last
+    /// good corpus when a publisher is down or has moved.
     #[arg(long, requires = "fetch")]
     refresh: bool,
 
@@ -468,8 +471,14 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
     println!("fetched {fetched} documents");
     if !failed.is_empty() {
         println!("could not fetch:");
+        // Under GitHub Actions each failure is also an annotation, because a failure that kept a
+        // cached copy passes every gate and would otherwise be read by nobody.
+        let annotate = std::env::var_os("GITHUB_ACTIONS").is_some_and(|value| value == "true");
         for line in &failed {
             println!("  {line}");
+            if annotate {
+                println!("::warning title=corpus fetch::{line}");
+            }
         }
     }
     Ok(())
@@ -498,6 +507,19 @@ fn download(url: &str) -> eyre::Result<Vec<u8>> {
         .limit(256 * 1024 * 1024)
         .read_to_vec()
         .wrap_err_with(|| format!("reading the response body from {url}"))?;
+    // A `.gz` source is a compressed file rather than a compressed transfer, so no
+    // `Content-Encoding` says so and the cache keeps the description itself.
+    let body = if url.ends_with(".gz") {
+        let mut description = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::GzDecoder::new(body.as_slice()),
+            &mut description,
+        )
+        .wrap_err_with(|| format!("decompressing {url}"))?;
+        description
+    } else {
+        body
+    };
 
     let head = body.get(..body.len().min(64)).unwrap_or_default();
     let head = String::from_utf8_lossy(head);

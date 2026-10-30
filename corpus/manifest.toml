@@ -51,9 +51,10 @@ notes = "openapi key NOT in first 128 KB (parser-order stress)"
 [[spec]]
 name = "anthropic"
 version = "3.1"
-url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/anthropic/anthropic-5ce93251152bd7c4c288dacdf5a445383825ba50bc472ff9e9821ee9455e3564.yml"
-file = "anthropic.yaml"
+url = "https://raw.githubusercontent.com/anthropics/anthropic-sdk-python/main/scripts/mock-spec.json.gz"
+file = "anthropic.json"
 mock = true
+notes = "published only as the Python SDK's gzip-compressed mock-server spec"
 bad_examples = [
   "BetaCloudConfig",
   "BetaCloudConfigParams",
@@ -223,9 +224,9 @@ file = "figma.yaml"
 [[spec]]
 name = "finch"
 version = "3.1"
-url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/finch%2Ffinch-46f433f34d440aa1dfcc48cc8d822c598571b68be2f723ec99e1b4fba6c13b1e.yml"
-file = "finch.yaml"
-notes = "Stainless hash-URL rotates; see finch-python .stats.yml; HR/payroll; discriminators, null types"
+url = "https://developer.tryfinch.com/openapi.json"
+file = "finch.json"
+notes = "HR/payroll; discriminators, null types"
 
 [[spec]]
 name = "frankfurter"
@@ -268,9 +269,9 @@ notes = "unusual 'openapi' : '3.0.1' spacing; release-pinned URL; extensionless,
 [[spec]]
 name = "increase"
 version = "3.1"
-url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/increase/increase-beca94b958f84df1e88f5e26405a66965fbf81a0c0c33b5201f0ec8d06e13ff0.yml"
-file = "increase.yaml"
-notes = "Stainless hash-URL rotates; see increase-python .stats.yml openapi_spec_url to re-resolve; webhooks, 1557 anyOf, null-heavy"
+url = "https://increase.com/openapi.json"
+file = "increase.json"
+notes = "webhooks, 1557 anyOf, null-heavy"
 bad_examples = [
   "create_an_entity_parameters",
   "sandbox_create_a_card_token_parameters",
@@ -440,9 +441,9 @@ bad_examples = [
 [[spec]]
 name = "lithic"
 version = "3.1"
-url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/lithic/lithic-efe780032e44b3cf0f6914407e43bce6aa7176fa50aa6ec018f93c1f28af8490.yml"
+url = "https://raw.githubusercontent.com/lithic-com/lithic-openapi/main/lithic-openapi.yml"
 file = "lithic.yaml"
-notes = "Stainless hash-URL rotates; see lithic-python .stats.yml; card-issuing fintech; 99 oneOf, 86 const, patternProperties"
+notes = "card-issuing fintech; 99 oneOf, 86 const, patternProperties"
 bad_examples = [
   "account-holder-created",
   "account-holder-document-updated",
@@ -562,9 +563,9 @@ notes = "302-redirects to release-assets.githubusercontent.com; 256 oneOf, 183 c
 [[spec]]
 name = "orb"
 version = "3.1"
-url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/orb%2Forb-c92fb451e13f157b3735f188acc8d57aa3adfbaac1683645e1ba4f432dd7a4f8.yml"
-file = "orb.yaml"
-notes = "Stainless hash-URL rotates; see orb-python .stats.yml; 2955 oneOf lines, 19 discriminators, octet-stream, null-heavy"
+url = "https://api.withorb.com/spec.json"
+file = "orb.json"
+notes = "2955 oneOf lines, 19 discriminators, octet-stream, null-heavy"
 
 [[spec]]
 name = "oxide"
@@ -642,9 +643,9 @@ mock = true
 [[spec]]
 name = "runway"
 version = "3.1"
-url = "https://storage.googleapis.com/stainless-sdk-openapi-specs/runwayml/runwayml-e4103e353904891c1dfe59c4cfaefb536c0dc20ae0316f2c18bae77aa4e8d8c7.yml"
-file = "runway.yaml"
-notes = "Stainless hash-URL rotates; see runwayml-python .stats.yml; 54 discriminators, 163 const"
+url = "https://raw.githubusercontent.com/runwayml/openapi/main/openapi.json"
+file = "runway.json"
+notes = "54 discriminators, 163 const"
 
 [[spec]]
 name = "scaleway-instance"

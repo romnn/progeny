@@ -1,4 +1,4 @@
-{"document":"sha256:b99194441a05efa9275f49f23942a4c1e0f9186bb33bdf1b87f40f031dadae66","diagnostics":4}
+{"document":"sha256:998ea52f04008a44d5fe490661772951e589baa6b2e183b1381764a94f701a81","diagnostics":4}
 {"class":"legacy-string-format","action":"repair","location":"/components/schemas/partition_parameters/properties/files/format","detail":"`format` is the 3.0 spelling of a fact 2020-12 moved to another member; 2020-12 defines no such format, so it was rewritten as that member"}
 {"class":"multi-media-type","action":"degrade","location":"/paths/~1general~1v0~1general/post/responses/200/content","detail":"the position declares 2 media types; `application/json` is generated and `text/csv` is not"}
 {"class":"presence-collapse","action":"degrade","location":"/components/schemas/ValidationError/properties/input","detail":"the property may be absent, and its type also holds `null`; an explicit `null` is written out but read back as `None`, the same as absent. The type is reached from a response body, so a caller cannot tell an explicit null from an absent member"}

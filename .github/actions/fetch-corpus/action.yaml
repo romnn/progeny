@@ -15,17 +15,25 @@ runs:
       run: >-
         echo "key=corpus-${{ hashFiles('corpus/manifest.toml') }}-$(date -u +%Y-%m-%d)"
         >> "$GITHUB_OUTPUT"
+    # A day's first run falls back to the most recent earlier corpus, so a document whose publisher
+    # is down or has moved keeps its last good copy instead of failing every run until the manifest
+    # catches up.
     - name: Restore the corpus
       id: cache
       uses: actions/cache/restore@v6
       with:
         path: corpus/cache
         key: ${{ steps.key.outputs.key }}
-    # Downloads only what the restore did not supply, so a partial or failed cache still converges
-    # and a vendor endpoint that was down last run is retried this one.
+        restore-keys: |
+          corpus-${{ hashFiles('corpus/manifest.toml') }}-
+          corpus-
+    # Without today's exact copy every document is downloaded again, and a failed download keeps
+    # the restored copy and is reported as a warning.
+    # With it, only what the restore did not supply is downloaded, so a partial cache still
+    # converges.
     - name: Fetch corpus
       shell: bash
-      run: task corpus:fetch
+      run: task corpus:fetch -- ${{ steps.cache.outputs.cache-hit != 'true' && '--refresh' || '' }}
     # Saved here rather than by the cache action's own post-job step: the gates that follow this in
     # the corpus jobs take an hour and fail often enough that a save conditioned on the job
     # succeeding would routinely never run.
