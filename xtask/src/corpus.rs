@@ -452,7 +452,13 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
             continue;
         };
         print!("fetching {} … ", spec.name);
-        match download(url) {
+        // A download replaces the cached copy only once it reads as a description, so a refresh
+        // that gets an error page with a 200 keeps the last good copy, as a failed request does.
+        let readable = download(url).and_then(|body| match harness::stats(&body) {
+            Ok(_) => Ok(body),
+            Err(error) => Err(eyre::eyre!("{url} served no readable description: {error}")),
+        });
+        match readable {
             Ok(body) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
@@ -509,7 +515,8 @@ fn download(url: &str) -> eyre::Result<Vec<u8>> {
         .wrap_err_with(|| format!("reading the response body from {url}"))?;
     // A `.gz` source is a compressed file rather than a compressed transfer, so no
     // `Content-Encoding` says so and the cache keeps the description itself.
-    let compressed = url
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let compressed = path
         .rsplit_once('.')
         .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("gz"));
     let body = if compressed {
