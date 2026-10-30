@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793332868629,
+  "lastUpdate": 1793371010203,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2308,6 +2308,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 232.9322910308838,
             "range": "± 0",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e553f24cbf4c011167f10e2a8faa638718d07130",
+          "message": "fix(corpus): fetch the documents whose sources went dark, and survive the next one (#122)\n\n* fix(corpus): fetch the documents whose pinned stainless urls went dark\n\nStainless closed its public spec bucket, so the pinned URLs of anthropic,\nfinch, increase, lithic, orb and runway answer 403 and the corpus job has\nfailed since. Each now comes from its vendor's official latest-tracking\nsource; Anthropic's is published only gzip-compressed, so a `.gz` source\nis decompressed on download.\n\nCI now falls back to its most recent cached corpus and refreshes every\ndocument over it, so a source that goes dark keeps its last good copy and\nsurfaces as a warning instead of failing every run. The snapshots are\nre-recorded against today's documents.\n\n* fix(corpus): replace scaleway's instance api with stackit's iaas api\n\nEvery scaleway.com schema endpoint now answers a bot challenge, and no\nofficial public copy of the Instance API remains. STACKIT's IaaS API keeps\nthe slot's role, an EU cloud's single-product compute API, and is\npublished under Apache-2.0 on a branch that tracks its latest version.\n\n* fix(corpus): replace a cached document only with one that reads as a description",
+          "timestamp": "2026-10-30T15:30:09+01:00",
+          "tree_id": "d06b3adb8ebba32cf000e560efdac3bd6b9b38d3",
+          "url": "https://github.com/romnn/progeny/commit/e553f24cbf4c011167f10e2a8faa638718d07130"
+        },
+        "date": 1793371009477,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 31.424217000000002,
+            "range": "± 0.32",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2700.061197280884,
+            "range": "± 1.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.945187666666667,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1080.001301765442,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.8166096666666668,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 232.7747392654419,
+            "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
