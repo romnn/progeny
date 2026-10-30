@@ -209,6 +209,20 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
     Ok(Value::Object(members))
 }
 
+/// The members [`parse`] hands back already typed, which a reader must not re-read as text.
+///
+/// A file part becomes the object an `Upload` deserializes from, and a JSON part becomes the value
+/// its JSON spells.
+/// Re-reading their strings as the values they spell would turn a filename `20261030`, or file
+/// content whose base64 is all digits, into a number.
+/// Only a text part carries no types, and a member nobody described is read as one.
+pub fn typed_members(specs: &[PartSpec]) -> impl Iterator<Item = &str> {
+    specs
+        .iter()
+        .filter(|spec| !matches!(spec.kind, PartKind::Text))
+        .map(|spec| spec.name)
+}
+
 /// Why a multipart request could not be decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -1090,5 +1104,121 @@ mod tests {
     fn a_body_that_is_not_an_object_has_no_parts() {
         assert!(body(&json!([1, 2]), &[]).is_none());
         assert!(body(&json!("text"), &[]).is_none());
+    }
+
+    /// A specification row with no declared content type.
+    fn spec(name: &'static str, kind: PartKind, repeated: bool) -> PartSpec {
+        PartSpec {
+            name,
+            kind,
+            repeated,
+            content_type: None,
+        }
+    }
+
+    /// A body a foreign client wrote under boundary `b`, each part given as its header block and
+    /// its content.
+    fn foreign_body(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (headers, content) in parts {
+            let delimited = indoc::formatdoc! {"
+                --b
+                {headers}
+
+            "};
+            body.extend_from_slice(crlf(&delimited).as_bytes());
+            body.extend_from_slice(content);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"--b--\r\n");
+        body
+    }
+
+    /// File and JSON parts keep the values the parser built while a text part beside them is
+    /// re-read, the way the generated server reads a multipart body.
+    #[test_util::test]
+    fn a_typed_part_is_not_re_read_beside_a_text_part_that_is() -> eyre::Result<()> {
+        use super::super::upload::Upload;
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Archive {
+            file: Upload,
+            files: Vec<Upload>,
+            meta: Meta,
+            tags: serde_json::Value,
+            retention_days: i64,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Meta {
+            code: String,
+        }
+        let specs = [
+            spec("file", PartKind::File, false),
+            spec("files", PartKind::File, true),
+            spec("meta", PartKind::Json, false),
+            spec("tags", PartKind::Json, false),
+            spec("retention_days", PartKind::Text, false),
+        ];
+        // Bytes whose base64 is all digits, so the content's encoded form spells a number too.
+        let digits = [0xd7, 0x6d, 0xf8, 0xe7, 0xae, 0xfc];
+        assert_eq!(super::super::base64_encode(&digits), "12345678");
+        let body = foreign_body(&[
+            (
+                indoc::indoc! {r#"
+                    Content-Disposition: form-data; name="file"; filename="20261030"
+                    Content-Type: text/plain"#},
+                b"hello",
+            ),
+            (
+                r#"Content-Disposition: form-data; name="files"; filename="true""#,
+                &digits,
+            ),
+            (
+                r#"Content-Disposition: form-data; name="files"; filename="7""#,
+                b"second",
+            ),
+            (
+                r#"Content-Disposition: form-data; name="meta""#,
+                br#"{"code":"123"}"#,
+            ),
+            (
+                r#"Content-Disposition: form-data; name="tags""#,
+                br#"["1","2"]"#,
+            ),
+            // A text part the schema types as an integer, which forces the second reading.
+            (
+                r#"Content-Disposition: form-data; name="retention_days""#,
+                b"7",
+            ),
+        ]);
+
+        let parsed = super::parse(&body, "b", &specs)?;
+        let kept: Vec<&str> = super::typed_members(&specs).collect();
+        let archive: Archive = super::super::serve::typed_body(parsed, &kept)?;
+
+        // Filenames and base64 content that spell numbers or booleans stay the text they were.
+        assert_eq!(
+            archive.file,
+            Upload::new("hello")
+                .with_filename("20261030")
+                .with_content_type("text/plain")
+        );
+        assert_eq!(
+            archive.files,
+            [
+                Upload::new(digits).with_filename("true"),
+                Upload::new("second").with_filename("7"),
+            ]
+        );
+        // A JSON part's strings stay strings, as they would in a JSON body.
+        assert_eq!(
+            archive.meta,
+            Meta {
+                code: "123".to_owned()
+            }
+        );
+        assert_eq!(archive.tags, json!(["1", "2"]));
+        // The text part is still read as the integer it spells.
+        assert_eq!(archive.retention_days, 7);
+        Ok(())
     }
 }

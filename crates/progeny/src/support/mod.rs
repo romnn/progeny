@@ -1217,7 +1217,7 @@ fn multipart_source(text: &str, client: bool, mut parts: PartUse) -> proc_macro2
                 let opposite_direction = if client {
                     matches!(
                         function.sig.ident.to_string().as_str(),
-                        "boundary_of" | "parse"
+                        "boundary_of" | "parse" | "typed_members"
                     )
                 } else {
                     function.sig.ident == "body"
