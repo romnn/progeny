@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::Build;
 use super::param::param_shape;
 use crate::api::style::{self, ParamShape};
-use crate::api::{BodyContract, FormSpec, PartKind, PartSpec, Style};
+use crate::api::{BodyContract, FormSpec, PartKind, PartSpec, Style, reading};
 use crate::contract::{ContractKind, Contracts, Format, TypeContract, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
@@ -150,14 +150,19 @@ impl Build<'_> {
         match base.as_str() {
             "application/x-www-form-urlencoded" => BodyContract::Form {
                 specs: self.form_specs(&ty, entry, at, ctx),
+                reading: reading::form(&ty, self.contracts),
                 ty,
                 required,
             },
-            "multipart/form-data" => BodyContract::Multipart {
-                parts: self.part_specs(&ty, entry),
-                ty,
-                required,
-            },
+            "multipart/form-data" => {
+                let parts = self.part_specs(&ty, entry);
+                BodyContract::Multipart {
+                    reading: reading::multipart(&ty, &parts, self.contracts),
+                    parts,
+                    ty,
+                    required,
+                }
+            }
             // A wildcard is not a content type, and a body with nothing but a wildcard has no
             // other to fall back to — `preference` only sorts it last. Sending `*/*` as a header
             // would be sending something no server can act on.
@@ -267,7 +272,6 @@ impl Build<'_> {
                         param_shape(&field.ty, self.contracts),
                         ParamShape::Object
                     )),
-                    text: is_text(&field.ty, self.contracts),
                 });
             }
         }
@@ -283,7 +287,6 @@ impl Build<'_> {
                 explode,
                 array: None,
                 object: None,
-                text: false,
             });
         }
         specs
@@ -335,7 +338,6 @@ impl Build<'_> {
                         .filter(|declared| !declared.contains(','))
                         .map(|declared| (*declared).to_owned()),
                     wire_name: field.wire_name.clone(),
-                    text: is_text(&field.ty, self.contracts),
                 }
             })
             .collect()
@@ -532,44 +534,6 @@ fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
     }
 }
 
-/// Whether a member is a string or a list of strings, whose text is the value as it arrived.
-///
-/// Only one list deep: an element that is itself a list arrives as its JSON spelling, which the
-/// server has to re-read.
-pub(super) fn is_text(ty: &TypeRef, contracts: &Contracts) -> bool {
-    match ty {
-        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-            is_text(inner, contracts)
-        }
-        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => is_string(inner, contracts),
-        TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
-            Some(ContractKind::Alias { target } | ContractKind::Newtype { inner: target }) => {
-                is_text(target, contracts)
-            }
-            _ => is_string(ty, contracts),
-        },
-        _ => is_string(ty, contracts),
-    }
-}
-
-/// Whether a value is a string on the wire; a format is one whatever Rust type it becomes.
-fn is_string(ty: &TypeRef, contracts: &Contracts) -> bool {
-    match ty {
-        TypeRef::String | TypeRef::Format(_) => true,
-        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-            is_string(inner, contracts)
-        }
-        TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
-            Some(ContractKind::StringEnum { .. }) => true,
-            Some(ContractKind::Alias { target } | ContractKind::Newtype { inner: target }) => {
-                is_string(target, contracts)
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 /// The JSON family: `application/json` and the `+json` structured suffix.
 pub(super) fn is_json(media_type: &str) -> bool {
     crate::doc::is_json_media_type(media_type)
@@ -581,8 +545,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::preference;
-    use crate::api::BodyContract;
     use crate::api::tests::{model_of, model_with, with_paths};
+    use crate::api::{BodyContract, Reading};
     use crate::config::Config;
     use crate::contract::TypeRef;
 
@@ -654,23 +618,30 @@ mod tests {
             ..Config::default()
         };
         let (model, _) = model_with(document, &config)?;
-        let Some(BodyContract::Multipart { parts, .. }) = &model.operations()[0].body else {
+        let Some(BodyContract::Multipart { parts, reading, .. }) = &model.operations()[0].body
+        else {
             eyre::bail!("the body is multipart");
         };
-        let part = |wire: &str| {
-            parts
-                .iter()
-                .find(|part| part.wire_name == wire)
-                .map(|part| (part.kind, part.repeated, part.text))
+        let Reading::Object { members, others } = reading else {
+            eyre::bail!("the body reads as an object");
         };
-        assert_eq!(part("purpose"), Some((Text, false, true)));
-        assert_eq!(part("id"), Some((Text, false, true)));
-        assert_eq!(part("modes"), Some((Text, true, true)));
-        assert_eq!(part("count"), Some((Text, false, false)));
-        assert_eq!(part("tags"), Some((Text, true, true)));
-        assert_eq!(part("grid"), Some((Text, true, false)));
-        assert_eq!(part("meta"), Some((Json, false, false)));
-        assert_eq!(part("file"), Some((File, false, false)));
+        let part = |wire: &str| {
+            let part = parts.iter().find(|part| part.wire_name == wire)?;
+            let row = members.iter().find(|member| member.wire_name == wire)?;
+            Some((part.kind, part.repeated, row.reading.clone()))
+        };
+        let items = |row: Reading| Reading::Items(Box::new(row));
+        // String-typed parts keep their text, and the rest are re-read; a list of lists has
+        // each element written as its JSON, and file and JSON parts keep what the parser built.
+        assert_eq!(part("purpose"), Some((Text, false, Reading::Keep)));
+        assert_eq!(part("id"), Some((Text, false, Reading::Keep)));
+        assert_eq!(part("modes"), Some((Text, true, items(Reading::Keep))));
+        assert_eq!(part("count"), Some((Text, false, Reading::Spelled)));
+        assert_eq!(part("tags"), Some((Text, true, items(Reading::Keep))));
+        assert_eq!(part("grid"), Some((Text, true, items(Reading::Spelled))));
+        assert_eq!(part("meta"), Some((Json, false, Reading::Keep)));
+        assert_eq!(part("file"), Some((File, false, Reading::Keep)));
+        assert_eq!(**others, Reading::Spelled);
     }
 
     /// The field that captures `additionalProperties` has no row in either body's table, so its

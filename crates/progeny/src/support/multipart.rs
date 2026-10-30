@@ -212,20 +212,6 @@ pub fn parse(body: &[u8], boundary: &str, specs: &[PartSpec]) -> Result<Value, P
     Ok(Value::Object(members))
 }
 
-/// The members [`parse`] hands back already typed, which a reader must not re-read as text.
-///
-/// A file part becomes the object an `Upload` deserializes from, and a JSON part becomes the value
-/// its JSON spells.
-/// Re-reading their strings as the values they spell would turn a filename `20261030`, or file
-/// content whose base64 is all digits, into a number.
-/// Only a text part carries no types, and a member nobody described is read as one.
-pub fn typed_members(specs: &[PartSpec]) -> impl Iterator<Item = &str> {
-    specs
-        .iter()
-        .filter(|spec| !matches!(spec.kind, PartKind::Text))
-        .map(|spec| spec.name)
-}
-
 /// Why a multipart request could not be decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -667,6 +653,7 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
+    use super::super::serve::Reading;
     use super::{PartKind, PartSpec, body, crlf};
 
     fn rendered(value: &serde_json::Value, specs: &[PartSpec]) -> eyre::Result<String> {
@@ -1369,9 +1356,20 @@ mod tests {
             ),
         ]);
 
+        // The plan the generator gives this body: file and JSON parts keep what the parser built,
+        // and the text part is read as the integer its type says it is.
+        let reading = Reading::Object {
+            members: &[
+                ("file", Reading::Keep),
+                ("files", Reading::Keep),
+                ("meta", Reading::Keep),
+                ("tags", Reading::Keep),
+                ("retention_days", Reading::Spelled),
+            ],
+            others: &Reading::Spelled,
+        };
         let parsed = super::parse(&body, "b", &specs)?;
-        let kept: Vec<&str> = super::typed_members(&specs).collect();
-        let archive: Archive = super::super::serve::typed_body(parsed, &kept)?;
+        let archive: Archive = super::super::serve::typed(parsed, &reading)?;
 
         // Filenames and base64 content that spell numbers or booleans stay the text they were.
         assert_eq!(
@@ -1397,6 +1395,70 @@ mod tests {
         assert_eq!(archive.tags, json!(["1", "2"]));
         // The text part is still read as the integer it spells.
         assert_eq!(archive.retention_days, 7);
+        Ok(())
+    }
+
+    /// The plan the generator gives a list of strings captured by `additionalProperties` in a
+    /// multipart body, beside a declared string member.
+    const CAPTURED_LIST: Reading = Reading::Object {
+        members: &[("name", Reading::Keep)],
+        others: &Reading::Whole(&Reading::Items(&Reading::Keep)),
+    };
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Script {
+        name: String,
+        #[serde(flatten)]
+        extra: std::collections::BTreeMap<String, Vec<String>>,
+    }
+
+    /// A member captured by `additionalProperties` has no row, so the client writes a compound one
+    /// as a single JSON part, and the server reads that part's text back as the JSON it is.
+    ///
+    /// `cloudflare`'s worker upload in miniature: the captured member is a list of strings, and
+    /// reading its one part as a raw occurrence would hand the handler the JSON text as the list's
+    /// only element.
+    #[test_util::test]
+    fn a_captured_compound_round_trips_as_one_json_part() -> eyre::Result<()> {
+        let specs = [spec("name", PartKind::Text, false)];
+        let sent = json!({"name": "7", "files": ["console.log(1)"]});
+
+        // Client to server, through the writer and the parser the generated crates use.
+        let (content_type, bytes) = body(&sent, &specs).ok_or_eyre("the body is an object")?;
+        let boundary = super::boundary_of(&content_type).ok_or_eyre("the body has a boundary")?;
+        let parsed = super::parse(&bytes, &boundary, &specs)?;
+
+        let script: Script = super::super::serve::typed(parsed, &CAPTURED_LIST)?;
+        assert_eq!(
+            script,
+            Script {
+                name: "7".to_owned(),
+                extra: [("files".to_owned(), vec!["console.log(1)".to_owned()])].into(),
+            }
+        );
+        Ok(())
+    }
+
+    /// The same captured list sent as repeated parts, one per element, reads back element by
+    /// element, so element texts that spell numbers stay the strings they are.
+    #[test_util::test]
+    fn a_captured_list_sent_as_repeated_parts_keeps_its_strings() -> eyre::Result<()> {
+        let specs = [spec("name", PartKind::Text, false)];
+        let body = foreign_body(&[
+            (r#"Content-Disposition: form-data; name="name""#, b"x"),
+            (r#"Content-Disposition: form-data; name="tags""#, b"1"),
+            (r#"Content-Disposition: form-data; name="tags""#, b"2"),
+        ]);
+        let parsed = super::parse(&body, "b", &specs)?;
+
+        let script: Script = super::super::serve::typed(parsed, &CAPTURED_LIST)?;
+        assert_eq!(
+            script,
+            Script {
+                name: "x".to_owned(),
+                extra: [("tags".to_owned(), vec!["1".to_owned(), "2".to_owned()])].into(),
+            }
+        );
         Ok(())
     }
 }

@@ -24,6 +24,7 @@ mod pagination;
 #[cfg(any(feature = "harness", test))]
 mod payload;
 mod presence;
+mod reading;
 mod registrable;
 mod route;
 mod security;
@@ -39,6 +40,7 @@ use crate::resolve::ResolvedDocument;
 use crate::shape::{Docs, Shapes};
 
 pub(crate) use pagination::PaginationContract;
+pub(crate) use reading::{MemberReading, Reading};
 pub(crate) use registrable::RegistrableRoute;
 pub(crate) use route::{PathTemplate, Piece};
 pub(crate) use security::{CredentialScheme, Place};
@@ -173,9 +175,8 @@ pub(crate) struct ParamContract {
     ///
     /// Only ever true for a header parameter.
     pub(crate) credential: bool,
-    /// The members of an object parameter the description types as strings, whose text the
-    /// generated server keeps while it re-reads the others as the values they spell.
-    pub(crate) strings: Vec<String>,
+    /// How the generated server reads the parameter's text back into its type.
+    pub(crate) reading: Reading,
 }
 
 /// The one body a request carries, and how.
@@ -204,6 +205,8 @@ pub(crate) enum BodyContract {
         /// What the body's `encoding` said about individual members, when it said anything. Empty
         /// for all but one corpus body.
         specs: Vec<FormSpec>,
+        /// How the generated server reads the members' text back into the body's type.
+        reading: Reading,
         required: bool,
     },
     /// `multipart/form-data`: one part per member of the typed value. 278 bodies across 27 corpus
@@ -214,6 +217,8 @@ pub(crate) enum BodyContract {
         /// `additionalProperties` member is real and absent from it, so the runtime walks the value
         /// and consults this rather than the other way round.
         parts: Vec<PartSpec>,
+        /// How the generated server reads the parts back into the body's type.
+        reading: Reading,
         required: bool,
     },
     /// A body that is text on the wire: `text/plain` and its relatives. 14 bodies across 5
@@ -278,9 +283,6 @@ pub(crate) struct PartSpec {
     pub(crate) repeated: bool,
     /// The per-part content type the body's `encoding` declared, if it declared one.
     pub(crate) content_type: Option<String>,
-    /// Whether the member is a string, or a list of strings, whose text the generated server keeps
-    /// as it arrived rather than re-reading it as the value it spells.
-    pub(crate) text: bool,
 }
 
 /// What the document's `encoding` said about one member of a form body.
@@ -300,9 +302,6 @@ pub(crate) struct FormSpec {
     /// Whether the member's schema says it is an object, which a flat spelling alternates the
     /// members of; `None` where the schema does not declare the member.
     pub(crate) object: Option<bool>,
-    /// Whether the member is a string, or a list of strings, whose text the generated server keeps
-    /// as it arrived rather than re-reading it as the value it spells.
-    pub(crate) text: bool,
 }
 
 /// What each declared status yields.
@@ -448,7 +447,7 @@ pub(crate) mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
-    use super::{ApiModel, build};
+    use super::{ApiModel, MemberReading, Reading, build};
     use crate::config::Config;
     use crate::diag::{Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
@@ -493,9 +492,10 @@ pub(crate) mod tests {
         assert_eq!(model.operations()[0].method, super::Method::Get);
     }
 
-    /// An object parameter records which of its members are strings, for the server's reading.
+    /// An object parameter's plan reads each member by its type, so the server keeps a string
+    /// member's text and re-reads the others.
     #[test_util::test]
-    fn an_object_parameter_names_its_string_members() {
+    fn an_object_parameter_plans_each_member_by_its_type() {
         let mut document = with_paths(json!({"/items": {"get": {
             "operationId": "list",
             "parameters": [{
@@ -513,7 +513,22 @@ pub(crate) mod tests {
             .params
             .first()
             .ok_or_eyre("the parameter")?;
-        assert_eq!(param.strings, ["cursor"]);
+        assert_eq!(
+            param.reading,
+            Reading::Object {
+                members: vec![
+                    MemberReading {
+                        wire_name: "cursor".to_owned(),
+                        reading: Reading::Keep,
+                    },
+                    MemberReading {
+                        wire_name: "number".to_owned(),
+                        reading: Reading::Spelled,
+                    },
+                ],
+                others: Box::new(Reading::Spelled),
+            }
+        );
     }
 
     /// An operation, or else its path item, may name a server of its own, and the operation goes

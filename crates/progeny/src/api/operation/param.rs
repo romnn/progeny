@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use super::Build;
 use crate::api::style::{self, ParamShape};
-use crate::api::{Location, ParamContract};
-use crate::contract::{ContractKind, Contracts, Namer, RustIdent, TypeContract, TypeRef};
+use crate::api::{Location, ParamContract, Reading, reading};
+use crate::contract::{ContractKind, Contracts, Namer, RustIdent, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{Operation, Parameter, PathItem};
 use crate::shape::Docs;
@@ -113,12 +113,18 @@ impl Build<'_> {
                 && CREDENTIAL_HEADERS
                     .iter()
                     .any(|header| header.eq_ignore_ascii_case(&name));
-            let strings = string_members(&ty, self.contracts);
+            // A JSON-content parameter's text is parsed as JSON before it is read, so it arrives
+            // with its types and is kept as it is.
+            let reading = if style.content() {
+                Reading::Keep
+            } else {
+                reading::parameter(&ty, self.contracts)
+            };
             params.push(ParamContract {
                 rust_name: used.unique(RustIdent::field(&name)),
                 wire_name: name,
                 credential,
-                strings,
+                reading,
                 style,
                 required,
                 ty,
@@ -215,26 +221,6 @@ pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
         | TypeRef::Format(_)
         | TypeRef::Value => ParamShape::Primitive,
     }
-}
-
-/// The members of an object parameter that are strings, by wire name.
-fn string_members(ty: &TypeRef, contracts: &Contracts) -> Vec<String> {
-    let mut ty = ty;
-    while let TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) = ty {
-        ty = inner;
-    }
-    let TypeRef::Named(index) = ty else {
-        return Vec::new();
-    };
-    let Some(ContractKind::Struct { fields }) = contracts.get(*index).map(TypeContract::kind)
-    else {
-        return Vec::new();
-    };
-    fields
-        .iter()
-        .filter(|field| super::body::is_text(&field.ty, contracts))
-        .map(|field| field.wire_name.clone())
-        .collect()
 }
 
 #[cfg(test)]
