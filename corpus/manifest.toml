@@ -648,13 +648,6 @@ file = "runway.json"
 notes = "54 discriminators, 163 const"
 
 [[spec]]
-name = "scaleway-instance"
-version = "3.1"
-url = "https://www.scaleway.com/en/developers/api/instance/v1/schema.yml"
-file = "scaleway-instance.yaml"
-notes = "EU cloud; sibling product schemas available for later expansion"
-
-[[spec]]
 name = "sentry"
 version = "3.0"
 url = "https://raw.githubusercontent.com/getsentry/sentry-api-schema/main/openapi-derefed.json"
@@ -667,6 +660,13 @@ version = "3.0"
 url = "https://raw.githubusercontent.com/sonallux/spotify-web-api/main/fixed-spotify-open-api.yml"
 file = "spotify.yaml"
 notes = "community-fixed official spec (sonallux)"
+
+[[spec]]
+name = "stackit-iaas"
+version = "3.0"
+url = "https://raw.githubusercontent.com/stackitcloud/stackit-api-specifications/main/services/iaas/v2/iaas.json"
+file = "stackit-iaas.json"
+notes = "EU cloud IaaS; 209 allOf, 161 readOnly, nullable; sibling product specs in the same repository"
 
 [[spec]]
 name = "stytch"

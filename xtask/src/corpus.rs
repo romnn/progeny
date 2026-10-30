@@ -509,7 +509,10 @@ fn download(url: &str) -> eyre::Result<Vec<u8>> {
         .wrap_err_with(|| format!("reading the response body from {url}"))?;
     // A `.gz` source is a compressed file rather than a compressed transfer, so no
     // `Content-Encoding` says so and the cache keeps the description itself.
-    let body = if url.ends_with(".gz") {
+    let compressed = url
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("gz"));
+    let body = if compressed {
         let mut description = Vec::new();
         std::io::Read::read_to_end(
             &mut flate2::read::GzDecoder::new(body.as_slice()),
