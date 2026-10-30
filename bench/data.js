@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793371010203,
+  "lastUpdate": 1793376914649,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2374,6 +2374,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 232.7747392654419,
             "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "75af81bda14dff9f7f5e892ff3a1135327f754e3",
+          "message": "fix(server): refuse a single multipart member that arrives in two parts (#123)\n\n* fix(corpus): fetch the documents whose pinned stainless urls went dark\n\nStainless closed its public spec bucket, so the pinned URLs of anthropic,\nfinch, increase, lithic, orb and runway answer 403 and the corpus job has\nfailed since. Each now comes from its vendor's official latest-tracking\nsource; Anthropic's is published only gzip-compressed, so a `.gz` source\nis decompressed on download.\n\nCI now falls back to its most recent cached corpus and refreshes every\ndocument over it, so a source that goes dark keeps its last good copy and\nsurfaces as a warning instead of failing every run. The snapshots are\nre-recorded against today's documents.\n\n* fix(corpus): replace scaleway's instance api with stackit's iaas api\n\nEvery scaleway.com schema endpoint now answers a bot challenge, and no\nofficial public copy of the Instance API remains. STACKIT's IaaS API keeps\nthe slot's role, an EU cloud's single-product compute API, and is\npublished under Apache-2.0 on a branch that tracks its latest version.\n\n* fix(corpus): replace a cached document only with one that reads as a description\n\n* fix(server): refuse a single multipart member that arrives in two parts\n\nA member the spec table declares single that arrived twice was appended\nto the first part's value. When that value was itself a JSON array, the\nsecond part was folded into it: `[\"a\"]` then `[\"b\"]` read as\n`[\"a\", [\"b\"]]`, a shape nobody sent. Such a body is now refused with\n`ParseError::RepeatedMember`; undescribed and repeated members still\ncollect their parts.",
+          "timestamp": "2026-10-30T17:08:01+01:00",
+          "tree_id": "a40d6d2ea56d231dbe7173a0be60feccd10b9e0c",
+          "url": "https://github.com/romnn/progeny/commit/75af81bda14dff9f7f5e892ff3a1135327f754e3"
+        },
+        "date": 1793376913615,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 30.483456,
+            "range": "± 0.09",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2700.123697280884,
+            "range": "± 0.8",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.651652,
+            "range": "± 0.06",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1079.653645515442,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.810806,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 232.8359375,
+            "range": "± 0",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
