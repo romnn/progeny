@@ -165,6 +165,10 @@ pub enum BreakageClass {
     CollidingTypeName,
     /// A derive the caller asked every type for, on a type that cannot have it.
     UnsatisfiableDerive,
+    /// Schemas whose lowered types are aliases and wrappers of one another, with no member,
+    /// element or `null` between them: no finite value is one, so each is typed as
+    /// `serde_json::Value`.
+    NonproductiveCycle,
 }
 
 impl BreakageClass {
@@ -182,7 +186,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -216,6 +220,7 @@ impl BreakageClass {
         Self::EncodingCollapse,
         Self::CollidingTypeName,
         Self::UnsatisfiableDerive,
+        Self::NonproductiveCycle,
     ];
 
     /// The stable kebab-case name used by the JSON-lines rendering and by config deny-lists.
@@ -255,6 +260,7 @@ impl BreakageClass {
             Self::EncodingCollapse => "encoding-collapse",
             Self::CollidingTypeName => "colliding-type-name",
             Self::UnsatisfiableDerive => "unsatisfiable-derive",
+            Self::NonproductiveCycle => "nonproductive-cycle",
         }
     }
 
@@ -321,6 +327,7 @@ impl BreakageClass {
             Self::MissingFinalLineBreak
             | Self::DiscriminatorEdgeCase
             | Self::ConnectionUpgrade
+            | Self::NonproductiveCycle
             // Each occurrence names one position whose schemas a reader would split; the count
             // is never the finding, and the collapse cannot fire at its siblings' scale.
             | Self::EncodingCollapse => Aggregation::PerOccurrence,

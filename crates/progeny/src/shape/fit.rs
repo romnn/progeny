@@ -19,7 +19,7 @@
 
 use serde_json::Value;
 
-use super::{Extra, Keyed, Scalar, Shape, ShapeRef, Shapes, Struct, Tag, TagStyle, Union};
+use super::{Extra, Keyed, Scalar, Shape, ShapeRef, Shapes, Struct, Tag, TagStyle, Trail, Union};
 
 /// The checker: the shape table, and the word the reasons call the value being judged.
 pub(crate) struct Fit<'a> {
@@ -36,6 +36,11 @@ impl<'a> Fit<'a> {
 
     /// Why a value cannot be what a shape describes, if it cannot.
     pub(crate) fn mismatch(&self, value: &Value, shape: &Shape) -> Option<String> {
+        self.judge(value, shape, &mut Trail::default())
+    }
+
+    /// [`Self::mismatch`], inside the keyed shapes `trail` holds for this same value.
+    fn judge(&self, value: &Value, shape: &Shape, trail: &mut Trail) -> Option<String> {
         match shape {
             Shape::Any => None,
             Shape::Null => (!value.is_null())
@@ -44,9 +49,9 @@ impl<'a> Fit<'a> {
                 if value.is_null() {
                     return None;
                 }
-                self.through(value, inner)
+                self.follow(value, inner, trail)
             }
-            Shape::Alias(inner) => self.through(value, inner),
+            Shape::Alias(inner) => self.follow(value, inner, trail),
             Shape::Scalar(scalar) => self.scalar(value, *scalar),
             // A format is a string with a spelling rule progeny does not check here.
             Shape::Format(_) => (!value.is_string()).then(|| {
@@ -76,7 +81,7 @@ impl<'a> Fit<'a> {
                     )
                 })
             }
-            Shape::Struct(structure) => self.structure(value, structure),
+            Shape::Struct(structure) => self.structure(value, structure, trail),
             Shape::Map { value: element } => self.mapping(value, element.as_ref()),
             // Recursing into elements matters for the same reason it matters into a struct's
             // members, and the containers were the half that was missing: all three payloads
@@ -87,7 +92,7 @@ impl<'a> Fit<'a> {
             Shape::Array { item } => self.list(value, item.as_ref()),
             Shape::FixedArray { item, len } => self.fixed(value, item, *len),
             Shape::Tuple { items, .. } => self.tuple(value, items),
-            Shape::Union(union) => self.union(value, union),
+            Shape::Union(union) => self.union(value, union, trail),
             Shape::Keyed(keyed) => self.keyed(value, keyed),
         }
     }
@@ -141,14 +146,30 @@ impl<'a> Fit<'a> {
     }
 
     /// The same question through a reference: resolve the key, then ask.
+    ///
+    /// The value is judged afresh, as a member or an element is: no keyed shape has been entered
+    /// for it yet.
     pub(crate) fn through(&self, value: &Value, reference: &ShapeRef) -> Option<String> {
+        self.follow(value, reference, &mut Trail::default())
+    }
+
+    /// [`Self::through`], for the same value a shape that holds this reference is judging.
+    ///
+    /// A key the trail already holds names a shape that reaches itself without consuming any of
+    /// the value, which is certain of nothing more on this path than it already was.
+    fn follow(&self, value: &Value, reference: &ShapeRef, trail: &mut Trail) -> Option<String> {
         match reference {
-            ShapeRef::Key(key) => self.mismatch(value, self.shapes.get(key)?),
-            ShapeRef::Inline(shape) => self.mismatch(value, shape),
+            ShapeRef::Key(key) => {
+                let shape = self.shapes.get(key)?;
+                trail
+                    .enter(key, |trail| self.judge(value, shape, trail))
+                    .flatten()
+            }
+            ShapeRef::Inline(shape) => self.judge(value, shape, trail),
         }
     }
 
-    fn structure(&self, value: &Value, structure: &Struct) -> Option<String> {
+    fn structure(&self, value: &Value, structure: &Struct, trail: &mut Trail) -> Option<String> {
         let Value::Object(object) = value else {
             return Some(self.not_an_object(value));
         };
@@ -178,7 +199,8 @@ impl<'a> Fit<'a> {
                 .filter(|(key, _)| !structure.fields.iter().any(|field| field.wire == **key))
                 .map(|(key, member)| (key.clone(), member.clone()))
                 .collect();
-            if let Some(reason) = self.through(&Value::Object(rest), flattened) {
+            // The rest is this same object less its declared members, so it stays on this trail.
+            if let Some(reason) = self.follow(&Value::Object(rest), flattened, trail) {
                 return Some(reason);
             }
         }
@@ -264,13 +286,13 @@ impl<'a> Fit<'a> {
     /// A union accepts whatever any branch accepts, and progeny already refuses to emit one whose
     /// branches nothing tells apart — so "no branch accepts this" is the only sound finding, and it
     /// needs every branch checked rather than any one of them.
-    fn union(&self, value: &Value, union: &Union) -> Option<String> {
+    fn union(&self, value: &Value, union: &Union, trail: &mut Trail) -> Option<String> {
         if let Some(tag) = &union.tag {
-            return self.tagged(value, union, tag);
+            return self.tagged(value, union, tag, trail);
         }
         let mut reasons = Vec::new();
         for variant in &union.variants {
-            let reason = self.through(value, &variant.shape)?;
+            let reason = self.follow(value, &variant.shape, trail)?;
             reasons.push(reason);
         }
         (!reasons.is_empty())
@@ -280,7 +302,7 @@ impl<'a> Fit<'a> {
     /// A union read by its tag is checked the way it is read: the tag names the branch, and a
     /// consumed tag is taken off the value before the branch sees it — the branch's own shape no
     /// longer declares it, and a closed branch would otherwise refuse its own tag as undeclared.
-    fn tagged(&self, value: &Value, union: &Union, tag: &Tag) -> Option<String> {
+    fn tagged(&self, value: &Value, union: &Union, tag: &Tag, trail: &mut Trail) -> Option<String> {
         let Value::Object(members) = value else {
             return Some(self.not_an_object(value));
         };
@@ -306,9 +328,10 @@ impl<'a> Fit<'a> {
                 TagStyle::Consumed => {
                     let mut rest = members.clone();
                     rest.remove(&tag.property);
-                    self.through(&Value::Object(rest), &variant.shape)
+                    // The rest is this same object less its tag, so it stays on this trail.
+                    self.follow(&Value::Object(rest), &variant.shape, trail)
                 }
-                TagStyle::Carried => self.through(value, &variant.shape),
+                TagStyle::Carried => self.follow(value, &variant.shape, trail),
             };
             reasons.push(reason?);
         }

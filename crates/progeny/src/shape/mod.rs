@@ -37,6 +37,7 @@ mod fit;
 mod listed;
 mod merge;
 mod roots;
+mod trail;
 
 use std::collections::BTreeMap;
 
@@ -48,6 +49,7 @@ use crate::schema::SchemaId;
 
 pub(crate) use fit::Fit;
 pub(crate) use roots::{Root, RootKind};
+pub(crate) use trail::Trail;
 
 /// The largest fixed-length array progeny emits.
 ///
@@ -792,6 +794,41 @@ mod tests {
         shapes
             .get(&root.key)
             .ok_or_else(|| eyre::eyre!("no shape for root named {name}"))
+    }
+
+    /// A tag property declared as a union that names only itself, through another, says nothing
+    /// about its value, so the walk asking whether it is a string ends there and lets the
+    /// discriminator stand, as it would for a property declared as arbitrary JSON.
+    #[test_util::test]
+    fn a_tag_declared_as_a_self_naming_union_still_tags_the_union() {
+        let variant = |own: &str| {
+            json!({
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": {"$ref": "#/components/schemas/K"},
+                    own: {"type": "string"},
+                },
+            })
+        };
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "Pet": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/Cat"},
+                    {"$ref": "#/components/schemas/Dog"},
+                ],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "Cat": variant("lives"),
+            "Dog": variant("pack"),
+            "K": {"oneOf": [{"$ref": "#/components/schemas/K2"}]},
+            "K2": {"oneOf": [{"$ref": "#/components/schemas/K"}]},
+        })))?;
+        let Shape::Union(union) = shape_of(&shapes, "Pet")? else {
+            eyre::bail!("`Pet` is a union");
+        };
+        let tag = union.tag.as_ref().map(|tag| tag.property.as_str());
+        assert_eq!(tag, Some("kind"));
     }
 
     /// The polymorphism spelling from OpenAPI's own guide, and the two things it needs: the base

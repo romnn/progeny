@@ -1,12 +1,12 @@
 //! The one body an operation sends: which media type, and what contract it becomes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Build;
 use super::param::param_shape;
 use crate::api::style::{self, ParamShape};
 use crate::api::{BodyContract, FormSpec, PartKind, PartSpec, Style, reading};
-use crate::contract::{ContractKind, Contracts, Format, TypeContract, TypeRef};
+use crate::contract::{ContractKind, Contracts, Format, TypeContract, TypeIndex, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
 
@@ -502,30 +502,51 @@ fn preference(media_type: &str) -> u8 {
 /// the type layer left as `String` — a base64 (`format: byte`) member, or a schema the
 /// encoding-collapse rule kept on the JSON spelling — is a text part whose bytes are the
 /// string's, with the stated consequence that such a part cannot carry invalid UTF-8.
+///
+/// A recursive member, such as `Tree(Vec<Tree>)`, is a JSON part: its structure has no faithful
+/// text form.
 fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
+    part_within(ty, contracts, &mut BTreeSet::new())
+}
+
+/// [`part_of`], knowing the named types the walk has already looked into.
+///
+/// Each step follows exactly one wrapped type, so the set is also the walk's path, and a type met
+/// again is one that holds itself.
+fn part_within(
+    ty: &TypeRef,
+    contracts: &Contracts,
+    followed: &mut BTreeSet<TypeIndex>,
+) -> (PartKind, bool) {
     match ty {
         TypeRef::Upload => (PartKind::File, false),
         // An option or a presence says nothing about the shape on the wire; a box says nothing at
         // all.
         TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-            part_of(inner, contracts)
+            part_within(inner, contracts, followed)
         }
         // The one wrapper that does say something: each element is its own part.
-        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => (part_of(inner, contracts).0, true),
+        TypeRef::Vec(inner) | TypeRef::Array(inner, _) => {
+            let (kind, _) = part_within(inner, contracts, followed);
+            (kind, true)
+        }
         TypeRef::Bool
         | TypeRef::Integer(_)
         | TypeRef::F64
         | TypeRef::String
         | TypeRef::Format(_) => (PartKind::Text, false),
+        TypeRef::Named(index) if !followed.insert(*index) => (PartKind::Json, false),
         // A string enum is a string on the wire, an alias is what it names, and a newtype is the
         // one value it wraps.
         TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
             Some(ContractKind::StringEnum { .. }) => (PartKind::Text, false),
-            Some(ContractKind::Alias { target }) => part_of(target, contracts),
-            Some(ContractKind::Newtype { inner }) => match part_of(inner, contracts) {
-                (PartKind::Text, false) => (PartKind::Text, false),
-                _ => (PartKind::Json, false),
-            },
+            Some(ContractKind::Alias { target }) => part_within(target, contracts, followed),
+            Some(ContractKind::Newtype { inner }) => {
+                match part_within(inner, contracts, followed) {
+                    (PartKind::Text, false) => (PartKind::Text, false),
+                    _ => (PartKind::Json, false),
+                }
+            }
             _ => (PartKind::Json, false),
         },
         // A map, a tuple or a degraded `Value` is structured, and structured members have no
@@ -642,6 +663,43 @@ mod tests {
         assert_eq!(part("meta"), Some((Json, false, Reading::Keep)));
         assert_eq!(part("file"), Some((File, false, Reading::Keep)));
         assert_eq!(**others, Reading::Spelled);
+    }
+
+    /// A recursive member meets its own type again on the way to its part kind, and is one JSON
+    /// part: a nullable wrapper around itself, and a list of itself, have no faithful text form.
+    #[test_util::test]
+    fn a_recursive_multipart_member_is_one_json_part() {
+        use crate::api::PartKind::Json;
+        let mut document = with_paths(json!({
+            "/x": {"post": {
+                "operationId": "postX",
+                "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {
+                    "type": "object",
+                    "properties": {
+                        "maybe": {"$ref": "#/components/schemas/A"},
+                        "tree": {"$ref": "#/components/schemas/Tree"},
+                    },
+                }}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        document["components"] = json!({"schemas": {
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}, {"type": "null"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+            "Tree": {"type": "array", "items": {"$ref": "#/components/schemas/Tree"}},
+        }});
+        let (model, _) = model_of(document)?;
+        let Some(BodyContract::Multipart { parts, .. }) = &model.operations()[0].body else {
+            eyre::bail!("the body is multipart");
+        };
+        let part = |wire: &str| {
+            parts
+                .iter()
+                .find(|part| part.wire_name == wire)
+                .map(|part| (part.kind, part.repeated))
+        };
+        assert_eq!(part("maybe"), Some((Json, false)));
+        assert_eq!(part("tree"), Some((Json, false)));
     }
 
     /// The field that captures `additionalProperties` has no row in either body's table, so its

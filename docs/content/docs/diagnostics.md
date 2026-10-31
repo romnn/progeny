@@ -72,6 +72,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `encoding-collapse` | A schema sent as `multipart/form-data` and also used at another wire position. |
 | `colliding-type-name` | Two shapes whose names sanitize to the same Rust identifier. |
 | `unsatisfiable-derive` | A derive asked of every type, on a type that cannot have it. |
+| `nonproductive-cycle` | Schemas whose lowered types are aliases and wrappers of one another with no member, element or `null` between them, such as two single-branch `oneOf`s naming each other; no finite value is one, so each is typed as arbitrary JSON. |
 
 ## Denying diagnostics
 

@@ -36,6 +36,7 @@ pub(super) fn run(
     config: &Config,
     ctx: &mut Ctx,
 ) -> Result<Contracts, RejectError> {
+    degrade_nonproductive_cycles(&mut types, ctx);
     promote_recursive_aliases(&mut types);
     break_cycles(&mut types);
 
@@ -203,6 +204,94 @@ fn decide(
             | ContractKind::Alias { .. } => DeserStrategy::Derive,
             ContractKind::CarriedTagEnum { .. } => DeserStrategy::HandWrittenCarriedTag,
         },
+    }
+}
+
+/// Type every schema on a nonproductive cycle as arbitrary JSON, and report each cycle once.
+///
+/// A cycle is nonproductive when every step along it is an alias or a newtype naming the next type
+/// directly or through a `Box`.
+/// Nothing on it is a member, an element or a `null`, so it describes no finite value; two
+/// single-branch `oneOf`s naming each other are the usual spelling.
+/// Every other wrapper ends the walk: `A(Option<Box<A>>)` holds `A(None)` and `Tree(Vec<Tree>)`
+/// holds the empty list, which is why this follows neither [`TypeRef::reaches`] nor any container.
+///
+/// It runs before every other pass here, so that neither alias promotion nor the walkers that look
+/// through aliases and newtypes ever meet such a cycle.
+/// Each member keeps its name and origin and becomes an alias of `serde_json::Value`.
+fn degrade_nonproductive_cycles(types: &mut [Provisional], ctx: &mut Ctx) {
+    let mut edges = Vec::new();
+    for (index, contract) in types.iter().enumerate() {
+        let (ContractKind::Alias { target: inner } | ContractKind::Newtype { inner }) =
+            &contract.kind
+        else {
+            continue;
+        };
+        if let Some(to) = named_directly(inner)
+            && let Ok(from) = u32::try_from(index)
+        {
+            edges.push((from, to.raw()));
+        }
+    }
+    let cycles = Sccs::of(types.len(), &edges);
+    let mut members: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for index in 0..types.len() {
+        if cycles.recursive(index)
+            && let Some(component) = cycles.component(index)
+        {
+            members.entry(component).or_default().push(index);
+        }
+    }
+
+    for cycle in members.into_values() {
+        for &index in &cycle {
+            if let Some(contract) = types.get_mut(index) {
+                contract.kind = ContractKind::Alias {
+                    target: TypeRef::Value,
+                };
+            }
+        }
+        let mut on_cycle: Vec<&Provisional> =
+            cycle.iter().filter_map(|&index| types.get(index)).collect();
+        on_cycle.sort_by(|left, right| left.origin.cmp(&right.origin));
+        let names: Vec<String> = on_cycle
+            .iter()
+            .map(|contract| format!("`{}`", contract.rust_name))
+            .collect();
+        let detail = match names.as_slice() {
+            [only] => format!(
+                "{only} lowers to aliases and wrappers of itself that never reach a member, an \
+                 element or a `null`, so no finite value is one; typed it as `serde_json::Value`"
+            ),
+            [init @ .., last] => format!(
+                "{} and {last} lower to aliases and wrappers of one another that never reach a \
+                 member, an element or a `null`, so no finite value is any of them; typed each \
+                 as `serde_json::Value`",
+                init.join(", ")
+            ),
+            [] => continue,
+        };
+        let Some((first, rest)) = on_cycle.split_first() else {
+            continue;
+        };
+        ctx.report(
+            Diagnostic::new(
+                BreakageClass::NonproductiveCycle,
+                Action::Degrade,
+                first.origin.clone(),
+                detail,
+            )
+            .with_related(rest.iter().map(|contract| contract.origin.clone())),
+        );
+    }
+}
+
+/// The type a wrapper names with nothing but a `Box` around it.
+fn named_directly(ty: &TypeRef) -> Option<TypeIndex> {
+    match ty {
+        TypeRef::Named(index) => Some(*index),
+        TypeRef::Boxed(inner) => named_directly(inner),
+        _ => None,
     }
 }
 
@@ -505,9 +594,167 @@ fn defaults(contract: &Provisional, supported: &[BTreeSet<Derive>], config: &Con
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+    use serde_json::{Value, json};
+
     use super::decide;
     use crate::config::{Config, SerdeImpl, UnknownFields};
-    use crate::contract::{ContractKind, DeserStrategy, StringVariant, name::RustIdent};
+    use crate::contract::tests::{contracts_of, named, with_schemas};
+    use crate::contract::{ContractKind, DeserStrategy, StringVariant, TypeRef, name::RustIdent};
+    use crate::diag::{Action, BreakageClass, Diagnostic};
+
+    /// The contracts of `schemas`, and the nonproductive cycles reported about them.
+    fn cycles_of(schemas: Value) -> eyre::Result<(crate::contract::Contracts, Vec<Diagnostic>)> {
+        let (contracts, diagnostics) = contracts_of(with_schemas(schemas), &Config::default())?;
+        let cycles = diagnostics
+            .into_iter()
+            .filter(|found| found.class() == BreakageClass::NonproductiveCycle)
+            .collect();
+        Ok((contracts, cycles))
+    }
+
+    /// Two single-branch unions naming each other describe no finite value, so both become
+    /// arbitrary JSON, and the cycle is reported once, at its first member, naming the other.
+    #[test_util::test]
+    fn two_unions_naming_only_each_other_are_typed_as_arbitrary_json() {
+        let (contracts, cycles) = cycles_of(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+        }))?;
+        for name in ["A", "B"] {
+            assert_eq!(
+                named(&contracts, name)?.kind(),
+                &ContractKind::Alias {
+                    target: TypeRef::Value
+                },
+                "{name}"
+            );
+        }
+        let [cycle] = cycles.as_slice() else {
+            eyre::bail!("one cycle is one record: {cycles:#?}");
+        };
+        assert_eq!(cycle.action(), Action::Degrade);
+        assert_eq!(cycle.location().to_string(), "/components/schemas/A");
+        let related: Vec<String> = cycle.related().iter().map(ToString::to_string).collect();
+        assert_eq!(related, ["/components/schemas/B"]);
+        assert!(cycle.detail().contains("`A` and `B`"), "{}", cycle.detail());
+    }
+
+    /// Two separate cycles are two records, and an alias that only leads into a cycle keeps its
+    /// own contract rather than joining it.
+    #[test_util::test]
+    fn separate_cycles_are_reported_apart_and_an_alias_into_one_is_not_part_of_it() {
+        let (contracts, cycles) = cycles_of(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+            "C": {"oneOf": [{"$ref": "#/components/schemas/C"}]},
+            "Into": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+        }))?;
+        // Both cycles degrade, one record each
+        for name in ["A", "B", "C"] {
+            assert_eq!(
+                named(&contracts, name)?.kind(),
+                &ContractKind::Alias {
+                    target: TypeRef::Value
+                },
+                "{name}"
+            );
+        }
+        let mut locations: Vec<String> = cycles
+            .iter()
+            .map(|cycle| cycle.location().to_string())
+            .collect();
+        locations.sort();
+        assert_eq!(
+            locations,
+            ["/components/schemas/A", "/components/schemas/C"],
+            "{cycles:#?}"
+        );
+        // The alias into the cycle is reported nowhere and still names its target
+        assert!(
+            cycles.iter().all(|cycle| !cycle
+                .related()
+                .iter()
+                .any(|related| related.to_string().ends_with("/Into"))),
+            "{cycles:#?}"
+        );
+        assert_ne!(
+            named(&contracts, "Into")?.kind(),
+            &ContractKind::Alias {
+                target: TypeRef::Value
+            }
+        );
+    }
+
+    /// The shortest nonproductive cycle: a union whose one branch is itself.
+    #[test_util::test]
+    fn a_union_naming_only_itself_is_typed_as_arbitrary_json() {
+        let (contracts, cycles) = cycles_of(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+        }))?;
+        assert_eq!(
+            named(&contracts, "A")?.kind(),
+            &ContractKind::Alias {
+                target: TypeRef::Value
+            }
+        );
+        let [cycle] = cycles.as_slice() else {
+            eyre::bail!("one cycle is one record: {cycles:#?}");
+        };
+        assert_eq!(cycle.location().to_string(), "/components/schemas/A");
+        assert!(cycle.related().is_empty(), "{cycle:#?}");
+    }
+
+    /// A `null` and an empty list are finite values, so a cycle through either is an ordinary
+    /// recursive type: kept as written, and not reported.
+    #[test_util::test]
+    fn a_cycle_through_a_null_or_a_list_is_kept() {
+        let (contracts, cycles) = cycles_of(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}, {"type": "null"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+            "Maybe": {"oneOf": [{"$ref": "#/components/schemas/Maybe"}, {"type": "null"}]},
+            "Tree": {"type": "array", "items": {"$ref": "#/components/schemas/Tree"}},
+        }))?;
+        assert!(cycles.is_empty(), "{cycles:#?}");
+        for name in ["A", "B", "Maybe", "Tree"] {
+            assert!(
+                matches!(
+                    named(&contracts, name)?.kind(),
+                    ContractKind::Newtype { .. }
+                ),
+                "{name} is {:?}",
+                named(&contracts, name)?.kind()
+            );
+        }
+    }
+
+    /// Judging a `default` walks the shapes before any contract exists, so it meets the cycle
+    /// itself; it has to end, and a cycle that constrains nothing finds nothing wrong.
+    #[test_util::test]
+    fn a_default_on_a_member_typed_by_a_nonproductive_cycle_is_judged() {
+        let (contracts, diagnostics) = contracts_of(
+            with_schemas(json!({
+                "Holder": {"type": "object", "properties": {
+                    "a": {"$ref": "#/components/schemas/A", "default": 1},
+                }},
+                "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+                "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+            })),
+            &Config::default(),
+        )?;
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|found| found.class() == BreakageClass::InvalidDefault),
+            "{diagnostics:#?}"
+        );
+        let ContractKind::Struct { fields } = named(&contracts, "Holder")?.kind() else {
+            eyre::bail!("`Holder` is a struct");
+        };
+        let defaults: Vec<Option<&Value>> =
+            fields.iter().map(|field| field.default.as_ref()).collect();
+        assert_eq!(defaults, [Some(&json!(1))]);
+    }
 
     fn hand_written() -> Config {
         Config {
