@@ -227,20 +227,20 @@ pub async fn json_body<T: ::serde::de::DeserializeOwned>(
 /// # Errors
 /// When the body cannot be read, or its members do not match the description.
 ///
-/// `strings` names the members the description types as strings, which keep their text.
+/// `reading` is the plan the description gives the body's members.
 pub async fn form_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::style::FormSpec],
-    strings: &[&str],
+    reading: &super::serve::Reading,
 ) -> Result<Option<T>, RequestError> {
     let Some(bytes) = incoming.bytes().await? else {
         return Ok(None);
     };
     let text = ::std::string::String::from_utf8_lossy(&bytes);
     // Through the same reading a query parameter gets: a form body carries no types either.
-    Ok(Some(super::serve::typed_body(
+    Ok(Some(super::serve::typed(
         super::style::query_object(&text, specs),
-        strings,
+        reading,
     )?))
 }
 
@@ -249,12 +249,12 @@ pub async fn form_body<T: ::serde::de::DeserializeOwned>(
 /// # Errors
 /// When the body cannot be read, is not well-formed multipart, or does not match the description.
 ///
-/// `strings` names the members the description types as strings, which keep their text.
-/// File and JSON parts keep the values the parser built for them.
+/// `reading` is the plan the description gives the body's members, which keeps the values the
+/// parser built for file and JSON parts.
 pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
     incoming: Incoming,
     specs: &[super::multipart::PartSpec],
-    strings: &[&str],
+    reading: &super::serve::Reading,
 ) -> Result<Option<T>, RequestError> {
     let content_type = incoming
         .headers
@@ -267,12 +267,7 @@ pub async fn multipart_body<T: ::serde::de::DeserializeOwned>(
         return Ok(None);
     };
     let value = super::multipart::parse(&bytes, &boundary, specs)?;
-    let kept: ::std::vec::Vec<&str> = strings
-        .iter()
-        .copied()
-        .chain(super::multipart::typed_members(specs))
-        .collect();
-    Ok(Some(super::serve::typed_body(value, &kept)?))
+    Ok(Some(super::serve::typed(value, reading)?))
 }
 
 /// A text body.

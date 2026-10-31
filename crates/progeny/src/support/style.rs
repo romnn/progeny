@@ -806,9 +806,12 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::json;
 
+    use std::collections::BTreeMap;
+
+    use super::super::serve::{Reading, typed};
     use super::{
-        FormSpec, Style, cookie_pair, encode, form_body, header_value, matrix_segment,
-        path_segment, query_object, query_pairs,
+        FormSpec, QueryRow, Style, cookie_pair, encode, form_body, from_query, header_value,
+        matrix_segment, path_segment, query_object, query_pairs,
     };
 
     #[test]
@@ -906,7 +909,17 @@ mod tests {
 
         // A member that is not a string is re-read as the value it spells.
         let body = form_body(&json!({"cfg": {"k": "v", "n": 1}}), &specs);
-        let read: Body = super::super::serve::typed_body(query_object(&body, &specs), &[])?;
+        let reading = Reading::Object {
+            members: &[(
+                "cfg",
+                Reading::Object {
+                    members: &[("k", Reading::Keep), ("n", Reading::Spelled)],
+                    others: &Reading::Spelled,
+                },
+            )],
+            others: &Reading::Spelled,
+        };
+        let read: Body = typed(query_object(&body, &specs), &reading)?;
         assert_eq!(
             read,
             Body {
@@ -927,6 +940,194 @@ mod tests {
             query_object(&body, &unknown),
             json!({"cfg": "{\"k\":\"v\"}"})
         );
+    }
+
+    /// A flat `form` object member keeps the text of its string members while its other members
+    /// are re-read, because the plan reaches into the member (#120).
+    #[test_util::test]
+    fn a_flat_form_object_member_keeps_its_string_members() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Body {
+            payload: Payload,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Payload {
+            label: String,
+            count: i64,
+        }
+        let specs = [FormSpec {
+            name: "payload",
+            style: Style::Form,
+            explode: false,
+            array: Some(false),
+            object: Some(true),
+        }];
+        let reading = Reading::Object {
+            members: &[(
+                "payload",
+                Reading::Object {
+                    members: &[("label", Reading::Keep), ("count", Reading::Spelled)],
+                    others: &Reading::Spelled,
+                },
+            )],
+            others: &Reading::Spelled,
+        };
+        let read: Body = typed(query_object("payload=label,true,count,4", &specs), &reading)?;
+        assert_eq!(
+            read,
+            Body {
+                payload: Payload {
+                    label: "true".to_owned(),
+                    count: 4,
+                },
+            }
+        );
+    }
+
+    /// A form member captured by `additionalProperties` is read by the capture's value type, so
+    /// a captured string that spells a boolean stays a string beside a declared integer (#119).
+    #[test_util::test]
+    fn a_captured_form_member_is_read_by_its_value_type() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Labels {
+            count: i64,
+            #[serde(flatten)]
+            extra: BTreeMap<String, String>,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Counts {
+            count: i64,
+            #[serde(flatten)]
+            extra: BTreeMap<String, i64>,
+        }
+        let specs = [FormSpec {
+            name: "count",
+            style: Style::Form,
+            explode: true,
+            array: Some(false),
+            object: Some(false),
+        }];
+        let arrived = query_object("count=4&extra=true", &specs);
+
+        // Captured strings keep their text.
+        let labels: Labels = typed(
+            arrived,
+            &Reading::Object {
+                members: &[("count", Reading::Spelled)],
+                others: &Reading::Keep,
+            },
+        )?;
+        assert_eq!(
+            labels,
+            Labels {
+                count: 4,
+                extra: [("extra".to_owned(), "true".to_owned())].into(),
+            }
+        );
+
+        // Captured integers are still the numbers their text spells.
+        let counts: Counts = typed(
+            query_object("count=4&extra=7", &specs),
+            &Reading::Object {
+                members: &[("count", Reading::Spelled)],
+                others: &Reading::Spelled,
+            },
+        )?;
+        assert_eq!(counts.extra, BTreeMap::from([("extra".to_owned(), 7)]));
+    }
+
+    /// A `deepObject` parameter's captured members are read by the capture's value type too.
+    #[test_util::test]
+    fn a_captured_deep_object_member_is_read_by_its_value_type() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Filter {
+            count: i64,
+            #[serde(flatten)]
+            extra: BTreeMap<String, String>,
+        }
+        let row = QueryRow {
+            style: Style::DeepObject,
+            explode: true,
+            array: false,
+            reserved: false,
+            object: true,
+        };
+        let found = from_query("p[count]=4&p[extra]=true", "p", row);
+        let filter: Filter = super::super::serve::read(
+            Ok::<_, std::convert::Infallible>(found),
+            "p",
+            true,
+            "listPets",
+            &Reading::Object {
+                members: &[("count", Reading::Spelled)],
+                others: &Reading::Keep,
+            },
+        )?;
+        assert_eq!(
+            filter,
+            Filter {
+                count: 4,
+                extra: [("extra".to_owned(), "true".to_owned())].into(),
+            }
+        );
+    }
+
+    /// A captured list in a form body travels as raw occurrences, one per element, so a single
+    /// element that happens to spell JSON is still that one element.
+    #[test_util::test]
+    fn a_captured_form_list_round_trips_as_raw_occurrences() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Body {
+            #[serde(flatten)]
+            extra: BTreeMap<String, Vec<String>>,
+        }
+        let reading = Reading::Object {
+            members: &[],
+            others: &Reading::Items(&Reading::Keep),
+        };
+        for elements in [vec!["[]"], vec!["a", "[]"]] {
+            let body = form_body(&json!({ "tags": elements }), &[]);
+            let read: Body = typed(query_object(&body, &[]), &reading)?;
+            assert_eq!(
+                read.extra,
+                BTreeMap::from([(
+                    "tags".to_owned(),
+                    elements
+                        .iter()
+                        .map(|element| (*element).to_owned())
+                        .collect()
+                )]),
+                "{body}"
+            );
+        }
+    }
+
+    /// A tuple parameter mixing a string and an integer keeps the string's text and re-reads the
+    /// integer, position by position.
+    #[test_util::test]
+    fn a_mixed_tuple_parameter_round_trips() {
+        let row = QueryRow {
+            style: Style::Form,
+            explode: true,
+            array: true,
+            reserved: false,
+            object: false,
+        };
+        let pairs = query_pairs("p", &json!(["9", 4]), Style::Form, true);
+        let query = pairs
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert_eq!(query, "p=9&p=4");
+        let pair: (String, i64) = super::super::serve::read(
+            Ok::<_, std::convert::Infallible>(from_query(&query, "p", row)),
+            "p",
+            true,
+            "listPets",
+            &Reading::Tuple(&[Reading::Keep, Reading::Spelled]),
+        )?;
+        assert_eq!(pair, ("9".to_owned(), 4));
     }
 
     /// A non-exploded `form` object alternates its members' names and values in one pair.

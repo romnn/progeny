@@ -20,8 +20,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::api::{
-    ApiModel, BodyContract, Location, OperationContract, ParamContract, RegistrableRoute,
-    ResponseArm, ResponseBody, StatusPattern,
+    ApiModel, BodyContract, Location, MemberReading, OperationContract, ParamContract, Reading,
+    RegistrableRoute, ResponseArm, ResponseBody, StatusPattern,
 };
 use crate::config::Config;
 use crate::contract::{Contracts, RustIdent};
@@ -468,6 +468,41 @@ fn content_source(param: &ParamContract, source: TokenStream) -> TokenStream {
     }
 }
 
+/// A reading plan as the `support::Reading` value that carries it.
+///
+/// Spelled inline at each position rather than named once, because the common plans are a single
+/// unit variant and a named table would cost more source than it saves.
+/// Every part is a constant expression, so the reference the reader takes is promoted to
+/// `'static`.
+fn reading_tokens(reading: &Reading) -> TokenStream {
+    match reading {
+        Reading::Keep => quote! { support::Reading::Keep },
+        Reading::Spelled => quote! { support::Reading::Spelled },
+        Reading::Items(row) => {
+            let row = reading_tokens(row);
+            quote! { support::Reading::Items(&#row) }
+        }
+        Reading::Tuple(rows) => {
+            let rows = rows.iter().map(reading_tokens);
+            quote! { support::Reading::Tuple(&[#(#rows),*]) }
+        }
+        Reading::Object { members, others } => {
+            let members = members.iter().map(|MemberReading { wire_name, reading }| {
+                let reading = reading_tokens(reading);
+                quote! { (#wire_name, #reading) }
+            });
+            let others = reading_tokens(others);
+            quote! {
+                support::Reading::Object { members: &[#(#members),*], others: &#others }
+            }
+        }
+        Reading::Whole(row) => {
+            let row = reading_tokens(row);
+            quote! { support::Reading::Whole(&#row) }
+        }
+    }
+}
+
 /// The `axum` handler that stands between a request and one trait method.
 ///
 /// Generated as a free function per operation rather than a closure so that its extraction is
@@ -499,7 +534,7 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
             // is an array or a scalar with a comma in it.
             let array = param.style.array();
             let object = param.style.object();
-            let strings = param.strings.iter().map(String::as_str);
+            let reading = reading_tokens(&param.reading);
             let source = match location {
                 Location::Path => {
                     quote! {
@@ -532,7 +567,7 @@ fn handler_fn(operation: &OperationContract, config: &Config) -> TokenStream {
             };
             let source = content_source(param, source);
             quote! {
-                #field: match support::read(#source, #wire, #required, #operation_label, &[#(#strings),*]) {
+                #field: match support::read(#source, #wire, #required, #operation_label, &#reading) {
                     ::std::result::Result::Ok(value) => value,
                     ::std::result::Result::Err(rejection) => {
                         return api.on_rejection(rejection).into_response();
@@ -599,26 +634,20 @@ fn body_extraction(
             accepts.clone().unwrap_or_else(|| content_type.clone()),
             quote! { support::json_body(incoming).await },
         ),
-        BodyContract::Form { specs, .. } => {
-            let strings = specs
-                .iter()
-                .filter(|spec| spec.text)
-                .map(|spec| spec.wire_name.as_str());
+        BodyContract::Form { specs, reading, .. } => {
+            let reading = reading_tokens(reading);
             let specs = super::client::form_specs(specs);
             (
                 "application/x-www-form-urlencoded".to_owned(),
-                quote! { support::form_body(incoming, #specs, &[#(#strings),*]).await },
+                quote! { support::form_body(incoming, #specs, &#reading).await },
             )
         }
-        BodyContract::Multipart { parts, .. } => {
-            let strings = parts
-                .iter()
-                .filter(|part| part.text)
-                .map(|part| part.wire_name.as_str());
+        BodyContract::Multipart { parts, reading, .. } => {
+            let reading = reading_tokens(reading);
             let specs = super::client::part_specs(parts);
             (
                 "multipart/form-data".to_owned(),
-                quote! { support::multipart_body(incoming, #specs, &[#(#strings),*]).await },
+                quote! { support::multipart_body(incoming, #specs, &#reading).await },
             )
         }
         BodyContract::Text { content_type, .. } => (

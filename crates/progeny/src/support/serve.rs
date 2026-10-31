@@ -134,7 +134,7 @@ impl RejectionResponse {
 /// the description marked it required. This is the one place that rule lives, so an optional
 /// parameter cannot become required by an accident in a renderer.
 ///
-/// `strings` names the members of an object parameter the description types as strings.
+/// `reading` is the plan the description gives the parameter's text, position by position.
 ///
 /// # Errors
 /// When the parameter is required and absent, or present and unparsable.
@@ -143,7 +143,7 @@ pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
     parameter: &'static str,
     required: bool,
     operation: &'static str,
-    strings: &[&str],
+    reading: &Reading,
 ) -> Result<T, Rejection> {
     let value = match found {
         Ok(Some(value)) => value,
@@ -165,7 +165,7 @@ pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
             });
         }
     };
-    typed(value, strings).map_err(|source| Rejection::InvalidParameter {
+    typed(value, reading).map_err(|source| Rejection::InvalidParameter {
         operation,
         parameter,
         detail: source.to_string(),
@@ -177,56 +177,148 @@ pub fn read<T: serde::de::DeserializeOwned, E: std::fmt::Display>(
 #[error(transparent)]
 pub struct ServerDecodeError(#[from] serde_json::Error);
 
-/// Deserialize a value that arrived as text into whatever the description says it is.
+/// How a value that arrived as text is read back into the value the description types.
 ///
-/// **A URL carries no types.** `?limit=3` is the three characters `l`, `i`, `m` … and the schema is
-/// the only thing that says the value is a number. Handing serde the string it arrived as fails on
-/// every non-string parameter in every description, which is what the example crate found the first
-/// time it ran.
+/// **A URL carries no types.**
+/// `?limit=3` is the three characters `l`, `i`, `m` … and the schema is the only thing that says
+/// the value is a number.
+/// A form body and a multipart body carry no types either.
+/// The generator knows, position by position, which text is the value itself and which is the
+/// spelling of a number, a boolean or a compound, and it ships that knowledge as one of these.
 ///
-/// Tried as-is first and only then re-read, which is what keeps a genuine string a string: a
-/// `type: string` parameter holding `"9"` or `"true"` succeeds on the first attempt and is never
-/// reinterpreted. Only a value serde has already refused is looked at again.
-///
-/// # Errors
-/// Returns [`ServerDecodeError`] when the value does not match the description under either
-/// reading.
-///
-/// An object's members are re-read one by one, except the ones `strings` names, which the
-/// description types as strings and which keep their text.
-pub fn typed<T: serde::de::DeserializeOwned>(
-    value: Value,
-    strings: &[&str],
-) -> Result<T, ServerDecodeError> {
-    if value.is_object() {
-        return typed_body(value, strings);
-    }
-    let first = match serde_json::from_value(value.clone()) {
-        Ok(parsed) => return Ok(parsed),
-        Err(source) => ServerDecodeError::from(source),
-    };
-    serde_json::from_value(retyped(value)).map_err(|_| first)
+/// A plan is per position rather than per value, so a string leaf keeps its text whatever its
+/// siblings need: `label=true` stays `"true"` beside a `count=4` that becomes `4`.
+/// `null` and absent members are never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// The value as it arrived.
+    ///
+    /// What a string leaf is, and a multipart file or JSON part, and a parameter declared with a
+    /// JSON `content`, whose text the extraction already parsed.
+    Keep,
+    /// The JSON value a string spells, when it spells a number, a boolean, an object or an array;
+    /// any other string is unchanged.
+    ///
+    /// An array has each element read this way, and an object that arrived as an object has its
+    /// string members read this way, one level deep.
+    /// This is the reading of every position whose type cannot say whether its text is a string:
+    /// arbitrary JSON, and unions.
+    /// It is also the reading of a compound the client wrote as one JSON text, which is parsed once
+    /// and read no further, because JSON already carries its types.
+    Spelled,
+    /// An array whose elements are each read by the row.
+    ///
+    /// A lone string is one occurrence of a repeated member, which a form body cannot tell from a
+    /// scalar, so it becomes a one-element array of that string read by the row.
+    Items(&'static Reading),
+    /// An array read position by position, with any element past the rows read as
+    /// [`Self::Spelled`].
+    ///
+    /// A lone string is parsed once when it spells a JSON array, and is otherwise unchanged.
+    Tuple(&'static [Reading]),
+    /// An object whose members are each read by the row that names them, and by `others` where no
+    /// row does.
+    ///
+    /// A lone string is parsed once when it spells a JSON object, and is otherwise unchanged.
+    Object {
+        members: &'static [(&'static str, Reading)],
+        others: &'static Reading,
+    },
+    /// A compound that arrives either as one JSON text of the whole value or already rebuilt.
+    ///
+    /// A string is that JSON text, parsed once and read no further; a string that is not JSON is
+    /// unchanged.
+    /// Anything else was rebuilt from the wire, such as an array of repeated multipart parts, and
+    /// reads by the row.
+    Whole(&'static Reading),
 }
 
-/// Every string leaf re-read as the JSON value it spells, where it spells one.
+/// Deserialize a value that arrived as text into whatever the description says it is.
 ///
-/// Scalars, and — since the wire probe — compounds too. The first version stopped at numbers and
-/// booleans, reasoning that "a string that happens to spell an object is a string the description
-/// asked for as a string". That reasoning missed what the *writer* does: the generated client has
-/// exactly one spelling for a compound element in a query pair or a text part, and it is the
-/// element's JSON (`style::scalar`). `posthog` sends `properties=` with one JSON-encoded filter
-/// object per occurrence, and the reader handed serde the text where the struct belonged. The two
-/// halves are one rule read from two ends, so the reader now inverts precisely what the writer
-/// emits.
+/// One directed pass: the value is read by its plan and handed to serde once, so a string the
+/// description types as a string is never reinterpreted, and a rejection carries the error serde
+/// reports for the value as the plan read it.
 ///
-/// The safety argument is unchanged and it is the order of attempts: the as-is reading runs first,
-/// so a member the description types as a string keeps its text — commas, braces and all — and this
-/// second reading only runs after serde has already refused.
+/// # Errors
+/// Returns [`ServerDecodeError`] when the value, read by its plan, does not match the description.
+pub fn typed<T: serde::de::DeserializeOwned>(
+    value: Value,
+    reading: &Reading,
+) -> Result<T, ServerDecodeError> {
+    Ok(serde_json::from_value(read_by(value, reading))?)
+}
+
+/// One value read by its plan.
+fn read_by(value: Value, reading: &Reading) -> Value {
+    match (reading, value) {
+        // Never touched
+        (_, Value::Null) => Value::Null,
+        (Reading::Keep, value) => value,
+        (Reading::Spelled, value) => spelled(value),
+        // Arrays
+        (Reading::Items(row), Value::Array(items)) => {
+            Value::Array(items.into_iter().map(|item| read_by(item, row)).collect())
+        }
+        (Reading::Items(row), Value::String(text)) => {
+            Value::Array(vec![read_by(Value::String(text), row)])
+        }
+        (Reading::Tuple(rows), Value::Array(items)) => Value::Array(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(position, item)| {
+                    read_by(item, rows.get(position).unwrap_or(&Reading::Spelled))
+                })
+                .collect(),
+        ),
+        (Reading::Tuple(_), Value::String(text)) => parsed_once(text, Value::is_array),
+        // Objects
+        (Reading::Object { members, others }, Value::Object(fields)) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(name, field)| {
+                    let row = members
+                        .iter()
+                        .find(|(member, _)| *member == name)
+                        .map_or(*others, |(_, row)| row);
+                    let field = read_by(field, row);
+                    (name, field)
+                })
+                .collect(),
+        ),
+        (Reading::Object { .. }, Value::String(text)) => parsed_once(text, Value::is_object),
+        // A whole compound
+        (Reading::Whole(_), Value::String(text)) => {
+            serde_json::from_str(&text).unwrap_or(Value::String(text))
+        }
+        (Reading::Whole(row), value) => read_by(value, row),
+        // A shape the plan does not expect goes to serde as it arrived, and serde refuses it.
+        (Reading::Items(_) | Reading::Tuple(_) | Reading::Object { .. }, other) => other,
+    }
+}
+
+/// A string as the compound its JSON spells when that is the expected kind, and otherwise as it
+/// arrived.
+fn parsed_once(text: String, expected: fn(&Value) -> bool) -> Value {
+    match serde_json::from_str::<Value>(&text) {
+        Ok(parsed) if expected(&parsed) => parsed,
+        _ => Value::String(text),
+    }
+}
+
+/// The [`Reading::Spelled`] reading of one value.
 ///
-/// Deliberately not recursive into a parsed compound: the client encodes a whole element once, so
-/// one level of unspelling is exactly its inverse. Arrays of leaves recurse, because an exploded
-/// array of integers is a list of strings and every element needs the same reading.
-fn retyped(value: Value) -> Value {
+/// Compounds as well as scalars, because the generated client has exactly one spelling for a
+/// compound element in a query pair or a text part, and it is the element's JSON
+/// (`style::scalar`).
+/// `posthog` sends `properties=` with one JSON-encoded filter object per occurrence, and the
+/// reader inverts precisely what the writer emits.
+///
+/// Not recursive into a parsed compound: the client encodes a whole element once, so one level of
+/// unspelling is exactly its inverse.
+/// Arrays of leaves recurse, because an exploded array of integers is a list of strings and every
+/// element needs the same reading.
+fn spelled(value: Value) -> Value {
     match value {
         Value::String(text) => match serde_json::from_str::<Value>(&text) {
             Ok(
@@ -234,7 +326,7 @@ fn retyped(value: Value) -> Value {
             ) => parsed,
             _ => Value::String(text),
         },
-        Value::Array(items) => Value::Array(items.into_iter().map(retyped).collect()),
+        Value::Array(items) => Value::Array(items.into_iter().map(spelled).collect()),
         // An object that arrived as an object was rebuilt from text member by member — a
         // `deepObject` or a flat `form` spelling — so its members are text to re-read, one level
         // deep as the writer spelled them.
@@ -242,48 +334,13 @@ fn retyped(value: Value) -> Value {
             members
                 .into_iter()
                 .map(|(name, member)| match member {
-                    Value::String(_) => (name, retyped(member)),
+                    Value::String(_) => (name, spelled(member)),
                     other => (name, other),
                 })
                 .collect(),
         ),
         other => other,
     }
-}
-
-/// The same reading for a whole body assembled from text — a form or a multipart request.
-///
-/// `kept` names the members that keep the value they arrived with when the others are re-read.
-/// Those are the members the description types as strings, since a string member that spells a
-/// number would otherwise fail its type as soon as any other member needed re-reading.
-/// They are also the members the caller already built typed, such as a multipart file part, whose
-/// strings are not text the schema still has to type.
-///
-/// # Errors
-/// Returns [`ServerDecodeError`] when the body does not match the description under either reading.
-pub fn typed_body<T: serde::de::DeserializeOwned>(
-    members: Value,
-    kept: &[&str],
-) -> Result<T, ServerDecodeError> {
-    let first = match serde_json::from_value(members.clone()) {
-        Ok(parsed) => return Ok(parsed),
-        Err(source) => ServerDecodeError::from(source),
-    };
-    let Value::Object(fields) = members else {
-        return Err(first);
-    };
-    let retyped: serde_json::Map<String, Value> = fields
-        .into_iter()
-        .map(|(name, value)| {
-            let value = if kept.contains(&name.as_str()) {
-                value
-            } else {
-                retyped(value)
-            };
-            (name, value)
-        })
-        .collect();
-    serde_json::from_value(Value::Object(retyped)).map_err(|_| first)
 }
 
 /// A body the description marked required.
@@ -327,19 +384,21 @@ pub fn optional_body<T, E: std::fmt::Display>(
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre::{self, OptionExt as _};
-    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
 
-    use super::{Rejection, RejectionResponse, optional_body, read, required_body, typed};
+    use color_eyre::eyre::{self, OptionExt as _};
+    use serde_json::json;
+
+    use super::{Reading, Rejection, RejectionResponse, optional_body, read, required_body, typed};
 
     /// The reader inverts exactly what the writer emits, one compound level deep.
     ///
     /// The wire probe's `posthog` find: the client's one spelling for a compound element in a query
     /// pair is the element's JSON, and the reader refused it — `properties=` carried a JSON-encoded
     /// filter per occurrence and serde was handed the text where the struct belonged. The guard in
-    /// the other direction matters as much: a member the description types as a *string* keeps its
-    /// braces, because the as-is reading accepts it before this one runs.
+    /// the other direction matters as much: a value the description types as a *string* keeps its
+    /// braces, because its plan keeps it.
     #[test_util::test]
     fn a_string_spelling_a_compound_is_reread_where_a_compound_is_expected() {
         #[derive(Debug, PartialEq, serde::Deserialize)]
@@ -347,7 +406,7 @@ mod tests {
             key: String,
         }
         let arrived = json!(["{\"key\":\"a\"}"]);
-        let parsed: Vec<Filter> = typed(arrived, &[])?;
+        let parsed: Vec<Filter> = typed(arrived, &Reading::Items(&Reading::Spelled))?;
         assert_eq!(
             parsed,
             vec![Filter {
@@ -355,17 +414,18 @@ mod tests {
             }]
         );
 
-        let stays_text: String = typed(json!("{\"key\":\"a\"}"), &[])?;
+        let stays_text: String = typed(json!("{\"key\":\"a\"}"), &Reading::Keep)?;
         assert_eq!(stays_text, "{\"key\":\"a\"}");
     }
 
     #[test_util::test]
     fn an_absent_optional_parameter_is_none_and_an_absent_required_one_is_a_rejection() {
         let absent = Ok::<_, Infallible>(None);
-        let optional: Option<String> = read(absent.clone(), "limit", false, "listPets", &[])?;
+        let optional: Option<String> =
+            read(absent.clone(), "limit", false, "listPets", &Reading::Keep)?;
         assert_eq!(optional, None);
 
-        let rejected = read::<String, _>(absent, "limit", true, "listPets", &[])
+        let rejected = read::<String, _>(absent, "limit", true, "listPets", &Reading::Keep)
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
         assert_eq!(
@@ -387,7 +447,7 @@ mod tests {
             "limit",
             true,
             "listPets",
-            &[],
+            &Reading::Spelled,
         )?;
         assert_eq!(number, 3);
         let flag: bool = read(
@@ -395,7 +455,7 @@ mod tests {
             "deep",
             true,
             "listPets",
-            &[],
+            &Reading::Spelled,
         )?;
         assert!(flag);
         // An exploded array is a list of strings, and every element needs the same reading.
@@ -404,40 +464,25 @@ mod tests {
             "ids",
             true,
             "listPets",
-            &[],
+            &Reading::Items(&Reading::Spelled),
         )?;
         assert_eq!(numbers, [1, 2]);
     }
 
     #[test_util::test]
     fn a_string_the_description_asked_for_stays_the_string_it_was() {
-        // The other half, and the reason the re-reading is a *second* attempt rather than a
-        // preprocessing pass: a `type: string` parameter holding `"9"` is the text `9`, and a
-        // version number, an identifier or a zip code that reads as a number must survive intact.
-        let text: String = read(
-            Ok::<_, Infallible>(Some(json!("9"))),
-            "version",
-            true,
-            "listPets",
-            &[],
-        )?;
-        assert_eq!(text, "9");
-        let text: String = read(
-            Ok::<_, Infallible>(Some(json!("true"))),
-            "mode",
-            true,
-            "listPets",
-            &[],
-        )?;
-        assert_eq!(text, "true");
-        let text: String = read(
-            Ok::<_, Infallible>(Some(json!("007"))),
-            "code",
-            true,
-            "listPets",
-            &[],
-        )?;
-        assert_eq!(text, "007");
+        // The other half: a `type: string` parameter holding `"9"` is the text `9`, and a version
+        // number, an identifier or a zip code that reads as a number must survive intact.
+        for text in ["9", "true", "007"] {
+            let kept: String = read(
+                Ok::<_, Infallible>(Some(json!(text))),
+                "version",
+                true,
+                "listPets",
+                &Reading::Keep,
+            )?;
+            assert_eq!(kept, text);
+        }
     }
 
     #[test_util::test]
@@ -450,7 +495,7 @@ mod tests {
                 "limit",
                 true,
                 "listPets",
-                &[],
+                &Reading::Spelled,
             )
             .is_err()
         );
@@ -461,7 +506,7 @@ mod tests {
             "filter",
             true,
             "listPets",
-            &[],
+            &Reading::Keep,
         )?;
         assert_eq!(text, "{\"a\":1}");
     }
@@ -475,7 +520,11 @@ mod tests {
             note: String,
             rating: i32,
         }
-        let parsed: Upload = super::typed_body(json!({"note": "a note", "rating": "4"}), &[])?;
+        let reading = Reading::Object {
+            members: &[("note", Reading::Keep), ("rating", Reading::Spelled)],
+            others: &Reading::Spelled,
+        };
+        let parsed: Upload = typed(json!({"note": "a note", "rating": "4"}), &reading)?;
         assert_eq!(
             parsed,
             Upload {
@@ -494,7 +543,11 @@ mod tests {
             label: String,
             count: i64,
         }
-        let parsed: Login = super::typed_body(json!({"label": "true", "count": "4"}), &["label"])?;
+        let reading = Reading::Object {
+            members: &[("label", Reading::Keep), ("count", Reading::Spelled)],
+            others: &Reading::Spelled,
+        };
+        let parsed: Login = typed(json!({"label": "true", "count": "4"}), &reading)?;
         assert_eq!(
             parsed,
             Login {
@@ -504,7 +557,102 @@ mod tests {
         );
     }
 
-    /// An object parameter's members are re-read one by one, and its string members keep their
+    /// A member no row names is read by the object's `others` row, which is how a member captured
+    /// by `additionalProperties` gets the reading of the capture's value type.
+    #[test_util::test]
+    fn a_captured_member_is_read_by_the_capture_row() {
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Labels {
+            count: i64,
+            #[serde(flatten)]
+            extra: BTreeMap<String, String>,
+        }
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Counts {
+            count: i64,
+            #[serde(flatten)]
+            extra: BTreeMap<String, i64>,
+        }
+        let arrived = json!({"count": "4", "extra": "true", "other": "7"});
+
+        // Captured strings keep their text beside a declared member that needed re-reading.
+        let labels: Labels = typed(
+            arrived.clone(),
+            &Reading::Object {
+                members: &[("count", Reading::Spelled)],
+                others: &Reading::Keep,
+            },
+        )?;
+        assert_eq!(labels.count, 4);
+        assert_eq!(
+            labels.extra,
+            BTreeMap::from([
+                ("extra".to_owned(), "true".to_owned()),
+                ("other".to_owned(), "7".to_owned()),
+            ])
+        );
+
+        // Captured integers are still read as the numbers they spell.
+        let counts: Counts = typed(
+            json!({"count": "4", "other": "7"}),
+            &Reading::Object {
+                members: &[("count", Reading::Spelled)],
+                others: &Reading::Spelled,
+            },
+        )?;
+        assert_eq!(counts.extra, BTreeMap::from([("other".to_owned(), 7)]));
+    }
+
+    /// A tuple is read position by position, so a string position keeps its text beside an
+    /// integer position that needs re-reading.
+    #[test_util::test]
+    fn a_tuple_is_read_position_by_position() {
+        let pair: (String, i64) = typed(
+            json!(["9", "4"]),
+            &Reading::Tuple(&[Reading::Keep, Reading::Spelled]),
+        )?;
+        assert_eq!(pair, ("9".to_owned(), 4));
+        // A tuple written as one JSON text is parsed once and not read any further.
+        let pair: (String, i64) = typed(
+            json!("[\"9\",4]"),
+            &Reading::Tuple(&[Reading::Keep, Reading::Spelled]),
+        )?;
+        assert_eq!(pair, ("9".to_owned(), 4));
+    }
+
+    /// A lone string at an array position is one occurrence of a repeated member, read by the
+    /// element row rather than parsed, so an element that happens to spell JSON stays text.
+    #[test_util::test]
+    fn a_lone_string_at_an_array_position_is_one_element() {
+        let one: Vec<String> = typed(json!("[]"), &Reading::Items(&Reading::Keep))?;
+        assert_eq!(one, ["[]"]);
+        let one: Vec<i64> = typed(json!("4"), &Reading::Items(&Reading::Spelled))?;
+        assert_eq!(one, [4]);
+    }
+
+    /// A value the plan keeps is handed to serde as it arrived: a JSON-content parameter's
+    /// document was parsed by the extraction, and its strings are strings.
+    #[test_util::test]
+    fn a_kept_value_is_not_re_read() {
+        let document: serde_json::Value = read(
+            Ok::<_, Infallible>(Some(json!({"payload": {"labels": ["1"]}}))),
+            "filter",
+            true,
+            "listPets",
+            &Reading::Keep,
+        )?;
+        assert_eq!(document, json!({"payload": {"labels": ["1"]}}));
+        let text: serde_json::Value = read(
+            Ok::<_, Infallible>(Some(json!("1"))),
+            "filter",
+            true,
+            "listPets",
+            &Reading::Keep,
+        )?;
+        assert_eq!(text, json!("1"));
+    }
+
+    /// An object parameter's members are read one by one, and its string members keep their
     /// text.
     #[test_util::test]
     fn an_object_parameter_is_read_member_by_member() {
@@ -513,7 +661,11 @@ mod tests {
             number: i64,
             cursor: String,
         }
-        let page: Page = typed(json!({"number": "2", "cursor": "20"}), &["cursor"])?;
+        let reading = Reading::Object {
+            members: &[("number", Reading::Spelled), ("cursor", Reading::Keep)],
+            others: &Reading::Spelled,
+        };
+        let page: Page = typed(json!({"number": "2", "cursor": "20"}), &reading)?;
         assert_eq!(
             page,
             Page {
@@ -526,7 +678,7 @@ mod tests {
     #[test_util::test]
     fn a_parameter_that_does_not_parse_says_which_one_and_why() {
         let found = Ok::<_, Infallible>(Some(serde_json::json!("not a number")));
-        let rejected = read::<i64, _>(found, "limit", true, "listPets", &[])
+        let rejected = read::<i64, _>(found, "limit", true, "listPets", &Reading::Spelled)
             .err()
             .ok_or_eyre("the test expects this operation to fail")?;
         let Rejection::InvalidParameter {
@@ -540,6 +692,31 @@ mod tests {
         // The sentence names the operation as well, because a service logging these has no other
         // way to tell two `limit` parameters apart.
         assert!(rejected.to_string().contains("listPets"), "{rejected}");
+    }
+
+    /// A rejection carries serde's error for the value as its plan read it.
+    ///
+    /// `count` arrives as text the plan re-reads into a number, so the error is the one about
+    /// `label`, a number where the description types a string.
+    #[test_util::test]
+    fn a_rejection_carries_the_error_for_the_value_as_planned() {
+        #[derive(Debug, serde::Deserialize)]
+        #[expect(dead_code, reason = "the test only checks that deserializing fails")]
+        struct Login {
+            label: String,
+            count: i64,
+        }
+        let reading = Reading::Object {
+            members: &[("label", Reading::Keep), ("count", Reading::Spelled)],
+            others: &Reading::Spelled,
+        };
+        let rejected = typed::<Login>(json!({"label": 4, "count": "4"}), &reading)
+            .err()
+            .ok_or_eyre("the test expects this operation to fail")?;
+        assert!(
+            rejected.to_string().contains("expected a string"),
+            "{rejected}"
+        );
     }
 
     #[test_util::test]
