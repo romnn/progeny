@@ -445,17 +445,27 @@ fn declares(shapes: &Shapes, variant: &ShapeKey, property: &str) -> bool {
 }
 
 /// Whether a variant's own declaration of the tag property agrees that it is a string.
+///
+/// A declaration that reaches itself through aliases and nullable wrappers before naming any kind
+/// of value constrains the tag no further, so it passes as [`Shape::Any`] does.
 fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
-    let shape = match reference {
-        ShapeRef::Key(key) => shapes.get(key),
-        ShapeRef::Inline(shape) => Some(&**shape),
-    };
-    match shape {
-        Some(Shape::Scalar(super::Scalar::String) | Shape::StringEnum(_) | Shape::Any) => true,
-        // A nullable tag is still a string tag; the null is the document being loose, not a
-        // different kind of value.
-        Some(Shape::Optional(inner) | Shape::Alias(inner)) => tag_shaped(shapes, inner),
-        _ => false,
+    let mut reference = reference;
+    let mut followed = BTreeSet::new();
+    loop {
+        let shape = match reference {
+            ShapeRef::Key(key) if !followed.insert(key) => return true,
+            ShapeRef::Key(key) => shapes.get(key),
+            ShapeRef::Inline(shape) => Some(&**shape),
+        };
+        match shape {
+            Some(Shape::Scalar(super::Scalar::String) | Shape::StringEnum(_) | Shape::Any) => {
+                return true;
+            }
+            // A nullable tag is still a string tag; the null is the document being loose, not a
+            // different kind of value.
+            Some(Shape::Optional(inner) | Shape::Alias(inner)) => reference = inner,
+            _ => return false,
+        }
     }
 }
 

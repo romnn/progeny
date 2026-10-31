@@ -17,6 +17,8 @@
 //! rendering is what makes the test a test — it is the type layer's claim about what it carries,
 //! checked against what the emitted Rust actually carries.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value};
 
 use super::{ApiModel, BodyContract};
@@ -25,7 +27,7 @@ use crate::diag::JsonPointer;
 use crate::doc::{MaybeRef, MediaType};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Extra, Keyed, Shape, ShapeKey, ShapeRef, Shapes, Tag, TagStyle, Union};
+use crate::shape::{Extra, Keyed, Shape, ShapeKey, ShapeRef, Shapes, Tag, TagStyle, Trail, Union};
 
 /// One example payload, and what a faithful round trip through the generated type must produce.
 #[derive(Debug, Clone)]
@@ -275,11 +277,17 @@ impl Collect<'_> {
     /// One arm per shape, and deliberately not collapsed where two happen to agree: adding a shape
     /// should not compile until somebody has said what pruning a payload against it means, and a
     /// merged arm would quietly absorb the next one.
-    fn prune(&self, value: &Value, shape: &Shape, lenient: bool) -> Option<Value> {
+    fn prune(
+        &self,
+        value: &Value,
+        shape: &Shape,
+        lenient: bool,
+        trail: &mut Trail,
+    ) -> Option<Value> {
         match shape {
             // Arbitrary JSON is carried whole, so nothing is pruned from it.
             Shape::Any => Some(value.clone()),
-            Shape::Struct(structure) => self.prune_struct(value, structure, None, lenient),
+            Shape::Struct(structure) => self.prune_struct(value, structure, None, lenient, trail),
             Shape::Map { value: element } => {
                 let members = value.as_object()?;
                 let mut out = Map::new();
@@ -328,7 +336,7 @@ impl Collect<'_> {
                 if value.is_null() {
                     return Some(Value::Null);
                 }
-                self.through(value, inner, lenient)
+                self.follow(value, inner, None, lenient, trail)
             }
             // Serde tries an untagged enum's variants in declaration order and takes the first
             // that deserializes, so the expectation is the payload pruned under that same first
@@ -338,9 +346,9 @@ impl Collect<'_> {
                 // …unless the union dispatches on a tag, where the first branch that accepts the
                 // payload is not the branch serde takes.
                 if let Some(tag) = &union.tag {
-                    return self.tagged(value, union, tag, lenient);
+                    return self.tagged(value, union, tag, lenient, trail);
                 }
-                self.untagged(value, union, lenient)
+                self.untagged(value, union, lenient, trail)
             }
             Shape::Keyed(keyed) => self.keyed(value, keyed, lenient),
             Shape::Null | Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => {
@@ -351,10 +359,16 @@ impl Collect<'_> {
 
     /// The expectation for an untagged union: the payload pruned under the first branch that
     /// accepts it, which is the branch serde takes.
-    fn untagged(&self, value: &Value, union: &Union, lenient: bool) -> Option<Value> {
+    fn untagged(
+        &self,
+        value: &Value,
+        union: &Union,
+        lenient: bool,
+        trail: &mut Trail,
+    ) -> Option<Value> {
         for variant in &union.variants {
             if self.accepts(value, &variant.shape) {
-                return self.through(value, &variant.shape, lenient);
+                return self.follow(value, &variant.shape, None, lenient, trail);
             }
         }
         // No branch accepts it, so the open arm keeps it whole.
@@ -426,7 +440,14 @@ impl Collect<'_> {
     /// and report the union writing its own tag as an invention.
     /// A [`TagStyle::Carried`] tag the variant's field let go of is written back for the same
     /// reason.
-    fn tagged(&self, value: &Value, union: &Union, tag: &Tag, lenient: bool) -> Option<Value> {
+    fn tagged(
+        &self,
+        value: &Value,
+        union: &Union,
+        tag: &Tag,
+        lenient: bool,
+        trail: &mut Trail,
+    ) -> Option<Value> {
         // A payload that names no variant is kept whole in the open arm, so it comes back as it
         // went in.
         let Value::Object(members) = value else {
@@ -449,7 +470,7 @@ impl Collect<'_> {
             },
         };
         let variant = union.variants.get(position)?;
-        let mut pruned = self.through(value, &variant.shape, lenient)?;
+        let mut pruned = self.follow(value, &variant.shape, None, lenient, trail)?;
         let object = pruned.as_object_mut()?;
         match tag.style {
             // A consumed tag is always one of the listed strings, because a union that reads any
@@ -484,6 +505,7 @@ impl Collect<'_> {
         structure: &crate::shape::Struct,
         fields: Option<&[FieldContract]>,
         lenient: bool,
+        trail: &mut Trail,
     ) -> Option<Value> {
         let members = value.as_object()?;
         if matches!(structure.extra, Extra::Typed(_)) {
@@ -527,7 +549,9 @@ impl Collect<'_> {
                 .filter(|(key, _)| !structure.fields.iter().any(|field| field.wire == **key))
                 .map(|(key, member)| (key.clone(), member.clone()))
                 .collect();
-            let Value::Object(kept) = self.through(&Value::Object(rest), flattened, lenient)?
+            // The rest is this same object less its declared members, so it stays on this trail.
+            let Value::Object(kept) =
+                self.follow(&Value::Object(rest), flattened, None, lenient, trail)?
             else {
                 return None;
             };
@@ -561,15 +585,47 @@ impl Collect<'_> {
         ty: Option<TypeRef>,
         lenient: bool,
     ) -> Option<Value> {
-        let (shape, ty) = match reference {
-            ShapeRef::Key(key) => (self.shapes.get(key)?, self.type_of(key, lenient).or(ty)),
-            ShapeRef::Inline(shape) => (&**shape, ty),
-        };
+        self.follow(value, reference, ty, lenient, &mut Trail::default())
+    }
+
+    /// [`Collect::through_typed`], for the same value a shape that holds this reference is pruning.
+    ///
+    /// A key the trail already holds names a shape that reaches itself without consuming any of
+    /// the value, so it declares nothing that would prune the value and keeps it whole.
+    fn follow(
+        &self,
+        value: &Value,
+        reference: &ShapeRef,
+        ty: Option<TypeRef>,
+        lenient: bool,
+        trail: &mut Trail,
+    ) -> Option<Value> {
+        match reference {
+            ShapeRef::Key(key) => {
+                let shape = self.shapes.get(key)?;
+                let ty = self.type_of(key, lenient).or(ty);
+                trail
+                    .enter(key, |trail| self.shaped(value, shape, ty, lenient, trail))
+                    .unwrap_or_else(|| Some(value.clone()))
+            }
+            ShapeRef::Inline(shape) => self.shaped(value, shape, ty, lenient, trail),
+        }
+    }
+
+    /// The payload pruned under one resolved shape, whose type is `ty` where it is known.
+    fn shaped(
+        &self,
+        value: &Value,
+        shape: &Shape,
+        ty: Option<TypeRef>,
+        lenient: bool,
+        trail: &mut Trail,
+    ) -> Option<Value> {
         match shape {
             // A struct is pruned against its contract, which the shape alone does not settle.
             Shape::Struct(structure) => {
                 let fields = ty.as_ref().and_then(|ty| self.fields_of(ty));
-                self.prune_struct(value, structure, fields, lenient)
+                self.prune_struct(value, structure, fields, lenient, trail)
             }
             // The wrapper's type holds the inner one.
             Shape::Optional(inner) | Shape::Alias(inner) => {
@@ -577,9 +633,9 @@ impl Collect<'_> {
                     return Some(Value::Null);
                 }
                 let inner_ty = ty.and_then(|ty| self.unwrapped(ty));
-                self.through_typed(value, inner, inner_ty, lenient)
+                self.follow(value, inner, inner_ty, lenient, trail)
             }
-            _ => self.prune(value, shape, lenient),
+            _ => self.prune(value, shape, lenient, trail),
         }
     }
 
@@ -609,22 +665,29 @@ impl Collect<'_> {
 
     /// The frozen fields of the struct a type names, through any wrapper around it.
     fn fields_of(&self, ty: &TypeRef) -> Option<&[FieldContract]> {
-        // Bounded, because an alias of an alias is a chain the contract layer already cut.
-        let mut ty = ty.clone();
-        for _ in 0..8 {
+        let mut ty = ty;
+        // The named types looked into so far.
+        // Alias promotion leaves no cycle of aliases to follow, and this keeps the walk finite
+        // without leaning on that, however long an acyclic chain of aliases is.
+        let mut followed = BTreeSet::new();
+        loop {
             match ty {
-                TypeRef::Named(index) => match self.contracts.get(index)?.kind() {
-                    ContractKind::Struct { fields } => return Some(fields),
-                    ContractKind::Alias { target } => ty = target.clone(),
-                    _ => return None,
-                },
+                TypeRef::Named(index) => {
+                    if !followed.insert(*index) {
+                        return None;
+                    }
+                    match self.contracts.get(*index)?.kind() {
+                        ContractKind::Struct { fields } => return Some(fields),
+                        ContractKind::Alias { target } => ty = target,
+                        _ => return None,
+                    }
+                }
                 TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-                    ty = *inner;
+                    ty = inner;
                 }
                 _ => return None,
             }
         }
-        None
     }
 
     /// Whether a `null` in this member survives the round trip.
@@ -682,9 +745,9 @@ fn examples_of(at: &JsonPointer, media_type: &str, entry: &MediaType) -> Vec<(St
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre;
+    use color_eyre::eyre::{self, OptionExt as _};
 
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
 
     use crate::api::tests::model_of;
     use crate::config::Config;
@@ -740,6 +803,94 @@ mod tests {
                 "responses": {"201": {"description": "created"}},
             }}},
         })
+    }
+
+    /// An example of a type that names itself without consuming any input meets the same shape
+    /// again with the same value, and the walk pruning it has to end there.
+    /// Two unions naming only each other constrain nothing, so the example is expected back
+    /// whole; so is one of a nullable wrapper around its own union, whose cycle has a `null` in
+    /// it and stays recursive.
+    #[test_util::test]
+    fn an_example_of_a_self_naming_type_is_expected_back_whole() {
+        for schemas in [
+            json!({
+                "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+                "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+            }),
+            json!({
+                "A": {"oneOf": [{"$ref": "#/components/schemas/B"}, {"type": "null"}]},
+                "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+            }),
+        ] {
+            // Held in a member, because a nullable type at the top of a position has no name a
+            // test could decode into.
+            let mut document = responding(
+                &json!({"type": "object", "properties": {"a": {"$ref": "#/components/schemas/A"}}}),
+                &json!({"a": 1}),
+            );
+            document["components"]["schemas"] = schemas;
+            let found = payloads_of(document)?;
+            let [payload] = found.as_slice() else {
+                eyre::bail!("one example is one payload: {found:#?}");
+            };
+            assert_eq!(payload.expected, json!({"a": 1}));
+            assert!(!payload.vendor_defect);
+        }
+    }
+
+    /// A chain of aliases is as long as the document makes it, and the struct at its end still
+    /// says which of its members write a `null` back.
+    #[test_util::test]
+    fn the_fields_of_a_struct_are_found_through_a_long_chain_of_aliases() {
+        // Ten single-branch unions, each naming the next, and a struct at the end.
+        let mut schemas = Map::new();
+        for depth in 0..10 {
+            let next = if depth == 9 {
+                "S".to_owned()
+            } else {
+                format!("A{}", depth + 1)
+            };
+            schemas.insert(
+                format!("A{depth}"),
+                json!({"oneOf": [{"$ref": format!("#/components/schemas/{next}")}]}),
+            );
+        }
+        schemas.insert(
+            "S".to_owned(),
+            json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+        );
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {"schemas": schemas},
+        });
+
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(document, &mut ctx)?;
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
+        let contracts = contract::build(&resolved, &shapes, &Config::default(), &mut ctx)?;
+        let collector = super::Collect {
+            resolved: &resolved,
+            shapes: &shapes,
+            contracts: &contracts,
+        };
+
+        let head = shapes
+            .roots()
+            .iter()
+            .find(|root| root.hint.iter().any(|segment| segment == "A0"))
+            .ok_or_eyre("`A0` is a root")?;
+        let ty = contracts.type_of(&head.key).ok_or_eyre("`A0` has a type")?;
+        let fields = collector
+            .fields_of(ty)
+            .ok_or_else(|| eyre::eyre!("no struct found through {ty:?}"))?;
+        let names: Vec<&str> = fields
+            .iter()
+            .map(|field| field.wire_name.as_str())
+            .collect();
+        assert_eq!(names, ["name"]);
     }
 
     #[test_util::test]

@@ -70,6 +70,11 @@ impl Sccs {
         self.self_loop.get(node).copied().unwrap_or(false) || self.component_size(node) > 1
     }
 
+    /// The component a node belongs to, which names its cycle when [`Self::recursive`] holds.
+    pub(crate) fn component(&self, node: usize) -> Option<u32> {
+        self.component.get(node).copied()
+    }
+
     /// Whether both nodes are on the same cycle, which is what makes an edge between them a
     /// closing edge rather than a step outward.
     pub(crate) fn together(&self, from: usize, to: usize) -> bool {

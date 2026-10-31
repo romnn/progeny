@@ -1,6 +1,6 @@
 //! The operation's parameters: merged, named, typed, and judged serializable or not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Build;
 use crate::api::style::{self, ParamShape};
@@ -183,43 +183,49 @@ impl Build<'_> {
 /// client builds. Wrappers that do not change what the wire carries are looked through; named
 /// types are looked *into*, because an alias of an array is an array on the wire.
 pub(super) fn param_shape(ty: &TypeRef, contracts: &Contracts) -> ParamShape {
-    match ty {
-        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-            param_shape(inner, contracts)
+    let mut ty = ty;
+    // The named types looked into so far, so that a type reaching itself through wrappers ends the
+    // walk instead of looping: `A(Option<Box<A>>)` is a legitimate recursive type.
+    let mut followed = BTreeSet::new();
+    loop {
+        match ty {
+            TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => ty = inner,
+            TypeRef::Vec(_) | TypeRef::Array(..) | TypeRef::Tuple(_) => return ParamShape::Array,
+            // Serialized as an object; it only ever sits in a multipart body, never a parameter.
+            TypeRef::Map(_) | TypeRef::Upload => return ParamShape::Object,
+            // A type met again wraps nothing but itself on this path, which says no more about
+            // its shape on the wire than an unresolvable index does.
+            TypeRef::Named(index) if !followed.insert(*index) => return ParamShape::Primitive,
+            TypeRef::Named(index) => match contracts
+                .get(*index)
+                .map(crate::contract::TypeContract::kind)
+            {
+                Some(ContractKind::Struct { .. }) => return ParamShape::Object,
+                Some(ContractKind::Tuple { .. }) => return ParamShape::Array,
+                Some(ContractKind::Newtype { inner } | ContractKind::Alias { target: inner }) => {
+                    ty = inner;
+                }
+                // String enums and unions serialize as whatever scalar their value is; `None` is
+                // an unresolvable index, which the type path renderer also treats as opaque.
+                // A *tagged* union's value is always an object, and it is still `Primitive`, the
+                // ruling untagged object unions get too, so the two stay consistent.
+                Some(
+                    ContractKind::StringEnum { .. }
+                    | ContractKind::Enum { .. }
+                    | ContractKind::TaggedEnum { .. }
+                    | ContractKind::CarriedTagEnum { .. }
+                    | ContractKind::KeyedEnum { .. },
+                )
+                | None => return ParamShape::Primitive,
+            },
+            TypeRef::Unit
+            | TypeRef::Bool
+            | TypeRef::Integer(_)
+            | TypeRef::F64
+            | TypeRef::String
+            | TypeRef::Format(_)
+            | TypeRef::Value => return ParamShape::Primitive,
         }
-        TypeRef::Vec(_) | TypeRef::Array(..) | TypeRef::Tuple(_) => ParamShape::Array,
-        // Serialized as an object; it only ever sits in a multipart body, never a parameter.
-        TypeRef::Map(_) | TypeRef::Upload => ParamShape::Object,
-        TypeRef::Named(index) => match contracts
-            .get(*index)
-            .map(crate::contract::TypeContract::kind)
-        {
-            Some(ContractKind::Struct { .. }) => ParamShape::Object,
-            Some(ContractKind::Tuple { .. }) => ParamShape::Array,
-            Some(ContractKind::Newtype { inner } | ContractKind::Alias { target: inner }) => {
-                param_shape(inner, contracts)
-            }
-            // String enums and unions serialize as whatever scalar their value is; `None` is an
-            // unresolvable index, which the type path renderer also treats as opaque. A *tagged*
-            // union's value is always an object, so `Primitive` is questionable there — but it is
-            // the ruling untagged object unions already get, and changing both is a behavioral
-            // decision, not this refactor's.
-            Some(
-                ContractKind::StringEnum { .. }
-                | ContractKind::Enum { .. }
-                | ContractKind::TaggedEnum { .. }
-                | ContractKind::CarriedTagEnum { .. }
-                | ContractKind::KeyedEnum { .. },
-            )
-            | None => ParamShape::Primitive,
-        },
-        TypeRef::Unit
-        | TypeRef::Bool
-        | TypeRef::Integer(_)
-        | TypeRef::F64
-        | TypeRef::String
-        | TypeRef::Format(_)
-        | TypeRef::Value => ParamShape::Primitive,
     }
 }
 
@@ -376,6 +382,94 @@ mod tests {
         let param = &model.operations()[0].params[0];
         assert_eq!(param.wire_name, "petId");
         assert!(param.required);
+    }
+
+    /// A document whose one operation takes a query parameter typed by `A`, among `schemas`.
+    fn querying(schemas: serde_json::Value) -> serde_json::Value {
+        let mut document = with_paths(json!({
+            "/x": {"get": {
+                "operationId": "getX",
+                "parameters": [{"name": "p", "in": "query", "schema": {"$ref": "#/components/schemas/A"}}],
+                "responses": {"200": {"description": "ok"}},
+            }},
+        }));
+        document["components"]["schemas"] = schemas;
+        document
+    }
+
+    /// What the one parameter of a [`querying`] document became, and how many nonproductive
+    /// cycles were reported on the way.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Queried {
+        array: bool,
+        object: bool,
+        cycles: usize,
+    }
+
+    fn queried(schemas: serde_json::Value) -> eyre::Result<Queried> {
+        let (model, diagnostics) = model_of(querying(schemas))?;
+        let param = model
+            .operations()
+            .first()
+            .and_then(|operation| operation.params.first())
+            .ok_or_eyre("the parameter is kept")?;
+        Ok(Queried {
+            array: param.style.array(),
+            object: param.style.object(),
+            cycles: diagnostics
+                .iter()
+                .filter(|found| found.class() == crate::BreakageClass::NonproductiveCycle)
+                .count(),
+        })
+    }
+
+    /// A parameter typed by two unions naming only each other (#124) describes no finite value,
+    /// so it is arbitrary JSON, a scalar on the wire, and the cycle is reported once.
+    /// A union naming only itself is the same cycle at its shortest.
+    #[test_util::test]
+    fn a_parameter_typed_by_a_nonproductive_cycle_is_opaque_and_reported() {
+        let opaque = Queried {
+            array: false,
+            object: false,
+            cycles: 1,
+        };
+        let pair = queried(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+        }))?;
+        assert_eq!(pair, opaque);
+        let alone = queried(json!({"A": {"oneOf": [{"$ref": "#/components/schemas/A"}]}}))?;
+        assert_eq!(alone, opaque);
+    }
+
+    /// A recursive type with a finite value stays recursive, so the walk deciding its shape meets
+    /// it again and has to end there.
+    /// A nullable wrapper around itself is a scalar on the wire, and a list of itself an array.
+    #[test_util::test]
+    fn a_parameter_typed_by_a_recursive_wrapper_has_a_shape() {
+        let nullable = queried(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}, {"type": "null"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+        }))?;
+        assert_eq!(
+            nullable,
+            Queried {
+                array: false,
+                object: false,
+                cycles: 0
+            }
+        );
+        let list = queried(json!({
+            "A": {"type": "array", "items": {"$ref": "#/components/schemas/A"}},
+        }))?;
+        assert_eq!(
+            list,
+            Queried {
+                array: true,
+                object: false,
+                cycles: 0
+            }
+        );
     }
 
     #[test_util::test]

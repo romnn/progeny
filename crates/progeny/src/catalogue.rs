@@ -192,6 +192,12 @@ fn wiring(class: BreakageClass) -> Wiring {
             "Usage": {"type": "object", "properties": {"total": {"type": "integer"}}},
             "MaybeUsage": {"anyOf": [{"$ref": "#/components/schemas/Usage"}, {"nullable": true}]},
         }))),
+        // Two single-branch unions naming each other: no member, element or `null` between them,
+        // so the pair describes no finite value.
+        BreakageClass::NonproductiveCycle => Wiring::Fixture(document(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+            "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+        }))),
         BreakageClass::UnsatisfiableDerive => Wiring::Fixture(document(json!({
             "Fuzzy": {"type": "object", "properties": {"ratio": {"type": "number"}}},
         }))),
