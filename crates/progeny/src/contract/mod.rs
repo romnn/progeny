@@ -15,6 +15,7 @@
 //! thing that builds one is [`finalize::run`], which consumes the provisional form and the
 //! [`Config`] together.
 
+mod cycle;
 mod dedup;
 mod finalize;
 mod lower;
@@ -637,6 +638,22 @@ impl Contracts {
         let mut read = ty.clone();
         read.remap(&self.twins);
         read
+    }
+
+    /// The type a reference spells once every alias it names is replaced by what it names.
+    ///
+    /// The reference itself when it names no alias.
+    /// A cycle of aliases ends the walk where it closes, though finalization leaves none.
+    pub(crate) fn unaliased<'a>(&'a self, ty: &'a TypeRef) -> &'a TypeRef {
+        let mut current = ty;
+        let mut followed = std::collections::BTreeSet::new();
+        while let TypeRef::Named(index) = current
+            && followed.insert(*index)
+            && let Some(ContractKind::Alias { target }) = self.get(*index).map(TypeContract::kind)
+        {
+            current = target;
+        }
+        current
     }
 
     /// The strict half of a read twin, or the index itself for every other type.

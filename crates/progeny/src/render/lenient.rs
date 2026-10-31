@@ -122,7 +122,7 @@ fn decoder(
     let support = scope.support();
     let name = implementation_type(contract);
     let body = match contract.kind() {
-        ContractKind::Struct { fields } => struct_body(contract, fields, scope),
+        ContractKind::Struct { fields } => struct_body(contract, fields, contracts, scope),
         // A value the description allows is no drift, so an enum that admits any other string
         // reads the way its strict form does.
         ContractKind::StringEnum {
@@ -209,7 +209,12 @@ fn decoder(
 }
 
 /// A struct: every declared member taken by its site, then the leftovers.
-fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) -> TokenStream {
+fn struct_body(
+    contract: &TypeContract,
+    fields: &[FieldContract],
+    contracts: &Contracts,
+    scope: Scope,
+) -> TokenStream {
     let support = scope.support();
     let literal_name = contract.rust_name().as_str();
     let denied = contract.unknown_fields() == UnknownFields::Deny;
@@ -236,8 +241,12 @@ fn struct_body(contract: &TypeContract, fields: &[FieldContract], scope: Scope) 
         }
         // A member declared `type: null` is `null` on every well-formed response, so `null` is
         // what it allows whatever else the description says about it.
-        let only_null = matches!(&field.ty, TypeRef::Unit)
-            || matches!(&field.ty, TypeRef::Option(inner) if **inner == TypeRef::Unit);
+        // An alias names what it names, so one of `()` is read as `()` is.
+        let only_null = match contracts.unaliased(&field.ty) {
+            TypeRef::Unit => true,
+            TypeRef::Option(inner) => contracts.unaliased(inner) == &TypeRef::Unit,
+            _ => false,
+        };
         let declared = match (field.presence, only_null) {
             (Presence::Required, false) => quote! { Required },
             (Presence::Optional, false) => quote! { Optional },
