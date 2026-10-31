@@ -73,6 +73,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `colliding-type-name` | Two shapes whose names sanitize to the same Rust identifier. |
 | `unsatisfiable-derive` | A derive asked of every type, on a type that cannot have it. |
 | `nonproductive-cycle` | Schemas whose lowered types are aliases and wrappers of one another with no member, element or `null` between them, such as two single-branch `oneOf`s naming each other; no finite value is one, so each is typed as arbitrary JSON. |
+| `non-consuming-cycle` | Schemas whose lowered types reach one another through steps that read the same value again, such as a `oneOf` listing itself beside `null` or beside a string; wrappers whose only way out is `null` are typed as `()`, and every other such cycle as arbitrary JSON, so no decoder can recurse on one value forever. |
 
 ## Denying diagnostics
 

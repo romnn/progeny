@@ -33,4 +33,12 @@ impl Trail {
         self.entered.pop();
         Some(result)
     }
+
+    /// The keys entered since the walk first entered `key`, `key` first, when it is inside it.
+    ///
+    /// The cycle a walk meeting `key` again has gone round with the same value.
+    pub(crate) fn since(&self, key: &ShapeKey) -> Option<&[ShapeKey]> {
+        let first = self.entered.iter().position(|entered| entered == key)?;
+        self.entered.get(first..)
+    }
 }

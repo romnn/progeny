@@ -40,6 +40,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Tool"
+  /maybe:
+    post:
+      operationId: postMaybe
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaybeHolder"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeHolder"
 components:
   schemas:
     Spike:
@@ -311,3 +326,33 @@ components:
         - type: array
           items:
             type: string
+    # A union of itself and `null`, whose one finite value is `null`, held directly and through
+    # an alias by required members, beside an alias of a nullable list of itself, which is
+    # recursive and so becomes a newtype. The required string gives the holder a read form of its
+    # own, so every member is read by its twin.
+    Maybe:
+      oneOf:
+        - $ref: "#/components/schemas/Maybe"
+        - type: "null"
+    MaybeAlias:
+      oneOf:
+        - $ref: "#/components/schemas/Maybe"
+    Nest:
+      oneOf:
+        - $ref: "#/components/schemas/NestList"
+    NestList:
+      type: [array, "null"]
+      items:
+        $ref: "#/components/schemas/Nest"
+    MaybeHolder:
+      type: object
+      required: [a, b, c, label]
+      properties:
+        a:
+          $ref: "#/components/schemas/Maybe"
+        b:
+          $ref: "#/components/schemas/MaybeAlias"
+        c:
+          $ref: "#/components/schemas/Nest"
+        label:
+          type: string
