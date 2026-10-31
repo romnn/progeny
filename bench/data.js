@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793376914649,
+  "lastUpdate": 1793450183147,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2440,6 +2440,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 232.8359375,
             "range": "± 0",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c969603ebb84b1498ec0a4fae083f078d052ab20",
+          "message": "fix(server): read text by a plan per position instead of a list of string names (#125)\n\n* fix(corpus): fetch the documents whose pinned stainless urls went dark\n\nStainless closed its public spec bucket, so the pinned URLs of anthropic,\nfinch, increase, lithic, orb and runway answer 403 and the corpus job has\nfailed since. Each now comes from its vendor's official latest-tracking\nsource; Anthropic's is published only gzip-compressed, so a `.gz` source\nis decompressed on download.\n\nCI now falls back to its most recent cached corpus and refreshes every\ndocument over it, so a source that goes dark keeps its last good copy and\nsurfaces as a warning instead of failing every run. The snapshots are\nre-recorded against today's documents.\n\n* fix(corpus): replace scaleway's instance api with stackit's iaas api\n\nEvery scaleway.com schema endpoint now answers a bot challenge, and no\nofficial public copy of the Instance API remains. STACKIT's IaaS API keeps\nthe slot's role, an EU cloud's single-product compute API, and is\npublished under Apache-2.0 on a branch that tracks its latest version.\n\n* fix(corpus): replace a cached document only with one that reads as a description\n\n* fix(server): refuse a single multipart member that arrives in two parts\n\nA member the spec table declares single that arrived twice was appended\nto the first part's value. When that value was itself a JSON array, the\nsecond part was folded into it: `[\"a\"]` then `[\"b\"]` read as\n`[\"a\", [\"b\"]]`, a shape nobody sent. Such a body is now refused with\n`ParseError::RepeatedMember`; undescribed and repeated members still\ncollect their parts.\n\n* fix(server): read text by a plan per position instead of a list of string names\n\nThe generated server read a parameter or a form or multipart body by\ntrying it as-is and then re-reading every member not named in a flat\nlist of top-level string members. Members captured by\n`additionalProperties` and the members of a flat form-encoded object\ncould never be named there, so a captured string spelling a boolean or\na nested string member spelling a number was re-read and the request\nrefused.\n\nEach position now carries a reading plan decided from its type and from\nhow the client writes it: `Keep`, `Spelled`, `Items`, `Tuple`, `Object`\nwith a row per member and one for captured members, and `Whole` for a\nmultipart compound that arrives as one JSON part or as repeated parts.\nThe server reads the text by the plan in one pass, so a leaf's reading\nnever depends on its siblings, and a rejection carries the error for\nthe value as read. The flat string lists and `multipart::typed_members`\nare gone.",
+          "timestamp": "2026-10-31T13:29:48+01:00",
+          "tree_id": "55ad8961d26f83b2940f98bd71cd9b7e85043215",
+          "url": "https://github.com/romnn/progeny/commit/c969603ebb84b1498ec0a4fae083f078d052ab20"
+        },
+        "date": 1793450182171,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 30.61917733333333,
+            "range": "± 0.46",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2701.26953125,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.705865666666668,
+            "range": "± 0.07",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1080.364583015442,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7983943333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 233.1236972808838,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
