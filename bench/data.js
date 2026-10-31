@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793450183147,
+  "lastUpdate": 1793454543746,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2505,6 +2505,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 233.1236972808838,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a46923221375b86d128694de0f91ab3f8d61af7f",
+          "message": "fix(generate): degrade nonproductive type cycles and let every walker terminate (#128)\n\n* fix(corpus): fetch the documents whose pinned stainless urls went dark\n\nStainless closed its public spec bucket, so the pinned URLs of anthropic,\nfinch, increase, lithic, orb and runway answer 403 and the corpus job has\nfailed since. Each now comes from its vendor's official latest-tracking\nsource; Anthropic's is published only gzip-compressed, so a `.gz` source\nis decompressed on download.\n\nCI now falls back to its most recent cached corpus and refreshes every\ndocument over it, so a source that goes dark keeps its last good copy and\nsurfaces as a warning instead of failing every run. The snapshots are\nre-recorded against today's documents.\n\n* fix(corpus): replace scaleway's instance api with stackit's iaas api\n\nEvery scaleway.com schema endpoint now answers a bot challenge, and no\nofficial public copy of the Instance API remains. STACKIT's IaaS API keeps\nthe slot's role, an EU cloud's single-product compute API, and is\npublished under Apache-2.0 on a branch that tracks its latest version.\n\n* fix(corpus): replace a cached document only with one that reads as a description\n\n* fix(server): refuse a single multipart member that arrives in two parts\n\nA member the spec table declares single that arrived twice was appended\nto the first part's value. When that value was itself a JSON array, the\nsecond part was folded into it: `[\"a\"]` then `[\"b\"]` read as\n`[\"a\", [\"b\"]]`, a shape nobody sent. Such a body is now refused with\n`ParseError::RepeatedMember`; undescribed and repeated members still\ncollect their parts.\n\n* fix(server): read text by a plan per position instead of a list of string names\n\nThe generated server read a parameter or a form or multipart body by\ntrying it as-is and then re-reading every member not named in a flat\nlist of top-level string members. Members captured by\n`additionalProperties` and the members of a flat form-encoded object\ncould never be named there, so a captured string spelling a boolean or\na nested string member spelling a number was re-read and the request\nrefused.\n\nEach position now carries a reading plan decided from its type and from\nhow the client writes it: `Keep`, `Spelled`, `Items`, `Tuple`, `Object`\nwith a row per member and one for captured members, and `Whole` for a\nmultipart compound that arrives as one JSON part or as repeated parts.\nThe server reads the text by the plan in one pass, so a leaf's reading\nnever depends on its siblings, and a rejection carries the error for\nthe value as read. The flat string lists and `multipart::typed_members`\nare gone.\n\n* fix(generate): degrade nonproductive type cycles and let every walker terminate\n\nTwo schemas naming only each other through single-branch unions lowered\nto newtypes of one another, an uninhabited cycle, and every walker that\nsees through aliases, newtypes and wrappers followed it forever: as a\nparameter it overflowed the generator's stack.\n\nFinalization now finds cycles made only of aliases and newtypes through\nboxes, before recursive aliases are promoted and boxed, and types their\nmembers as `serde_json::Value` with a new `nonproductive-cycle`\ndiagnostic. Cycles through a `null`, a list or a struct have finite\nvalues and stay typed, so the walkers that follow such edges (parameter\nshapes, multipart parts, default and example fitting, payload pruning,\ndiscriminator tags) now record the types they have followed and stop on\na revisit.",
+          "timestamp": "2026-10-31T14:43:30+01:00",
+          "tree_id": "d2ca8a5acd35de0d19d31d2a600cb928150eedc0",
+          "url": "https://github.com/romnn/progeny/commit/a46923221375b86d128694de0f91ab3f8d61af7f"
+        },
+        "date": 1793454542879,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 23.81311033333333,
+            "range": "± 2.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2700.90625,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.503795333333333,
+            "range": "± 0.6",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1080.7291660308838,
+            "range": "± 1.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6991826666666667,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 233.15234375,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
