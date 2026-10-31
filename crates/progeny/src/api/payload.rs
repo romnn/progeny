@@ -808,19 +808,26 @@ mod tests {
     /// An example of a type that names itself without consuming any input meets the same shape
     /// again with the same value, and the walk pruning it has to end there.
     /// Two unions naming only each other constrain nothing, so the example is expected back
-    /// whole; so is one of a nullable wrapper around its own union, whose cycle has a `null` in
-    /// it and stays recursive.
+    /// whole.
+    /// So is one of a nullable wrapper around its own union, which is typed as `null`, and whose
+    /// example of anything else is the document contradicting itself.
     #[test_util::test]
     fn an_example_of_a_self_naming_type_is_expected_back_whole() {
-        for schemas in [
-            json!({
-                "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
-                "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
-            }),
-            json!({
-                "A": {"oneOf": [{"$ref": "#/components/schemas/B"}, {"type": "null"}]},
-                "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
-            }),
+        for (schemas, contradicts) in [
+            (
+                json!({
+                    "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
+                    "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "A": {"oneOf": [{"$ref": "#/components/schemas/B"}, {"type": "null"}]},
+                    "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
+                }),
+                true,
+            ),
         ] {
             // Held in a member, because a nullable type at the top of a position has no name a
             // test could decode into.
@@ -834,7 +841,36 @@ mod tests {
                 eyre::bail!("one example is one payload: {found:#?}");
             };
             assert_eq!(payload.expected, json!({"a": 1}));
-            assert!(!payload.vendor_defect);
+            assert_eq!(payload.vendor_defect, contradicts);
+        }
+    }
+
+    /// A member typed by a wrapper whose only way out is `null` reads `null` and nothing else, so
+    /// an example writing `null` there is sound, and one writing anything else contradicts the
+    /// schema rather than finding a defect in the generated type.
+    #[test_util::test]
+    fn an_example_of_a_null_only_cycle_is_sound_only_as_null() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a"],
+            "properties": {"a": {"$ref": "#/components/schemas/Maybe"}},
+        });
+        for (example, contradicts) in [
+            (json!({"a": null}), false),
+            (json!({"a": 1}), true),
+            (json!({"a": {"b": null}}), true),
+        ] {
+            let mut document = requesting(&schema, &example);
+            document["components"]["schemas"] = json!({
+                "Maybe": {"oneOf": [{"$ref": "#/components/schemas/Maybe"}, {"type": "null"}]},
+            });
+            let found = payloads_of(document)?;
+            let [payload] = found.as_slice() else {
+                eyre::bail!("one example is one payload: {found:#?}");
+            };
+            assert_eq!(payload.vendor_defect, contradicts, "{example}");
+            // Never rewritten to `null`: what the document wrote is what is expected back.
+            assert_eq!(payload.expected, example);
         }
     }
 

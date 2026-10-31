@@ -759,7 +759,7 @@ impl Lower<'_> {
             // A member whose type reads `null` as a value of its own is nullable too, because an
             // `Option` around it reads a present `null` as absent.
             // A required one holds the `null` in its own type and needs no `Option`.
-            let nullable = matches!(self.shape_of(&field.shape), Some(Shape::Optional(_)))
+            let nullable = self.optional_behind_aliases(&field.shape)
                 || (!field.required && self.holds_null(&field.shape));
             // What collapsing the member onto one `Option` costs: an `Option` of a type that holds
             // `null` itself can still write one out.
@@ -995,6 +995,27 @@ impl Lower<'_> {
                     current = inner;
                 }
                 _ => return self.holds_null(current),
+            }
+        }
+    }
+
+    /// Whether a member's shape is an `Optional`, itself or at the end of a chain of aliases.
+    ///
+    /// An alias lowers to a name for what it names, so a required member typed by an alias of a
+    /// nullable shape holds `null` exactly as one typed by that shape does.
+    fn optional_behind_aliases(&self, reference: &ShapeRef) -> bool {
+        let mut current = reference;
+        let mut seen: BTreeSet<&ShapeKey> = BTreeSet::new();
+        loop {
+            if let ShapeRef::Key(key) = current
+                && !seen.insert(key)
+            {
+                return false;
+            }
+            match self.shape_of(current) {
+                Some(Shape::Optional(_)) => return true,
+                Some(Shape::Alias(inner)) => current = inner,
+                _ => return false,
             }
         }
     }

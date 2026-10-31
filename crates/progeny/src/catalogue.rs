@@ -198,6 +198,11 @@ fn wiring(class: BreakageClass) -> Wiring {
             "A": {"oneOf": [{"$ref": "#/components/schemas/B"}]},
             "B": {"oneOf": [{"$ref": "#/components/schemas/A"}]},
         }))),
+        // A union listing itself beside `null`: a decoder handed anything else reads it again
+        // as the same union.
+        BreakageClass::NonConsumingCycle => Wiring::Fixture(document(json!({
+            "A": {"oneOf": [{"$ref": "#/components/schemas/A"}, {"type": "null"}]},
+        }))),
         BreakageClass::UnsatisfiableDerive => Wiring::Fixture(document(json!({
             "Fuzzy": {"type": "object", "properties": {"ratio": {"type": "number"}}},
         }))),

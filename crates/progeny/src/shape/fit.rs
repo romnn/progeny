@@ -19,7 +19,9 @@
 
 use serde_json::Value;
 
-use super::{Extra, Keyed, Scalar, Shape, ShapeRef, Shapes, Struct, Tag, TagStyle, Trail, Union};
+use super::{
+    Extra, Keyed, Scalar, Shape, ShapeKey, ShapeRef, Shapes, Struct, Tag, TagStyle, Trail, Union,
+};
 
 /// The checker: the shape table, and the word the reasons call the value being judged.
 pub(crate) struct Fit<'a> {
@@ -156,17 +158,42 @@ impl<'a> Fit<'a> {
     /// [`Self::through`], for the same value a shape that holds this reference is judging.
     ///
     /// A key the trail already holds names a shape that reaches itself without consuming any of
-    /// the value, which is certain of nothing more on this path than it already was.
+    /// the value, which [`Self::revisit`] judges.
     fn follow(&self, value: &Value, reference: &ShapeRef, trail: &mut Trail) -> Option<String> {
         match reference {
             ShapeRef::Key(key) => {
                 let shape = self.shapes.get(key)?;
+                if let Some(cycle) = trail.since(key) {
+                    return self.revisit(value, cycle);
+                }
                 trail
                     .enter(key, |trail| self.judge(value, shape, trail))
                     .flatten()
             }
             ShapeRef::Inline(shape) => self.judge(value, shape, trail),
         }
+    }
+
+    /// The verdict for a value that came back round `cycle`, the keys entered since its first.
+    ///
+    /// It agrees with how the contract layer types such a cycle.
+    /// Wrappers whose only way out is `null` become `()`, and a value that went round one is not
+    /// `null`, because an optional wrapper takes a `null` without going on.
+    /// Every other cycle becomes arbitrary JSON, which accepts anything, so the path is certain
+    /// of nothing more than it already was.
+    fn revisit(&self, value: &Value, cycle: &[ShapeKey]) -> Option<String> {
+        let mut through_null = false;
+        for key in cycle {
+            through_null |= wrapping(self.shapes.get(key)?)?;
+        }
+        (through_null && !value.is_null()).then(|| {
+            format!(
+                "the schema wraps itself with `null` as its only way out, so it allows only \
+                 null, and {} is {}",
+                self.subject,
+                kind(value)
+            )
+        })
     }
 
     fn structure(&self, value: &Value, structure: &Struct, trail: &mut Trail) -> Option<String> {
@@ -410,6 +437,19 @@ impl<'a> Fit<'a> {
             self.subject,
             kind(value)
         )
+    }
+}
+
+/// Whether a shape is a wrapper that hands its whole value to a keyed shape, and if so, whether
+/// it takes a `null` on the way.
+fn wrapping(shape: &Shape) -> Option<bool> {
+    let (Shape::Alias(inner) | Shape::Optional(inner)) = shape else {
+        return None;
+    };
+    let nullable = matches!(shape, Shape::Optional(_));
+    match inner {
+        ShapeRef::Key(_) => Some(nullable),
+        ShapeRef::Inline(inner) => wrapping(inner).map(|inner| nullable || inner),
     }
 }
 

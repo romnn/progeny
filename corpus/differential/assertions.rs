@@ -567,3 +567,74 @@ fn a_list_reaches_the_list_branch_after_an_object_one() {
         assert_eq!(serde_json::to_string(&hand)?, payload);
     }
 }
+
+/// A union of itself and `null` reads `null` and refuses every other value, the same way under
+/// both strategies, strictly and through the read form of the struct holding it.
+/// A decoder handing a value back to the type it came from would recurse until the stack
+/// overflowed, which aborts this whole test binary rather than failing one test.
+#[test_util::test]
+fn a_union_of_itself_and_null_refuses_other_values_instead_of_recursing() {
+    // Strict decoding
+    serde_json::from_str::<derived::types::Maybe>("null")?;
+    serde_json::from_str::<hand::types::Maybe>("null")?;
+    for payload in ["1", "{}", "[null]"] {
+        assert!(serde_json::from_str::<derived::types::Maybe>(payload).is_err(), "{payload}");
+        assert!(serde_json::from_str::<hand::types::Maybe>(payload).is_err(), "{payload}");
+    }
+    for payload in [
+        r#"{"a":1,"b":null,"c":null,"label":"x"}"#,
+        r#"{"a":null,"b":{"a":1},"c":null,"label":"x"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<derived::types::MaybeHolder>(payload).is_err(),
+            "{payload}"
+        );
+        assert!(
+            serde_json::from_str::<hand::types::MaybeHolder>(payload).is_err(),
+            "{payload}"
+        );
+    }
+
+    // Lenient decoding: the type alone refuses, and the read form tolerates the member as absent
+    assert!(derived::types::Decoded::<derived::types::Maybe>::from_json("1").is_err());
+    assert!(hand::types::Decoded::<hand::types::Maybe>::from_json("1").is_err());
+    let payload = r#"{"a":1,"b":null,"c":null,"label":"x"}"#;
+    let left = derived::types::Decoded::<derived::types::read::MaybeHolder>::from_json(payload)?;
+    let right = hand::types::Decoded::<hand::types::read::MaybeHolder>::from_json(payload)?;
+    assert!(left.value.a.is_none() && right.value.a.is_none());
+    assert!(!left.degradations.is_empty(), "{}", left.degradations);
+    assert!(!right.degradations.is_empty(), "{}", right.degradations);
+}
+
+/// A required member typed by the union of itself and `null`, directly or through an alias,
+/// holds `null` as a value: both renderings write it back strictly, and the read form, which
+/// the required string gives the holder, reads it without reporting it and writes it back too.
+/// So does one typed by an alias of a nullable list of itself, which is a newtype once its
+/// recursion is promoted, and which holds its lists through every rendering as well.
+#[test_util::test]
+fn a_null_in_a_required_member_typed_through_an_alias_round_trips() {
+    for payload in [
+        r#"{"a":null,"b":null,"c":null,"label":"x"}"#,
+        r#"{"a":null,"b":null,"c":[null,[[]]],"label":"x"}"#,
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::MaybeHolder, hand::types::MaybeHolder>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+
+        let left =
+            derived::types::Decoded::<derived::types::read::MaybeHolder>::from_json(payload)?;
+        let right = hand::types::Decoded::<hand::types::read::MaybeHolder>::from_json(payload)?;
+        assert!(left.degradations.is_empty(), "{}", left.degradations);
+        assert!(right.degradations.is_empty(), "{}", right.degradations);
+        assert_eq!(serde_json::to_string(&left.value)?, payload);
+        assert_eq!(serde_json::to_string(&right.value)?, payload);
+    }
+    // The holder is twinned, so its read form is a type of its own rather than a re-export.
+    let _: derived::types::read::MaybeHolder = derived::types::MaybeHolder {
+        a: None,
+        b: None,
+        c: None,
+        label: "x".to_owned(),
+    }
+    .into();
+}

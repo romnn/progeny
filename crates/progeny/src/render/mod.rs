@@ -4542,6 +4542,43 @@ mod tests {
         );
     }
 
+    /// A member typed by a `type: null` component, or by an alias of one, allows `null` the way
+    /// a member declared `type: null` in place does, because an alias is read as what it names.
+    #[test_util::test]
+    fn a_member_typed_by_an_alias_of_null_allows_null() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/things": {"post": {
+                "operationId": "postThing",
+                "requestBody": {"required": true, "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Thing"},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Nil": {"type": "null"},
+                "ViaNil": {"oneOf": [{"$ref": "#/components/schemas/Nil"}]},
+                "Thing": {"type": "object", "required": ["name", "nil", "via"],
+                          "properties": {"name": {"type": "string"},
+                                         "nil": {"$ref": "#/components/schemas/Nil"},
+                                         "via": {"$ref": "#/components/schemas/ViaNil"}}},
+            }},
+        });
+        let rendered = files(document, &Config::default())?;
+        let types = &rendered[camino::Utf8Path::new("src/types.rs")];
+        for site in ["Self::SITE_NIL", "Self::SITE_VIA"] {
+            let at = types.find(site).ok_or_eyre("the member's site")?;
+            let after = &types[at..];
+            let declared = after.find("Declared::").ok_or_eyre("its declaration")?;
+            assert!(
+                after[declared..].starts_with("Declared::Nullable"),
+                "{site}: {after}"
+            );
+        }
+    }
+
     /// A deprecated type that twins converts through the non-deprecated aliases, so neither the
     /// conversion nor the decoder carries an expectation that nothing would fulfil — which the
     /// consumer's build denies as loudly as a real warning.
