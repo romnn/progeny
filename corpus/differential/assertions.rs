@@ -638,3 +638,56 @@ fn a_null_in_a_required_member_typed_through_an_alias_round_trips() {
     }
     .into();
 }
+
+/// A base listing its one subtype, tagged, reads a payload into that subtype by its tag, and
+/// writes it back with the tag first and the subtype's members after it, under both strategies.
+/// A tag the family does not list is kept whole, and a payload without one is refused.
+#[test_util::test]
+fn a_family_of_one_round_trips_through_its_tag() {
+    let payload = r#"{"type":"OTEL","endpoint":"https://x","logTypes":["EVENTS"]}"#;
+    let (left, right) =
+        round_trip::<derived::types::LogExport, hand::types::LogExport>(payload)?;
+    assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+    // The subtype holds the base's members and its own, the consumed tag aside.
+    let derived::types::LogExport::Otel(read) = serde_json::from_str(payload)? else {
+        bail!("the tag names the one subtype");
+    };
+    assert_eq!(read.endpoint, "https://x");
+    assert_eq!(read.log_types, ["EVENTS"]);
+
+    // A tag the family does not list, written back as the JSON it was read as
+    let other = r#"{"endpoint":"https://x","type":"KAFKA"}"#;
+    let (left, right) = round_trip::<derived::types::LogExport, hand::types::LogExport>(other)?;
+    assert_eq!((left.as_str(), right.as_str()), (other, other));
+    assert!(matches!(
+        serde_json::from_str::<hand::types::LogExport>(other)?,
+        hand::types::LogExport::Unknown(_)
+    ));
+
+    // The read form reads the response the same way, and has nothing to report about it.
+    let left = derived::types::Decoded::<derived::types::read::LogExport>::from_json(payload)?;
+    let right = hand::types::Decoded::<hand::types::read::LogExport>::from_json(payload)?;
+    assert!(left.degradations.is_empty(), "{}", left.degradations);
+    assert!(right.degradations.is_empty(), "{}", right.degradations);
+    assert_eq!(serde_json::to_string(&left.value)?, payload);
+    assert_eq!(serde_json::to_string(&right.value)?, payload);
+}
+
+/// A subtype a response also carries on its own keeps its tag, and the family carries it: the
+/// union reads the tag, hands the whole payload to the subtype, and writes the tag first and the
+/// subtype's members after it.
+#[test_util::test]
+fn a_family_of_one_whose_subtype_is_used_directly_carries_its_tag() {
+    let payload = r#"{"kind":"email","address":"a@b","label":"work"}"#;
+    let (left, right) = round_trip::<derived::types::Channel, hand::types::Channel>(payload)?;
+    assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+    let derived::types::Channel::Email(read) = serde_json::from_str(payload)? else {
+        bail!("the tag names the one subtype");
+    };
+    assert_eq!(read.kind, "email");
+    // The subtype on its own is the same struct, tag included, in the order it declares them.
+    let alone = r#"{"address":"a@b","kind":"email","label":"work"}"#;
+    let (left, right) =
+        round_trip::<derived::types::EmailChannel, hand::types::EmailChannel>(alone)?;
+    assert_eq!((left.as_str(), right.as_str()), (alone, alone));
+}

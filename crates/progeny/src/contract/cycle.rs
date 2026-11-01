@@ -72,7 +72,9 @@ pub(super) fn normalize(types: &mut [Provisional], ctx: &mut Ctx) {
         {
             continue;
         }
-        on_cycle.sort_by(|left, right| left.origin.cmp(&right.origin));
+        // At each type's declaration rather than its address, because the record names the
+        // types and a reader looks for each where it was written.
+        on_cycle.sort_by(|left, right| left.declaration.cmp(&right.declaration));
         let names: Vec<String> = on_cycle
             .iter()
             .map(|contract| format!("`{}`", contract.rust_name))
@@ -84,8 +86,13 @@ pub(super) fn normalize(types: &mut [Provisional], ctx: &mut Ctx) {
             continue;
         };
         ctx.report(
-            Diagnostic::new(kind.class(), kind.action(), first.origin.clone(), detail)
-                .with_related(rest.iter().map(|contract| contract.origin.clone())),
+            Diagnostic::new(
+                kind.class(),
+                kind.action(),
+                first.declaration.clone(),
+                detail,
+            )
+            .with_related(rest.iter().map(|contract| contract.declaration.clone())),
         );
     }
 }
@@ -273,6 +280,52 @@ mod tests {
             })
             .collect();
         Ok((contracts, cycles))
+    }
+
+    /// A closed base refuses every member its subtype adds, so the inheritance rule leaves the
+    /// family to the merge, whose subtype is an alias of itself.
+    /// The cycle is reported where the subtype it names is declared, although its type is
+    /// addressed at the base, the first schema its key merges.
+    #[test_util::test]
+    fn a_closed_family_keeps_its_cycle_reported_where_the_subtype_is_declared() {
+        let (contracts, diagnostics) = contracts_of(
+            with_schemas(json!({
+                "Base": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"name": {"type": "string"}},
+                    "oneOf": [{"$ref": "#/components/schemas/Child"}],
+                },
+                "Child": {"allOf": [
+                    {"$ref": "#/components/schemas/Base"},
+                    {"type": "object", "properties": {"age": {"type": "integer"}}},
+                ]},
+            })),
+            &Config::default(),
+        )?;
+        let child = named(&contracts, "Child")?;
+        assert_eq!(
+            child.kind(),
+            &ContractKind::Alias {
+                target: TypeRef::Value
+            }
+        );
+        assert_eq!(child.origin().to_string(), "/components/schemas/Base");
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|found| found.class() == BreakageClass::InheritanceCycle),
+            "{diagnostics:#?}"
+        );
+        let cycles: Vec<&Diagnostic> = diagnostics
+            .iter()
+            .filter(|found| found.class() == BreakageClass::NonproductiveCycle)
+            .collect();
+        let [cycle] = cycles.as_slice() else {
+            eyre::bail!("one cycle is one record: {diagnostics:#?}");
+        };
+        assert!(cycle.detail().contains("`Child`"), "{}", cycle.detail());
+        assert_eq!(cycle.location().to_string(), "/components/schemas/Child");
     }
 
     /// Two single-branch unions naming each other describe no finite value, so both become
@@ -531,15 +584,17 @@ mod tests {
 
     /// A contract named `name`, declared as that component, in its strict form.
     fn declared(name: &str, kind: ContractKind) -> Provisional {
+        let address = JsonPointer::root()
+            .child("components")
+            .child("schemas")
+            .child(name);
         Provisional {
             rust_name: RustIdent::type_name(&[name.to_owned()]),
             docs: Docs::default(),
             kind,
             unknown_fields: UnknownFields::Ignore,
-            origin: JsonPointer::root()
-                .child("components")
-                .child("schemas")
-                .child(name),
+            origin: address.clone(),
+            declaration: address,
             declared: true,
             explicit: false,
             component: Some(name.to_owned()),

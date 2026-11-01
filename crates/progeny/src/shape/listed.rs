@@ -16,7 +16,7 @@
 
 use serde_json::Value;
 
-use super::ShapeKey;
+use super::{Part, ShapeKey};
 use crate::resolve::ResolvedDocument;
 use crate::schema::{Schema, SchemaObject, TypeName};
 
@@ -104,7 +104,7 @@ fn aliases(resolved: &ResolvedDocument, branches: &[ShapeKey], values: &[Value])
 /// `Option` rather than counting it.
 fn is_null(resolved: &ResolvedDocument, branch: &ShapeKey) -> bool {
     branch.parts().iter().any(|&part| {
-        matches!(resolved.schema(part), Schema::Object(object)
+        matches!(resolved.schema(part.id()), Schema::Object(object)
         if object.types.as_ref().is_some_and(|types| {
             types.iter().all(|name| *name == TypeName::Null)
         }))
@@ -120,7 +120,7 @@ fn is_null(resolved: &ResolvedDocument, branch: &ShapeKey) -> bool {
 /// back to the schema cannot recurse.
 fn holds_only(resolved: &ResolvedDocument, branch: &ShapeKey, values: &[Value]) -> bool {
     branch.parts().iter().any(|&part| {
-        let object = match resolved.schema(part) {
+        let object = match resolved.schema(part.id()) {
             Schema::Bool(admits) => return !*admits,
             Schema::Object(object) => object,
         };
@@ -205,7 +205,7 @@ pub(super) fn admits(
         return Admission::Unknown;
     }
     key.parts().iter().fold(Admission::Yes, |admission, &part| {
-        admission.and(match resolved.schema(part) {
+        admission.and(match resolved.schema(part.id()) {
             Schema::Bool(admits) => {
                 if *admits {
                     Admission::Yes
@@ -213,17 +213,18 @@ pub(super) fn admits(
                     Admission::No
                 }
             }
-            Schema::Object(object) => object_admits(resolved, object, value, depth),
+            Schema::Object(object) => object_admits(resolved, object, part, value, depth),
         })
     })
 }
 
-/// Whether one schema object admits a value.
+/// Whether one schema object admits a value, as much of it as `part` reads.
 ///
 /// Its `$ref` and `allOf` are parts of the key already, so they are not followed here.
 fn object_admits(
     resolved: &ResolvedDocument,
     object: &SchemaObject,
+    part: Part,
     value: &Value,
     depth: usize,
 ) -> Admission {
@@ -247,7 +248,7 @@ fn object_admits(
         admission = admission.and(among(std::slice::from_ref(constant), value));
     }
     for (branches, exactly_one) in [(&object.any_of, false), (&object.one_of, true)] {
-        if let Some(branches) = branches {
+        if let Some(branches) = branches.as_ref().filter(|_| part.dispatches()) {
             let keys: Vec<ShapeKey> = branches
                 .iter()
                 .map(|&id| super::merge::key_of(resolved, id))

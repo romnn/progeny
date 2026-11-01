@@ -11,6 +11,7 @@
 //! types nothing refers to. **Links** hold no schemas at all. Webhooks *are* roots: a webhook
 //! payload is a payload, even though the operation itself is not rendered in v1.
 
+use crate::diag::JsonPointer;
 use crate::doc::{Document, MaybeRef, MediaType, Operation, PathItem};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
@@ -53,6 +54,11 @@ pub(crate) struct Root {
     /// The name's segments, before sanitization: `["createWidget", "response", "200"]`.
     pub(crate) hint: Vec<String>,
     pub(crate) kind: RootKind,
+    /// Where the document wrote the schema the name belongs to.
+    ///
+    /// Not always the shape's own address, which is its key's anchor: a subtype written as
+    /// `allOf: [$ref Base, {…}]` is addressed at whichever of its parts comes first.
+    pub(crate) site: JsonPointer,
 }
 
 /// Every schema position that needs a name, in document order.

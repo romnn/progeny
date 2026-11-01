@@ -74,6 +74,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `unsatisfiable-derive` | A derive asked of every type, on a type that cannot have it. |
 | `nonproductive-cycle` | Schemas whose lowered types are aliases and wrappers of one another with no member, element or `null` between them, such as two single-branch `oneOf`s naming each other; no finite value is one, so each is typed as arbitrary JSON. |
 | `non-consuming-cycle` | Schemas whose lowered types reach one another through steps that read the same value again, such as a `oneOf` listing itself beside `null` or beside a string; wrappers whose only way out is `null` are typed as `()`, and every other such cycle as arbitrary JSON, so no decoder can recurse on one value forever. |
+| `inheritance-cycle` | A base whose `oneOf` or `anyOf` lists subtypes that each extend it through `allOf`, which merged whole would fold into each other; each subtype is read as the base's members and its own, without the base's union, and the base as the union of its subtypes, by its tag where it declares a discriminator. |
 
 ## Denying diagnostics
 
