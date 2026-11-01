@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793502378037,
+  "lastUpdate": 1793528886679,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2703,6 +2703,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 232.96875,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fcbd76764202d5e017f953badc222dedc02ea1a3",
+          "message": "fix(generate): route every discriminator mapping value to its variant (#132)\n\n* fix(generate): type non-consuming cycles by their finite values instead of recursing\n\nA type that reaches itself through wrappers and untagged branches without consuming input\nmade the generated decoders recurse on one value until the stack overflowed. Cycle\nnormalization now types a null-only wrapper cycle as `()` and a cycle through a union as\n`serde_json::Value`, reported as `non-consuming-cycle`, and a nullable member keeps an\n`Option` whenever its final type no longer spells one.\n\n* fix(generate): type an allOf/oneOf inheritance family as a union of its subtypes\n\nA base whose oneOf lists subtypes that allOf it back folded each subtype through the base's\nown union, so a single subtype lowered to an alias of itself and several became unions of\ntheir siblings. A subtype now inherits the base's members and constraints without its\ndispatch, a discriminated family becomes a tagged union even with one subtype, and each\nfamily is reported once as `inheritance-cycle`. Mixed, closed, nested and multi-parent\nfamilies keep the existing handling.\n\n* fix(generate): route every discriminator mapping value to its variant\n\nA mapping that named one schema under several values routed only the first of them to that\nvariant, so a payload tagged with another landed in the fallback. The first value is now the\ntag the variant writes and the rest are aliases it reads and writes back unchanged, and a\ncomponent name the mapping sends to another branch no longer also names its own.",
+          "timestamp": "2026-11-01T11:21:20+01:00",
+          "tree_id": "9773472ef1d2e9dacd77be95d732d4bfc434dc7f",
+          "url": "https://github.com/romnn/progeny/commit/fcbd76764202d5e017f953badc222dedc02ea1a3"
+        },
+        "date": 1793528885750,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 32.67809233333333,
+            "range": "± 0.16",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2701.546875,
+            "range": "± 2.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 11.373808666666667,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1080.302083015442,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.8601773333333332,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 233.0143222808838,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
