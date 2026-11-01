@@ -425,9 +425,9 @@ pub(crate) struct Variant {
     /// Other values of the tag property that name this variant too, which the union reads and
     /// never writes in place of [`Variant::tag`].
     ///
-    /// Set only for a union whose branches name themselves, where one branch lists several
-    /// spellings of its own name, as `tool_search_tool_bm25` beside
-    /// `tool_search_tool_bm25_20251119`.
+    /// Set where one branch lists several spellings of its own name, as `tool_search_tool_bm25`
+    /// beside `tool_search_tool_bm25_20251119`, and where a discriminator's mapping names one
+    /// branch under several values, as `ACTIVE` and `PENDING`.
     pub(crate) aliases: Vec<String>,
 }
 
@@ -2609,6 +2609,93 @@ mod tests {
             ),
             "{:?}",
             shape_of(&shapes, "Base")?
+        );
+    }
+
+    /// A mapping that names one branch under two values reads both as that branch, writes back
+    /// the one it read, and so leaves the tag on the variant.
+    #[test_util::test]
+    fn every_mapping_value_naming_a_branch_reads_as_it() {
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "Status": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/Active"},
+                    {"$ref": "#/components/schemas/Closed"},
+                ],
+                "discriminator": {"propertyName": "status", "mapping": {
+                    "ACTIVE": "#/components/schemas/Active",
+                    "PENDING": "#/components/schemas/Active",
+                    "CLOSED": "#/components/schemas/Closed",
+                }},
+            },
+            // Open objects with nothing required beyond the tag, which shape cannot tell apart.
+            "Active": {"type": "object", "required": ["status"], "properties": {
+                "status": {"type": "string"}, "since": {"type": "string"},
+            }},
+            "Closed": {"type": "object", "required": ["status"], "properties": {
+                "status": {"type": "string"}, "until": {"type": "string"},
+            }},
+        })))?;
+        let Shape::Union(union) = shape_of(&shapes, "Status")? else {
+            eyre::bail!("expected a union, found {:?}", shape_of(&shapes, "Status")?);
+        };
+        let spellings: Vec<(Option<&str>, &[String])> = union
+            .variants
+            .iter()
+            .map(|variant| (variant.tag.as_deref(), variant.aliases.as_slice()))
+            .collect();
+
+        // `Active` writes the first value in key order and reads the other one too.
+        assert_eq!(
+            spellings,
+            [
+                (Some("ACTIVE"), ["PENDING".to_owned()].as_slice()),
+                (Some("CLOSED"), [].as_slice()),
+            ]
+        );
+        // A consumed tag would write `PENDING` back as `ACTIVE`, so the variant keeps it.
+        assert_eq!(
+            union.tag.as_ref().map(|tag| tag.style),
+            Some(TagStyle::Carried)
+        );
+    }
+
+    /// A component name the mapping sends to another branch does not also name its own branch.
+    #[test_util::test]
+    fn a_mapping_value_spelled_like_another_branch_is_not_that_branch() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Pet": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/Cat"},
+                    {"$ref": "#/components/schemas/Dog"},
+                ],
+                // `Cat` is the tag `Cat` writes, and `Dog` one more value it reads.
+                "discriminator": {"propertyName": "kind", "mapping": {
+                    "Cat": "#/components/schemas/Cat",
+                    "Dog": "#/components/schemas/Cat",
+                }},
+            },
+            "Cat": {"type": "object", "required": ["kind"], "properties": {
+                "kind": {"type": "string"}, "lives": {"type": "integer"},
+            }},
+            "Dog": {"type": "object", "required": ["kind"], "properties": {
+                "kind": {"type": "string"}, "pack": {"type": "integer"},
+            }},
+        })))?;
+
+        // `Dog` reads as `Cat`, which leaves the `Dog` branch no tag of its own, and a union with
+        // an unnamed variant cannot be read by its tag, so it degrades rather than reading `Dog`
+        // as both.
+        assert!(
+            matches!(shape_of(&shapes, "Pet")?, Shape::Any),
+            "{:?}",
+            shape_of(&shapes, "Pet")?
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|found| found.class() == BreakageClass::DiscriminatorEdgeCase),
+            "{diagnostics:?}"
         );
     }
 
