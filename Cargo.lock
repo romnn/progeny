@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "progeny"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "axum",
  "camino",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "progeny-cli"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "color-eyre",
  "indoc",
@@ -1267,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "test-util"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "quote",
  "syn 3.0.6",
@@ -1760,7 +1760,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "camino",
  "clap",
