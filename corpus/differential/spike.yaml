@@ -40,6 +40,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Tool"
+  /logs:
+    post:
+      operationId: postLogExport
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogExport"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogExport"
+  /channels:
+    post:
+      operationId: postChannel
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Channel"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailChannel"
   /maybe:
     post:
       operationId: postMaybe
@@ -356,3 +386,55 @@ components:
           $ref: "#/components/schemas/Nest"
         label:
           type: string
+    # A base listing its one subtype, which extends it through `allOf`, tagged by `type`: the
+    # base is a union of the subtype by that tag, and the subtype a struct of both their members.
+    # Nothing uses the subtype but the union, so the union consumes the tag.
+    LogExport:
+      type: object
+      required: [type, logTypes]
+      properties:
+        type:
+          type: string
+          enum: [OTEL]
+        logTypes:
+          type: array
+          items:
+            type: string
+      discriminator:
+        propertyName: type
+        mapping:
+          OTEL: "#/components/schemas/OtelLogExport"
+      oneOf:
+        - $ref: "#/components/schemas/OtelLogExport"
+    OtelLogExport:
+      allOf:
+        - $ref: "#/components/schemas/LogExport"
+        - type: object
+          required: [endpoint]
+          properties:
+            endpoint:
+              type: string
+    # The same family whose subtype a response also carries on its own, where the tag is on the
+    # wire, so the union leaves the tag on the subtype and carries it.
+    Channel:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+        label:
+          type: string
+      discriminator:
+        propertyName: kind
+        mapping:
+          email: "#/components/schemas/EmailChannel"
+      oneOf:
+        - $ref: "#/components/schemas/EmailChannel"
+    EmailChannel:
+      allOf:
+        - $ref: "#/components/schemas/Channel"
+        - type: object
+          required: [address]
+          properties:
+            address:
+              type: string

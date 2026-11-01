@@ -337,7 +337,14 @@ fn core(
         if let Some(structure) = flattened(resolved, view, key, branches) {
             return structure;
         }
-        let shape = union(resolved, view, branches, component_names, ctx, at);
+        let shape = match &view.discriminator {
+            // A family's subtypes all hold the base's members, so their shapes say little, and the
+            // tag the base declares is what the document dispatches by, even with one subtype.
+            Some(declared) if super::inheritance::heads_family(resolved, key) => {
+                tagged_family(resolved, declared, branches, component_names)
+            }
+            _ => union(resolved, view, branches, component_names, ctx, at),
+        };
         return keep_own_members(resolved, view, shape, ctx, at);
     }
     if let Some(values) = string_values(view, ctx, at) {
@@ -579,7 +586,7 @@ fn union(
                     nullable |= null;
                     shape
                 }
-                None => tagged(resolved, view, rest, component_names, &reason, ctx, at),
+                None => tagged(resolved, view, &rest, component_names, &reason, ctx, at),
             },
         },
     };
@@ -604,32 +611,11 @@ fn told_apart(
     if let Some(keyed) = keyed(resolved, view, &rest) {
         return Ok(Shape::Keyed(keyed));
     }
-    if let Some(named) = constant_discriminator(resolved, &rest) {
+    if let Some(named) = constant_discriminator(resolved, &rest, None) {
         // The branches name themselves: read the tag, the way a declared discriminator is read,
         // rather than match by shape — which would rest on the constants, and a generated string
         // enum reads any string.
-        return Ok(Shape::Union(Union {
-            variants: named
-                .variants
-                .into_iter()
-                .map(|(key, values)| {
-                    // The first spelling is the one written, and the rest are read too.
-                    let mut values = values.into_iter();
-                    Variant {
-                        shape: ShapeRef::Key(key),
-                        tag: values.next(),
-                        aliases: values.collect(),
-                    }
-                })
-                .collect(),
-            tag: Some(Tag {
-                property: named.property,
-                style: TagStyle::Consumed,
-                absent: named.absent,
-                null: named.null,
-                shared: false,
-            }),
-        }));
+        return Ok(self_named(named));
     }
     match ambiguity(resolved, &rest) {
         // Shape decides it: an untagged enum is exact, and every variant keeps every property the
@@ -805,7 +791,7 @@ fn partition_values(resolved: &ResolvedDocument, member: SchemaId) -> Option<Vec
     }
     let mut listed: Vec<&Value> = Vec::new();
     for &part in key.parts() {
-        let Schema::Object(object) = resolved.schema(part) else {
+        let Schema::Object(object) = resolved.schema(part.id()) else {
             continue;
         };
         listed.extend(object.enumeration.iter().flatten());
@@ -907,7 +893,7 @@ fn plain_closed<'a>(resolved: &'a ResolvedDocument, key: &ShapeKey) -> Option<&'
     let [part] = key.parts() else {
         return None;
     };
-    let Schema::Object(object) = resolved.schema(*part) else {
+    let Schema::Object(object) = resolved.schema(part.id()) else {
         return None;
     };
     let closed = object
@@ -938,7 +924,7 @@ fn plain_closed<'a>(resolved: &'a ResolvedDocument, key: &ShapeKey) -> Option<&'
         && object.enumeration.is_none()
         && object.constant.is_none()
         && object.discriminator.is_none()
-        && resolved.follow(*part).is_none()
+        && resolved.follow(part.id()).is_none()
         && object.dynamic_reference.is_none();
     plain.then_some(object)
 }
@@ -975,7 +961,10 @@ fn same_schema(resolved: &ResolvedDocument, left: &ShapeKey, right: &ShapeKey) -
                 .parts()
                 .iter()
                 .zip(right.parts())
-                .all(|(&left, &right)| same_written(resolved, left, right, 0)))
+                .all(|(&left, &right)| {
+                    left.dispatches() == right.dispatches()
+                        && same_written(resolved, left.id(), right.id(), 0)
+                }))
 }
 
 /// Whether two schemas say the same, each keyword alike and each subschema in turn, as far as
@@ -1077,9 +1066,10 @@ fn spread_into(
 /// Neither is a `oneOf`, which refuses a payload two of its branches admit, and so leaves it to a
 /// later branch of the outer union that its branches, read in its place, would take first.
 fn bare_union(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Vec<ShapeKey>> {
-    let one_of = key.parts().iter().any(
-        |&part| matches!(resolved.schema(part), Schema::Object(object) if object.one_of.is_some()),
-    );
+    let one_of = key.parts().iter().any(|&part| {
+        part.dispatches()
+            && matches!(resolved.schema(part.id()), Schema::Object(object) if object.one_of.is_some())
+    });
     if one_of {
         return None;
     }
@@ -1503,7 +1493,7 @@ impl Reading {
 fn tagged(
     resolved: &ResolvedDocument,
     view: &View,
-    branches: Vec<ShapeKey>,
+    branches: &[ShapeKey],
     component_names: &ComponentNames,
     reason: &str,
     ctx: &mut Ctx,
@@ -1512,7 +1502,7 @@ fn tagged(
     let inherited = view
         .discriminator
         .is_none()
-        .then(|| shared_base_discriminator(resolved, &branches))
+        .then(|| shared_base_discriminator(resolved, branches))
         .flatten();
     let Some(declared) = view.discriminator.as_ref().or(inherited.as_ref()) else {
         // No discriminator and no way to tell the variants apart. An untagged enum here picks
@@ -1530,16 +1520,47 @@ fn tagged(
         );
         return Shape::Any;
     };
+    dispatched(resolved, declared, branches, component_names)
+}
 
+/// The union a family's base declares, read by its declared tag however many subtypes it lists.
+///
+/// Each subtype is named as [`union`] names the branches of any discriminated union: by the
+/// constants every subtype binds the tag property to where those tell them apart, reading every
+/// spelling and a missing or `null` tag as [`constant_discriminator`] does, and otherwise as
+/// [`tagged`] names them, by the mapping and then by the component name.
+fn tagged_family(
+    resolved: &ResolvedDocument,
+    declared: &Discriminated,
+    branches: &[ShapeKey],
+    component_names: &ComponentNames,
+) -> Shape {
+    let mut subtypes: Vec<ShapeKey> = Vec::new();
+    for branch in branches {
+        if !subtypes.contains(branch) {
+            subtypes.push(branch.clone());
+        }
+    }
+    match constant_discriminator(resolved, &subtypes, Some(&declared.property)) {
+        Some(named) => self_named(named),
+        None => dispatched(resolved, declared, &subtypes, component_names),
+    }
+}
+
+/// A union read by a declared discriminator, each branch a variant named by the mapping or, where
+/// the mapping does not name it, by its component name.
+fn dispatched(
+    resolved: &ResolvedDocument,
+    declared: &Discriminated,
+    branches: &[ShapeKey],
+    component_names: &ComponentNames,
+) -> Shape {
     let variants = branches
-        .into_iter()
-        .map(|key| {
-            let tag = tag_value(resolved, declared, component_names, &key);
-            Variant {
-                shape: ShapeRef::Key(key),
-                tag,
-                aliases: Vec::new(),
-            }
+        .iter()
+        .map(|key| Variant {
+            shape: ShapeRef::Key(key.clone()),
+            tag: tag_value(resolved, declared, component_names, key),
+            aliases: Vec::new(),
         })
         .collect();
     Shape::Union(Union {
@@ -1572,12 +1593,20 @@ fn tagged(
 /// payload without it is, which is how anthropic's custom tool is sent.
 /// One branch that admits `null` there is likewise what a payload with `null` in it is.
 /// With two such branches the payload could be either, so it names no variant.
-fn constant_discriminator(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<SelfNamed> {
+///
+/// Where `tag` names the property, only that property is read, and one branch is enough: a union
+/// declaring its tag says which property it is, so even a lone branch's constants spell it.
+fn constant_discriminator(
+    resolved: &ResolvedDocument,
+    branches: &[ShapeKey],
+    tag: Option<&str>,
+) -> Option<SelfNamed> {
     let views: Vec<(&ShapeKey, View)> = branches
         .iter()
         .map(|branch| (branch, merge::view(resolved, branch)))
         .collect();
-    if views.len() < 2
+    let fewest = if tag.is_some() { 1 } else { 2 };
+    if views.len() < fewest
         || views
             .iter()
             .any(|(_, view)| kind_of(resolved, view) != Some(Kind::Object))
@@ -1587,7 +1616,11 @@ fn constant_discriminator(resolved: &ResolvedDocument, branches: &[ShapeKey]) ->
     let (_, first) = views.first()?;
     // One constant per branch first, then several, so the stricter reading wins where both fit.
     for several in [false, true] {
-        'candidates: for name in first.properties.keys() {
+        let candidates = first
+            .properties
+            .keys()
+            .filter(|name| tag.is_none_or(|tag| tag == name.as_str()));
+        'candidates: for name in candidates {
             let mut seen: BTreeSet<String> = BTreeSet::new();
             let mut variants = Vec::new();
             let mut optional = Vec::new();
@@ -1630,6 +1663,32 @@ fn constant_discriminator(resolved: &ResolvedDocument, branches: &[ShapeKey]) ->
         }
     }
     None
+}
+
+/// A union whose branches name themselves, read by the constants they name themselves with.
+fn self_named(named: SelfNamed) -> Shape {
+    Shape::Union(Union {
+        variants: named
+            .variants
+            .into_iter()
+            .map(|(key, values)| {
+                // The first spelling is the one written, and the rest are read too.
+                let mut values = values.into_iter();
+                Variant {
+                    shape: ShapeRef::Key(key),
+                    tag: values.next(),
+                    aliases: values.collect(),
+                }
+            })
+            .collect(),
+        tag: Some(Tag {
+            property: named.property,
+            style: TagStyle::Consumed,
+            absent: named.absent,
+            null: named.null,
+            shared: false,
+        }),
+    })
 }
 
 /// A union whose branches name themselves, as [`constant_discriminator`] reads it.
@@ -1930,7 +1989,7 @@ fn shared_base_discriminator(
         let bases: BTreeSet<SchemaId> = branch
             .parts()
             .iter()
-            .copied()
+            .map(|part| part.id())
             .filter(|&id| mapping_of(resolved, id).is_some())
             .collect();
         shared = Some(match shared {

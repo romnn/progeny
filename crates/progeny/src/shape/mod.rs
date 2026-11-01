@@ -18,6 +18,8 @@
 //! * **`allOf` is a merge, not an inheritance relation.** `{allOf: [{$ref: Base}, {…}]}` yields
 //!   the key `{Base, …}`, and classifying that key merges both. 2020-12's rule that keywords
 //!   beside a `$ref` also apply falls out of the same expansion.
+//!   The one exception is a base whose own `oneOf` or `anyOf` lists the subtype back, which a
+//!   merge would fold into the subtype it names; [`inheritance`] reads that family instead.
 //! * **Cycles cost nothing.** A key is a value, so a schema that refers to itself produces a key
 //!   that has already been classified, and the walk stops without a visited set to maintain.
 //!
@@ -34,12 +36,13 @@
 mod classify;
 mod discriminate;
 mod fit;
+mod inheritance;
 mod listed;
 mod merge;
 mod roots;
 mod trail;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -64,7 +67,7 @@ const MAX_FIXED_ARRAY: u32 = 32;
 /// produce one key and therefore one type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ShapeKey {
-    parts: Vec<SchemaId>,
+    parts: Vec<Part>,
     /// Whether the key stands for only the `oneOf`/`anyOf` its schemas declare, without the
     /// members they declare beside it.
     ///
@@ -73,17 +76,82 @@ pub(crate) struct ShapeKey {
     branches: bool,
 }
 
+/// One schema of a key, and how much of it applies to the value.
+///
+/// Ordered by schema first, so a key's parts stay in document order whatever each one's reading,
+/// and its anchor and the annotations its view reads first do not depend on the readings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Part {
+    id: SchemaId,
+    reading: Reading,
+}
+
+/// How much of a part's schema applies to the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Reading {
+    /// Every keyword the schema writes.
+    Full,
+    /// The schema as the base a subtype extends through `allOf`, which [`inheritance`] recognizes.
+    ///
+    /// Its own members and constraints apply, and the `oneOf`/`anyOf` and `discriminator` that
+    /// dispatch to its subtypes do not, because the value is one of those subtypes already.
+    InheritedBase,
+}
+
+impl Part {
+    /// Every keyword of the schema at `id`.
+    fn full(id: SchemaId) -> Self {
+        Self {
+            id,
+            reading: Reading::Full,
+        }
+    }
+
+    /// The schema at `id` as an inheritance base folded into its subtype.
+    fn inherited_base(id: SchemaId) -> Self {
+        Self {
+            id,
+            reading: Reading::InheritedBase,
+        }
+    }
+
+    /// The schema this part reads.
+    pub(crate) fn id(self) -> SchemaId {
+        self.id
+    }
+
+    /// Whether the schema's `oneOf`, `anyOf` and `discriminator` apply to the value.
+    ///
+    /// They do except for an inheritance base, whose union names the subtype that folded it in.
+    pub(crate) fn dispatches(self) -> bool {
+        match self.reading {
+            Reading::Full => true,
+            Reading::InheritedBase => false,
+        }
+    }
+}
+
 impl ShapeKey {
-    fn new(mut parts: Vec<SchemaId>) -> Self {
+    /// The key of these parts, sorted and deduplicated.
+    ///
+    /// A schema read in full and as an inheritance base is read in full, which says everything the
+    /// projection does and more.
+    fn new(mut parts: Vec<Part>) -> Self {
         parts.sort_unstable();
         parts.dedup();
+        let full: BTreeSet<SchemaId> = parts
+            .iter()
+            .filter(|part| part.reading == Reading::Full)
+            .map(|part| part.id)
+            .collect();
+        parts.retain(|part| part.reading == Reading::Full || !full.contains(&part.id));
         Self {
             parts,
             branches: false,
         }
     }
 
-    pub(crate) fn parts(&self) -> &[SchemaId] {
+    pub(crate) fn parts(&self) -> &[Part] {
         &self.parts
     }
 
@@ -92,7 +160,7 @@ impl ShapeKey {
     /// Ids are assigned in document order, so this is the earliest-written schema of the set — a
     /// deterministic choice that does not depend on which position reached the key first.
     pub(crate) fn anchor(&self) -> Option<SchemaId> {
-        self.parts.first().copied()
+        self.parts.first().map(|part| part.id)
     }
 
     /// The key of the `oneOf`/`anyOf` these schemas declare, apart from their own members.
@@ -611,12 +679,17 @@ pub(crate) fn classify(
 
     // A bundle's roots are its wire: only what they reach is classified, and each is a position a
     // payload really sits at.
-    let selected: Vec<(ShapeKey, String)> = resolved
+    let selected: Vec<Root> = resolved
         .bundle_roots()
         .iter()
-        .map(|root| (merge::key_of(resolved, root.id), root.name.clone()))
+        .map(|root| Root {
+            key: merge::key_of(resolved, root.id),
+            hint: vec![root.name.clone()],
+            kind: RootKind::Position,
+            site: resolved.schemas().address(root.id).clone(),
+        })
         .collect();
-    let mut queue: Vec<ShapeKey> = selected.iter().map(|(key, _)| key.clone()).collect();
+    let mut queue: Vec<ShapeKey> = selected.iter().map(|root| root.key.clone()).collect();
     let mut named = Vec::new();
     // The name `components.schemas` gave each shape, which is the discriminator's implicit
     // mapping. Collected from the roots because their keys are computed here anyway, and because
@@ -638,15 +711,10 @@ pub(crate) fn classify(
             key,
             hint: site.hint,
             kind: site.kind,
+            site: resolved.schemas().address(site.id).clone(),
         });
     }
-    for (key, name) in &selected {
-        named.push(Root {
-            key: key.clone(),
-            hint: vec![name.clone()],
-            kind: RootKind::Position,
-        });
-    }
+    named.extend(selected);
 
     while let Some(key) = queue.pop() {
         if shapes.by_key.contains_key(&key) {
@@ -661,6 +729,7 @@ pub(crate) fn classify(
         }
         shapes.by_key.insert(key, shape);
     }
+    inheritance::report(resolved, shapes.by_key.keys(), ctx);
     // A name the bundle gives a type its roots never reach names nothing generated.
     named.retain(|root| shapes.by_key.contains_key(&root.key));
     shapes.roots = named;

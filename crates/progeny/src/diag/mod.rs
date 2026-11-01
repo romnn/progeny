@@ -175,6 +175,11 @@ pub enum BreakageClass {
     /// Wrappers whose only way out is `null` are typed as `()`, and every other such cycle as
     /// `serde_json::Value`.
     NonConsumingCycle,
+    /// A base whose `oneOf` or `anyOf` lists subtypes that each extend it through `allOf`, which a
+    /// merge would fold into each other.
+    /// Each subtype is read as the base's members and its own, without the base's union, and the
+    /// base as the union of its subtypes.
+    InheritanceCycle,
 }
 
 impl BreakageClass {
@@ -192,7 +197,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 35] = [
+    pub(crate) const ALL: [Self; 36] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -228,6 +233,7 @@ impl BreakageClass {
         Self::UnsatisfiableDerive,
         Self::NonproductiveCycle,
         Self::NonConsumingCycle,
+        Self::InheritanceCycle,
     ];
 
     /// The stable kebab-case name used by the JSON-lines rendering and by config deny-lists.
@@ -269,6 +275,7 @@ impl BreakageClass {
             Self::UnsatisfiableDerive => "unsatisfiable-derive",
             Self::NonproductiveCycle => "nonproductive-cycle",
             Self::NonConsumingCycle => "non-consuming-cycle",
+            Self::InheritanceCycle => "inheritance-cycle",
         }
     }
 
@@ -337,6 +344,7 @@ impl BreakageClass {
             | Self::ConnectionUpgrade
             | Self::NonproductiveCycle
             | Self::NonConsumingCycle
+            | Self::InheritanceCycle
             // Each occurrence names one position whose schemas a reader would split; the count
             // is never the finding, and the collapse cannot fire at its siblings' scale.
             | Self::EncodingCollapse => Aggregation::PerOccurrence,

@@ -64,7 +64,14 @@ pub(super) struct Provisional {
     pub(super) docs: Docs,
     pub(super) kind: ContractKind,
     pub(super) unknown_fields: UnknownFields,
+    /// The shape's address, which configuration keys and member provenance are written against.
     pub(super) origin: JsonPointer,
+    /// Where the document wrote the schema the type is named after, which a diagnostic naming the
+    /// type points at.
+    ///
+    /// The root's own schema for a type named after a root, and [`Provisional::origin`] for every
+    /// other.
+    pub(super) declaration: JsonPointer,
     /// The document gave this shape a name of its own, as a component or by the title it is named
     /// after, so it must not merge with another type that also has one.
     /// Two named types evolve independently, whatever they look like today, and a merge would put
@@ -98,6 +105,7 @@ pub(super) fn run(
         done: BTreeMap::new(),
         types: Vec::new(),
         hints: BTreeMap::new(),
+        sites: BTreeMap::new(),
         by_address: BTreeMap::new(),
         components: BTreeMap::new(),
         needs_name: BTreeSet::new(),
@@ -112,6 +120,10 @@ pub(super) fn run(
             .hints
             .entry(root.key.clone())
             .or_insert_with(|| root.hint.clone());
+        lower
+            .sites
+            .entry(root.key.clone())
+            .or_insert_with(|| root.site.clone());
         if let Some(address) = shapes.address(&root.key) {
             lower
                 .by_address
@@ -281,6 +293,8 @@ struct Lower<'a> {
     types: Vec<Provisional>,
     /// The name a root asked for.
     hints: BTreeMap<ShapeKey, Vec<String>>,
+    /// Where the root that gave each name wrote its schema.
+    sites: BTreeMap<ShapeKey, JsonPointer>,
     /// The same, by the address of the root, for naming the shapes inside it.
     by_address: BTreeMap<String, Vec<String>>,
     /// Which addresses are `components.schemas` entries, and under what name.
@@ -398,6 +412,11 @@ impl Lower<'_> {
             unknown_fields: self
                 .config
                 .unknown_fields_for(component.as_deref(), &rendered),
+            declaration: self
+                .sites
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| address.clone()),
             origin: address,
             declared: component.is_some() || titled,
             explicit,

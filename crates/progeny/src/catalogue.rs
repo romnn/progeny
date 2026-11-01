@@ -203,6 +203,19 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::NonConsumingCycle => Wiring::Fixture(document(json!({
             "A": {"oneOf": [{"$ref": "#/components/schemas/A"}, {"type": "null"}]},
         }))),
+        // A base listing its one subtype, which extends it back: merged whole, the subtype would
+        // be an alias of itself.
+        BreakageClass::InheritanceCycle => Wiring::Fixture(document(json!({
+            "Base": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "oneOf": [{"$ref": "#/components/schemas/Child"}],
+            },
+            "Child": {"allOf": [
+                {"$ref": "#/components/schemas/Base"},
+                {"type": "object", "properties": {"age": {"type": "integer"}}},
+            ]},
+        }))),
         BreakageClass::UnsatisfiableDerive => Wiring::Fixture(document(json!({
             "Fuzzy": {"type": "object", "properties": {"ratio": {"type": "number"}}},
         }))),

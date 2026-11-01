@@ -522,7 +522,7 @@ fn addresses(resolved: &ResolvedDocument, shapes: &Shapes, key: &ShapeKey) -> Ve
     let mut out: Vec<JsonPointer> = key
         .parts()
         .iter()
-        .map(|&id| resolved.schemas().address(id).clone())
+        .map(|part| resolved.schemas().address(part.id()).clone())
         .collect();
     if out.is_empty() {
         out.push(address(resolved, shapes, key));

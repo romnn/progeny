@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Number, Value};
 
 use super::listed::Narrowed;
-use super::{Docs, MAX_FIXED_ARRAY, ShapeKey};
+use super::{Docs, MAX_FIXED_ARRAY, Part, Reading, ShapeKey};
 use crate::resolve::ResolvedDocument;
 use crate::schema::{Schema, SchemaId, SchemaObject, TypeName};
 
@@ -24,12 +24,16 @@ const MAX_PARTS: usize = 512;
 /// A schema that only points somewhere — `{$ref: X}`, `{allOf: [X]}`, `{$ref: X, description: …}` —
 /// contributes nothing of its own and so drops out of the key entirely, which is what makes a
 /// reference position share a type with its target instead of copying it.
+/// An `allOf` member naming the base of a family the schema belongs to contributes that base as an
+/// inherited base ([`super::inheritance`]).
 /// A walk cut short at [`MAX_PARTS`] keeps `id` among the parts, so a key that lost schemas never
 /// looks like the one schema it kept.
 pub(crate) fn key_of(resolved: &ResolvedDocument, id: SchemaId) -> ShapeKey {
     let mut parts = Vec::new();
+    // By reading as well as by schema, so a base reached in full after it was reached as an
+    // inherited base is still expanded.
     let mut seen = BTreeSet::new();
-    let mut stack = vec![id];
+    let mut stack = vec![Part::full(id)];
     let mut truncated = false;
     while let Some(current) = stack.pop() {
         if !seen.insert(current) {
@@ -39,16 +43,24 @@ pub(crate) fn key_of(resolved: &ResolvedDocument, id: SchemaId) -> ShapeKey {
             truncated = true;
             continue;
         }
-        match resolved.schema(current) {
+        match current.reading {
+            Reading::Full => {}
+            // The base refers to nothing itself, which the rule that recognized it checked.
+            Reading::InheritedBase => {
+                parts.push(current);
+                continue;
+            }
+        }
+        match resolved.schema(current.id) {
             // `true` accepts anything, so it constrains nothing and adds nothing to a merge.
             Schema::Bool(true) => {}
             Schema::Bool(false) => parts.push(current),
             Schema::Object(object) => {
-                if let Some(target) = resolved.follow(current) {
-                    stack.push(target);
+                if let Some(target) = resolved.follow(current.id) {
+                    stack.push(Part::full(target));
                 }
-                for &branch in object.all_of.iter().flatten() {
-                    stack.push(branch);
+                for &member in object.all_of.iter().flatten() {
+                    stack.push(super::inheritance::part(resolved, current.id, member));
                 }
                 if constrains(object) {
                     parts.push(current);
@@ -56,17 +68,17 @@ pub(crate) fn key_of(resolved: &ResolvedDocument, id: SchemaId) -> ShapeKey {
             }
         }
     }
-    if parts.is_empty() || (truncated && !parts.contains(&id)) {
+    if parts.is_empty() || (truncated && !parts.contains(&Part::full(id))) {
         // Nothing constrains the value, or not everything that does was reached: the key holds the
         // schema itself, which classifies as "any" alone.
-        parts.push(id);
+        parts.push(Part::full(id));
     }
     ShapeKey::new(parts)
 }
 
 /// The key of the shape all of these schemas describe together.
 fn merged_key(resolved: &ResolvedDocument, ids: &[SchemaId]) -> ShapeKey {
-    let mut parts = Vec::new();
+    let mut parts: Vec<Part> = Vec::new();
     for &id in ids {
         parts.extend_from_slice(key_of(resolved, id).parts());
     }
@@ -77,7 +89,7 @@ fn merged_key(resolved: &ResolvedDocument, ids: &[SchemaId]) -> ShapeKey {
 ///
 /// Annotations are excluded deliberately — see the module documentation in
 /// [`super`]: a description beside a `$ref` must not fork a type.
-fn constrains(object: &SchemaObject) -> bool {
+pub(super) fn constrains(object: &SchemaObject) -> bool {
     object.types.is_some()
         || object.enumeration.is_some()
         || object.constant.is_some()
@@ -195,7 +207,7 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
     let mut patterns: Vec<SchemaId> = Vec::new();
 
     for &part in key.parts() {
-        let object = match resolved.schema(part) {
+        let object = match resolved.schema(part.id()) {
             Schema::Bool(false) => {
                 view.impossible = true;
                 continue;
@@ -204,7 +216,16 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
             Schema::Object(object) => object,
         };
         fold_types(&mut view, object);
-        fold_values(&mut view, object, resolved);
+        fold_values(&mut view, object);
+        match part.reading {
+            Reading::Full => {
+                fold_dispatch(&mut view, object, resolved);
+                fold_docs(&mut view, object);
+            }
+            // An inherited base dispatches to the subtype the value is already, and its title and
+            // description say what the base is rather than what the subtype is.
+            Reading::InheritedBase => {}
+        }
         fold_object(
             &mut view,
             object,
@@ -311,9 +332,10 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
         view.impossible = true;
         return;
     }
-    let exactly_one = key.parts().iter().any(
-        |&part| matches!(resolved.schema(part), Schema::Object(object) if object.one_of.is_some()),
-    );
+    let exactly_one = key.parts().iter().any(|&part| {
+        part.dispatches()
+            && matches!(resolved.schema(part.id()), Schema::Object(object) if object.one_of.is_some())
+    });
     match super::listed::narrow(
         resolved,
         &listed,
@@ -457,7 +479,7 @@ fn render(names: &BTreeSet<TypeName>) -> String {
     rendered.join("/")
 }
 
-fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocument) {
+fn fold_values(view: &mut View, object: &SchemaObject) {
     // An empty list, which generators write beside a reference to mean "the values it names", is
     // read as no list at all.
     if let Some(values) = object
@@ -495,6 +517,27 @@ fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocume
     {
         view.constant = Some(value.clone());
     }
+    for (bound, exclusive) in [(&object.minimum, false), (&object.exclusive_minimum, true)] {
+        if let Some(bound) = bound {
+            let at = Bound::lower(bound, exclusive);
+            view.lower = Some(view.lower.map_or(at, |was| was.tighter(at, i128::max)));
+        }
+    }
+    for (bound, exclusive) in [(&object.maximum, false), (&object.exclusive_maximum, true)] {
+        if let Some(bound) = bound {
+            let at = Bound::upper(bound, exclusive);
+            view.upper = Some(view.upper.map_or(at, |was| was.tighter(at, i128::min)));
+        }
+    }
+    if object.minimum.as_ref().is_some_and(non_negative)
+        || object.exclusive_minimum.as_ref().is_some_and(non_negative)
+    {
+        view.unsigned = true;
+    }
+}
+
+/// Fold the union a schema declares and the discriminator that tags it.
+fn fold_dispatch(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocument) {
     if let Some(discriminator) = &object.discriminator
         && view.discriminator.is_none()
         && let Some(property) = discriminator.property_name.clone()
@@ -513,23 +556,6 @@ fn fold_values(view: &mut View, object: &SchemaObject, resolved: &ResolvedDocume
             continue;
         }
         view.union = Some(branches.iter().map(|&id| key_of(resolved, id)).collect());
-    }
-    for (bound, exclusive) in [(&object.minimum, false), (&object.exclusive_minimum, true)] {
-        if let Some(bound) = bound {
-            let at = Bound::lower(bound, exclusive);
-            view.lower = Some(view.lower.map_or(at, |was| was.tighter(at, i128::max)));
-        }
-    }
-    for (bound, exclusive) in [(&object.maximum, false), (&object.exclusive_maximum, true)] {
-        if let Some(bound) = bound {
-            let at = Bound::upper(bound, exclusive);
-            view.upper = Some(view.upper.map_or(at, |was| was.tighter(at, i128::min)));
-        }
-    }
-    if object.minimum.as_ref().is_some_and(non_negative)
-        || object.exclusive_minimum.as_ref().is_some_and(non_negative)
-    {
-        view.unsigned = true;
     }
 }
 
@@ -687,7 +713,7 @@ fn as_count(number: &Number) -> Option<u32> {
     u32::try_from(number.as_u64()?).ok()
 }
 
-fn fold_annotations(view: &mut View, object: &SchemaObject) {
+fn fold_docs(view: &mut View, object: &SchemaObject) {
     if view.docs.title.is_none() {
         view.docs.title.clone_from(&object.title);
     }
@@ -695,6 +721,9 @@ fn fold_annotations(view: &mut View, object: &SchemaObject) {
         view.docs.description.clone_from(&object.description);
     }
     view.docs.deprecated |= object.deprecated.unwrap_or(false);
+}
+
+fn fold_annotations(view: &mut View, object: &SchemaObject) {
     if let (Some(held), Some(other)) = (&view.format, &object.format)
         && held != other
     {
