@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793483723190,
+  "lastUpdate": 1793502378037,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2638,6 +2638,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 233.05859375,
             "range": "± 0",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6df382bfc4884456c64e5bed03f4dec1ff10fc52",
+          "message": "fix(generate): type an allOf/oneOf inheritance family as a union of its subtypes (#131)\n\n* fix(generate): type non-consuming cycles by their finite values instead of recursing\n\nA type that reaches itself through wrappers and untagged branches without consuming input\nmade the generated decoders recurse on one value until the stack overflowed. Cycle\nnormalization now types a null-only wrapper cycle as `()` and a cycle through a union as\n`serde_json::Value`, reported as `non-consuming-cycle`, and a nullable member keeps an\n`Option` whenever its final type no longer spells one.\n\n* fix(generate): type an allOf/oneOf inheritance family as a union of its subtypes\n\nA base whose oneOf lists subtypes that allOf it back folded each subtype through the base's\nown union, so a single subtype lowered to an alias of itself and several became unions of\ntheir siblings. A subtype now inherits the base's members and constraints without its\ndispatch, a discriminated family becomes a tagged union even with one subtype, and each\nfamily is reported once as `inheritance-cycle`. Mixed, closed, nested and multi-parent\nfamilies keep the existing handling.",
+          "timestamp": "2026-11-01T03:59:38+01:00",
+          "tree_id": "ff1107f6441d20180f893d80e4f82a4b7db4c48f",
+          "url": "https://github.com/romnn/progeny/commit/6df382bfc4884456c64e5bed03f4dec1ff10fc52"
+        },
+        "date": 1793502377538,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 31.322843000000002,
+            "range": "± 0.19",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2699.591145515442,
+            "range": "± 0.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.935462666666666,
+            "range": "± 0.04",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1080.5221347808838,
+            "range": "± 0.9",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.8169226666666667,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 232.96875,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
