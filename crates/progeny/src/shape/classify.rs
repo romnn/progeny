@@ -1549,6 +1549,8 @@ fn tagged_family(
 
 /// A union read by a declared discriminator, each branch a variant named by the mapping or, where
 /// the mapping does not name it, by its component name.
+///
+/// A mapping that names one branch under several values reads every one of them as that branch.
 fn dispatched(
     resolved: &ResolvedDocument,
     declared: &Discriminated,
@@ -1557,10 +1559,13 @@ fn dispatched(
 ) -> Shape {
     let variants = branches
         .iter()
-        .map(|key| Variant {
-            shape: ShapeRef::Key(key.clone()),
-            tag: tag_value(resolved, declared, component_names, key),
-            aliases: Vec::new(),
+        .map(|key| {
+            let (tag, aliases) = tag_spellings(resolved, declared, component_names, key);
+            Variant {
+                shape: ShapeRef::Key(key.clone()),
+                tag,
+                aliases,
+            }
         })
         .collect();
     Shape::Union(Union {
@@ -2041,10 +2046,14 @@ fn mapping_of(resolved: &ResolvedDocument, id: SchemaId) -> Option<Discriminated
     })
 }
 
-/// The name a discriminated union knows one branch by.
+/// The name a discriminated union knows one branch by, and the other names it reads as that branch.
 ///
 /// The resolution order OpenAPI defines: an explicit `mapping` entry naming this branch wins, and
 /// otherwise the branch's own component name stands in.
+/// The first entry, in the mapping's key order, is the tag the variant writes, and the rest are
+/// aliases it reads and never writes.
+/// A component name the mapping already sends elsewhere is not an implicit name for this branch,
+/// because a tag value names one schema, and the explicit entry is the one OpenAPI honours.
 ///
 /// Both halves work on the **branch's key** rather than on the addresses its parts were written
 /// at, and that is what makes them right for the inheritance spelling. A variant written as
@@ -2053,21 +2062,27 @@ fn mapping_of(resolved: &ResolvedDocument, id: SchemaId) -> Option<Discriminated
 /// addresses, and the one address that *is* a clean component is the base's, which every sibling
 /// shares. Reading a tag off that gave `okta` twenty unions whose variants were all tagged with
 /// their base's name.
-fn tag_value(
+fn tag_spellings(
     resolved: &ResolvedDocument,
     declared: &Discriminated,
     component_names: &ComponentNames,
     branch: &ShapeKey,
-) -> Option<String> {
-    for (name, target) in &declared.mapping {
-        if let Some(id) = resolved.discriminator_target(target)
-            && &merge::key_of(resolved, id) == branch
-        {
-            return Some(name.clone());
-        }
+) -> (Option<String>, Vec<String>) {
+    let mut mapped = declared.mapping.iter().filter_map(|(name, target)| {
+        let id = resolved.discriminator_target(target)?;
+        (&merge::key_of(resolved, id) == branch).then(|| name.clone())
+    });
+    match mapped.next() {
+        Some(tag) => (Some(tag), mapped.collect()),
+        // No explicit entry: the component's own name is the implicit mapping.
+        None => (
+            component_names
+                .get(branch)
+                .filter(|name| !declared.mapping.contains_key(*name))
+                .cloned(),
+            Vec::new(),
+        ),
     }
-    // No explicit entry: the component's own name is the implicit mapping.
-    component_names.get(branch).cloned()
 }
 
 /// Why matching these branches by shape alone would be unsound, if it would be.
