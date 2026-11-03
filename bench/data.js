@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793529309940,
+  "lastUpdate": 1793685864931,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2836,6 +2836,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 232.9010410308838,
             "range": "± 0",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "53057fba2b762a0680e9f5f74895fb158813b2fa",
+          "message": "feat(generate)!: give operations a typed request context and declared response headers (#135)\n\nThe generated `Api` gains `type Context: FromRequestParts<Self>`, extracted\nbefore any generated decoding and passed to every operation and to\n`on_rejection`, which now returns a full response. Server response variants\ncarry typed `{Op}{Arm}Headers` groups with a `raw` override, attached only once\nthe body encodes. The client reads the declared headers into arm payloads,\nleniently with degradations or strictly with `Error::HeaderDecode`.\n\nA `default` arm now refuses a status that an exact or range arm claims.\n\nCloses #133\nCloses #134",
+          "timestamp": "2026-11-03T06:58:39+01:00",
+          "tree_id": "306f9cfabcacd2b2d5d3106ac1a6a8418ff3c22b",
+          "url": "https://github.com/romnn/progeny/commit/53057fba2b762a0680e9f5f74895fb158813b2fa"
+        },
+        "date": 1793685863908,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 24.80145966666667,
+            "range": "± 1.4",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2811.923176765442,
+            "range": "± 1.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.951589,
+            "range": "± 0.14",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1131.4296875,
+            "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6936086666666667,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 236.4244785308838,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           }
