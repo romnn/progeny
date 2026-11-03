@@ -324,12 +324,97 @@ pub(crate) struct ResponseContract {
 pub(crate) struct ResponseArm {
     pub(crate) status: StatusPattern,
     pub(crate) body: ResponseBody,
+    /// The declared headers that have a typed field, ordered by wire name.
+    ///
+    /// Empty when the response declares none, and when every one it declares was left to the
+    /// raw headers with a diagnostic.
+    pub(crate) headers: Vec<ResponseHeader>,
+    /// The names of the types the arm's typed headers are generated as: `Some` exactly when
+    /// [`Self::headers`] is not empty.
+    pub(crate) header_types: Option<HeaderTypes>,
     pub(crate) docs: Docs,
     /// The variant name this arm contributes to the response enum.
     pub(crate) rust_name: RustIdent,
     /// The response's position in the document, which is what a degradation at the body's root
     /// — a skipped element of a top-level list, an unrecognized top-level union — is reported
     /// under.
+    pub(crate) origin: JsonPointer,
+}
+
+/// The two types an arm that types a header is generated with, named once every operation is.
+///
+/// Allocated rather than spelled by the renderers, because `{Operation}{Arm}` is not unique by
+/// construction: `foo`'s `400` is `FooBadRequest`, which is also `fooBad`'s request builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeaderTypes {
+    /// What the client decodes the arm to, its body beside its typed headers:
+    /// `{Operation}{Arm}`, numbered when another type has that name.
+    pub(crate) payload: RustIdent,
+    /// The struct holding the typed headers, in the server and the client alike: the payload's
+    /// name followed by [`type_suffix::HEADERS`].
+    pub(crate) group: RustIdent,
+}
+
+/// The tails the renderers append to an operation's type stem, one per type they may generate for
+/// the operation, which the arms' [`HeaderTypes`] never take.
+pub(crate) mod type_suffix {
+    /// The client's params struct, `FooParams`.
+    pub(crate) const PARAMS: &str = "Params";
+    /// The client's request builder, `FooRequest`.
+    pub(crate) const REQUEST: &str = "Request";
+    /// The client's enum of several successes, `FooSuccess`.
+    pub(crate) const SUCCESS: &str = "Success";
+    /// The client's enum of several failures, `FooError`.
+    pub(crate) const ERROR: &str = "Error";
+    /// The server's response enum, `FooResponse`.
+    pub(crate) const RESPONSE: &str = "Response";
+    /// The server's path parameter group, `FooPath`.
+    pub(crate) const PATH: &str = "Path";
+    /// The server's query parameter group, `FooQuery`.
+    pub(crate) const QUERY: &str = "Query";
+    /// The server's header parameter group, `FooHeader`.
+    pub(crate) const HEADER: &str = "Header";
+    /// The server's cookie parameter group, `FooCookie`.
+    pub(crate) const COOKIE: &str = "Cookie";
+
+    /// Every tail above.
+    pub(crate) const ALL: [&str; 9] = [
+        PARAMS, REQUEST, SUCCESS, ERROR, RESPONSE, PATH, QUERY, HEADER, COOKIE,
+    ];
+
+    /// The tail of an arm's header group, after its payload's name: `FooCreatedHeaders`.
+    pub(crate) const HEADERS: &str = "Headers";
+}
+
+/// One declared response header with a typed field.
+///
+/// Only a header whose declaration the `simple` style can write and read back unchanged gets
+/// one: a scalar, a string enum, a list of either, or any value declared as one JSON document
+/// that cannot be `null`.
+/// Every other declared header, and every undeclared one, travels in the arm's raw headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResponseHeader {
+    /// The field name exactly as the description spells it, which is a valid HTTP field name and
+    /// unique within the response however it is cased.
+    pub(crate) wire_name: String,
+    /// The field in the arm's header group; never `raw`, which the group's raw headers hold.
+    pub(crate) rust_name: RustIdent,
+    /// The read form of the declared type, without the `null` a header has no spelling for, or
+    /// the text `simple` carries where the schema says nothing about the value.
+    pub(crate) ty: TypeRef,
+    pub(crate) required: bool,
+    /// The `simple` style, with the shape the type gives it and whether the value is one JSON
+    /// document.
+    pub(crate) style: StyleContract,
+    /// Whether the value's text, or each list element's, is read back as the JSON scalar it
+    /// spells — a boolean or a number — rather than kept as the text itself, which is what a
+    /// string, a formatted string, a string enum and a value its schema says nothing about are.
+    ///
+    /// Always `false` for a JSON document, whose text is parsed whole.
+    pub(crate) spelled: bool,
+    pub(crate) docs: Docs,
+    /// Where the response declares the header, which is the position a reference to a
+    /// `components.headers` entry is written at, not the entry.
     pub(crate) origin: JsonPointer,
 }
 

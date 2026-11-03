@@ -295,6 +295,21 @@ fn wiring(class: BreakageClass) -> Wiring {
                 },
             },
         }))),
+        // An object, whose `k,v` spelling cannot keep a member apart from its value once either
+        // holds a comma.
+        BreakageClass::UntypedResponseHeader => Wiring::Fixture(paths(json!({
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "responses": {"200": {"description": "ok", "headers": {
+                        "X-Page": {"schema": {
+                            "type": "object",
+                            "properties": {"next": {"type": "string"}},
+                        }},
+                    }}},
+                },
+            },
+        }))),
         // Half of this class: a template no parameter can fill, which is a property of one
         // operation. The other half — two routes colliding under a router's matching rules — is a
         // property of a router, and there is none before stage 7.

@@ -94,9 +94,14 @@ pub(super) fn workspace_readme(config: &Config, client: bool, server: bool) -> S
     }
 }
 
-/// The types crate's manifest, which depends on `time` whenever it ships `support::Rfc3339`,
-/// including for an edge crate's `time` parameter that no type holds.
-pub(super) fn types_crate(contracts: &Contracts, config: &Config, rfc3339: bool) -> String {
+/// The types crate's manifest: every crate its types name, and every crate its support module
+/// names beyond them.
+///
+/// `supported` is the second set, which the caller reads from the same decisions it emits the
+/// support module by: the leaves its lenient decoder implements, which an edge crate's typed
+/// header or parameter can need without any type here holding one, and `time` whenever it ships
+/// `support::Rfc3339`.
+pub(super) fn types_crate(contracts: &Contracts, config: &Config, supported: LeafUse) -> String {
     let mut out = package(&package_name(config, "types"), &config.package.version);
     let gates = gate_features(contracts);
     if !gates.is_empty() {
@@ -109,8 +114,7 @@ pub(super) fn types_crate(contracts: &Contracts, config: &Config, rfc3339: bool)
     out.push_str("[dependencies]\n");
     out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
     out.push_str("serde_json = \"1\"\n");
-    let mut named = crates_named(Some(contracts), None, config);
-    named.time |= rfc3339;
+    let named = crates_named(Some(contracts), None, config).union(supported);
     for line in dependency_lines(named) {
         let _ = writeln!(out, "{line}");
     }
@@ -466,6 +470,11 @@ pub(super) fn crates_named(
             for arm in arms.chain(operation.responses.default.as_ref()) {
                 if let Some(ty) = arm.body.json_type() {
                     collect(ty, &mut formats, &mut maps);
+                }
+                // A typed response header is spelled in the server's header group, as a scalar
+                // that gets no named contract: a `uuid::Uuid` request ID names the crate there.
+                for header in &arm.headers {
+                    collect(&header.ty, &mut formats, &mut maps);
                 }
             }
         }

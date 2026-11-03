@@ -11,6 +11,11 @@
 //! `Api` trait with a double that records what arrived, starts it on a real socket, and calls it
 //! with the generated client. A disagreement between the two halves about any part of the request
 //! line is a failing test rather than a thing somebody notices in production.
+//! A second implementation takes a request context of its own, so the order between extracting it
+//! and decoding the request, and the context reaching `on_rejection`, are checked on the wire too.
+//! The double also answers with the response headers the subject is given here, so what the
+//! server writes for a typed header, its raw override and a reply that fails on the way out are
+//! read off the wire as well, and what the client reads back into its typed fields beside them.
 //!
 //! Its subject is the committed `petstore-31`, which needs no network and whose `rejectionProbe`
 //! operation carries a path parameter, a query parameter, a header, a cookie and a body at once.
@@ -55,7 +60,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let keyed = with_security_schemes(bytes)?;
+    let keyed = with_response_headers(&with_security_schemes(bytes)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
@@ -136,18 +141,164 @@ fn with_security_schemes(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
           - basic: []
           - oauth: ['pets:read']
     "};
+    spliced(
+        bytes,
+        &[
+            Insertion {
+                after: &["components:\n"],
+                text: SCHEMES,
+                indent: "  ",
+            },
+            Insertion {
+                after: &["      operationId: showPetById\n"],
+                text: REQUIREMENT,
+                indent: "      ",
+            },
+        ],
+    )
+}
+
+/// The subject with response headers on four arms, which no other gate needs either, and two
+/// operations whose generated type names would meet.
+///
+/// `createPets` answers `201` with typed headers of every shape the server types, beside a
+/// deprecated one, the `Content-Type` OpenAPI ignores and the `Content-Length` the transport
+/// owns; `typedErrors` answers a `204` whose headers are all it says, one of them a value its
+/// schema says nothing about; and `showPetById` declares one on its `200` and one on its
+/// `default`, the two arms a handler defect turns into a `500` without them.
+/// `namedArms` refuses with a `400` whose payload would be `NamedArmsBadRequest`, the request
+/// builder of `namedArmsBad`.
+fn with_response_headers(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const CREATED: &str = indoc::indoc! {"
+        headers:
+          Location:
+            description: Where the new pet is.
+            required: true
+            schema: {type: string}
+          Retry-After:
+            schema: {type: integer, minimum: 0}
+          X-Pet-Tags:
+            schema: {type: array, items: {type: string}}
+          X-Legacy-Id:
+            deprecated: true
+            schema: {type: integer}
+          Content-Type:
+            schema: {type: string}
+          Content-Length:
+            schema: {type: integer}
+    "};
+    const OUTCOME: &str = indoc::indoc! {"
+        headers:
+          X-Outcome:
+            schema: {type: string}
+          X-Flag:
+            description: Anything at all, which travels as its text.
+            schema: {}
+    "};
+    const NAMED: &str = indoc::indoc! {"
+        /names/{kind}:
+          get:
+            operationId: namedArms
+            summary: Refuse with a header on an arm named like another operation's type
+            parameters:
+              - name: kind
+                in: path
+                required: true
+                schema: {type: string}
+            responses:
+              \"204\":
+                description: Nothing refused
+              \"400\":
+                description: Refused
+                headers:
+                  X-Reason:
+                    schema: {type: string}
+        /names-bad:
+          get:
+            operationId: namedArmsBad
+            summary: The operation whose request builder the refusal would be named like
+            responses:
+              \"204\":
+                description: Done
+    "};
+    const NOTE: &str = indoc::indoc! {"
+        headers:
+          X-Pet-Note:
+            schema: {type: string}
+    "};
+    const REQUEST_ID: &str = indoc::indoc! {"
+        headers:
+          X-Request-Id:
+            schema: {type: string}
+    "};
+    let arm = "          description:";
+    spliced(
+        bytes,
+        &[
+            Insertion {
+                after: &["\npaths:\n"],
+                text: NAMED,
+                indent: "  ",
+            },
+            Insertion {
+                after: &[&format!("{arm} Null response\n")],
+                text: CREATED,
+                indent: "          ",
+            },
+            Insertion {
+                after: &[&format!("{arm} No error requested\n")],
+                text: OUTCOME,
+                indent: "          ",
+            },
+            Insertion {
+                after: &[&format!("{arm} Expected response to a valid request\n")],
+                text: NOTE,
+                indent: "          ",
+            },
+            // Every operation's `default` reads alike, so this one is found after its operation.
+            Insertion {
+                after: &[
+                    "operationId: showPetById\n",
+                    "        default:\n",
+                    &format!("{arm} unexpected error\n"),
+                ],
+                text: REQUEST_ID,
+                indent: "          ",
+            },
+        ],
+    )
+}
+
+/// YAML lines to add to the subject.
+struct Insertion<'a> {
+    /// Lines found one after another, the first anywhere and each later one after the last; the
+    /// text goes right after the final one.
+    after: &'a [&'a str],
+    text: &'a str,
+    /// What every line of `text` is indented by, which places it in the mapping it extends.
+    indent: &'a str,
+}
+
+/// The subject with each insertion indented and placed where its anchor lines lead.
+fn spliced(bytes: &[u8], insertions: &[Insertion<'_>]) -> eyre::Result<Vec<u8>> {
     let text = std::str::from_utf8(bytes).wrap_err("the subject is UTF-8")?;
     let mut keyed = text.to_owned();
-    for (anchor, insertion, indent) in [
-        ("components:\n", SCHEMES, "  "),
-        ("      operationId: showPetById\n", REQUIREMENT, "      "),
-    ] {
-        let at = keyed
-            .find(anchor)
-            .wrap_err_with(|| format!("the subject no longer has `{}`", anchor.trim()))?
-            + anchor.len();
+    for Insertion {
+        after,
+        text,
+        indent,
+    } in insertions
+    {
+        let mut at = 0;
+        for anchor in *after {
+            at += keyed
+                .get(at..)
+                .and_then(|rest| rest.find(anchor))
+                .wrap_err_with(|| format!("the subject no longer has `{}`", anchor.trim()))?
+                + anchor.len();
+        }
         let mut indented = String::new();
-        for line in insertion.lines() {
+        for line in text.lines() {
             let _ = writeln!(indented, "{indent}{line}");
         }
         keyed.insert_str(at, &indented);
@@ -187,6 +338,7 @@ fn test_source(krate: &str) -> String {
     );
     out.push_str(RECORDER);
     out.push_str(IMPLEMENTATION);
+    out.push_str(GATEKEEPER);
     out.push_str(TESTS);
     out
 }
@@ -207,6 +359,7 @@ struct Seen {
     probe_mode: Option<String>,
     probe_session: Option<i64>,
     probe_body: Option<(i64, String)>,
+    probe_caller: Option<String>,
     photo_note: Option<String>,
     photo_file: Option<String>,
 }
@@ -239,24 +392,51 @@ impl Double {
 /// The `Api` implementation. Spelled out rather than generated, so it reads as a consumer's would.
 const IMPLEMENTATION: &str = indoc::indoc! {r#"
 impl server::Api for Double {
-    async fn list_pets(&self, query: server::ListPetsQuery) -> server::ListPetsResponse {
+    type Context = ();
+
+    async fn list_pets(&self, _context: (), query: server::ListPetsQuery) -> server::ListPetsResponse {
         self.record(|seen| seen.limit = query.limit);
         // A response position takes the read form of its type. A strict value converts into
         // it, which is how a server built on the strict types answers.
-        server::ListPetsResponse::Ok(Box::new(vec![types::Pet {
-            id: 1,
-            name: "Rex".to_owned(),
-            tag: Some("dog".to_owned()),
+        server::ListPetsResponse::Ok {
+            headers: Default::default(),
+            body: Box::new(vec![types::Pet {
+                id: 1,
+                name: "Rex".to_owned(),
+                tag: Some("dog".to_owned()),
+            }
+            .into()]),
         }
-        .into()]))
     }
 
-    async fn create_pets(&self) -> server::CreatePetsResponse {
-        server::CreatePetsResponse::Created(())
+    async fn create_pets(&self, _context: ()) -> server::CreatePetsResponse {
+        // A `raw` value replacing a typed field of the same name, and two raw values of a name
+        // the description does not declare, in the order the handler wrote them.
+        let mut raw = axum::http::HeaderMap::new();
+        raw.insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("soon"),
+        );
+        for trace in ["first", "second"] {
+            raw.append("x-trace", axum::http::HeaderValue::from_static(trace));
+        }
+        #[expect(
+            deprecated,
+            reason = "the double still answers with the header the description deprecates"
+        )]
+        let headers = server::CreatePetsCreatedHeaders {
+            location: Some("/pets/7".to_owned()),
+            retry_after: Some(30),
+            x_pet_tags: Some(vec!["new".to_owned(), "dog".to_owned()]),
+            x_legacy_id: Some(7),
+            raw,
+        };
+        server::CreatePetsResponse::Created { headers }
     }
 
     async fn list_pets_paged(
         &self,
+        _context: (),
         query: server::ListPetsPagedQuery,
     ) -> server::ListPetsPagedResponse {
         // Two pages: the first names a cursor, the second does not.
@@ -264,33 +444,81 @@ impl server::Api for Double {
             None => (vec![(1, "Rex"), (2, "Tom")], Some("page-2".to_owned())),
             Some(_) => (vec![(3, "Kit")], None),
         };
-        server::ListPetsPagedResponse::Ok(Box::new(types::read::PetPage {
-            items: Some(
-                items
-                    .into_iter()
-                    .map(|(id, name)| types::read::Pet {
-                        id: Some(id),
-                        name: Some(name.to_owned()),
-                        ..Default::default()
-                    })
-                    .collect(),
-            ),
-            next,
-            ..Default::default()
-        }))
+        server::ListPetsPagedResponse::Ok {
+            headers: Default::default(),
+            body: Box::new(types::read::PetPage {
+                items: Some(
+                    items
+                        .into_iter()
+                        .map(|(id, name)| types::read::Pet {
+                            id: Some(id),
+                            name: Some(name.to_owned()),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                next,
+                ..Default::default()
+            }),
+        }
     }
 
-    async fn show_pet_by_id(&self, path: server::ShowPetByIdPath) -> server::ShowPetByIdResponse {
+    async fn show_pet_by_id(
+        &self,
+        _context: (),
+        path: server::ShowPetByIdPath,
+    ) -> server::ShowPetByIdResponse {
         self.record(|seen| seen.pet_id = Some(path.pet_id.clone()));
-        server::ShowPetByIdResponse::Ok(Box::new(types::read::Pet::from(types::Pet {
-            id: 7,
-            name: path.pet_id,
-            tag: None,
-        })))
+        // A handler defect: `default` answered with the status the `200` arm claims, which a
+        // client would decode as a pet.
+        if path.pet_id == "misrouted" {
+            return server::ShowPetByIdResponse::Default {
+                status: 200,
+                headers: server::ShowPetByIdDefaultHeaders {
+                    x_request_id: Some("r-1".to_owned()),
+                    ..Default::default()
+                },
+                body: Box::new(types::read::Error {
+                    code: Some(200),
+                    message: Some("not a pet".to_owned()),
+                    ..Default::default()
+                }),
+            };
+        }
+        // Another: a typed header whose value has a line break, which no HTTP field carries, or
+        // whitespace around it, which HTTP strips. A raw value of the same name replaces the
+        // typed one, which is then no defect.
+        let headers = match path.pet_id.as_str() {
+            "unsendable" | "overridden" => {
+                let mut raw = axum::http::HeaderMap::new();
+                raw.insert("x-trace", axum::http::HeaderValue::from_static("kept?"));
+                if path.pet_id == "overridden" {
+                    raw.insert("x-pet-note", axum::http::HeaderValue::from_static("by hand"));
+                }
+                server::ShowPetByIdOkHeaders {
+                    x_pet_note: Some("first line\nsecond line".to_owned()),
+                    raw,
+                }
+            }
+            "padded" => server::ShowPetByIdOkHeaders {
+                x_pet_note: Some(" padded ".to_owned()),
+                ..Default::default()
+            },
+            _ => Default::default(),
+        };
+        server::ShowPetByIdResponse::Ok {
+            headers,
+            body: Box::new(types::read::Pet::from(types::Pet {
+                id: 7,
+                name: path.pet_id,
+                tag: None,
+            })),
+        }
     }
 
     async fn upload_pet_photo(
         &self,
+        _context: (),
         path: server::UploadPetPhotoPath,
         body: types::UploadPetPhotoBody,
     ) -> server::UploadPetPhotoResponse {
@@ -300,45 +528,96 @@ impl server::Api for Double {
         });
         // A type only a response yields has no strict form; its read form is written out, and
         // `Default` fills whatever the answer leaves unsaid.
-        server::UploadPetPhotoResponse::Created(Box::new(types::read::PhotoUpload {
-            pet_id: Some(path.pet_id),
-            filename: Some("photo".to_owned()),
-            content_type: Some("image/png".to_owned()),
-            file_size: Some(body.file.len() as i64),
-            note: body.note,
-            rating: body.rating,
-            ..Default::default()
-        }))
-    }
-
-    async fn typed_errors(&self, path: server::TypedErrorsPath) -> server::TypedErrorsResponse {
-        match path.kind.as_str() {
-            "missing" => server::TypedErrorsResponse::NotFound(Box::new(types::read::Error {
-                code: Some(404),
-                message: Some("missing".to_owned()),
+        server::UploadPetPhotoResponse::Created {
+            headers: Default::default(),
+            body: Box::new(types::read::PhotoUpload {
+                pet_id: Some(path.pet_id),
+                filename: Some("photo".to_owned()),
+                content_type: Some("image/png".to_owned()),
+                file_size: Some(body.file.len() as i64),
+                note: body.note,
+                rating: body.rating,
                 ..Default::default()
-            })),
-            "conflict" => server::TypedErrorsResponse::Conflict(Box::new(types::read::Error {
-                code: Some(409),
-                message: Some("conflict".to_owned()),
-                ..Default::default()
-            })),
-            _ => server::TypedErrorsResponse::NoContent(()),
+            }),
         }
     }
 
-    async fn download_bytes(&self) -> server::DownloadBytesResponse {
-        server::DownloadBytesResponse::Ok(Box::new(vec![0, 255, b'{', b'\n']))
+    async fn typed_errors(
+        &self,
+        _context: (),
+        path: server::TypedErrorsPath,
+    ) -> server::TypedErrorsResponse {
+        match path.kind.as_str() {
+            "missing" => server::TypedErrorsResponse::NotFound {
+                headers: Default::default(),
+                body: Box::new(types::read::Error {
+                    code: Some(404),
+                    message: Some("missing".to_owned()),
+                    ..Default::default()
+                }),
+            },
+            "conflict" => server::TypedErrorsResponse::Conflict {
+                headers: Default::default(),
+                body: Box::new(types::read::Error {
+                    code: Some(409),
+                    message: Some("conflict".to_owned()),
+                    ..Default::default()
+                }),
+            },
+            // A reply whose declared headers are all it says, one of them text a reader must
+            // not mistake for the boolean it spells.
+            _ => server::TypedErrorsResponse::NoContent {
+                headers: server::TypedErrorsNoContentHeaders {
+                    x_outcome: Some("none".to_owned()),
+                    x_flag: Some("true".to_owned()),
+                    ..Default::default()
+                },
+            },
+        }
     }
 
-    async fn download_text(&self) -> server::DownloadTextResponse {
-        server::DownloadTextResponse::Ok(Box::new(
-            "plain text\nthat is not JSON".to_owned(),
-        ))
+    async fn named_arms(
+        &self,
+        _context: (),
+        path: server::NamedArmsPath,
+    ) -> server::NamedArmsResponse {
+        // The refusal's header group is numbered apart from `namedArmsBad`'s request builder.
+        if path.kind == "refused" {
+            return server::NamedArmsResponse::BadRequest {
+                headers: server::NamedArmsBadRequest2Headers {
+                    x_reason: Some("named apart".to_owned()),
+                    ..Default::default()
+                },
+            };
+        }
+        server::NamedArmsResponse::NoContent {
+            headers: Default::default(),
+        }
+    }
+
+    async fn named_arms_bad(&self, _context: ()) -> server::NamedArmsBadResponse {
+        server::NamedArmsBadResponse::NoContent {
+            headers: Default::default(),
+        }
+    }
+
+    async fn download_bytes(&self, _context: ()) -> server::DownloadBytesResponse {
+        server::DownloadBytesResponse::Ok {
+            headers: Default::default(),
+            body: Box::new(vec![0, 255, b'{', b'\n']),
+        }
+    }
+
+    async fn download_text(&self, _context: ()) -> server::DownloadTextResponse {
+        server::DownloadTextResponse::Ok {
+            headers: Default::default(),
+            body: Box::new("plain text\nthat is not JSON".to_owned()),
+        }
     }
 
     async fn rejection_probe(
         &self,
+        _context: (),
         path: server::RejectionProbePath,
         query: server::RejectionProbeQuery,
         header: server::RejectionProbeHeader,
@@ -352,7 +631,143 @@ impl server::Api for Double {
             seen.probe_session = Some(cookie.session);
             seen.probe_body = Some((body.id, body.name.clone()));
         });
-        server::RejectionProbeResponse::NoContent(())
+        server::RejectionProbeResponse::NoContent {
+            headers: Default::default(),
+        }
+    }
+}
+"#};
+
+/// A second `Api` implementation, with a request context of its own.
+///
+/// The double asks nothing of the request; this one needs a caller, as an authenticated service
+/// would, so the ordering between the context and generated decoding is driven over the wire.
+const GATEKEEPER: &str = indoc::indoc! {r#"
+/// Who is calling, as the middleware in front of the router left it on the request.
+#[derive(Debug, Clone)]
+struct Caller(String);
+
+/// The double's operations, answered only for the one caller it admits.
+#[derive(Debug, Clone)]
+struct Gatekeeper {
+    inner: Double,
+    admitted: &'static str,
+}
+
+/// Read from the extension the middleware inserted, and checked against the state the router
+/// hands the extractor, which is the implementation itself.
+impl axum::extract::FromRequestParts<Gatekeeper> for Caller {
+    type Rejection = (axum::http::StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        gatekeeper: &Gatekeeper,
+    ) -> Result<Self, Self::Rejection> {
+        let caller = parts
+            .extensions
+            .get::<Caller>()
+            .cloned()
+            .ok_or((axum::http::StatusCode::UNAUTHORIZED, "no caller"))?;
+        if caller.0 != gatekeeper.admitted {
+            return Err((axum::http::StatusCode::FORBIDDEN, "not admitted"));
+        }
+        Ok(caller)
+    }
+}
+
+impl server::Api for Gatekeeper {
+    type Context = Caller;
+
+    async fn list_pets(&self, _: Caller, query: server::ListPetsQuery) -> server::ListPetsResponse {
+        self.inner.list_pets((), query).await
+    }
+
+    async fn create_pets(&self, _: Caller) -> server::CreatePetsResponse {
+        self.inner.create_pets(()).await
+    }
+
+    async fn list_pets_paged(
+        &self,
+        _: Caller,
+        query: server::ListPetsPagedQuery,
+    ) -> server::ListPetsPagedResponse {
+        self.inner.list_pets_paged((), query).await
+    }
+
+    async fn show_pet_by_id(
+        &self,
+        _: Caller,
+        path: server::ShowPetByIdPath,
+    ) -> server::ShowPetByIdResponse {
+        self.inner.show_pet_by_id((), path).await
+    }
+
+    async fn upload_pet_photo(
+        &self,
+        _: Caller,
+        path: server::UploadPetPhotoPath,
+        body: types::UploadPetPhotoBody,
+    ) -> server::UploadPetPhotoResponse {
+        self.inner.upload_pet_photo((), path, body).await
+    }
+
+    async fn typed_errors(
+        &self,
+        _: Caller,
+        path: server::TypedErrorsPath,
+    ) -> server::TypedErrorsResponse {
+        self.inner.typed_errors((), path).await
+    }
+
+    async fn named_arms(
+        &self,
+        _: Caller,
+        path: server::NamedArmsPath,
+    ) -> server::NamedArmsResponse {
+        self.inner.named_arms((), path).await
+    }
+
+    async fn named_arms_bad(&self, _: Caller) -> server::NamedArmsBadResponse {
+        self.inner.named_arms_bad(()).await
+    }
+
+    async fn download_bytes(&self, _: Caller) -> server::DownloadBytesResponse {
+        self.inner.download_bytes(()).await
+    }
+
+    async fn download_text(&self, _: Caller) -> server::DownloadTextResponse {
+        self.inner.download_text(()).await
+    }
+
+    async fn rejection_probe(
+        &self,
+        caller: Caller,
+        path: server::RejectionProbePath,
+        query: server::RejectionProbeQuery,
+        header: server::RejectionProbeHeader,
+        cookie: server::RejectionProbeCookie,
+        body: types::Pet,
+    ) -> server::RejectionProbeResponse {
+        self.inner.record(|seen| seen.probe_caller = Some(caller.0));
+        self.inner
+            .rejection_probe((), path, query, header, cookie, body)
+            .await
+    }
+
+    /// A problem document that names the caller, which only the context knows.
+    fn on_rejection(&self, caller: &Caller, rejection: server::Rejection) -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let status = axum::http::StatusCode::from_u16(rejection.status())
+            .unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+        (
+            status,
+            [(axum::http::header::CONTENT_TYPE, "application/problem+json")],
+            axum::Json(serde_json::json!({
+                "title": rejection.to_string(),
+                "caller": caller.0,
+            })),
+        )
+            .into_response()
     }
 }
 "#};
@@ -429,6 +844,22 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                         {"id": 3, "name": "Rex"},
                     ])),
                 )
+            })
+            // A vendor that drifted on its headers: the required `Location` left out, the
+            // `X-Legacy-Id` the description declares as one value sent twice, and the
+            // `X-Pet-Tags` list split across two fields, which HTTP allows.
+            .post(|| async {
+                let mut headers = axum::http::HeaderMap::new();
+                for (name, value) in [
+                    ("retry-after", "30"),
+                    ("x-legacy-id", "1"),
+                    ("x-legacy-id", "2"),
+                    ("x-pet-tags", "new, dog"),
+                    ("x-pet-tags", "cat"),
+                ] {
+                    headers.append(name, axum::http::HeaderValue::from_static(value));
+                }
+                (axum::http::StatusCode::CREATED, headers)
             }),
         )
         // A paged listing whose second page has an item that cannot be read: the stream must
@@ -447,8 +878,9 @@ async fn raw_serving() -> eyre::Result<client::Client> {
             }),
         )
         // `keyed` answers with the credentials the request carried, `chunked` with a body of no
-        // declared length, and anything else with a root that is not what the description
-        // declares at all.
+        // declared length, `drifted` with drift in both its body and its declared header,
+        // `failing` with the `default` arm and its header, and anything else with a root that is
+        // not what the description declares at all.
         .route(
             "/pets/{pet_id}",
             get(
@@ -468,6 +900,22 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                             )),
                         ]))
                         .into_response(),
+                        // A required member sent as `null`, and the one `X-Pet-Note` the `200`
+                        // declares sent twice.
+                        "drifted" => {
+                            let mut headers = axum::http::HeaderMap::new();
+                            for note in ["first", "second"] {
+                                headers.append("x-pet-note", axum::http::HeaderValue::from_static(note));
+                            }
+                            (headers, axum::Json(serde_json::json!({"id": 7, "name": null})))
+                                .into_response()
+                        }
+                        "failing" => (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            [("x-request-id", "r-9")],
+                            axum::Json(serde_json::json!({"code": 500, "message": "down"})),
+                        )
+                            .into_response(),
                         _ => axum::Json(serde_json::json!(["not", "an", "object"])).into_response(),
                     }
                 },
@@ -514,7 +962,7 @@ async fn a_path_parameter_survives_the_round_trip() {
     // Percent-encoded on the way out and decoded on the way in, which is the pair of rules a
     // template variable actually depends on.
     assert_eq!(double.seen().pet_id.as_deref(), Some("a pet/with slashes"));
-    assert_eq!(pet.into_value().name.as_deref(), Some("a pet/with slashes"));
+    assert_eq!(pet.into_value().body.name.as_deref(), Some("a pet/with slashes"));
 }
 
 #[test_util::test]
@@ -790,6 +1238,359 @@ async fn the_server_writes_declared_non_json_bodies_and_content_types() {
     assert_eq!(text.text().await?, "plain text\nthat is not JSON");
 }
 
+/// Start the gatekeeper behind a middleware that turns an `x-caller` header into the request
+/// extension its context reads, as an authenticating layer would.
+async fn gated_serving() -> eyre::Result<(Double, client::Client)> {
+    let double = Double::default();
+    let gatekeeper = Gatekeeper {
+        inner: double.clone(),
+        admitted: "alice",
+    };
+    let router = server::router(gatekeeper).layer(axum::middleware::from_fn(
+        |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+            let caller = request
+                .headers()
+                .get("x-caller")
+                .and_then(|value| value.to_str().ok())
+                .map(|name| Caller(name.to_owned()));
+            if let Some(caller) = caller {
+                request.extensions_mut().insert(caller);
+            }
+            next.run(request).await
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok((double, client::Client::new(format!("http://{address}"))))
+}
+
+/// A well-formed `rejectionProbe` request.
+fn probe_params() -> client::RejectionProbeParams {
+    client::RejectionProbeParams {
+        id: 9,
+        limit: 11,
+        x_mode: "strict".to_owned(),
+        session: 1234,
+        body: types::Pet { id: 1, name: "p".to_owned(), tag: None },
+    }
+}
+
+/// A context reads what a middleware left on the request, and the operation receives it.
+#[test_util::test]
+async fn a_request_context_reaches_the_operation() {
+    let caller = reqwest::header::HeaderName::from_static("x-caller");
+    let (double, client) = gated_serving().await?;
+    client
+        .rejection_probe(probe_params())
+        .header(caller.clone(), reqwest::header::HeaderValue::from_static("alice"))
+        .send()
+        .await?;
+    assert_eq!(double.seen().probe_caller.as_deref(), Some("alice"));
+
+    // The extractor is handed the implementation as its state, and refuses a caller it does not
+    // admit before the operation runs.
+    let (double, client) = gated_serving().await?;
+    let error = client
+        .rejection_probe(probe_params())
+        .header(caller, reqwest::header::HeaderValue::from_static("mallory"))
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a caller the state does not admit is refused")?;
+    assert_eq!(error.status().map(|status| status.as_u16()), Some(403));
+    assert_eq!(double.seen(), Seen::default());
+}
+
+/// The context is extracted before anything is decoded, so a malformed request without a caller
+/// is refused by the context, and `on_rejection` never sees it.
+#[test_util::test]
+async fn a_failing_context_wins_over_a_malformed_request() {
+    let (_, client) = gated_serving().await?;
+    // No `session` cookie, which the description requires: a `400` once decoding runs.
+    let response = reqwest::Client::new()
+        .post(format!("{}/rejection-probe/9?limit=11", client.base_url()))
+        .header("x-mode", "strict")
+        .json(&types::Pet { id: 1, name: "p".to_owned(), tag: None })
+        .send()
+        .await?;
+    assert_eq!(response.status(), 401);
+    assert_eq!(response.text().await?, "no caller");
+}
+
+/// A request the context admits and decoding then rejects reaches `on_rejection` with that
+/// context, which an override can put in its reply.
+#[test_util::test]
+async fn a_generated_rejection_sees_the_context() {
+    let (double, client) = gated_serving().await?;
+    let response = reqwest::Client::new()
+        .post(format!("{}/rejection-probe/9?limit=11", client.base_url()))
+        .header("x-caller", "alice")
+        .header("x-mode", "strict")
+        .json(&types::Pet { id: 1, name: "p".to_owned(), tag: None })
+        .send()
+        .await?;
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        response.headers().get(reqwest::header::CONTENT_TYPE),
+        Some(&reqwest::header::HeaderValue::from_static("application/problem+json"))
+    );
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(body["caller"], "alice", "{body}");
+    let title = body["title"].as_str().unwrap_or_default();
+    assert!(title.contains("session"), "{body}");
+    assert_eq!(double.seen(), Seen::default());
+}
+
+/// A `default` answered with a status another arm claims is the handler's defect, refused `500`
+/// rather than sent as a body a client would decode as that arm's, and without the headers the
+/// handler gave the `default`.
+#[test_util::test]
+async fn a_default_answered_with_a_claimed_status_is_refused() {
+    let (_, client) = serving().await?;
+    let response = reqwest::Client::new()
+        .get(format!("{}/pets/misrouted", client.base_url()))
+        .send()
+        .await?;
+    assert_eq!(response.status(), 500);
+    assert_eq!(response.headers().get("x-request-id"), None);
+    let text = response.text().await?;
+    assert!(text.contains("`default` with 200"), "{text}");
+}
+
+/// Every value of one header a response carries, in order.
+fn values(headers: &reqwest::header::HeaderMap, name: &str) -> Vec<String> {
+    headers
+        .get_all(name)
+        .iter()
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .collect()
+}
+
+/// A typed header reaches the wire as its `simple` spelling, a scalar whole and a list in one
+/// field, and `raw` replaces the typed field of the same name with every value it holds.
+/// Read off the response raw, which is what the server wrote whatever the client makes of it.
+#[test_util::test]
+async fn declared_response_headers_reach_the_wire() {
+    let (_, client) = serving().await?;
+    let created = client.create_pets().send().await?;
+    assert_eq!(created.status(), 201);
+    let headers = created.headers();
+
+    // The typed fields, under the names the description spells
+    assert_eq!(values(headers, "location"), ["/pets/7"]);
+    assert_eq!(values(headers, "x-pet-tags"), ["new,dog"]);
+    assert_eq!(values(headers, "x-legacy-id"), ["7"]);
+
+    // The raw headers: one replacing the typed `Retry-After`, one repeated in order
+    assert_eq!(values(headers, "retry-after"), ["soon"]);
+    assert_eq!(values(headers, "x-trace"), ["first", "second"]);
+}
+
+/// A `204` that declares a header and no content carries the header alone.
+#[test_util::test]
+async fn a_header_only_reply_carries_its_declared_header() {
+    let (_, client) = serving().await?;
+    let reply = client
+        .typed_errors(client::TypedErrorsParams { kind: "neither".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(reply.status(), 204);
+    assert_eq!(values(reply.headers(), "x-outcome"), ["none"]);
+    // And the client reads it into its typed field, with no body to read it beside.
+    assert_eq!(reply.value().headers.x_outcome.as_deref(), Some("none"));
+    // A header its schema says nothing about is the text it was written as on both sides,
+    // never the boolean `true` spells.
+    assert_eq!(values(reply.headers(), "x-flag"), ["true"]);
+    assert_eq!(reply.value().headers.x_flag.as_deref(), Some("true"));
+    assert!(!reply.is_degraded(), "{}", reply.degradations());
+}
+
+/// An arm whose payload would be named like another operation's request builder is numbered
+/// apart from it, with its header group beside it, and both operations still answer.
+#[test_util::test]
+async fn an_arm_type_named_like_another_operations_type_is_numbered_apart() {
+    let (_, client) = serving().await?;
+    let error = client
+        .named_arms(client::NamedArmsParams { kind: "refused".to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("the `400` is a declared failure")?;
+    let client::Error::Declared(response) = &error else {
+        eyre::bail!("expected a declared error, got {error:?}");
+    };
+    assert_eq!(response.status(), 400);
+    let refusal: &client::NamedArmsBadRequest2 = response.value();
+    assert_eq!(refusal.headers.x_reason.as_deref(), Some("named apart"));
+
+    let request: client::NamedArmsBadRequest<'_> = client.named_arms_bad();
+    assert_eq!(request.send().await?.status(), 204);
+}
+
+/// The headers a response declares arrive typed, in one payload with its body, while every
+/// header stays on the response raw.
+/// A raw override the declaration cannot read is `None` and reported, rather than a call that
+/// fails over one header.
+#[test_util::test]
+async fn declared_response_headers_decode_into_typed_fields() {
+    let (_, client) = serving().await?;
+    let created = client.create_pets().send().await?;
+    let headers = &created.value().headers;
+    assert_eq!(headers.location.as_deref(), Some("/pets/7"));
+    assert_eq!(headers.x_pet_tags, Some(vec!["new".to_owned(), "dog".to_owned()]));
+    #[expect(deprecated, reason = "the test reads the header the description deprecates")]
+    let legacy = headers.x_legacy_id;
+    assert_eq!(legacy, Some(7));
+
+    // `Retry-After: soon`, which the double's raw headers put over its typed thirty seconds, is
+    // no number of seconds: the field is `None`, the report says why, and the raw value stays.
+    assert_eq!(headers.retry_after, None);
+    let report = created.degradations();
+    assert_eq!(report.len(), 1, "{report}");
+    let entry = report.iter().next().ok_or_eyre("the malformed header is reported")?;
+    assert_eq!(entry.kind, types::DegradationKind::Undecodable);
+    assert_eq!(entry.site.type_name(), "CreatePetsCreatedHeaders");
+    assert_eq!(
+        entry.site.pointer(),
+        "/paths/~1pets/post/responses/201/headers/Retry-After"
+    );
+    assert!(entry.samples.iter().any(|sample| sample.contains("soon")), "{report}");
+    assert_eq!(values(created.headers(), "retry-after"), ["soon"]);
+
+    // A JSON body and its declared header are one payload; the double's `200` leaves out the
+    // optional `X-Pet-Note`, which is no drift.
+    let pet = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "rex".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(pet.value().body.name.as_deref(), Some("rex"));
+    assert_eq!(pet.value().headers.x_pet_note, None);
+    assert!(!pet.is_degraded(), "{}", pet.degradations());
+}
+
+/// A vendor that drifted on its headers: a required one left out is reported, one declared as a
+/// single value that arrives twice is refused rather than picked, and a list split across two
+/// fields is read whole.
+#[test_util::test]
+async fn header_drift_is_tolerated_and_reported_header_by_header() {
+    let client = raw_serving().await?;
+    let created = client.create_pets().send().await?;
+    let headers = &created.value().headers;
+    assert_eq!(headers.location, None);
+    assert_eq!(headers.retry_after, Some(30));
+    assert_eq!(
+        headers.x_pet_tags,
+        Some(vec!["new".to_owned(), "dog".to_owned(), "cat".to_owned()])
+    );
+    #[expect(deprecated, reason = "the test reads the header the description deprecates")]
+    let legacy = headers.x_legacy_id;
+    assert_eq!(legacy, None);
+
+    // One entry per header that drifted, keyed at the place the description declares it.
+    let report = created.degradations();
+    let kinds_at = |header: &str| -> Vec<types::DegradationKind> {
+        let at = format!("/paths/~1pets/post/responses/201/headers/{header}");
+        report
+            .iter()
+            .filter(|entry| entry.site.pointer() == at)
+            .map(|entry| entry.kind)
+            .collect()
+    };
+    assert_eq!(kinds_at("Location"), [types::DegradationKind::RequiredAbsent]);
+    assert_eq!(kinds_at("X-Legacy-Id"), [types::DegradationKind::Undecodable]);
+    assert_eq!(report.len(), 2, "{report}");
+    assert!(report.to_string().contains("2 fields"), "{report}");
+    // Both values are still on the response, as they arrived.
+    assert_eq!(values(created.headers(), "x-legacy-id"), ["1", "2"]);
+}
+
+/// A response whose body and declared header both drifted reaches the observer once, with one
+/// report holding both, which is the report the response carries.
+/// A declared error carries its typed headers beside its body too.
+#[test_util::test]
+async fn header_and_body_drift_reach_the_observer_as_one_report() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let client = raw_serving().await?.observe({
+        let seen = Arc::clone(&seen);
+        move |degraded: client::Degraded<'_>| {
+            if let Ok(mut seen) = seen.lock() {
+                seen.push(degraded.degradations.to_string());
+            }
+        }
+    });
+    let pet = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "drifted".to_owned() })
+        .send()
+        .await?;
+    let report = pet.degradations();
+    assert!(report.touches(types::read::Pet::SITE_NAME.site()), "{report}");
+    assert!(
+        report.iter().any(|entry| entry.site.type_name() == "ShowPetByIdOkHeaders"
+            && entry.kind == types::DegradationKind::Undecodable),
+        "{report}"
+    );
+    assert_eq!(pet.value().body.id, Some(7));
+    assert_eq!(pet.value().headers.x_pet_note, None);
+    let observed = seen.lock().map_err(|_| eyre::eyre!("poisoned"))?.clone();
+    assert_eq!(observed, [report.to_string()]);
+
+    let error = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "failing".to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("the `default` arm is a declared failure")?;
+    let client::Error::Declared(response) = &error else {
+        eyre::bail!("expected a declared error, got {error:?}");
+    };
+    assert_eq!(response.status(), 500);
+    assert_eq!(response.value().headers.x_request_id.as_deref(), Some("r-9"));
+    assert_eq!(response.value().body.message.as_deref(), Some("down"));
+}
+
+/// A typed header value no HTTP field can carry is the handler's defect: a `500` that carries
+/// none of the arm's headers, typed or raw, rather than a reply with the header dropped.
+#[test_util::test]
+async fn a_header_the_handler_cannot_send_answers_without_the_arm_headers() {
+    let (_, client) = serving().await?;
+    let response = reqwest::Client::new()
+        .get(format!("{}/pets/unsendable", client.base_url()))
+        .send()
+        .await?;
+    assert_eq!(response.status(), 500);
+    assert_eq!(values(response.headers(), "x-pet-note"), [] as [String; 0]);
+    assert_eq!(values(response.headers(), "x-trace"), [] as [String; 0]);
+    let text = response.text().await?;
+    assert!(text.contains("`X-Pet-Note`"), "{text}");
+
+    // Whitespace around a value, which HTTP strips, is refused the same way.
+    let response = reqwest::Client::new()
+        .get(format!("{}/pets/padded", client.base_url()))
+        .send()
+        .await?;
+    assert_eq!(response.status(), 500);
+    let text = response.text().await?;
+    assert!(text.contains("whitespace"), "{text}");
+}
+
+/// A raw value replaces the typed one of its name before the typed one is checked, so a handler
+/// can send by hand what its typed field cannot hold, and the client reads the raw value.
+#[test_util::test]
+async fn a_raw_header_overrides_a_typed_one_that_cannot_be_sent() {
+    let (_, client) = serving().await?;
+    let pet = client
+        .show_pet_by_id(client::ShowPetByIdParams { pet_id: "overridden".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(pet.status(), 200);
+    assert_eq!(values(pet.headers(), "x-pet-note"), ["by hand"]);
+    assert_eq!(values(pet.headers(), "x-trace"), ["kept?"]);
+    assert_eq!(pet.value().headers.x_pet_note.as_deref(), Some("by hand"));
+}
+
 #[test_util::test]
 async fn a_request_the_description_does_not_describe_is_rejected_in_one_place() {
     // Not sent through the generated client, because the generated client cannot build a request
@@ -952,7 +1753,7 @@ async fn each_credential_is_sent_only_where_it_is_required() {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        Ok((pet.into_value().name.unwrap_or_default(), listed))
+        Ok((pet.into_value().body.name.unwrap_or_default(), listed))
     }
 
     // Header key
@@ -1001,7 +1802,7 @@ async fn each_credential_is_sent_only_where_it_is_required() {
         )
         .send()
         .await?;
-    assert_eq!(pet.into_value().name.as_deref(), Some("key=explicit"));
+    assert_eq!(pet.into_value().body.name.as_deref(), Some("key=explicit"));
 
     // Without any credential set, the request that requires one is sent without it.
     assert_eq!(seen(&raw_serving().await?).await?.0, "none");

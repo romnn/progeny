@@ -299,6 +299,37 @@ Both settings are values every request carries into the shared decoders, so what
 operation is the two setters and a field, and a request that sets neither reads its body whole,
 keeping only the value.
 
+## Response headers
+
+A header a response declares is read into a typed field, beside the body, in a payload of the
+arm's own. A `201` that declares `Location` and `Retry-After` decodes to
+`CreatePetsCreated { body, headers: CreatePetsCreatedHeaders }`, or `{ headers }` when it declares
+no content, and an operation with several such arms carries each payload in a variant of its
+success or error enum, so a body and its headers always come from the same arm. An arm that
+declares no typed header keeps its plain body. Every header, declared or not, stays on
+`ResponseValue::headers()` exactly as it arrived. A payload whose name is another generated
+type's, as `foo`'s `400` would be `fooBad`'s request builder `FooBadRequest`, is numbered with its
+group: `FooBadRequest2` and `FooBadRequest2Headers`.
+
+```rust
+let created = client.create_pets().send().await?;
+let location = created.value().headers.location.as_deref();   // typed
+let trace = created.headers().get("x-trace");                 // raw, as ever
+```
+
+A header is read in the `simple` style it is declared with, or as the one JSON document its
+`content` declares, from every field of its name: a list gathers the elements of all of them, and
+a scalar is never split on its commas, so a `Link` arrives whole. One declared as a single value
+that arrives in more than one field is malformed rather than read as whichever came first.
+
+Read leniently, every typed field is an `Option`. A malformed header is `None`, and so is a
+required one the response left out, each reported in the response's degradations at the place the
+description declares it, such as `/paths/~1pets/post/responses/201/headers/Retry-After`, and merged
+with the body's before an observer sees the response, whatever the body is. An absent optional
+header, and one the description never declared, is no drift. Read strictly, a required header is a
+plain field, and a malformed or missing one fails the call with `Error::HeaderDecode`, which carries
+the status, the header's name and declaration, what was wrong, and the raw headers.
+
 ## Credentials
 
 Every security scheme a description declares that progeny can send becomes a setter on the client,
@@ -362,6 +393,65 @@ HTTP middleware does not automatically know progeny's operation name, so it cann
 identity to each trace. Applications that need it can wrap the generated `Client` in an
 application-owned type whose operation-named methods create spans before sending the generated
 requests. A single undeclared header rides an individual request through its `.header(...)`.
+
+## Serving
+
+The server is an `Api` trait with one method per operation, and `server::router(api)`. Every
+method takes the request's context first, then the operation's parameter groups and body, and
+returns the operation's response enum. The context is the implementation's `type Context`, an
+`axum` `FromRequestParts` extractor run with the implementation as its state before anything is
+decoded: `()` takes nothing, `axum::http::request::Parts` takes the whole request head (cloning it,
+with every extension), and an application type parses exactly what the operations depend on, such
+as a principal an authenticating middleware left in the extensions. A failing context answers with
+its own rejection, so an unauthenticated request is refused before a malformed one is.
+
+```rust
+impl server::Api for Service {
+    type Context = Principal; // implements `FromRequestParts<Service>`
+
+    async fn show_pet_by_id(
+        &self,
+        principal: Principal,
+        path: server::ShowPetByIdPath,
+    ) -> server::ShowPetByIdResponse {
+        let pet = self.pets.find(&principal, &path.pet_id).await;
+        server::ShowPetByIdResponse::Ok {
+            headers: server::ShowPetByIdOkHeaders {
+                etag: Some(pet.version.to_string()), // a header the `200` declares
+                ..Default::default()
+            },
+            body: Box::new(pet.into()),
+        }
+    }
+
+    // Provided; overriding it reshapes every parameter, body and media-type rejection at once.
+    fn on_rejection(&self, principal: &Principal, rejection: server::Rejection) -> axum::response::Response {
+        // the default answers `RejectionResponse::of(&rejection)`, a JSON `message`
+    }
+}
+```
+
+Every response variant is a struct variant: its `headers`, then its `body` where the arm declares
+content, after the `status` a range or `default` arm is answered with. An arm that declares headers
+gets a `{Operation}{Arm}Headers` group with one optional field per header progeny can type — a
+scalar, a string enum, a list of them, a value its schema says nothing about, typed as its `String`
+text, or a JSON document that cannot be `null` — beside `raw: HeaderMap`; an arm that declares none
+carries a bare `HeaderMap`. A typed field is optional even where the description requires the
+header, as a read form's member is, so a test double can leave it out. A name in `raw` replaces the
+typed field of that name with every value `raw` holds, in order, and the typed value is then
+neither written nor checked, which is how a mock sends `Retry-After: soon`; a raw `Content-Type`
+replaces the arm's media type. A declared `Content-Type` gets no field, as OpenAPI says. A header
+`simple` cannot write so that it reads back unchanged, such as an object or `Set-Cookie`, and a
+field the transport owns, such as `Content-Length`, `Transfer-Encoding` or `Connection`, is
+reported as `untyped-response-header` and travels in `raw`.
+
+Headers are attached only once the body has encoded. A body or typed header value the server cannot
+write, a status HTTP has no code for, and a `default` answered with a status an exact or range arm
+of the same operation claims are all the handler's defects, answered `500` without the arm's
+headers: the last because the client would decode it as that arm's body, as it would a range arm
+answered outside its class. A typed value the server cannot write includes one its reader would
+read back as another: a string that starts or ends with whitespace, which HTTP strips, and a list
+element that is empty, holds a comma, or is padded.
 
 ## Operations as data
 

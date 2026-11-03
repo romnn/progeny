@@ -139,7 +139,7 @@ impl Build<'_> {
     }
 
     /// A parameter's type, and which of the three serialization shapes it has.
-    fn param_type(&self, parameter: &Parameter) -> (TypeRef, ParamShape) {
+    pub(super) fn param_type(&self, parameter: &Parameter) -> (TypeRef, ParamShape) {
         // `content` on a parameter means "this value is a document in that media type", which is
         // one media type's worth of encoding rather than a style. Typed as its schema and treated
         // as a primitive, because what goes in the URL is the encoded text.

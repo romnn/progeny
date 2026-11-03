@@ -14,6 +14,11 @@
 //! decodes back in the client. Anything an operation needs that cannot be synthesized — a recursive
 //! type with no optional escape, a success the document never declares — is a *named skip*, counted
 //! out loud, never a silent cap.
+//!
+//! Response headers are the exception to "no value equality", because a typed header has no
+//! rejection to surface its defects: a header the server writes in one spelling and the client
+//! reads in another simply arrives as something else. So the double answers with a value for every
+//! typed header of its arm, and the driver asserts that the client reads back the same value.
 
 use crate::api::{
     BodyContract, Location, OperationContract, ResponseArm, ResponseBody, StatusPattern,
@@ -154,6 +159,33 @@ pub struct ProbeAnswer {
     pub status: u16,
     /// Whether the arm is a status range, whose variant carries the status it is answered with.
     pub ranged: bool,
+    /// The typed headers the double answers with, when the arm declares any.
+    pub headers: Option<ProbeHeaders>,
+}
+
+/// The typed headers of the arm the double answers with, and where the driver reads them back.
+#[derive(Debug, Clone)]
+pub struct ProbeHeaders {
+    /// The server's header group, spelled from the test file (`server::FooOkHeaders`).
+    pub group: String,
+    /// The variant of the client's success enum the payload arrives in
+    /// (`client::FooSuccess::Ok`), or `None` when the payload is the response's value itself.
+    pub success_variant: Option<String>,
+    /// One per typed header, in the group's field order.
+    pub fields: Vec<ProbeHeader>,
+}
+
+/// One typed header: what the double sets, and what the driver expects the client to read.
+#[derive(Debug, Clone)]
+pub struct ProbeHeader {
+    /// The field's Rust name, which the server's group and the client's share.
+    pub field: String,
+    /// The header's name on the wire, for a failure that says which header disagreed.
+    pub wire_name: String,
+    /// Whether naming the field deliberately exercises deprecated API.
+    pub deprecated: bool,
+    /// A JSON value of the header's type.
+    pub json: String,
 }
 
 /// A synthesized response payload, distinguished by its wire representation.
@@ -352,7 +384,94 @@ fn probe_answer(
         value,
         status,
         ranged: matches!(arm.status, StatusPattern::Range(_)),
+        headers: probe_headers(operation, arm, contracts)?,
     })
+}
+
+/// A value for every typed header of the answered arm, or `None` when it declares none.
+fn probe_headers(
+    operation: &OperationContract,
+    arm: &ResponseArm,
+    contracts: &Contracts,
+) -> Result<Option<ProbeHeaders>, String> {
+    let Some(types) = &arm.header_types else {
+        return Ok(None);
+    };
+    let fields = arm
+        .headers
+        .iter()
+        .map(|header| {
+            let value = synthesize_header(header, contracts).map_err(|reason| {
+                format!(
+                    "the response header `{}` cannot be synthesized: {reason}",
+                    header.wire_name
+                )
+            })?;
+            Ok(ProbeHeader {
+                field: header.rust_name.as_str().to_owned(),
+                wire_name: header.wire_name.clone(),
+                deprecated: header.docs.deprecated,
+                json: value.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let several = render::client::success_arms(operation).len() > 1;
+    Ok(Some(ProbeHeaders {
+        group: format!("server::{}", types.group),
+        success_variant: several.then(|| {
+            format!(
+                "client::{}::{}",
+                render::client::success_name(operation),
+                arm.rust_name.as_str()
+            )
+        }),
+        fields,
+    }))
+}
+
+/// A value of a typed header's type that its `simple` spelling carries.
+///
+/// The body's synthesis, except that a string declared as one value holds a comma, which the
+/// client must not split on; an element of a list holds none, because there the comma is the
+/// separator.
+/// A JSON document carries anything, so it takes the body's value whole.
+fn synthesize_header(
+    header: &crate::api::ResponseHeader,
+    contracts: &Contracts,
+) -> Result<serde_json::Value, SynthesisError> {
+    if header.style.content() {
+        return synthesize(&header.ty, contracts, &mut Vec::new());
+    }
+    let ty = through_wrappers(&header.ty, contracts);
+    match ty {
+        TypeRef::String => Ok(serde_json::json!("a, b")),
+        _ => synthesize(ty, contracts, &mut Vec::new()),
+    }
+}
+
+/// A type with its options, boxes, newtypes and aliases looked through.
+fn through_wrappers<'a>(ty: &'a TypeRef, contracts: &'a Contracts) -> &'a TypeRef {
+    let mut current = ty;
+    // A type met again wraps nothing but itself, and the walk ends at it.
+    let mut followed = Vec::new();
+    loop {
+        current = match current {
+            TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => inner,
+            TypeRef::Named(index) if !followed.contains(index) => {
+                followed.push(*index);
+                match contracts
+                    .get(*index)
+                    .map(crate::contract::TypeContract::kind)
+                {
+                    Some(
+                        ContractKind::Newtype { inner } | ContractKind::Alias { target: inner },
+                    ) => inner,
+                    _ => return current,
+                }
+            }
+            _ => return current,
+        };
+    }
 }
 
 /// A rendered type path, as the probe's test file spells it.

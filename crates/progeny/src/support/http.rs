@@ -8,14 +8,15 @@
 //! describe rather than drifting into parallel implementations.
 
 use super::{Decoded, Degradations};
-// Only the lenient decoder names these two, and strict decoding leaves the decoder — and this
-// import beside it — out of the generated crate.
-use super::{Lenient, Site};
+// Only the lenient decoders name these, and strict decoding leaves the decoders — and this
+// import beside them — out of the generated crate.
+use super::{DegradationKind, Lenient, Site};
 
 /// A successful response, with everything the caller might need about it.
 ///
-/// Headers are exposed raw. Typed response headers are a later question; handing back what arrived
-/// is the answer that cannot be wrong in the meantime.
+/// Every header is on [`ResponseValue::headers`], raw and exactly as it arrived.
+/// The ones the description declares for the response's arm are also read into typed fields,
+/// beside the body in the arm's payload, so a body and its headers cannot come from two arms.
 ///
 /// The body arrives with its [`Degradations`]: everything the decoder tolerated on the way to
 /// the value, keyed by the place in the description it happened at. Empty when the payload
@@ -141,6 +142,19 @@ impl<T> ResponseValue<T> {
             raw_body: self.raw_body,
         }
     }
+
+    /// Hand `read` the headers and the report, so a generated arm reads its declared headers
+    /// into their typed fields and records what it tolerated beside what the body's decode did.
+    ///
+    /// The report is the response's own, so one observer call sees the body and the headers at
+    /// once.
+    #[doc(hidden)]
+    pub fn read_headers<H>(
+        &mut self,
+        read: impl FnOnce(&::reqwest::header::HeaderMap, &mut Degradations) -> H,
+    ) -> H {
+        read(&self.headers, &mut self.degradations)
+    }
 }
 
 /// Why a request did not produce a declared successful response.
@@ -148,7 +162,7 @@ impl<T> ResponseValue<T> {
 /// `E` is the operation's declared error payload, so a caller matches on a type rather than
 /// re-parsing a body the document already described.
 ///
-/// The two variants that carry a whole response are boxed. This type is the `Err` half of every
+/// The variants that carry a response's headers are boxed. This type is the `Err` half of every
 /// operation's return, so its width is paid on the success path too — and unboxed, a `HeaderMap`
 /// alone puts it past the width at which `clippy::result_large_err` calls a `Result` too expensive
 /// to return by value, in the generated crate and in its consumer's build alike.
@@ -197,6 +211,16 @@ pub enum Error<E> {
     /// The body arrived and did not match the contract the document stated.
     #[error(transparent)]
     Decode(#[from] DecodeError),
+    /// A header the description declares for the response did not match its declaration: absent
+    /// where it is required, repeated where it is one value, or not readable as its type.
+    ///
+    /// Its own variant rather than an [`Error::Decode`], because it says nothing about the body,
+    /// which may have decoded perfectly well, or have been empty.
+    /// Only a strictly decoded client produces it: a lenient one leaves the typed field `None`
+    /// and reports the header in the response's degradations instead.
+    /// Boxed, like the other variants that carry a response's headers.
+    #[error(transparent)]
+    HeaderDecode(::std::boxed::Box<HeaderDecodeError>),
     /// A response body longer than the limit the client or the request set with
     /// `response_body_limit`.
     ///
@@ -268,6 +292,9 @@ impl<E: ::std::fmt::Debug> ::std::fmt::Debug for Error<E> {
                 .finish_non_exhaustive(),
             Self::BodyRead(error) => formatter.debug_tuple("BodyRead").field(error).finish(),
             Self::Decode(error) => formatter.debug_tuple("Decode").field(error).finish(),
+            Self::HeaderDecode(error) => {
+                formatter.debug_tuple("HeaderDecode").field(error).finish()
+            }
             Self::BodyTooLarge(error) => {
                 formatter.debug_tuple("BodyTooLarge").field(error).finish()
             }
@@ -293,10 +320,17 @@ impl<E> Error<E> {
             Self::UnexpectedStatus(response) => Some(response.status()),
             Self::BodyRead(error) => Some(error.status()),
             Self::Decode(error) => Some(error.status()),
+            Self::HeaderDecode(error) => Some(error.status()),
             Self::BodyTooLarge(error) => Some(error.status()),
             Self::DegradedPage(page) => Some(page.status()),
             Self::UnsendablePath { .. } => None,
         }
+    }
+}
+
+impl<E> From<::std::boxed::Box<HeaderDecodeError>> for Error<E> {
+    fn from(error: ::std::boxed::Box<HeaderDecodeError>) -> Self {
+        Self::HeaderDecode(error)
     }
 }
 
@@ -498,6 +532,242 @@ impl DecodeError {
     pub fn status(&self) -> ::reqwest::StatusCode {
         self.status
     }
+}
+
+/// A header the description declares for a response, which did not match its declaration under
+/// strict decoding.
+///
+/// Carries every header the response arrived with, exactly as it arrived, for a caller who wants
+/// what the server sent; its `Debug` leaves them out, because a header can carry a credential.
+#[derive(thiserror::Error)]
+#[error("the `{name}` header of the {status} response does not match its declaration")]
+pub struct HeaderDecodeError {
+    status: ::reqwest::StatusCode,
+    name: &'static str,
+    origin: &'static str,
+    #[source]
+    problem: HeaderProblem,
+    headers: ::reqwest::header::HeaderMap,
+}
+
+impl HeaderDecodeError {
+    /// The status of the response the header arrived with.
+    pub fn status(&self) -> ::reqwest::StatusCode {
+        self.status
+    }
+
+    /// The header, by the name the description spells it with.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Where the description declares the header, as a JSON Pointer: the pointer a lenient
+    /// client's degradation of the same header names.
+    pub fn origin(&self) -> &'static str {
+        self.origin
+    }
+
+    /// What was wrong with the header.
+    pub fn problem(&self) -> &HeaderProblem {
+        &self.problem
+    }
+
+    /// Every header the response arrived with, exactly as it arrived.
+    pub fn headers(&self) -> &::reqwest::header::HeaderMap {
+        &self.headers
+    }
+}
+
+impl ::std::fmt::Debug for HeaderDecodeError {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter
+            .debug_struct("HeaderDecodeError")
+            .field("status", &self.status)
+            .field("name", &self.name)
+            .field("origin", &self.origin)
+            .field("problem", &self.problem)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What was wrong with a declared response header.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum HeaderProblem {
+    /// The description requires the header, and the response did not carry it.
+    #[error("the header is required and was absent")]
+    Absent,
+    /// The header arrived in more than one field where the description declares one value.
+    ///
+    /// Joined, the fields would be a list, which is a different value from each of them, and
+    /// reading only one of them would be an arbitrary pick.
+    #[error("the header arrived in {count} fields, where the description declares one value")]
+    Repeated {
+        /// How many fields carried the header.
+        count: usize,
+    },
+    /// A field holds bytes that are not UTF-8 text, which no declared type is read from.
+    #[error("the header is not UTF-8 text")]
+    NotText,
+    /// The header's text does not read as its declared type.
+    #[error("the header does not read as its declared type")]
+    Malformed(#[source] ::serde_json::Error),
+}
+
+/// One declared response header, as a generated arm hands it to the header decoders.
+///
+/// The rules for reading a header live here, once, and a generated arm only says which apply.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderRow {
+    /// The field name the description spells.
+    pub name: &'static str,
+    /// Where the description declares the header, as a JSON Pointer.
+    pub origin: &'static str,
+    /// Whether the description requires the header.
+    pub required: bool,
+    /// Whether the value is one JSON document, which is read whole.
+    pub json: bool,
+    /// Whether the value is a comma-separated list, gathered across every field it arrived in.
+    pub list: bool,
+    /// Whether a scalar's text, or each element's, is read as the boolean or number it spells
+    /// rather than kept as text.
+    pub spelled: bool,
+}
+
+/// One declared header as the JSON value its declaration reads it as, or `None` when the
+/// response does not carry it.
+///
+/// Every field of the name is read, never only the first.
+/// A list gathers the elements of all of them, because HTTP lets a sender split one list across
+/// several fields (RFC 9110, section 5.3), and drops the empty elements its list syntax allows.
+/// A header declared as one value that arrived in more than one field is refused rather than
+/// read as whichever came first.
+/// A scalar is never split on its commas, which a string such as a `Link` holds.
+fn header_value(
+    headers: &::reqwest::header::HeaderMap,
+    row: &HeaderRow,
+) -> Result<Option<::serde_json::Value>, HeaderProblem> {
+    // UTF-8 rather than the visible ASCII `to_str` insists on: a server that writes a filename or
+    // a message in UTF-8 has sent text, and refusing it would lose a value nobody misread.
+    let fields = headers
+        .get_all(row.name)
+        .iter()
+        .map(|field| std::str::from_utf8(field.as_bytes()).map_err(|_| HeaderProblem::NotText))
+        .collect::<Result<Vec<&str>, HeaderProblem>>()?;
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    if row.list && !row.json {
+        let elements = fields
+            .iter()
+            .flat_map(|field| field.split(','))
+            .map(|element| element.trim_matches([' ', '\t']))
+            .filter(|element| !element.is_empty())
+            .map(|element| header_scalar(element, row.spelled))
+            .collect();
+        return Ok(Some(::serde_json::Value::Array(elements)));
+    }
+    let [text] = fields.as_slice() else {
+        return Err(HeaderProblem::Repeated {
+            count: fields.len(),
+        });
+    };
+    if row.json {
+        return ::serde_json::from_str(text)
+            .map(Some)
+            .map_err(HeaderProblem::Malformed);
+    }
+    Ok(Some(header_scalar(text, row.spelled)))
+}
+
+/// One scalar's text as the value it reads back as: the boolean or number it spells, where the
+/// declaration reads its scalars that way and the text spells one, and the text itself otherwise.
+///
+/// Anything else stays text, so the type decides: `soon` is a malformed integer.
+/// A declaration that reads its scalars as text keeps `true` and `7` as the strings they are.
+fn header_scalar(text: &str, spelled: bool) -> ::serde_json::Value {
+    if spelled
+        && let Ok(parsed @ (::serde_json::Value::Bool(_) | ::serde_json::Value::Number(_))) =
+            ::serde_json::from_str(text)
+    {
+        return parsed;
+    }
+    ::serde_json::Value::String(text.to_owned())
+}
+
+/// One declared header read leniently into its typed field: `None`, with the reason recorded,
+/// when it is malformed, and `None`, with the absence recorded, when the description requires it
+/// and the response does not carry it.
+///
+/// Recorded at the header's own site: the generated `group` its field belongs to, and the place
+/// the description declares the header.
+/// An absent optional header is no drift, and neither is a header nobody declared, which never
+/// reaches this.
+/// Compiled once per header type, like the body decoders.
+#[doc(hidden)]
+pub fn lenient_header<T: for<'de> Lenient<'de>>(
+    headers: &::reqwest::header::HeaderMap,
+    report: &mut Degradations,
+    group: &'static str,
+    row: &HeaderRow,
+) -> Option<T> {
+    let site = Site::new(group, row.origin, None);
+    let refused = match header_value(headers, row) {
+        Ok(None) => {
+            if row.required {
+                report.record(site, DegradationKind::RequiredAbsent, None, true);
+            }
+            return None;
+        }
+        Ok(Some(value)) => match Decoded::<T>::from_deserializer_at(site, value) {
+            Ok(decoded) => {
+                report.merge(decoded.degradations);
+                return Some(decoded.value);
+            }
+            Err(err) => err.to_string(),
+        },
+        // The parser's own words say what was wrong with the document.
+        Err(HeaderProblem::Malformed(err)) => err.to_string(),
+        Err(problem) => problem.to_string(),
+    };
+    report.record(site, DegradationKind::Undecodable, Some(refused), true);
+    None
+}
+
+/// One declared header read strictly into its typed field, or the reason the response fails.
+///
+/// `T` is the field's type, which is an `Option` exactly when the description lets the header
+/// be absent; an absent optional header reads as `None`.
+/// Compiled once per header type, like the body decoders.
+///
+/// # Errors
+///
+/// Returns a [`HeaderDecodeError`] when a required header is absent, when one declared as one
+/// value arrived in more than one field, and when one does not read as its declared type.
+#[doc(hidden)]
+pub fn strict_header<T: ::serde::de::DeserializeOwned>(
+    status: ::reqwest::StatusCode,
+    headers: &::reqwest::header::HeaderMap,
+    row: &HeaderRow,
+) -> Result<T, ::std::boxed::Box<HeaderDecodeError>> {
+    let refused = |problem| {
+        ::std::boxed::Box::new(HeaderDecodeError {
+            status,
+            name: row.name,
+            origin: row.origin,
+            problem,
+            headers: headers.clone(),
+        })
+    };
+    let value = match header_value(headers, row) {
+        Ok(Some(value)) => value,
+        Ok(None) if row.required => return Err(refused(HeaderProblem::Absent)),
+        // An absent optional header is `None`, which every optional field is typed to hold.
+        Ok(None) => ::serde_json::Value::Null,
+        Err(problem) => return Err(refused(problem)),
+    };
+    ::serde_json::from_value(value).map_err(|err| refused(HeaderProblem::Malformed(err)))
 }
 
 /// A form body whose value is not an object.
@@ -731,6 +1001,352 @@ mod tests {
         )
         .build();
         assert!(invalid.is_err());
+    }
+
+    /// The fields a response arrived with, in order, repeated names included.
+    fn arrived(fields: &[(&'static str, &[u8])]) -> eyre::Result<::reqwest::header::HeaderMap> {
+        let mut headers = ::reqwest::header::HeaderMap::new();
+        for (name, value) in fields {
+            headers.append(*name, ::reqwest::header::HeaderValue::from_bytes(value)?);
+        }
+        Ok(headers)
+    }
+
+    /// The row of an optional header declared as one value its text is.
+    const TEXT: super::HeaderRow = super::HeaderRow {
+        name: "X-Note",
+        origin: "/paths/~1x/get/responses/200/headers/X-Note",
+        required: false,
+        json: false,
+        list: false,
+        spelled: false,
+    };
+
+    /// The group a lenient read records at, as a generated reader names it.
+    const GROUP: &str = "GetXOkHeaders";
+
+    /// One header read leniently, with what reading it recorded.
+    fn lenient<T: for<'de> super::Lenient<'de>>(
+        headers: &::reqwest::header::HeaderMap,
+        row: &super::HeaderRow,
+    ) -> (Option<T>, super::Degradations) {
+        let mut report = super::Degradations::rooted(ROOT);
+        let value = super::lenient_header(headers, &mut report, GROUP, row);
+        (value, report)
+    }
+
+    /// One header read strictly into a field of type `T`.
+    fn strict<T: ::serde::de::DeserializeOwned>(
+        headers: &::reqwest::header::HeaderMap,
+        row: &super::HeaderRow,
+    ) -> Result<T, Box<super::HeaderDecodeError>> {
+        super::strict_header(::reqwest::StatusCode::ACCEPTED, headers, row)
+    }
+
+    /// The only entry of a report, which is keyed at the header's own site.
+    fn only_entry(
+        report: &super::Degradations,
+    ) -> eyre::Result<super::super::degradations::Degradation<'_>> {
+        let mut entries = report.iter();
+        let entry = entries.next().ok_or_eyre("one entry")?;
+        eyre::ensure!(entries.next().is_none(), "one entry only: {report}");
+        assert_eq!(entry.site.type_name(), GROUP);
+        assert_eq!(entry.site.member(), None);
+        Ok(entry)
+    }
+
+    /// A string enum read the way a generated one is: an unlisted value kept, and reported.
+    #[derive(Debug, PartialEq, ::serde::Deserialize)]
+    enum Mode {
+        #[serde(rename = "fast")]
+        Fast,
+        #[serde(untagged)]
+        Unknown(String),
+    }
+
+    impl<'de> super::Lenient<'de> for Mode {
+        fn lenient(
+            content: super::super::Content<'de>,
+            site: Site,
+            report: &mut super::Degradations,
+        ) -> Result<Self, super::super::lenient::Problem> {
+            super::super::lenient::open_string(content, site, report, |mode| match mode {
+                Mode::Fast => None,
+                Mode::Unknown(raw) => Some(raw.as_str()),
+            })
+        }
+    }
+
+    /// A header declared as one value is its whole text, commas and all, which a `Link` and a
+    /// date both carry, under either decoding.
+    #[test_util::test]
+    fn a_header_declared_as_one_value_is_never_split_on_its_commas() {
+        let link = r#"<https://x.test/?page=2>; rel="next", <https://x.test/?page=9>; rel="last""#;
+        let headers = arrived(&[("x-note", link.as_bytes())])?;
+        assert_eq!(
+            strict::<Option<String>>(&headers, &TEXT)?.as_deref(),
+            Some(link)
+        );
+        let (value, report) = lenient::<String>(&headers, &TEXT);
+        assert_eq!(value.as_deref(), Some(link));
+        assert!(report.is_empty(), "{report}");
+    }
+
+    /// A list gathers its elements across every field it arrived in, as HTTP lets a sender split
+    /// one, with the whitespace around each element and the empty elements its syntax allows
+    /// dropped, and each element read the way the declaration reads its scalars.
+    #[test_util::test]
+    fn a_list_gathers_its_elements_across_every_field() {
+        let list = super::HeaderRow { list: true, ..TEXT };
+        let headers = arrived(&[("x-note", b"a, b,,"), ("x-note", b"\tc ")])?;
+        assert_eq!(
+            strict::<Option<Vec<String>>>(&headers, &list)?,
+            Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
+        );
+        let numbers = super::HeaderRow {
+            spelled: true,
+            ..list
+        };
+        let headers = arrived(&[("x-note", b"1,2"), ("x-note", b"3")])?;
+        assert_eq!(strict::<Vec<i64>>(&headers, &numbers)?, [1, 2, 3]);
+
+        // Leniently, an element that does not read is left out and counted, and the rest stay.
+        let headers = arrived(&[("x-note", b"1,two,3")])?;
+        let (value, report) = lenient::<Vec<i64>>(&headers, &numbers);
+        assert_eq!(value, Some(vec![1, 3]));
+        let entry = only_entry(&report)?;
+        assert_eq!(entry.kind, super::DegradationKind::SkippedElement);
+        assert_eq!(entry.site.origin(), TEXT.origin);
+    }
+
+    /// A header declared as one value that arrived in two fields is refused, never read as the
+    /// first or the last: a strict client fails the response, and a lenient one leaves the field
+    /// `None` and says why.
+    #[test_util::test]
+    fn a_singleton_that_arrives_repeated_is_refused() {
+        let headers = arrived(&[("x-note", b"first"), ("x-note", b"second")])?;
+        let refused = strict::<Option<String>>(&headers, &TEXT)
+            .err()
+            .ok_or_eyre("a repeated singleton is refused")?;
+        assert!(
+            matches!(
+                refused.problem(),
+                super::HeaderProblem::Repeated { count: 2 }
+            ),
+            "{refused:?}"
+        );
+        let (value, report) = lenient::<String>(&headers, &TEXT);
+        assert_eq!(value, None);
+        let entry = only_entry(&report)?;
+        assert_eq!(entry.kind, super::DegradationKind::Undecodable);
+        assert!(
+            entry
+                .samples
+                .iter()
+                .any(|sample| sample.contains("2 fields")),
+            "{report}"
+        );
+    }
+
+    /// A header declared with a JSON `content` is one document, read whole: its commas are the
+    /// document's own, and text that is not JSON does not read.
+    #[test_util::test]
+    fn a_json_content_header_is_one_document() {
+        let json = super::HeaderRow { json: true, ..TEXT };
+        let headers = arrived(&[("x-note", br#"{"side": 3, "tags": ["a,b", "c"]}"#)])?;
+        assert_eq!(
+            strict::<Option<::serde_json::Value>>(&headers, &json)?,
+            Some(::serde_json::json!({"side": 3, "tags": ["a,b", "c"]}))
+        );
+        let headers = arrived(&[("x-note", b"{not json")])?;
+        let refused = strict::<Option<::serde_json::Value>>(&headers, &json)
+            .err()
+            .ok_or_eyre("text that is not JSON is refused")?;
+        assert!(
+            matches!(refused.problem(), super::HeaderProblem::Malformed(_)),
+            "{refused:?}"
+        );
+        let (value, report) = lenient::<::serde_json::Value>(&headers, &json);
+        assert_eq!(value, None);
+        assert_eq!(
+            only_entry(&report)?.kind,
+            super::DegradationKind::Undecodable
+        );
+    }
+
+    /// A number or a boolean is the JSON its text spells, and text that spells neither is
+    /// malformed for its type; a header read as its text keeps text that spells one as the
+    /// string it is.
+    #[test_util::test]
+    fn a_number_or_a_boolean_reads_from_the_text_it_spells() {
+        let spelled = super::HeaderRow {
+            spelled: true,
+            ..TEXT
+        };
+        let header = |text: &'static str| arrived(&[("x-note", text.as_bytes())]);
+        assert_eq!(strict::<Option<i64>>(&header("30")?, &spelled)?, Some(30));
+        assert_eq!(strict::<Option<f64>>(&header("0.5")?, &spelled)?, Some(0.5));
+        assert_eq!(
+            strict::<Option<bool>>(&header("true")?, &spelled)?,
+            Some(true)
+        );
+        // A value its schema says nothing about is typed as its text, so `true` and `7` stay the
+        // strings a server wrote.
+        for text in ["true", "7"] {
+            assert_eq!(
+                strict::<Option<String>>(&header(text)?, &TEXT)?.as_deref(),
+                Some(text)
+            );
+        }
+
+        // `Retry-After: soon` where the description declares seconds
+        let soon = header("soon")?;
+        let refused = strict::<Option<i64>>(&soon, &spelled)
+            .err()
+            .ok_or_eyre("a malformed integer is refused")?;
+        assert_eq!(refused.status(), ::reqwest::StatusCode::ACCEPTED);
+        assert_eq!(refused.name(), "X-Note");
+        assert_eq!(refused.origin(), TEXT.origin);
+        assert!(matches!(
+            refused.problem(),
+            super::HeaderProblem::Malformed(_)
+        ));
+        assert_eq!(refused.headers(), &soon);
+        let (value, report) = lenient::<i64>(&soon, &spelled);
+        assert_eq!(value, None);
+        let entry = only_entry(&report)?;
+        assert_eq!(entry.kind, super::DegradationKind::Undecodable);
+        assert_eq!(entry.site.pointer(), TEXT.origin);
+        assert!(
+            entry.samples.iter().any(|sample| sample.contains("soon")),
+            "{report}"
+        );
+    }
+
+    /// A string enum reads its text, and an unlisted value lands in its open arm: a strict
+    /// client accepts it, and a lenient one keeps it and reports it at the header's site.
+    #[test_util::test]
+    fn a_string_enum_reads_its_text_and_keeps_an_unlisted_value() {
+        let fast = arrived(&[("x-note", b"fast")])?;
+        assert_eq!(strict::<Option<Mode>>(&fast, &TEXT)?, Some(Mode::Fast));
+        let medium = arrived(&[("x-note", b"medium")])?;
+        assert_eq!(
+            strict::<Option<Mode>>(&medium, &TEXT)?,
+            Some(Mode::Unknown("medium".to_owned()))
+        );
+        let (value, report) = lenient::<Mode>(&medium, &TEXT);
+        assert_eq!(value, Some(Mode::Unknown("medium".to_owned())));
+        let entry = only_entry(&report)?;
+        assert_eq!(entry.kind, super::DegradationKind::UnknownEnumValue);
+        assert_eq!(entry.samples, ["medium"]);
+    }
+
+    /// A required header that is absent fails a strict response and is reported by a lenient
+    /// one; an optional one that is absent is `None` and no drift; a field that is not UTF-8
+    /// reads as nothing, and one that is reads as its text.
+    #[test_util::test]
+    fn absence_is_drift_only_where_the_description_requires_the_header() {
+        let required = super::HeaderRow {
+            required: true,
+            ..TEXT
+        };
+        let none = arrived(&[("x-other", b"undeclared")])?;
+        let refused = strict::<String>(&none, &required)
+            .err()
+            .ok_or_eyre("an absent required header is refused")?;
+        assert!(matches!(refused.problem(), super::HeaderProblem::Absent));
+        let (value, report) = lenient::<String>(&none, &required);
+        assert_eq!(value, None);
+        assert_eq!(
+            only_entry(&report)?.kind,
+            super::DegradationKind::RequiredAbsent
+        );
+
+        assert_eq!(strict::<Option<String>>(&none, &TEXT)?, None);
+        let (value, report) = lenient::<String>(&none, &TEXT);
+        assert_eq!(value, None);
+        assert!(report.is_empty(), "{report}");
+
+        let latin = arrived(&[("x-note", b"na\xefve")])?;
+        let refused = strict::<Option<String>>(&latin, &TEXT)
+            .err()
+            .ok_or_eyre("a field that is not UTF-8 is refused")?;
+        assert!(matches!(refused.problem(), super::HeaderProblem::NotText));
+        let utf8 = arrived(&[("x-note", "naïve".as_bytes())])?;
+        assert_eq!(
+            strict::<Option<String>>(&utf8, &TEXT)?.as_deref(),
+            Some("naïve")
+        );
+    }
+
+    /// A header read leniently joins the response's own report, beside what the body's decode
+    /// recorded, so one look at the response sees both.
+    #[test_util::test]
+    fn a_lenient_header_read_joins_the_response_report() {
+        let headers = arrived(&[("x-note", b"soon")])?;
+        let mut body = super::Degradations::rooted(ROOT);
+        body.record(
+            Site::new("Pet", "/components/schemas/Pet", Some("name")),
+            super::DegradationKind::RequiredAbsent,
+            None,
+            false,
+        );
+        let mut response = super::ResponseValue::decoded(
+            ::reqwest::StatusCode::OK,
+            headers,
+            super::Decoded {
+                value: (),
+                degradations: body,
+            },
+            None,
+        );
+        let spelled = super::HeaderRow {
+            spelled: true,
+            ..TEXT
+        };
+        let read: Option<i64> = response.read_headers(|headers, report| {
+            super::lenient_header(headers, report, GROUP, &spelled)
+        });
+        assert_eq!(read, None);
+        assert_eq!(
+            response.degradations().len(),
+            2,
+            "{}",
+            response.degradations()
+        );
+        assert_eq!(response.degradations().root(), ROOT);
+    }
+
+    /// A header error says which header and status, keeps the status the client's error reports,
+    /// and leaves the headers out of its `Debug`, any of which can carry a credential.
+    #[test_util::test]
+    fn a_header_error_names_its_header_and_keeps_the_rest_out_of_debug() {
+        let headers = arrived(&[
+            ("x-note", b"first"),
+            ("x-note", b"second"),
+            ("x-token", b"s3cr3t"),
+        ])?;
+        let refused = strict::<Option<String>>(&headers, &TEXT)
+            .err()
+            .ok_or_eyre("a repeated singleton is refused")?;
+        assert_eq!(
+            refused.to_string(),
+            "the `X-Note` header of the 202 Accepted response does not match its declaration"
+        );
+        let cause = ::std::error::Error::source(&*refused).map(ToString::to_string);
+        assert_eq!(
+            cause.as_deref(),
+            Some("the header arrived in 2 fields, where the description declares one value")
+        );
+        let error: super::Error<()> = refused.into();
+        assert_eq!(error.status(), Some(::reqwest::StatusCode::ACCEPTED));
+        let debug = format!("{error:?}");
+        assert!(debug.contains("HeaderDecode"), "{debug}");
+        assert!(!debug.contains("s3cr3t"), "{debug}");
+        let super::Error::HeaderDecode(refused) = error else {
+            eyre::bail!("expected a header error, got {error:?}");
+        };
+        assert_eq!(refused.headers().get_all("x-note").iter().count(), 2);
     }
 
     /// A request's own limit wins over the client's, the client's applies where the request set
