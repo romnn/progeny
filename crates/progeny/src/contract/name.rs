@@ -81,6 +81,15 @@ impl RustIdent {
         stem
     }
 
+    /// A type named by a [`type_stem`](Self::type_stem) and a tail, verbatim, as the renderers
+    /// spell it: the stem `GetMe` and the tail `Params` are `GetMeParams`.
+    ///
+    /// `tail` is a non-empty run of ASCII letters and digits starting with an uppercase letter,
+    /// so the name is an identifier and never a reserved word.
+    pub(crate) fn stem_type(stem: &str, tail: &str) -> Self {
+        Self(format!("{stem}{tail}"))
+    }
+
     /// A [`type_stem`](Self::type_stem) as an enum variant on its own.
     ///
     /// Verbatim, except that a reserved word takes the trailing underscore every other identifier

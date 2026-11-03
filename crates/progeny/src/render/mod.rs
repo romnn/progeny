@@ -79,7 +79,8 @@ pub(crate) fn run(
     // Under the same gate as the client and regardless of `Emit`: the module has no dependency,
     // so a flag would be a knob nothing needs, and nothing to call is nothing to reflect.
     let operations_body = has_operations.then(|| operations::render(api));
-    let client_body = http.then(|| client::render(api, contracts, config, decoding));
+    let client_body =
+        http.then(|| client::render(api, contracts, config, client_decoding(api, decoding)));
     let server_body = serves.then(|| server::render(api, contracts, config));
     let mut modules = vec![("types", types_body.clone())];
     for (name, body) in [
@@ -256,7 +257,7 @@ fn workspace_files(
                 reflection: reflection.as_ref(),
                 body,
             },
-            decoding,
+            client_decoding(api, decoding),
             streams,
         );
     }
@@ -278,20 +279,17 @@ fn workspace_files(
 /// How the generated support decodes responses.
 ///
 /// The configuration's choice, narrowed by what there is to decode: lenient decoding with no
-/// JSON response anywhere and no read form has nothing to run, and the decoder is left out of
-/// the support module rather than shipped for nobody. A JSON arm with no schema counts — it
-/// decodes as arbitrary JSON, leniently like everything else.
+/// JSON response anywhere, no typed response header and no read form has nothing to run, and the
+/// decoder is left out of the support module rather than shipped for nobody. A JSON arm with no
+/// schema counts — it decodes as arbitrary JSON, leniently like everything else — and so does a
+/// typed header of any type, which a scalar's needs as much as a read form's.
+/// A read form counts on its own, wherever it is reached from, because its `Lenient` impl names
+/// the decoder.
 fn decoding(contracts: &Contracts, api: &ApiModel, config: &Config) -> crate::support::Decoding {
-    let json_arms = api.operations().iter().any(|operation| {
-        operation
-            .responses
-            .arms
-            .iter()
-            .chain(&operation.responses.default)
-            .any(|arm| arm.body.json_type().is_some())
-    });
     match config.decoding {
-        Decoding::Lenient if contracts.has_read_forms() || json_arms => {
+        Decoding::Lenient
+            if contracts.has_read_forms() || reads_json(api) || reads_typed_headers(api) =>
+        {
             crate::support::Decoding::Lenient(manifest::crates_named(
                 Some(contracts),
                 Some(api),
@@ -300,6 +298,45 @@ fn decoding(contracts: &Contracts, api: &ApiModel, config: &Config) -> crate::su
         }
         Decoding::Lenient | Decoding::Strict => crate::support::Decoding::Strict,
     }
+}
+
+/// How the client reads responses: as [`decoding`] says where it reads a JSON body or a typed
+/// header, and strictly where it reads neither.
+///
+/// Narrower than the type layer's, whose read forms need the lenient decoder even where only a
+/// header the client reads raw reaches them, such as an object left to the raw headers: with
+/// nothing typed to read, a lenient client would ship an observer and a decoder nothing calls.
+fn client_decoding(api: &ApiModel, decoding: crate::support::Decoding) -> crate::support::Decoding {
+    if reads_json(api) || reads_typed_headers(api) {
+        decoding
+    } else {
+        crate::support::Decoding::Strict
+    }
+}
+
+/// Whether any response arm is a JSON body, which a client decodes as its configuration says.
+fn reads_json(api: &ApiModel) -> bool {
+    api.operations().iter().any(|operation| {
+        operation
+            .responses
+            .arms
+            .iter()
+            .chain(&operation.responses.default)
+            .any(|arm| arm.body.json_type().is_some())
+    })
+}
+
+/// Whether any response arm declares a header with a typed field, which a client decodes as its
+/// configuration says, whatever the arm's body is.
+fn reads_typed_headers(api: &ApiModel) -> bool {
+    api.operations().iter().any(|operation| {
+        operation
+            .responses
+            .arms
+            .iter()
+            .chain(&operation.responses.default)
+            .any(|arm| !arm.headers.is_empty())
+    })
 }
 
 /// The types crate of a workspace, as the path segment its edge crates name it by.
@@ -317,9 +354,13 @@ fn insert_types_crate(
     operations_body: Option<&TokenStream>,
 ) {
     let directory = Utf8PathBuf::from(format!("{}-types", config.package.name));
+    // What the support module below implements beyond the types, so the manifest declares the
+    // crates it names from the decisions that emit it.
+    let mut supported = decoding.lenient().unwrap_or_default();
+    supported.time |= rfc3339;
     files.insert(
         directory.join("Cargo.toml"),
-        manifest::types_crate(contracts, config, rfc3339),
+        manifest::types_crate(contracts, config, supported),
     );
     // `pub` for the same reason the one-crate packaging makes it public: an upload body field is
     // `support::Upload`, and a consumer who has to fill that field has to be able to name the
@@ -482,6 +523,9 @@ fn client_use(api: &ApiModel) -> crate::support::ClientUse {
                 crate::api::ResponseBody::Text { .. } => used.text_response = true,
                 crate::api::ResponseBody::Bytes { .. } => used.byte_response = true,
             }
+            if !arm.headers.is_empty() {
+                used.response_header = true;
+            }
         }
         for parameter in &operation.params {
             note_style(&mut used.styles, parameter.style.style());
@@ -533,6 +577,9 @@ fn server_use(api: &ApiModel) -> crate::support::ServerUse {
         {
             used.media_type_gate = true;
         }
+        if operation.body.is_some() || !operation.params.is_empty() {
+            used.decodes = true;
+        }
         match &operation.body {
             Some(crate::api::BodyContract::Json { .. }) => used.json = true,
             Some(crate::api::BodyContract::Form { specs, .. }) => {
@@ -573,6 +620,10 @@ fn server_use(api: &ApiModel) -> crate::support::ServerUse {
                 crate::api::ResponseBody::Bytes { .. } => used.byte_response = true,
                 crate::api::ResponseBody::Json { .. } => used.json_response = true,
                 crate::api::ResponseBody::Empty => used.empty_response = true,
+            }
+            // Written through `header_value`, which names no style variant.
+            if !arm.headers.is_empty() {
+                used.response_header = true;
             }
         }
         // An operation that declares no responses answers `204` with nothing.
@@ -2990,10 +3041,341 @@ mod tests {
         );
         // A code with its own exact arm is that arm's, not the range's.
         assert!(
-            flat.contains("Self::Status4xx{status,body}=>{ifstatus/100!=4u16||status==400u16"),
+            flat.contains("Self::Status4xx{status,headers}=>{ifstatus/100!=4u16||status==400u16"),
             "{server}"
         );
-        assert!(flat.contains("Self::Ok(body)=>"), "{server}");
+        assert!(flat.contains("Self::Ok{headers}=>"), "{server}");
+    }
+
+    /// The server module of one operation whose arms declare headers of several kinds, and one
+    /// arm of each shape: a body, no body, a range and a `default`.
+    fn headers_server() -> eyre::Result<String> {
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/analyses": {"post": {
+                    "operationId": "createAnalysis",
+                    "responses": {
+                        "202": {
+                            "description": "accepted",
+                            "headers": {
+                                "Location": {"required": true, "schema": {"type": "string"}},
+                                "Retry-After": {"schema": {"type": "integer"}},
+                                "X-Shape": {"content": {"application/json": {"schema": {
+                                    "type": "object",
+                                    "properties": {"side": {"type": "integer"}},
+                                }}}},
+                                "X-Old": {"deprecated": true, "schema": {"type": "string"}},
+                                "Content-Type": {"schema": {"type": "string"}},
+                            },
+                            "content": {"application/json": {"schema": {"type": "object"}}},
+                        },
+                        "204": {
+                            "description": "nothing",
+                            "headers": {"X-Outcome": {"schema": {"type": "string"}}},
+                        },
+                        "4XX": {"description": "client error"},
+                        "default": {
+                            "description": "else",
+                            "content": {"application/json": {"schema": {"type": "object"}}},
+                        },
+                    },
+                }}},
+            }),
+            &Config::default(),
+        )?;
+        let types = generated
+            .get(camino::Utf8Path::new("src/types.rs"))
+            .ok_or_eyre("the types")?;
+        // The types a workspace's shared crate would ship name no HTTP crate: groups are the
+        // server's.
+        eyre::ensure!(!types.contains("Headers"), "{types}");
+        Ok(generated
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?
+            .clone())
+    }
+
+    /// An arm's declared headers become a group of optional typed fields beside `raw`, and the
+    /// writer is handed each typed header by its wire name.
+    /// A declared `Content-Type` is no field at all.
+    #[test_util::test]
+    fn declared_headers_become_a_group_on_their_arm() {
+        let server = headers_server()?;
+        let flat: String = server.split_whitespace().collect();
+
+        // The group: optional typed fields, never `Content-Type`, and `raw`.
+        assert!(
+            flat.contains("#[derive(Debug,Clone,Default)]pubstructCreateAnalysisAcceptedHeaders{"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("publocation:::std::option::Option<String>,"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("pubretry_after:::std::option::Option<i64>,"),
+            "{server}"
+        );
+        assert!(flat.contains("pubraw:::axum::http::HeaderMap,"), "{server}");
+        assert!(!flat.contains("content_type"), "{server}");
+        assert!(server.contains("The description requires it"), "{server}");
+
+        // Each typed header is handed over by its wire name, a JSON document as its text, and a
+        // deprecated one is written without a warning in the consumer's build.
+        assert!(
+            flat.contains(r#"headers.typed("Location",false,::serde_json::to_value(value));"#),
+            "{server}"
+        );
+        assert!(
+            flat.contains(
+                r#"headers.typed("X-Shape",false,::serde_json::to_string(value).map(::serde_json::Value::String),);"#
+            ),
+            "{server}"
+        );
+        assert!(flat.contains("#[deprecated]pubx_old:"), "{server}");
+        assert!(
+            flat.contains("#[expect(deprecated,reason=")
+                && flat.contains("fninto_response_headers"),
+            "{server}"
+        );
+    }
+
+    /// Every variant is a struct variant holding its arm's group, or a bare header map where the
+    /// arm declares none, with no `body` where the arm declares no content, and its writer is
+    /// handed the headers to attach after the body.
+    #[test_util::test]
+    fn every_variant_carries_its_headers_to_the_writer() {
+        let server = headers_server()?;
+        let flat: String = server.split_whitespace().collect();
+
+        // The variants
+        assert!(
+            flat.contains("Accepted{headers:CreateAnalysisAcceptedHeaders,body:Box<"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("NoContent{headers:CreateAnalysisNoContentHeaders}"),
+            "{server}"
+        );
+        assert!(
+            flat.contains(
+                "Status4xx{status:::std::primitive::u16,headers:::axum::http::HeaderMap}"
+            ),
+            "{server}"
+        );
+        assert!(
+            flat.contains(
+                "Default{status:::std::primitive::u16,headers:::axum::http::HeaderMap,body:"
+            ),
+            "{server}"
+        );
+
+        // The writers
+        assert!(
+            flat.contains(
+                r#"Self::Accepted{headers,body}=>{support::respond_json(202u16,"application/json",&body,headers.into_response_headers(),)"#
+            ),
+            "{server}"
+        );
+        assert!(
+            flat.contains(
+                "Self::NoContent{headers}=>{support::respond_empty(204u16,headers.into_response_headers())"
+            ),
+            "{server}"
+        );
+        assert!(
+            flat.contains("support::respond_empty(status,support::ResponseHeaders::new(headers))"),
+            "{server}"
+        );
+    }
+
+    /// The named items one generated module defines at its top level, repeats included, with
+    /// the names its `use` items bring in.
+    fn top_level_names(source: &str) -> eyre::Result<Vec<String>> {
+        let file = syn::parse_file(source)?;
+        let mut names = Vec::new();
+        for item in &file.items {
+            match item {
+                syn::Item::Struct(it) => names.push(it.ident.to_string()),
+                syn::Item::Enum(it) => names.push(it.ident.to_string()),
+                syn::Item::Trait(it) => names.push(it.ident.to_string()),
+                syn::Item::Type(it) => names.push(it.ident.to_string()),
+                syn::Item::Fn(it) => names.push(it.sig.ident.to_string()),
+                syn::Item::Use(it) => use_names(&it.tree, &mut names),
+                _ => {}
+            }
+        }
+        Ok(names)
+    }
+
+    /// The names a `use` tree brings into scope.
+    fn use_names(tree: &syn::UseTree, names: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => use_names(&path.tree, names),
+            syn::UseTree::Name(name) => names.push(name.ident.to_string()),
+            syn::UseTree::Rename(rename) => names.push(rename.rename.to_string()),
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    use_names(tree, names);
+                }
+            }
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+
+    /// A description whose arm types would meet other operations' types renders a client and a
+    /// server that each define every name once, which is what rustc requires of a module.
+    ///
+    /// `foo`'s `400` payload would be `fooBad`'s request builder, and its `500` payload the enum
+    /// of `fooInternalServer`'s two failures; each takes a suffix, with its header group beside it.
+    #[test_util::test]
+    fn arm_types_never_take_a_name_another_type_of_the_module_has() {
+        let typed = json!({"X-Reason": {"schema": {"type": "string"}}});
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {
+                    "/a": {"get": {"operationId": "foo", "responses": {
+                        "204": {"description": "done"},
+                        "400": {"description": "refused", "headers": typed},
+                        "500": {"description": "failed", "headers": typed},
+                    }}},
+                    "/b": {"get": {"operationId": "fooBad", "responses": {
+                        "204": {"description": "done"},
+                    }}},
+                    "/c": {"get": {"operationId": "fooInternalServer", "responses": {
+                        "204": {"description": "done"},
+                        "409": {"description": "conflict"},
+                        "500": {"description": "failed"},
+                    }}},
+                },
+            }),
+            &Config::default(),
+        )?;
+        for module in ["src/client.rs", "src/server.rs"] {
+            let source = generated
+                .get(camino::Utf8Path::new(module))
+                .ok_or_eyre(format!("the crate has `{module}`"))?;
+            let names = top_level_names(source)?;
+            let mut seen = std::collections::BTreeSet::new();
+            let repeated: Vec<&String> = names.iter().filter(|name| !seen.insert(*name)).collect();
+            assert!(repeated.is_empty(), "`{module}` repeats {repeated:?}");
+        }
+        let client = &generated[camino::Utf8Path::new("src/client.rs")];
+        let flat: String = client.split_whitespace().collect();
+        // The other operations keep their names; the payloads and groups are the ones numbered.
+        for name in [
+            "pubstructFooBadRequest<'a>",
+            "pubenumFooInternalServerError{",
+            "pubstructFooBadRequest2{",
+            "pubstructFooBadRequest2Headers{",
+            "pubstructFooInternalServerError2{",
+            "pubstructFooInternalServerError2Headers{",
+        ] {
+            assert!(
+                flat.contains(name),
+                "the client defines `{name}`:\n{client}"
+            );
+        }
+        let server: String = generated[camino::Utf8Path::new("src/server.rs")]
+            .split_whitespace()
+            .collect();
+        assert!(
+            server.contains("pubstructFooBadRequest2Headers{"),
+            "{server}"
+        );
+        assert!(
+            server.contains("BadRequest{headers:FooBadRequest2Headers}"),
+            "{server}"
+        );
+    }
+
+    /// An operation declaring no responses answers `204` with whatever headers its handler
+    /// writes.
+    #[test_util::test]
+    fn the_synthesized_no_content_carries_headers() {
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/ping": {"get": {"operationId": "ping"}}},
+            }),
+            &Config::default(),
+        )?;
+        let server = generated
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?;
+        let flat: String = server.split_whitespace().collect();
+        assert!(
+            flat.contains("NoContent{headers:::axum::http::HeaderMap}"),
+            "{server}"
+        );
+        assert!(
+            flat.contains(
+                "Self::NoContent{headers}=>{support::respond_empty(204u16,support::ResponseHeaders::new(headers))"
+            ),
+            "{server}"
+        );
+    }
+
+    /// A `default` answered with a status another arm claims is refused `500`, because the client
+    /// would decode it as that arm's body.
+    ///
+    /// Both kinds of claim: an exact code (`202`), and a code inside a range arm's class (`404`
+    /// against `4XX`).
+    /// An exact code inside a claimed class is spelled once, through the class, and adjacent
+    /// claims merge, so the generated pattern has no alternative another covers or continues.
+    #[test_util::test]
+    fn a_default_answered_with_a_claimed_status_is_refused() {
+        let problem = json!({"application/problem+json": {"schema": {"type": "object"}}});
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/analyses": {"post": {
+                    "operationId": "createAnalysis",
+                    "responses": {
+                        "202": {"description": "accepted", "content": {
+                            "application/json": {"schema": {"type": "object"}},
+                        }},
+                        "404": {"description": "missing", "content": problem.clone()},
+                        "4XX": {"description": "client error", "content": problem.clone()},
+                        "5XX": {"description": "server error", "content": problem.clone()},
+                        "default": {"description": "anything else", "content": problem},
+                    },
+                }}},
+            }),
+            &Config::default(),
+        )?;
+        let server = generated
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?;
+        let flat: String = server.split_whitespace().collect();
+        assert!(
+            flat.contains(
+                "Self::Default{status,headers,body}=>{if::std::matches!(status,202u16|400u16..=599u16){"
+            ),
+            "{server}"
+        );
+        assert!(
+            flat.contains("INTERNAL_SERVER_ERROR,::std::format!(\"thehandleranswered`default`"),
+            "{server}"
+        );
+
+        // A `default` beside no other arm claims every status, and is sent unchecked.
+        let alone = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/analyses": {"post": {
+                    "operationId": "createAnalysis",
+                    "responses": {"default": {"description": "anything"}},
+                }}},
+            }),
+            &Config::default(),
+        )?;
+        let alone = alone
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?;
+        assert!(!alone.contains("matches!"), "{alone}");
     }
 
     /// A parameter declared with a JSON `content` travels as one value, the document's text, and
@@ -4004,12 +4386,71 @@ mod tests {
         assert!(client.contains("::bytes::Bytes"), "{client}");
         let server = &rendered[camino::Utf8Path::new("src/server.rs")];
         assert!(server.contains("Box<::bytes::Bytes>"), "{server}");
+        let flat: String = server.split_whitespace().collect();
         assert!(
-            server.contains(r#"respond_bytes(200u16, "application/octet-stream""#),
+            flat.contains(r#"respond_bytes(200u16,"application/octet-stream""#),
             "{server}"
         );
         let types = &rendered[camino::Utf8Path::new("src/types.rs")];
         assert!(!types.contains("uuid::Uuid"), "{types}");
+    }
+
+    /// Every crate of a workspace declares each format crate its source names, including a types
+    /// crate whose lenient decoder reads a leaf only a typed header holds.
+    ///
+    /// A typed header's scalar gets no named contract, so nothing in the types it ships names
+    /// `uuid::Uuid` or `jiff::Timestamp`. Its support module still implements the lenient
+    /// decoder for both, because the client reads the header through the trait the types crate
+    /// owns, and a manifest computed from the named types alone left the crate uncompilable.
+    #[test_util::test]
+    fn every_workspace_crate_declares_the_format_crates_its_source_names() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/jobs": {"post": {
+                "operationId": "startJob",
+                "responses": {"204": {"description": "started", "headers": {
+                    "X-Request-Id": {"schema": {"type": "string", "format": "uuid"}},
+                    "X-Started": {"schema": {"type": "string", "format": "date-time"}},
+                }}},
+            }}},
+        });
+        let config = Config {
+            packaging: Packaging::Workspace,
+            formats: crate::config::Formats {
+                uuid: crate::config::UuidCrate::Uuid,
+                date_time: crate::config::DateTimeCrate::Jiff,
+                ..crate::config::Formats::default()
+            },
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+
+        // The premise: the types crate implements the lenient decoder for both leaves.
+        let types_support = rendered
+            .get(camino::Utf8Path::new("api-types/src/support.rs"))
+            .ok_or_eyre("the types crate ships a support module")?;
+        assert!(types_support.contains("uuid::Uuid"), "{types_support}");
+        assert!(types_support.contains("jiff::Timestamp"), "{types_support}");
+
+        // Each crate's manifest declares every format crate one of its source files names.
+        for krate in ["api-types", "api-client", "api-server"] {
+            let manifest = rendered
+                .get(camino::Utf8PathBuf::from(format!("{krate}/Cargo.toml")).as_path())
+                .ok_or_eyre(format!("the workspace has `{krate}`"))?;
+            let source: String = rendered
+                .iter()
+                .filter(|(path, _)| path.starts_with(krate) && path.extension() == Some("rs"))
+                .map(|(_, text)| text.as_str())
+                .collect();
+            for dependency in ["uuid", "jiff", "chrono", "indexmap"] {
+                if source.contains(&format!("{dependency}::")) {
+                    assert!(
+                        manifest.contains(&format!("\n{dependency} = ")),
+                        "`{krate}` names `{dependency}` and does not declare it:\n{manifest}"
+                    );
+                }
+            }
+        }
     }
 
     #[test_util::test]
@@ -4313,12 +4754,15 @@ mod tests {
         assert!(!client.contains("support::decode_json("), "{client}");
 
         let server = &rendered[camino::Utf8Path::new("src/server.rs")];
+        let flat: String = server.split_whitespace().collect();
         assert!(
-            server.contains("Ok(Box<super::types::read::Page>)"),
+            flat.contains("Ok{headers:::axum::http::HeaderMap,body:Box<super::types::read::Page>"),
             "{server}"
         );
         assert!(
-            server.contains("Created(Box<super::types::read::Pet>)"),
+            flat.contains(
+                "Created{headers:::axum::http::HeaderMap,body:Box<super::types::read::Pet>"
+            ),
             "{server}"
         );
         assert!(
@@ -4363,6 +4807,389 @@ mod tests {
         assert!(support.contains("pub mod degradations {"), "{support}");
         assert!(!support.contains("fn decode_lenient"), "{support}");
         assert!(support.contains("degradations: Degradations,"), "{support}");
+    }
+
+    /// A client that reads no JSON body but a typed header reads that header leniently, so it is
+    /// rendered lenient: its workspace crate takes the report vocabulary from the types crate and
+    /// expects the body decoder it never calls dead, rather than leaving it out of a runtime the
+    /// header decoder shares.
+    /// A server whose operations decode nothing expects its request reader dead.
+    #[test_util::test]
+    fn a_client_that_reads_only_typed_headers_is_lenient() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/jobs": {"post": {
+                "operationId": "startJob",
+                "responses": {"204": {"description": "started", "headers": {
+                    "X-Mode": {"schema": {"$ref": "#/components/schemas/Mode"}},
+                }}},
+            }}},
+            "components": {"schemas": {"Mode": {"type": "string", "enum": ["fast", "slow"]}}},
+        });
+        let config = Config {
+            packaging: Packaging::Workspace,
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+        let read = |path: &str| {
+            rendered
+                .get(camino::Utf8Path::new(path))
+                .ok_or_eyre(format!("the workspace has `{path}`"))
+        };
+
+        // The type layer decodes the header's type leniently.
+        let types = read("api-types/src/types.rs")?;
+        assert!(types.contains("pub mod read {"), "{types}");
+        assert!(read("api-types/src/support.rs")?.contains("pub mod lenient {"));
+
+        // The client reads the header leniently, through the types crate's vocabulary, and
+        // decodes no body leniently.
+        let client_support = read("api-client/src/support.rs")?;
+        assert!(
+            client_support.contains(
+                "pub use super::types::{Decoded, DegradationKind, Degradations, Lenient, Site};"
+            ),
+            "{client_support}"
+        );
+        let flat: String = client_support.split_whitespace().collect();
+        assert!(
+            flat.contains(
+                "#[expect(dead_code,reason=\"thisdescriptiondeclaresnoJSONresponsebody\")]pubasyncfndecode_lenient<"
+            ),
+            "{client_support}"
+        );
+        assert!(flat.contains("pubfnlenient_header<"), "{client_support}");
+        assert!(!flat.contains("fnstrict_header"), "{client_support}");
+        let client = read("api-client/src/client.rs")?;
+        assert!(
+            !client.contains("a strict decode tolerates nothing"),
+            "{client}"
+        );
+        assert!(
+            client.contains("pub x_mode: ::std::option::Option<super::types::read::Mode>,"),
+            "{client}"
+        );
+
+        // The server types the header and decodes no request.
+        let server = read("api-server/src/server.rs")?;
+        assert!(
+            server.contains("pub x_mode: ::std::option::Option<super::types::read::Mode>,"),
+            "{server}"
+        );
+        let server_support: String = read("api-server/src/support.rs")?
+            .split_whitespace()
+            .collect();
+        assert!(
+            server_support.contains(
+                "#[expect(dead_code,reason=\"thisdescriptiondeclaresnoparameterandnorequestbody\")]pubasyncfnreceive("
+            ),
+            "{server_support}"
+        );
+    }
+
+    /// A read form only a header left to the raw headers reaches still needs the lenient decoder,
+    /// which its `Lenient` impl names, but a client with nothing typed to read has nothing to read
+    /// leniently: it is rendered strict, and a workspace's client crate ships neither decoder nor
+    /// observer call for nobody.
+    #[test_util::test]
+    fn a_read_form_only_an_untyped_header_reaches_leaves_the_client_strict() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/jobs": {"post": {
+                "operationId": "startJob",
+                "responses": {"204": {"description": "started", "headers": {
+                    "X-Shape": {"schema": {"$ref": "#/components/schemas/Shape"}},
+                }}},
+            }}},
+            "components": {"schemas": {"Shape": {
+                "type": "object",
+                "required": ["side"],
+                "properties": {"side": {"type": "integer"}},
+            }}},
+        });
+        let config = Config {
+            packaging: Packaging::Workspace,
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+        let read = |path: &str| {
+            rendered
+                .get(camino::Utf8Path::new(path))
+                .ok_or_eyre(format!("the workspace has `{path}`"))
+        };
+
+        // The type layer decodes the header's type leniently.
+        let types = read("api-types/src/types.rs")?;
+        assert!(types.contains("pub mod read {"), "{types}");
+
+        // The client decodes nothing leniently, so it carries its own report and no decoder.
+        let client_support = read("api-client/src/support.rs")?;
+        assert!(
+            !client_support.contains("fn decode_lenient"),
+            "{client_support}"
+        );
+        assert!(
+            client_support.contains("pub use degradations::{Decoded, Degradations};"),
+            "{client_support}"
+        );
+        let client = read("api-client/src/client.rs")?;
+        assert!(
+            client.contains("a strict decode tolerates nothing"),
+            "{client}"
+        );
+        assert!(!client.contains("Headers"), "{client}");
+    }
+
+    /// The client module of one operation whose arms declare headers of every typed shape, with a
+    /// JSON success, a header-only success and a `default` without headers, generated with the
+    /// given decoding; and a paged listing whose page declares a header.
+    fn headers_client(decoding: crate::config::Decoding) -> eyre::Result<String> {
+        let config = Config {
+            decoding,
+            pagination: [(
+                "list_pets".to_owned(),
+                crate::config::Pagination {
+                    cursor_param: "cursor".to_owned(),
+                    next_cursor: "next".to_owned(),
+                    items: "items".to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {
+                    "/analyses": {"post": {
+                        "operationId": "createAnalysis",
+                        "responses": {
+                            "202": {
+                                "description": "accepted",
+                                "headers": {
+                                    "Location": {"required": true, "schema": {"type": "string"}},
+                                    "Retry-After": {"schema": {"type": "integer"}},
+                                    "X-Tags": {"schema": {"type": "array", "items": {"type": "string"}}},
+                                    "X-Shape": {"content": {"application/json": {"schema": {
+                                        "type": "object",
+                                        "properties": {"side": {"type": "integer"}},
+                                    }}}},
+                                    "X-Old": {"deprecated": true, "schema": {"type": "string"}},
+                                },
+                                "content": {"application/json": {"schema": {
+                                    "$ref": "#/components/schemas/Analysis",
+                                }}},
+                            },
+                            "204": {
+                                "description": "nothing",
+                                "headers": {"X-Outcome": {"schema": {"type": "string"}}},
+                            },
+                            "default": {
+                                "description": "else",
+                                "content": {"application/json": {"schema": {"type": "object"}}},
+                            },
+                        },
+                    }},
+                    "/motd": {"get": {
+                        "operationId": "getMotd",
+                        "responses": {"200": {
+                            "description": "text",
+                            "headers": {"X-Edition": {"schema": {"type": "integer"}}},
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        }},
+                    }},
+                    "/pets": {"get": {
+                        "operationId": "listPets",
+                        "parameters": [
+                            {"name": "cursor", "in": "query", "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {
+                            "description": "a page",
+                            "headers": {"X-Total": {"schema": {"type": "integer"}}},
+                            "content": {"application/json": {"schema": {
+                                "$ref": "#/components/schemas/Page",
+                            }}},
+                        }},
+                    }},
+                },
+                "components": {"schemas": {
+                    "Analysis": {"type": "object", "required": ["id"],
+                                 "properties": {"id": {"type": "string"}}},
+                    "Page": {"type": "object", "required": ["items"],
+                             "properties": {"items": {"type": "array", "items": {"type": "string"}},
+                                            "next": {"type": "string"}}},
+                }},
+            }),
+            &config,
+        )?;
+        let types = generated
+            .get(camino::Utf8Path::new("src/types.rs"))
+            .ok_or_eyre("the types")?;
+        // The types a workspace's shared crate would ship name no HTTP crate: groups and payloads
+        // are the client's.
+        eyre::ensure!(!types.contains("Headers"), "{types}");
+        Ok(generated
+            .get(camino::Utf8Path::new("src/client.rs"))
+            .ok_or_eyre("a client")?
+            .clone())
+    }
+
+    /// Read leniently, an arm that declares headers decodes to a payload of its body and a group
+    /// of optional typed fields, read from rows that say how each spells its value, and the
+    /// observer is shown the response once its headers' drift has joined its body's — for a
+    /// header-only `204` as much as for a JSON body.
+    /// An arm that declares none keeps its plain body.
+    #[test_util::test]
+    fn a_lenient_client_reads_typed_headers_into_the_arm_payload() {
+        let client = headers_client(crate::config::Decoding::Lenient)?;
+        let flat: String = client.split_whitespace().collect();
+
+        // The group: every field optional, a deprecated header deprecated, typed fields only
+        assert!(
+            flat.contains("pubstructCreateAnalysisAcceptedHeaders{"),
+            "{client}"
+        );
+        assert!(
+            flat.contains("publocation:::std::option::Option<String>,"),
+            "{client}"
+        );
+        assert!(
+            flat.contains("pubretry_after:::std::option::Option<i64>,"),
+            "{client}"
+        );
+        assert!(
+            flat.contains("pubx_tags:::std::option::Option<Vec<String>>,"),
+            "{client}"
+        );
+        assert!(flat.contains("#[deprecated]pubx_old:"), "{client}");
+        assert!(!flat.contains("pubraw:"), "{client}");
+        assert!(
+            client.contains("a response without it reads as `None`"),
+            "{client}"
+        );
+
+        // The reader: one row per header, recorded at the group's site
+        assert!(
+            flat.contains(
+                "fnread(headers:&::reqwest::header::HeaderMap,report:&mutDegradations)->Self{"
+            ),
+            "{client}"
+        );
+        assert!(
+            flat.contains(r#"location:support::lenient_header(headers,report,"CreateAnalysisAcceptedHeaders",&support::HeaderRow{name:"Location",origin:"/paths/~1analyses/post/responses/202/headers/Location",required:true,json:false,list:false,spelled:false,},),"#),
+            "{client}"
+        );
+        assert!(
+            flat.contains(r#"name:"Retry-After",origin:"/paths/~1analyses/post/responses/202/headers/Retry-After",required:false,json:false,list:false,spelled:true,"#),
+            "{client}"
+        );
+        assert!(
+            flat.contains(r#"name:"X-Tags",origin:"/paths/~1analyses/post/responses/202/headers/X-Tags",required:false,json:false,list:true,spelled:false,"#),
+            "{client}"
+        );
+        assert!(
+            flat.contains(r#"name:"X-Shape",origin:"/paths/~1analyses/post/responses/202/headers/X-Shape",required:false,json:true,list:false,spelled:false,"#),
+            "{client}"
+        );
+        assert!(
+            flat.contains("#[expect(deprecated,reason=") && flat.contains("fnread(headers:"),
+            "{client}"
+        );
+
+        // The payloads, and the enum carrying them
+        assert!(
+            flat.contains(
+                "pubstructCreateAnalysisAccepted{///Thebody.pubbody:super::types::read::Analysis,///Theheadersthe"
+            ),
+            "{client}"
+        );
+        assert!(
+            flat.contains("pubstructCreateAnalysisNoContent{///Theheaders"),
+            "{client}"
+        );
+        assert!(
+            flat.contains(
+                "Accepted(Box<CreateAnalysisAccepted>),///nothingNoContent(Box<CreateAnalysisNoContent>),"
+            ),
+            "{client}"
+        );
+
+        // The decode: headers read into the body's report, then observed once
+        assert!(
+            flat.contains(
+                "letheaders=decoded.read_headers(CreateAnalysisAcceptedHeaders::read);self.client.observed(operations::Operation::CreateAnalysis,decoded.map(|body|CreateAnalysisAccepted{body,headers"
+            ),
+            "{client}"
+        );
+        assert!(
+            flat.contains(
+                "letmutdecoded=support::decode_json(response,reading).await?;letheaders=decoded.read_headers(CreateAnalysisNoContentHeaders::read);self.client.observed(operations::Operation::CreateAnalysis,decoded.map(|()|CreateAnalysisNoContent{headers}),)"
+            ),
+            "{client}"
+        );
+        assert!(
+            flat.contains(".map(::std::boxed::Box::new).map(CreateAnalysisSuccess::NoContent)"),
+            "{client}"
+        );
+        // A text body has nothing to tolerate, and its header still reaches the observer.
+        assert!(
+            flat.contains(
+                "letmutdecoded=support::decode_text(response,reading).await?;letheaders=decoded.read_headers(GetMotdOkHeaders::read);self.client.observed(operations::Operation::GetMotd,"
+            ),
+            "{client}"
+        );
+
+        // The page is the payload's body
+        assert!(flat.contains("ResponseValue<ListPetsOk>"), "{client}");
+        assert!(flat.contains("letpage=page.into_value().body;"), "{client}");
+    }
+
+    /// Read strictly, a required header is a plain field and an optional one an `Option`, and a
+    /// header that does not match its declaration fails the response through `?`, never the
+    /// observer.
+    #[test_util::test]
+    fn a_strict_client_reads_typed_headers_or_fails_the_response() {
+        let client = headers_client(crate::config::Decoding::Strict)?;
+        let flat: String = client.split_whitespace().collect();
+
+        // The group: what the description requires is there
+        assert!(flat.contains("publocation:String,"), "{client}");
+        assert!(
+            flat.contains("pubretry_after:::std::option::Option<i64>,"),
+            "{client}"
+        );
+        assert!(
+            client.contains("The description requires it, so a response without it fails."),
+            "{client}"
+        );
+
+        // The reader and the decode
+        assert!(
+            flat.contains(
+                "fnread(status:::reqwest::StatusCode,headers:&::reqwest::header::HeaderMap,)->::std::result::Result<Self,::std::boxed::Box<HeaderDecodeError>>{"
+            ),
+            "{client}"
+        );
+        assert!(
+            flat.contains(r#"location:support::strict_header(status,headers,&support::HeaderRow{name:"Location","#),
+            "{client}"
+        );
+        assert!(
+            flat.contains(
+                "letdecoded=support::decode_json(response,reading).await?;letheaders=CreateAnalysisAcceptedHeaders::read(decoded.status(),decoded.headers(),)?;decoded.map(|body|CreateAnalysisAccepted{body,headers"
+            ),
+            "{client}"
+        );
+        assert!(!flat.contains("self.client.observed("), "{client}");
+        assert!(!flat.contains("lenient_header"), "{client}");
+        assert!(client.contains("[`Error::HeaderDecode`]"), "{client}");
+
+        // The page is the payload's body here too
+        assert!(
+            flat.contains("letpage=page_request.send().await?.into_value().body;"),
+            "{client}"
+        );
     }
 
     /// A strict workspace client carries its own report in a private support module, so it

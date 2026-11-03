@@ -14,10 +14,12 @@
 //!   sent — and a method that cannot build its own request is worse than a method that is absent.
 //!
 //! One module per cluster: [`param`] what travels beside the body, [`body`] the one body and its
-//! media type, [`response`] the status arms — and this file, which walks the paths and names what
-//! it finds.
+//! media type, [`response`] the status arms and the types their headers are generated as, and
+//! [`header`] the headers each declares — and this file, which walks the paths and names what it
+//! finds.
 
 mod body;
+mod header;
 mod param;
 mod response;
 
@@ -75,6 +77,7 @@ pub(super) fn run(
         build.path_item(item, route, &mut operations, ctx);
     }
     build.check_media_type_requests()?;
+    response::name_header_types(&mut operations);
 
     super::registrable::classify(&mut operations, ctx);
     // A client holds a credential only to send it. When no operation requires a scheme the

@@ -54,6 +54,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `colliding-operation-id` | An operation without an `operationId`, or one that sanitizes to a name another operation has. |
 | `connection-upgrade` | A switching-protocols response the generated surfaces do not hand over. |
 | `query-serialization-style` | A parameter style combination OpenAPI leaves undefined. |
+| `untyped-response-header` | A declared response header that gets no typed field — an invalid or case-duplicated name, a style other than `simple`, a shape `simple` cannot read back such as an object, a JSON `content` document that may be `null`, `Set-Cookie`, or a field the transport owns such as `Content-Length` or `Connection` — and travels in the raw headers instead. |
 | `invalid-example` | An example payload that contradicts its own schema. |
 | `invalid-default` | A `default` that does not typecheck against its own schema. |
 | `unregistrable-route` | A route the generated router could not register, a collision, or a template and parameters that disagree. |

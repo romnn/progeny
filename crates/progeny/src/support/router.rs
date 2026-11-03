@@ -47,11 +47,16 @@ pub struct Incoming {
     body: ::axum::body::Body,
 }
 
-/// Take a request apart.
-pub async fn receive(request: ::axum::extract::Request) -> Incoming {
+/// Take a request apart, from the head the context's extractor left behind.
+///
+/// Handed the head and the body rather than the request, because the handler already split it to
+/// extract the context, and joining them again only to split them here would buy nothing.
+pub async fn receive(
+    mut parts: ::axum::http::request::Parts,
+    body: ::axum::body::Body,
+) -> Incoming {
     use ::axum::extract::FromRequestParts as _;
 
-    let (mut parts, body) = request.into_parts();
     // Asked for through the extractor rather than read out of the extensions: what the router
     // stores there is its own type, and reaching for anything else finds nothing — every path
     // parameter then arrives as "not sent", which is a request rejected for being exactly right.
@@ -289,18 +294,162 @@ pub async fn byte_body(incoming: Incoming) -> Result<Option<Vec<u8>>, RequestErr
     incoming.bytes().await
 }
 
+/// The headers one response arm answers with, gathered before any of them is attached.
+///
+/// A generated arm writes its typed headers here and hands the result to one of the `respond_*`
+/// writers, which attach it only once the body has encoded: a reply that fails on the way out is
+/// a `500` that carries none of the arm's headers, so a failed `201` never sends its `Location`.
+///
+/// The raw headers are the handler's own and replace, name by name, whatever the typed fields
+/// wrote, keeping every value and its order.
+/// They are attached last, so a raw `Content-Type` replaces the arm's media type too.
+#[derive(Debug)]
+pub struct ResponseHeaders {
+    typed: ::axum::http::HeaderMap,
+    raw: ::axum::http::HeaderMap,
+    /// Why a typed header could not be written, which makes the reply a `500`.
+    defect: Option<String>,
+}
+
+impl ResponseHeaders {
+    /// An arm's headers, starting from the ones the handler wrote as they are.
+    #[must_use]
+    pub fn new(raw: ::axum::http::HeaderMap) -> Self {
+        Self {
+            typed: ::axum::http::HeaderMap::new(),
+            raw,
+            defect: None,
+        }
+    }
+
+    /// Write one declared header in its `simple` spelling, from its value as JSON.
+    ///
+    /// `list` is whether the description declares the header a list.
+    /// A name the raw headers carry is theirs, so its typed value is neither written nor checked:
+    /// a handler can send by hand what the typed field cannot hold.
+    /// `null`, which is what a non-finite number serializes as, writes nothing.
+    /// A scalar is written as its text, never split, and a list as its elements joined by commas
+    /// in one field.
+    ///
+    /// A value that spelling cannot carry so that it reads back unchanged is the handler's defect
+    /// and turns the reply into a `500`:
+    ///
+    /// - an object, or a list where the description declares one value;
+    /// - a list holding anything but scalars, or a string element that is empty, holds a comma, or
+    ///   starts or ends with a space or a tab, which a reader splitting the field on its commas
+    ///   drops, splits or trims;
+    /// - a string that starts or ends with a space or a tab, which HTTP strips from every field
+    ///   value (RFC 9110, section 5.5), while an empty string is an empty field and reads back as
+    ///   itself;
+    /// - text HTTP does not allow in a field, such as a line break.
+    pub fn typed(
+        &mut self,
+        name: &'static str,
+        list: bool,
+        value: Result<Value, ::serde_json::Error>,
+    ) {
+        if self.defect.is_some() || self.raw.contains_key(name) {
+            return;
+        }
+        let refusal = match value {
+            Err(err) => format!("could not be serialized: {err}"),
+            Ok(Value::Null) => return,
+            Ok(Value::Object(_)) => "is an object, which a header field cannot spell".to_owned(),
+            // The reader of a header declared as one value never splits it, so a list would read
+            // back as one string.
+            Ok(Value::Array(_)) if !list => {
+                "is a list, where the description declares one value".to_owned()
+            }
+            Ok(Value::Array(items)) if !items.iter().all(header_element) => {
+                "is a list with an element its commas cannot keep apart from the others".to_owned()
+            }
+            Ok(Value::String(text)) if padded(&text) => {
+                "starts or ends with whitespace, which HTTP strips from a field value".to_owned()
+            }
+            Ok(value) => {
+                let text = super::style::header_value(&value, false);
+                match (
+                    ::axum::http::HeaderName::from_bytes(name.as_bytes()),
+                    ::axum::http::HeaderValue::from_str(&text),
+                ) {
+                    (Ok(field), Ok(text)) => {
+                        self.typed.insert(field, text);
+                        return;
+                    }
+                    (Err(_), _) => "is not named by an HTTP field name".to_owned(),
+                    (_, Err(_)) => "is not text an HTTP field can carry".to_owned(),
+                }
+            }
+        };
+        self.defect = Some(format!("the handler's `{name}` header {refusal}"));
+    }
+
+    /// The reply with these headers attached, or a `500` without them when one of them could
+    /// not be written.
+    fn attach(self, mut response: ::axum::response::Response) -> ::axum::response::Response {
+        let Self {
+            mut typed,
+            raw,
+            defect,
+        } = self;
+        if let Some(defect) = defect {
+            return refused(&defect);
+        }
+        // `extend` replaces every value of a name it brings, in both steps.
+        typed.extend(raw);
+        response.headers_mut().extend(typed);
+        response
+    }
+}
+
+/// Whether a list element survives being joined with commas and split again: a reader drops an
+/// empty element and trims the whitespace around each one (RFC 9110, section 5.6.1).
+fn header_element(element: &Value) -> bool {
+    match element {
+        Value::String(text) => !text.is_empty() && !text.contains(',') && !padded(text),
+        Value::Bool(_) | Value::Number(_) => true,
+        Value::Null | Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
+/// Whether text starts or ends with the whitespace HTTP trims around a field value and a list
+/// element.
+fn padded(text: &str) -> bool {
+    text.starts_with([' ', '\t']) || text.ends_with([' ', '\t'])
+}
+
+/// A reply this server could not write, which is its own defect rather than the caller's: a
+/// `500` carrying the reason and none of the arm's headers.
+fn refused(message: &str) -> ::axum::response::Response {
+    use ::axum::response::IntoResponse as _;
+    (
+        ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ::axum::Json(::serde_json::json!({ "message": message })),
+    )
+        .into_response()
+}
+
+/// The `500` refusing a status a handler answered with that HTTP has no code for.
+fn unknown_status(status: u16) -> ::axum::response::Response {
+    refused(&format!(
+        "the handler answered with {status}, which is not an HTTP status"
+    ))
+}
+
 /// One declared JSON arm's reply.
 pub fn respond_json<T: ::serde::Serialize>(
     status: u16,
     content_type: &str,
     body: &T,
+    headers: ResponseHeaders,
 ) -> ::axum::response::Response {
     use ::axum::response::IntoResponse as _;
-    let code = ::axum::http::StatusCode::from_u16(status)
-        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    // A `204` carries no body by definition, whatever the arm declares.
+    let Ok(code) = ::axum::http::StatusCode::from_u16(status) else {
+        return unknown_status(status);
+    };
+    // A `204` carries no body by definition, whatever the arm declares, and still its headers.
     if code == ::axum::http::StatusCode::NO_CONTENT {
-        return code.into_response();
+        return headers.attach(code.into_response());
     }
     // A JSON `null` is a body like any other: the arm declared JSON, and an empty reply would
     // say it declared nothing.
@@ -319,24 +468,21 @@ pub fn respond_json<T: ::serde::Serialize>(
                     .headers_mut()
                     .insert(::axum::http::header::CONTENT_TYPE, declared);
             }
-            response
+            headers.attach(response)
         }
         // A response the handler built and serde cannot render is this server's own defect, not the
         // caller's, so it is a 500 rather than a rejection.
-        Err(source) => (
-            ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            ::axum::Json(::serde_json::json!({ "message": source.to_string() })),
-        )
-            .into_response(),
+        Err(source) => refused(&source.to_string()),
     }
 }
 
-/// One declared arm's reply when the arm declares no content: the status alone.
-pub fn respond_empty(status: u16, (): ()) -> ::axum::response::Response {
+/// One declared arm's reply when the arm declares no content: the status and its headers alone.
+pub fn respond_empty(status: u16, headers: ResponseHeaders) -> ::axum::response::Response {
     use ::axum::response::IntoResponse as _;
-    ::axum::http::StatusCode::from_u16(status)
-        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+    match ::axum::http::StatusCode::from_u16(status) {
+        Ok(code) => headers.attach(code.into_response()),
+        Err(_) => unknown_status(status),
+    }
 }
 
 /// One declared text arm's reply.
@@ -344,8 +490,9 @@ pub fn respond_text(
     status: u16,
     content_type: &'static str,
     body: ::std::string::String,
+    headers: ResponseHeaders,
 ) -> ::axum::response::Response {
-    respond_raw(status, content_type, body)
+    respond_raw(status, content_type, body, headers)
 }
 
 /// One declared binary arm's reply.
@@ -353,39 +500,40 @@ pub fn respond_bytes<T>(
     status: u16,
     content_type: &'static str,
     body: T,
+    headers: ResponseHeaders,
 ) -> ::axum::response::Response
 where
     T: ::axum::response::IntoResponse,
 {
-    respond_raw(status, content_type, body)
+    respond_raw(status, content_type, body, headers)
 }
 
-fn respond_raw<T>(status: u16, content_type: &'static str, body: T) -> ::axum::response::Response
+fn respond_raw<T>(
+    status: u16,
+    content_type: &'static str,
+    body: T,
+    headers: ResponseHeaders,
+) -> ::axum::response::Response
 where
     T: ::axum::response::IntoResponse,
 {
     use ::axum::response::IntoResponse as _;
 
-    let code = ::axum::http::StatusCode::from_u16(status)
-        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let Ok(code) = ::axum::http::StatusCode::from_u16(status) else {
+        return unknown_status(status);
+    };
     if code == ::axum::http::StatusCode::NO_CONTENT {
-        return code.into_response();
+        return headers.attach(code.into_response());
     }
     let Ok(content_type) = content_type.parse::<::axum::http::HeaderValue>() else {
-        return (
-            ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            ::axum::Json(::serde_json::json!({
-                "message": "the declared response content type is not a valid HTTP header value",
-            })),
-        )
-            .into_response();
+        return refused("the declared response content type is not a valid HTTP header value");
     };
     let mut response = body.into_response();
     *response.status_mut() = code;
     response
         .headers_mut()
         .insert(::axum::http::header::CONTENT_TYPE, content_type);
-    response
+    headers.attach(response)
 }
 
 impl ::axum::response::IntoResponse for super::serve::RejectionResponse {
@@ -400,6 +548,50 @@ impl ::axum::response::IntoResponse for super::serve::RejectionResponse {
 #[cfg(test)]
 mod tests {
     use color_eyre::eyre;
+
+    /// An arm's headers when it declares none and the handler wrote none.
+    fn no_headers() -> super::ResponseHeaders {
+        super::ResponseHeaders::new(::axum::http::HeaderMap::new())
+    }
+
+    /// Every value of one header a response carries, in order.
+    fn values(response: &::axum::response::Response, name: &str) -> Vec<String> {
+        response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+            .collect()
+    }
+
+    /// The JSON body of a response the server wrote in full.
+    ///
+    /// Polled once, with no runtime: a body held in memory is ready on the first poll.
+    fn json_body(response: ::axum::response::Response) -> eyre::Result<serde_json::Value> {
+        use std::future::Future as _;
+
+        let mut read = std::pin::pin!(::axum::body::to_bytes(response.into_body(), 1024));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(bytes) = read.as_mut().poll(&mut context) else {
+            eyre::bail!("a body held in memory is ready at once");
+        };
+        Ok(serde_json::from_slice(&bytes?)?)
+    }
+
+    /// Typed headers in their `simple` spelling: a scalar whole, a list joined by commas.
+    ///
+    /// A field is declared a list exactly when its value is one, so a case that hands a list to
+    /// a header declared as one value calls the writer itself.
+    fn typed(
+        raw: ::axum::http::HeaderMap,
+        fields: &[(&'static str, serde_json::Value)],
+    ) -> super::ResponseHeaders {
+        let mut headers = super::ResponseHeaders::new(raw);
+        for (name, value) in fields {
+            headers.typed(name, value.is_array(), Ok(value.clone()));
+        }
+        headers
+    }
 
     fn incoming_with(content_type: Option<&str>) -> super::Incoming {
         let mut headers = ::axum::http::HeaderMap::new();
@@ -492,17 +684,230 @@ mod tests {
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned)
         };
-        let null = super::respond_json(200, "application/json", &None::<String>);
+        let null = super::respond_json(200, "application/json", &None::<String>, no_headers());
         assert_eq!(content_type(&null).as_deref(), Some("application/json"));
-        let empty = super::respond_empty(200, ());
+        let empty = super::respond_empty(200, no_headers());
         assert_eq!(content_type(&empty), None);
-        let no_content = super::respond_json(204, "application/json", &None::<String>);
+        let no_content =
+            super::respond_json(204, "application/json", &None::<String>, no_headers());
         assert_eq!(content_type(&no_content), None);
+    }
+
+    /// A typed header is written in its `simple` spelling, and a name the raw headers carry
+    /// replaces it with every value they hold, in order; the other typed headers stay.
+    #[test_util::test]
+    fn the_raw_headers_replace_a_typed_field_of_the_same_name() {
+        let mut raw = ::axum::http::HeaderMap::new();
+        for value in ["soon", "later"] {
+            raw.append("retry-after", ::axum::http::HeaderValue::from_static(value));
+        }
+        raw.append("x-trace", ::axum::http::HeaderValue::from_static("b"));
+        raw.append("x-trace", ::axum::http::HeaderValue::from_static("a"));
+        let headers = typed(
+            raw,
+            &[
+                ("Retry-After", serde_json::json!(30)),
+                ("Location", serde_json::json!("/pets/1, the first")),
+                ("X-Ids", serde_json::json!([1, 2, 3])),
+                ("X-Absent", serde_json::Value::Null),
+            ],
+        );
+        let response = super::respond_empty(201, headers);
+        assert_eq!(response.status(), 201);
+        assert_eq!(values(&response, "retry-after"), ["soon", "later"]);
+        assert_eq!(values(&response, "x-trace"), ["b", "a"]);
+        // A scalar is never split on its commas, and a list is one field.
+        assert_eq!(values(&response, "location"), ["/pets/1, the first"]);
+        assert_eq!(values(&response, "x-ids"), ["1,2,3"]);
+        // `null` writes nothing.
+        assert_eq!(values(&response, "x-absent"), [] as [String; 0]);
+    }
+
+    /// The raw headers are attached after the body, so a raw `Content-Type` replaces the arm's
+    /// declared media type: the deliberate escape hatch for a response that drifted.
+    #[test_util::test]
+    fn a_raw_content_type_replaces_the_declared_media_type() {
+        let mut raw = ::axum::http::HeaderMap::new();
+        raw.insert(
+            ::axum::http::header::CONTENT_TYPE,
+            ::axum::http::HeaderValue::from_static("application/vnd.pet+json"),
+        );
+        let json = super::respond_json(
+            200,
+            "application/problem+json",
+            &42,
+            typed(raw.clone(), &[]),
+        );
+        assert_eq!(values(&json, "content-type"), ["application/vnd.pet+json"]);
+        let text = super::respond_text(200, "text/plain", "hi".to_owned(), typed(raw, &[]));
+        assert_eq!(values(&text, "content-type"), ["application/vnd.pet+json"]);
+    }
+
+    /// A `204` drops the body an arm declares and keeps its headers, which may be all it says.
+    #[test_util::test]
+    fn a_header_only_reply_carries_its_headers() {
+        let headers = typed(
+            ::axum::http::HeaderMap::new(),
+            &[("X-Outcome", serde_json::json!("none"))],
+        );
+        let response = super::respond_json(204, "application/json", &"dropped", headers);
+        assert_eq!(response.status(), 204);
+        assert_eq!(values(&response, "x-outcome"), ["none"]);
+        assert_eq!(values(&response, "content-type"), [] as [String; 0]);
+    }
+
+    /// A body that cannot be encoded is the server's defect: a `500` that carries none of the
+    /// arm's headers, typed or raw, so a failed `201` never sends its `Location`.
+    #[test_util::test]
+    fn a_body_that_fails_to_encode_answers_without_the_arm_headers() {
+        /// A body whose serialization always fails, as one holding a map with non-string keys
+        /// would.
+        struct Unencodable;
+
+        impl serde::Serialize for Unencodable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("refused"))
+            }
+        }
+
+        let mut raw = ::axum::http::HeaderMap::new();
+        raw.insert("x-trace", ::axum::http::HeaderValue::from_static("a"));
+        let headers = typed(raw, &[("Location", serde_json::json!("/pets/1"))]);
+        let response = super::respond_json(201, "application/json", &Unencodable, headers);
+        assert_eq!(response.status(), 500);
+        assert_eq!(values(&response, "location"), [] as [String; 0]);
+        assert_eq!(values(&response, "x-trace"), [] as [String; 0]);
+        assert_eq!(json_body(response)?["message"], "refused");
+    }
+
+    /// A typed value the `simple` spelling cannot carry so that it reads back unchanged is the
+    /// handler's defect, answered `500` without any of the arm's headers rather than sent wrong.
+    #[test_util::test]
+    fn a_typed_header_that_cannot_be_written_answers_without_the_arm_headers() {
+        let cases = [
+            (
+                serde_json::json!("line\nbreak"),
+                "not text an HTTP field can carry",
+            ),
+            (serde_json::json!({"k": "v"}), "is an object"),
+            (serde_json::json!(["a,b", "c"]), "commas"),
+            (serde_json::json!([["nested"]]), "commas"),
+        ];
+        for (value, reason) in cases {
+            let mut raw = ::axum::http::HeaderMap::new();
+            raw.insert("x-trace", ::axum::http::HeaderValue::from_static("a"));
+            let headers = typed(
+                raw,
+                &[
+                    ("Location", serde_json::json!("/pets/1")),
+                    ("X-Note", value.clone()),
+                ],
+            );
+            let response = super::respond_empty(201, headers);
+            assert_eq!(response.status(), 500, "{value}");
+            assert_eq!(values(&response, "location"), [] as [String; 0], "{value}");
+            assert_eq!(values(&response, "x-trace"), [] as [String; 0], "{value}");
+            let body = json_body(response)?;
+            let message = body["message"].as_str().unwrap_or_default();
+            assert!(message.contains("`X-Note`"), "{message}");
+            assert!(message.contains(reason), "{message}");
+        }
+    }
+
+    /// A header declared as one value is read back whole, never split, so a list handed to it
+    /// would arrive as one string: refused like any other value the spelling cannot carry, while
+    /// the same list is written for a header the description declares a list.
+    #[test_util::test]
+    fn a_list_in_a_header_declared_as_one_value_answers_without_the_arm_headers() {
+        let mut headers = super::ResponseHeaders::new(::axum::http::HeaderMap::new());
+        headers.typed("X-Any", false, Ok(serde_json::json!([1, 2])));
+        let response = super::respond_empty(201, headers);
+        assert_eq!(response.status(), 500);
+        assert_eq!(values(&response, "x-any"), [] as [String; 0]);
+        let body = json_body(response)?;
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(message.contains("`X-Any` header is a list"), "{message}");
+
+        let mut headers = super::ResponseHeaders::new(::axum::http::HeaderMap::new());
+        headers.typed("X-Ids", true, Ok(serde_json::json!([1, 2])));
+        let response = super::respond_empty(201, headers);
+        assert_eq!(values(&response, "x-ids"), ["1,2"]);
+    }
+
+    /// A raw value replaces a typed one of the same name before the typed one is checked, so a
+    /// typed value no field can carry, or one that fails to serialize, is no defect when the
+    /// handler sends that name by hand; the name is matched in any case.
+    #[test_util::test]
+    fn a_raw_value_overrides_a_typed_one_that_cannot_be_written() {
+        let mut raw = ::axum::http::HeaderMap::new();
+        raw.insert(
+            "location",
+            ::axum::http::HeaderValue::from_static("/pets/1"),
+        );
+        raw.insert("x-count", ::axum::http::HeaderValue::from_static("many"));
+        let mut headers = super::ResponseHeaders::new(raw);
+        headers.typed("Location", false, Ok(serde_json::json!("bad\nvalue")));
+        headers.typed("X-Count", false, Err(serde::ser::Error::custom("refused")));
+        headers.typed("X-Kept", false, Ok(serde_json::json!("typed")));
+        let response = super::respond_empty(201, headers);
+        assert_eq!(response.status(), 201);
+        assert_eq!(values(&response, "location"), ["/pets/1"]);
+        assert_eq!(values(&response, "x-count"), ["many"]);
+        assert_eq!(values(&response, "x-kept"), ["typed"]);
+    }
+
+    /// A value whose spelling a reader would change is refused rather than sent as another value:
+    /// HTTP strips the whitespace around a field value, and a reader of a list drops its empty
+    /// elements and trims each of the rest.
+    /// An empty string and inner whitespace survive, so they are written.
+    #[test_util::test]
+    fn a_typed_value_a_reader_would_trim_or_drop_answers_without_the_arm_headers() {
+        let refused = [
+            (serde_json::json!(" leading"), "whitespace"),
+            (serde_json::json!("trailing\t"), "whitespace"),
+            (serde_json::json!(["", "a"]), "commas"),
+            (serde_json::json!([" a", "b"]), "commas"),
+            (serde_json::json!(["a", "b\t"]), "commas"),
+        ];
+        for (value, reason) in refused {
+            let mut headers = super::ResponseHeaders::new(::axum::http::HeaderMap::new());
+            headers.typed("X-Note", value.is_array(), Ok(value.clone()));
+            let response = super::respond_empty(201, headers);
+            assert_eq!(response.status(), 500, "{value}");
+            assert_eq!(values(&response, "x-note"), [] as [String; 0], "{value}");
+            let body = json_body(response)?;
+            let message = body["message"].as_str().unwrap_or_default();
+            assert!(message.contains(reason), "{value}: {message}");
+        }
+        let written = [
+            (serde_json::json!(""), ""),
+            (serde_json::json!("inner space"), "inner space"),
+            (serde_json::json!(["a b", "c"]), "a b,c"),
+        ];
+        for (value, wire) in written {
+            let mut headers = super::ResponseHeaders::new(::axum::http::HeaderMap::new());
+            headers.typed("X-Note", value.is_array(), Ok(value.clone()));
+            let response = super::respond_empty(201, headers);
+            assert_eq!(response.status(), 201, "{value}");
+            assert_eq!(values(&response, "x-note"), [wire], "{value}");
+        }
+    }
+
+    /// A status HTTP has no code for is refused like any other handler defect.
+    #[test_util::test]
+    fn a_status_http_has_no_code_for_answers_without_the_arm_headers() {
+        let headers = typed(
+            ::axum::http::HeaderMap::new(),
+            &[("Location", serde_json::json!("/pets/1"))],
+        );
+        let response = super::respond_empty(1000, headers);
+        assert_eq!(response.status(), 500);
+        assert_eq!(values(&response, "location"), [] as [String; 0]);
     }
 
     #[test_util::test]
     fn a_declared_json_spelling_is_the_content_type_the_response_carries() {
-        let response = super::respond_json(200, "application/problem+json", &42);
+        let response = super::respond_json(200, "application/problem+json", &42, no_headers());
         assert_eq!(
             response
                 .headers()
@@ -510,7 +915,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/problem+json")
         );
-        let plain = super::respond_json(200, "application/json", &42);
+        let plain = super::respond_json(200, "application/json", &42, no_headers());
         assert_eq!(
             plain
                 .headers()

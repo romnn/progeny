@@ -370,6 +370,15 @@ pub(crate) struct Response {
     pub(crate) extensions: BTreeMap<String, Value>,
 }
 
+/// Whether a response header declaration is one OpenAPI says to ignore: `Content-Type`, which
+/// the response's media type writes.
+///
+/// Defined beside the document model because two layers ask: the type layer, which seeds no read
+/// form for an ignored declaration, and the API model, which gives it no typed field.
+pub(crate) fn ignored_response_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-type")
+}
+
 /// A Callback Object: an open map keyed by runtime expression.
 ///
 /// Carried losslessly and not interpreted by later layers, which report it rather than pretend

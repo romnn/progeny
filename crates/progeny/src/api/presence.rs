@@ -210,6 +210,10 @@ fn reachability(
             if let Some(ty) = arm.body.json_type() {
                 seed(ty, contracts, &mut responses);
             }
+            // A typed header comes back with the response, as its body does.
+            for header in &arm.headers {
+                seed(&header.ty, contracts, &mut responses);
+            }
         }
     }
 

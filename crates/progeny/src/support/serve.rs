@@ -96,9 +96,10 @@ impl Rejection {
 /// The default reply to a [`Rejection`].
 ///
 /// A JSON object with a `message`, which is the shape a caller can do something with and the
-/// shallowest thing that is not an empty body. It is a named type rather than a bare `Response` so
-/// that overriding `on_rejection` can build one of these with a different message and still return
-/// the same type.
+/// shallowest thing that is not an empty body.
+/// The default `on_rejection` renders one, and an override that only wants another status or
+/// message can build one with [`RejectionResponse::new`] and render it the same way, through
+/// its `IntoResponse`.
 #[derive(Debug, Clone)]
 pub struct RejectionResponse {
     status: u16,

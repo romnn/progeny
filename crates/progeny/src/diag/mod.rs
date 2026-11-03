@@ -108,6 +108,11 @@ pub enum BreakageClass {
     ConnectionUpgrade,
     /// A (location, style, explode, shape) parameter combination OpenAPI leaves undefined.
     QuerySerializationStyle,
+    /// A declared response header progeny gives no typed field: its name is not an HTTP field
+    /// name or repeats another declaration's in a different case, its style or shape has no
+    /// spelling that reads back unchanged, or the field must never be folded into one value.
+    /// The header travels in the arm's raw headers, where a handler and a caller still reach it.
+    UntypedResponseHeader,
     /// An example payload that contradicts its own schema. Never gates generation.
     InvalidExample,
     /// A `default` value that does not typecheck against its own schema.
@@ -197,7 +202,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 36] = [
+    pub(crate) const ALL: [Self; 37] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -214,6 +219,7 @@ impl BreakageClass {
         Self::CollidingOperationId,
         Self::ConnectionUpgrade,
         Self::QuerySerializationStyle,
+        Self::UntypedResponseHeader,
         Self::InvalidExample,
         Self::InvalidDefault,
         Self::UnregistrableRoute,
@@ -256,6 +262,7 @@ impl BreakageClass {
             Self::CollidingOperationId => "colliding-operation-id",
             Self::ConnectionUpgrade => "connection-upgrade",
             Self::QuerySerializationStyle => "query-serialization-style",
+            Self::UntypedResponseHeader => "untyped-response-header",
             Self::InvalidExample => "invalid-example",
             Self::InvalidDefault => "invalid-default",
             Self::UnregistrableRoute => "unregistrable-route",
@@ -304,6 +311,9 @@ impl BreakageClass {
             | Self::UnknownSchemaType
             | Self::WildUnion
             | Self::QuerySerializationStyle
+            // A component response shared by a few hundred operations repeats its headers at
+            // every arm that references it, so the count is the finding.
+            | Self::UntypedResponseHeader
             | Self::InvalidExample
             | Self::InvalidDefault
             | Self::LegacyTupleItems

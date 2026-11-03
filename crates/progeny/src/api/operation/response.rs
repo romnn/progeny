@@ -1,8 +1,13 @@
 //! The status arms: parsed from the response keys, typed, and put in overlap order.
 
+use std::collections::BTreeSet;
+
 use super::Build;
 use super::body::is_json;
-use crate::api::{ResponseArm, ResponseBody, ResponseContract, StatusPattern};
+use crate::api::{
+    HeaderTypes, OperationContract, ResponseArm, ResponseBody, ResponseContract, StatusPattern,
+    type_suffix,
+};
 use crate::contract::{Namer, RustIdent, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MaybeRef, Operation, Response};
@@ -123,6 +128,8 @@ impl Build<'_> {
                     ty: TypeRef::Value,
                     content_type: "application/json".to_owned(),
                 },
+                headers: Vec::new(),
+                header_types: None,
                 docs: Docs::default(),
                 rust_name: used.unique(name),
                 origin: at.clone(),
@@ -159,12 +166,60 @@ impl Build<'_> {
         ResponseArm {
             status,
             body,
+            headers: self.headers(response, at, ctx),
+            // Named once every operation is, by `name_header_types`.
+            header_types: None,
             docs: Docs {
                 description: response.description.clone(),
                 ..Docs::default()
             },
             rust_name: used.unique(name),
             origin: at.clone(),
+        }
+    }
+}
+
+/// Names the payload and the header group of every arm that types a header, once every
+/// operation has its stem.
+///
+/// `{Operation}{Arm}` can be another operation's type: `foo`'s `400` is `FooBadRequest`, which is
+/// also `fooBad`'s request builder, and `foo`'s `500` is `FooInternalServerError`, which is
+/// `fooInternalServer`'s enum of failures.
+/// So every name a renderer builds from a stem and one of the [`type_suffix::ALL`] tails is
+/// claimed first, for every operation, whether it is generated or not.
+/// Then each arm in model order takes the first of `FooBadRequest`, `FooBadRequest2`, … whose
+/// payload and group are both free, so the two always share a spelling.
+pub(super) fn name_header_types(operations: &mut [OperationContract]) {
+    let mut taken: BTreeSet<String> = operations
+        .iter()
+        .flat_map(|operation| {
+            let stem = operation.rust_name.type_stem();
+            type_suffix::ALL.map(|suffix| RustIdent::stem_type(&stem, suffix).to_string())
+        })
+        .collect();
+    for operation in operations.iter_mut() {
+        let stem = operation.rust_name.type_stem();
+        let responses = &mut operation.responses;
+        for arm in responses.arms.iter_mut().chain(responses.default.as_mut()) {
+            if arm.headers.is_empty() {
+                arm.header_types = None;
+                continue;
+            }
+            for index in 1u32.. {
+                let tail = if index == 1 {
+                    arm.rust_name.to_string()
+                } else {
+                    format!("{}{index}", arm.rust_name)
+                };
+                let payload = RustIdent::stem_type(&stem, &tail);
+                let group = RustIdent::stem_type(&stem, &format!("{tail}{}", type_suffix::HEADERS));
+                if !taken.contains(payload.as_str()) && !taken.contains(group.as_str()) {
+                    taken.insert(payload.to_string());
+                    taken.insert(group.to_string());
+                    arm.header_types = Some(HeaderTypes { payload, group });
+                    break;
+                }
+            }
         }
     }
 }
@@ -220,14 +275,14 @@ fn status_name(status: StatusPattern) -> String {
 
 #[cfg(test)]
 mod tests {
-    use color_eyre::eyre;
+    use color_eyre::eyre::{self, OptionExt as _};
 
     use serde_json::json;
 
     use super::parse_status;
     use crate::api::tests::{model_of, with_paths};
     use crate::api::{ResponseBody, StatusPattern};
-    use crate::contract::TypeRef;
+    use crate::contract::{RustIdent, TypeRef};
 
     #[test_util::test]
     fn a_status_key_is_a_code_or_a_range_and_nothing_else() {
@@ -470,5 +525,95 @@ mod tests {
             }
         );
         assert_eq!(arms[3].body, ResponseBody::Empty);
+    }
+
+    /// Every arm's payload and header group, as `Operation.Arm: Payload / Group`, in model order;
+    /// an arm that types no header has neither.
+    fn header_types(model: &crate::api::ApiModel) -> Vec<String> {
+        model
+            .operations()
+            .iter()
+            .flat_map(|operation| {
+                let responses = &operation.responses;
+                responses
+                    .arms
+                    .iter()
+                    .chain(&responses.default)
+                    .map(move |arm| match &arm.header_types {
+                        Some(types) => format!(
+                            "{}.{}: {} / {}",
+                            operation.rust_name, arm.rust_name, types.payload, types.group
+                        ),
+                        None => format!("{}.{}: none", operation.rust_name, arm.rust_name),
+                    })
+            })
+            .collect()
+    }
+
+    /// An arm's payload and group take a suffix where `{Operation}{Arm}` is a type another
+    /// operation generates, and keep their plain names otherwise.
+    ///
+    /// `foo`'s `400` would be `FooBadRequest`, the request builder of `fooBad`, and its `500`
+    /// `FooInternalServerError`, the enum of failures `fooInternalServer` would have with a
+    /// second error: every such name is claimed whether the renderers emit it or not, so a
+    /// description gaining an error arm does not rename another operation's payload.
+    #[test_util::test]
+    fn an_arm_type_another_operation_generates_takes_a_suffix() {
+        let typed = json!({"X-Reason": {"schema": {"type": "string"}}});
+        let (model, _) = model_of(with_paths(json!({
+            "/a": {"get": {"operationId": "foo", "responses": {
+                "400": {"description": "refused", "headers": typed},
+                "404": {"description": "missing", "headers": typed},
+                "500": {"description": "failed", "headers": typed},
+            }}},
+            "/b": {"get": {"operationId": "fooBad", "responses": {
+                "204": {"description": "done"},
+            }}},
+            "/c": {"get": {"operationId": "fooInternalServer", "responses": {
+                "204": {"description": "done", "headers": typed},
+            }}},
+        })))?;
+        assert_eq!(
+            header_types(&model),
+            [
+                "foo.BadRequest: FooBadRequest2 / FooBadRequest2Headers",
+                "foo.NotFound: FooNotFound / FooNotFoundHeaders",
+                "foo.InternalServerError: FooInternalServerError2 / FooInternalServerError2Headers",
+                "foo_bad.NoContent: none",
+                "foo_internal_server.NoContent: FooInternalServerNoContent / FooInternalServerNoContentHeaders",
+            ]
+        );
+    }
+
+    /// Two arms whose `{Operation}{Arm}` meet are told apart in model order, the payload and its
+    /// group together.
+    ///
+    /// No two arm names the model gives today end alike, so the arms here are renamed the way an
+    /// arm named after a status phrase would be: `fooNot`'s `Found` meets `foo`'s `NotFound`.
+    #[test_util::test]
+    fn two_arms_whose_types_meet_are_told_apart_in_model_order() {
+        let typed = json!({"X-Reason": {"schema": {"type": "string"}}});
+        let (mut model, _) = model_of(with_paths(json!({
+            "/a": {"get": {"operationId": "foo", "responses": {
+                "404": {"description": "missing", "headers": typed},
+            }}},
+            "/b": {"get": {"operationId": "fooNot", "responses": {
+                "302": {"description": "elsewhere", "headers": typed},
+            }}},
+        })))?;
+        let found = model
+            .operations
+            .get_mut(1)
+            .and_then(|operation| operation.responses.arms.first_mut())
+            .ok_or_eyre("`fooNot`'s arm")?;
+        found.rust_name = RustIdent::variant("Found");
+        super::name_header_types(&mut model.operations);
+        assert_eq!(
+            header_types(&model),
+            [
+                "foo.NotFound: FooNotFound / FooNotFoundHeaders",
+                "foo_not.Found: FooNotFound2 / FooNotFound2Headers",
+            ]
+        );
     }
 }

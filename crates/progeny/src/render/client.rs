@@ -17,6 +17,8 @@
 //! yields that arm's type directly; several yield an enum. The same for errors. An operation with
 //! one `200` and one `404` therefore adds no types at all, which is the overwhelmingly common case
 //! and the reason the client does not double the size of a generated crate.
+//! An arm that declares a header with a typed field yields a payload of its own instead, its body
+//! beside a group of the typed headers, so the two are read from one arm and handed back as one.
 
 use std::collections::BTreeSet;
 
@@ -24,8 +26,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::api::{
-    ApiModel, BodyContract, CredentialScheme, FormSpec, Location, OperationContract, ParamContract,
-    PartKind, PartSpec, Piece, Place, ResponseArm, ResponseBody, Style,
+    ApiModel, BodyContract, CredentialScheme, FormSpec, HeaderTypes, Location, OperationContract,
+    ParamContract, PartKind, PartSpec, Piece, Place, ResponseArm, ResponseBody, ResponseHeader,
+    Style, type_suffix,
 };
 use crate::config::{BytesRepr, Config};
 use crate::contract::{Contracts, RustIdent, TypeRef};
@@ -114,23 +117,7 @@ pub(super) fn render(
 
     let client = client_struct(methods, model.schemes(), decoding, config.docs);
     let observing = observing(decoding);
-    let reading = if decoding.is_lenient() {
-        quote! {
-            //!
-            //! A response body is read leniently, into its *read form* (`types::read`): a
-            //! member that is absent, `null` or unreadable is `None`, an element that cannot be
-            //! read is left out, and an undeclared member is kept. None of it is silent — the
-            //! [`ResponseValue`] carries a [`Degradations`] report of everything tolerated, and
-            //! [`Client::observe`] hands every degraded response to one function for an
-            //! application that wants to see drift in one place.
-        }
-    } else {
-        quote! {
-            //!
-            //! A response body is read strictly: once it has arrived whole, it matches the
-            //! description or the response fails with [`Error::Decode`].
-        }
-    };
+    let reading = reading_docs(model, decoding);
     quote! {
         //! The calling side.
         #reading
@@ -140,7 +127,8 @@ pub(super) fn render(
 
         #[doc(inline)]
         pub use super::support::{
-            BodyReadError, BodyTooLarge, DecodeError, Degradations, Error, ResponseValue,
+            BodyReadError, BodyTooLarge, DecodeError, Degradations, Error, HeaderDecodeError,
+            HeaderProblem, ResponseValue,
         };
 
         #observing
@@ -163,6 +151,49 @@ pub(super) fn render(
         }
 
         #(#interfaces)*
+    }
+}
+
+/// The module's paragraph on how responses are read, under the decoding it is rendered with.
+fn reading_docs(model: &ApiModel, decoding: Decoding) -> TokenStream {
+    let typed_headers = model.operations().iter().any(|operation| {
+        operation
+            .responses
+            .arms
+            .iter()
+            .chain(&operation.responses.default)
+            .any(|arm| !arm.headers.is_empty())
+    });
+    if decoding.is_lenient() {
+        let headers = typed_headers.then(|| {
+            quote! {
+                //! A header a response declares is read the same way, into its typed field: one
+                //! that is absent or unreadable is `None`, and reported beside the body's drift.
+            }
+        });
+        quote! {
+            //!
+            //! A response body is read leniently, into its *read form* (`types::read`): a
+            //! member that is absent, `null` or unreadable is `None`, an element that cannot be
+            //! read is left out, and an undeclared member is kept. None of it is silent — the
+            //! [`ResponseValue`] carries a [`Degradations`] report of everything tolerated, and
+            //! [`Client::observe`] hands every degraded response to one function for an
+            //! application that wants to see drift in one place.
+            #headers
+        }
+    } else {
+        let headers = typed_headers.then(|| {
+            quote! {
+                //! A header a response declares matches its declaration in the same way, or the
+                //! response fails with [`Error::HeaderDecode`].
+            }
+        });
+        quote! {
+            //!
+            //! A response body is read strictly: once it has arrived whole, it matches the
+            //! description or the response fails with [`Error::Decode`].
+            #headers
+        }
     }
 }
 
@@ -313,10 +344,11 @@ fn client_struct(
             /// The same client, calling `observe` with every response the decoder tolerated
             /// something in.
             ///
-            /// Called after the body was decoded and before the response is handed back, with
-            /// the operation, the status and the same report the response carries. Nothing is
-            /// logged or counted unless the application does it here. A crate generated with
-            /// strict decoding tolerates nothing, so its observer is never called.
+            /// Called once the body and the headers the response declares were decoded, and
+            /// before the response is handed back, with the operation, the status and the same
+            /// report the response carries. Nothing is logged or counted unless the application
+            /// does it here. A crate generated with strict decoding tolerates nothing, so its
+            /// observer is never called.
             #[must_use]
             pub fn observe(
                 mut self,
@@ -597,6 +629,7 @@ fn interface(
     let params_arg = takes.then(|| quote! { , params: #params });
     let params_init = takes.then(|| quote! { params, });
 
+    let payloads = payloads(operation, contracts, config, decoding);
     let success = success_type(operation, contracts, config);
     let failure = error_type(operation, contracts, config);
     let reading = Reading {
@@ -638,6 +671,7 @@ fn interface(
     });
 
     quote! {
+        #payloads
         #success_decl
         #failure_decl
 
@@ -848,7 +882,12 @@ fn stream(
         value = quote! { ::std::option::Option::Some(#value) };
     }
     let assign = quote! { page_request.params.#cursor = #value; };
-    let page = page_walk(pagination, contracts, config, decoding);
+    // A page whose arm types a header is its payload, and the walk starts at its body.
+    let body = success_arms(operation)
+        .first()
+        .is_some_and(|arm| !arm.headers.is_empty())
+        .then(|| quote! { .body });
+    let page = page_walk(pagination, body.as_ref(), contracts, config, decoding);
     let docs = format!(
         " Every item of every page, following `{}` until the service stops sending one.",
         pagination.cursor_param
@@ -932,6 +971,7 @@ fn stream(
 /// than pretending otherwise.
 fn page_walk(
     pagination: &crate::api::PaginationContract,
+    body: Option<&TokenStream>,
     contracts: &Contracts,
     config: &Config,
     decoding: Decoding,
@@ -943,7 +983,7 @@ fn page_walk(
     let items_path = pagination.items.iter().map(|step| ident(&step.rust_name));
     if !decoding.is_lenient() {
         return quote! {
-            let page = page_request.send().await?.into_value();
+            let page = page_request.send().await?.into_value() #body;
             let next = ::std::clone::Clone::clone(&page #(.#next_path)*);
             let items = page #(.#items_path)*;
         };
@@ -971,7 +1011,7 @@ fn page_walk(
                 ::std::boxed::Box::new(page.map(|_| ())),
             ));
         }
-        let page = page.into_value();
+        let page = page.into_value() #body;
         let next = ::std::option::Option::Some(&page) #(#next_steps)* .cloned();
         let items = ::std::option::Option::Some(page) #(#items_steps)* .unwrap_or_default();
     }
@@ -995,14 +1035,14 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
             declaration: TokenStream::new(),
         },
         [only] => Rendered {
-            name: response_type_path(&only.body, contracts, config),
+            name: arm_type(only, contracts, config),
             declaration: TokenStream::new(),
         },
         several => {
-            let name = format_ident!("{}Success", operation.rust_name.type_stem());
+            let name = success_name(operation);
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
-                let ty = response_enum_type_path(&arm.body, contracts, config);
+                let ty = arm_variant_type(arm, contracts, config);
                 let docs = docs_of(&arm.docs, config.docs);
                 quote! { #docs #variant(#ty), }
             });
@@ -1022,6 +1062,15 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
     }
 }
 
+/// `FooSuccess`: the enum of an operation's successes, where it declares more than one.
+pub(crate) fn success_name(operation: &OperationContract) -> proc_macro2::Ident {
+    format_ident!(
+        "{}{}",
+        operation.rust_name.type_stem(),
+        type_suffix::SUCCESS
+    )
+}
+
 /// The arms a 2xx status can land in.
 ///
 /// The `default` arm counts **only when the document declares no successful status at all**, which
@@ -1029,7 +1078,7 @@ fn success_type(operation: &OperationContract, contracts: &Contracts, config: &C
 /// `2XX` beside it, a `200` is exactly that. Treating it as an error instead would report every
 /// successful call as a failure. Where explicit success arms *do* exist, `default` stays a failure:
 /// the document has already said what success looks like, and an undeclared success is a stranger.
-fn success_arms(operation: &OperationContract) -> Vec<&ResponseArm> {
+pub(crate) fn success_arms(operation: &OperationContract) -> Vec<&ResponseArm> {
     let declared: Vec<&ResponseArm> = operation
         .responses
         .arms
@@ -1067,14 +1116,14 @@ fn error_type(operation: &OperationContract, contracts: &Contracts, config: &Con
             declaration: TokenStream::new(),
         },
         [only] => Rendered {
-            name: response_type_path(&only.body, contracts, config),
+            name: arm_type(only, contracts, config),
             declaration: TokenStream::new(),
         },
         several => {
-            let name = format_ident!("{}Error", operation.rust_name.type_stem());
+            let name = format_ident!("{}{}", operation.rust_name.type_stem(), type_suffix::ERROR);
             let variants = several.iter().map(|arm| {
                 let variant = format_ident!("{}", arm.rust_name.as_str());
-                let ty = response_enum_type_path(&arm.body, contracts, config);
+                let ty = arm_variant_type(arm, contracts, config);
                 let docs = docs_of(&arm.docs, config.docs);
                 quote! { #docs #variant(#ty), }
             });
@@ -1129,16 +1178,35 @@ fn send(
         || operation.responses.default.is_some())
     .then(|| quote! { let reading = self.reading.under(self.client.reading); });
     let dispatch = dispatch(operation, success, failure, reading);
+    let typed_headers = operation
+        .responses
+        .arms
+        .iter()
+        .chain(&operation.responses.default)
+        .any(|arm| !arm.headers.is_empty());
     let body_note = if reading.decoding.is_lenient() {
+        let headers = typed_headers.then(|| {
+            quote! {
+                /// So are the headers a response declares: one that is absent or unreadable is
+                /// `None` in its typed field, and reported beside the body's drift.
+            }
+        });
         quote! {
             ///
             /// The body is read leniently into its read form: `Ok` can be partial, with a
             /// member the description requires absent or unreadable — `None` — and the
             /// response's [`ResponseValue::degradations`] says what was tolerated.
+            #headers
         }
     } else {
         TokenStream::new()
     };
+    let header_errors = (typed_headers && !reading.decoding.is_lenient()).then(|| {
+        quote! {
+            /// A header a response declares that does not match its declaration is
+            /// [`Error::HeaderDecode`].
+        }
+    });
 
     quote! {
         /// Perform the request.
@@ -1149,6 +1217,7 @@ fn send(
         /// Returns [`Error`] when the request fails, when the server answers with a status the
         /// description declares as an error, when it answers with one the description does not
         /// declare at all, or when a body does not match the shape the description states.
+        #header_errors
         pub async fn send(self) -> ::std::result::Result<ResponseValue<#success>, Error<#failure>> {
             let url = #path;
             let mut request = self.client.client().request(::reqwest::Method::#method, url);
@@ -1820,38 +1889,39 @@ fn arm_matches(
     out
 }
 
-/// Parse the body and put it in its variant, if the operation needed variants.
+/// Parse the body, read the arm's typed headers beside it, and put the result in its variant, if
+/// the operation needed variants.
 ///
 /// Written as a `map` over the response rather than as a `let` and a rebuild, so the body is never
 /// bound to a name: a `204` arm's body is `()`, and binding a unit is a lint the consumer sees.
+///
+/// A lenient arm that types a header records what reading it tolerated in the response's own
+/// report before the observer sees the response, so one call to the observer covers the body and
+/// the headers, whatever the body is.
 fn decode(
     arm: &ResponseArm,
     ty: &TokenStream,
     wrapped: bool,
     reading: &Reading<'_>,
 ) -> TokenStream {
-    let decoded = match &arm.body {
+    let lenient = reading.decoding.is_lenient();
+    let body = match &arm.body {
         // A JSON body is read leniently where the configuration says so, with the response's
-        // own position as the root site and the client's observer shown the result; an empty
-        // body has nothing to be lenient about.
-        ResponseBody::Json { .. } if reading.decoding.is_lenient() => {
+        // own position as the root site; an empty body has nothing to be lenient about.
+        ResponseBody::Json { .. } if lenient => {
             let operation = reading.operation;
-            let variant = reading.variant;
             let origin = arm.origin.to_string();
             quote! {
-                self.client.observed(
-                    operations::Operation::#variant,
-                    support::decode_lenient(
-                        response,
-                        reading,
-                        support::Site::new(
-                            #operation,
-                            #origin,
-                            ::std::option::Option::None,
-                        ),
-                    )
-                    .await?,
+                support::decode_lenient(
+                    response,
+                    reading,
+                    support::Site::new(
+                        #operation,
+                        #origin,
+                        ::std::option::Option::None,
+                    ),
                 )
+                .await?
             }
         }
         ResponseBody::Json { .. } | ResponseBody::Empty => {
@@ -1868,11 +1938,47 @@ fn decode(
             }
         },
     };
+    let observed = |response: TokenStream| {
+        let variant = reading.variant;
+        quote! { self.client.observed(operations::Operation::#variant, #response) }
+    };
+    let decoded = if let Some(types) = &arm.header_types {
+        let group = ident(&types.group);
+        let payload = ident(&types.payload);
+        let join = if has_body(arm) {
+            quote! { |body| #payload { body, headers } }
+        } else {
+            quote! { |()| #payload { headers } }
+        };
+        if lenient {
+            let joined = observed(quote! { decoded.map(#join) });
+            quote! {
+                {
+                    let mut decoded = #body;
+                    let headers = decoded.read_headers(#group::read);
+                    #joined
+                }
+            }
+        } else {
+            quote! {
+                {
+                    let decoded = #body;
+                    let headers = #group::read(decoded.status(), decoded.headers())?;
+                    decoded.map(#join)
+                }
+            }
+        }
+    } else if lenient && matches!(arm.body, ResponseBody::Json { .. }) {
+        // The client's observer is shown what a lenient body decode tolerated.
+        observed(body)
+    } else {
+        body
+    };
     if !wrapped {
         return decoded;
     }
     let variant = format_ident!("{}", arm.rust_name.as_str());
-    if response_body_is_boxed(&arm.body) {
+    if response_body_is_boxed(&arm.body) || arm.header_types.is_some() {
         quote! {
             #decoded
                 .map(::std::boxed::Box::new)
@@ -1880,6 +1986,264 @@ fn decode(
         }
     } else {
         quote! { #decoded.map(#ty::#variant) }
+    }
+}
+
+/// The type one arm decodes to: its payload where it types a header, and its body otherwise.
+fn arm_type(arm: &ResponseArm, contracts: &Contracts, config: &Config) -> TokenStream {
+    let Some(types) = &arm.header_types else {
+        return response_type_path(&arm.body, contracts, config);
+    };
+    let payload = ident(&types.payload);
+    quote! { #payload }
+}
+
+/// The same, as a variant of a response enum holds it: indirected like every non-empty payload.
+fn arm_variant_type(arm: &ResponseArm, contracts: &Contracts, config: &Config) -> TokenStream {
+    let Some(types) = &arm.header_types else {
+        return response_enum_type_path(&arm.body, contracts, config);
+    };
+    let payload = ident(&types.payload);
+    quote! { Box<#payload> }
+}
+
+fn has_body(arm: &ResponseArm) -> bool {
+    !matches!(arm.body, ResponseBody::Empty)
+}
+
+/// The header group and the payload of every arm of the operation that types a header.
+///
+/// One each per arm, the `default` arm's included, even where it is the operation's success as
+/// well as its failure.
+fn payloads(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+    decoding: Decoding,
+) -> TokenStream {
+    let rendered = operation
+        .responses
+        .arms
+        .iter()
+        .chain(&operation.responses.default)
+        .filter_map(|arm| {
+            let types = arm.header_types.as_ref()?;
+            Some((arm, types))
+        })
+        .map(|(arm, types)| {
+            let group = header_group(operation, arm, types, contracts, config, decoding);
+            let payload = payload_struct(operation, arm, types, contracts, config);
+            quote! {
+                #group
+                #payload
+            }
+        });
+    quote! { #(#rendered)* }
+}
+
+/// What an arm that types a header decodes to: its body, where it declares one, and its headers.
+fn payload_struct(
+    operation: &OperationContract,
+    arm: &ResponseArm,
+    types: &HeaderTypes,
+    contracts: &Contracts,
+    config: &Config,
+) -> TokenStream {
+    let name = ident(&types.payload);
+    let group = ident(&types.group);
+    let status = super::server::status_label(arm);
+    let method = operation.rust_name.as_str();
+    let summary = if has_body(arm) {
+        format!(" The {status} response of [`Client::{method}`]: its body and its typed headers.")
+    } else {
+        format!(" The {status} response of [`Client::{method}`]: its typed headers, and no body.")
+    };
+    let prose = docs_prose(&arm.docs, config.docs);
+    let described = (!prose.is_empty()).then(|| {
+        quote! {
+            #[doc = ""]
+            #prose
+        }
+    });
+    let body = has_body(arm).then(|| {
+        let ty = response_type_path(&arm.body, contracts, config);
+        let nesting = super::types::type_complexity(&ty);
+        quote! {
+            /// The body.
+            #nesting
+            pub body: #ty,
+        }
+    });
+    quote! {
+        #[doc = #summary]
+        #described
+        #[derive(Debug, Clone)]
+        pub struct #name {
+            #body
+            /// The headers the response declares, each in its typed field.
+            pub headers: #group,
+        }
+    }
+}
+
+/// The struct an arm's typed headers are read into, and its reader.
+///
+/// Typed fields only, with no `raw` map of the server's kind: every header the response carries,
+/// these included, stays on `ResponseValue::headers` as it arrived.
+/// Lives in the client module because its reader names `reqwest`'s header map, which the shared
+/// types crate does not depend on.
+///
+/// Read leniently, every field is an `Option`, as a read form's member is, and one that is absent
+/// or unreadable is recorded in the response's report.
+/// Read strictly, a required header is a plain field, and a required header that is absent or any
+/// header that does not read as its type fails the response.
+fn header_group(
+    operation: &OperationContract,
+    arm: &ResponseArm,
+    types: &HeaderTypes,
+    contracts: &Contracts,
+    config: &Config,
+    decoding: Decoding,
+) -> TokenStream {
+    let lenient = decoding.is_lenient();
+    let name = ident(&types.group);
+    let doc = format!(
+        " The headers `{}` declares for its {} response, typed.",
+        operation.rust_name,
+        super::server::status_label(arm)
+    );
+    let fields = arm.headers.iter().map(|header| {
+        let field = ident(&header.rust_name);
+        let ty = type_tokens(&header.ty, contracts, config);
+        let ty = if lenient || !header.required {
+            quote! { ::std::option::Option<#ty> }
+        } else {
+            ty
+        };
+        let nesting = super::types::type_complexity(&ty);
+        let docs = header_docs(header, decoding, config);
+        quote! { #docs #nesting pub #field: #ty, }
+    });
+    // Each header is read by the support runtime from its row, which spells the rules once.
+    let group = name.to_string();
+    let reads = arm.headers.iter().map(|header| {
+        let field = ident(&header.rust_name);
+        let row = header_row(header);
+        if lenient {
+            quote! { #field: support::lenient_header(headers, report, #group, &#row), }
+        } else {
+            quote! { #field: support::strict_header(status, headers, &#row)?, }
+        }
+    });
+    let deprecated = arm.headers.iter().any(|header| header.docs.deprecated).then(|| {
+        quote! {
+            #[expect(deprecated, reason = "the description still declares the deprecated header, so it is still read")]
+        }
+    });
+    let (contract, read) = if lenient {
+        (
+            quote! {
+                /// Every field is optional, as a read form's member is: a header that is absent, or
+                /// whose value does not read as its type, is `None`, and the response's
+                /// [`ResponseValue::degradations`] say which.
+            },
+            quote! {
+                /// Every typed header, with what reading them tolerated in the response's report.
+                #deprecated
+                fn read(headers: &::reqwest::header::HeaderMap, report: &mut Degradations) -> Self {
+                    Self { #(#reads)* }
+                }
+            },
+        )
+    } else {
+        (
+            quote! {
+                /// A header the description requires is a plain field and any other an `Option`:
+                /// a required header that is absent, or a header whose value does not read as its
+                /// type, fails the response with [`Error::HeaderDecode`].
+            },
+            quote! {
+                /// Every typed header, or why the response fails.
+                #deprecated
+                fn read(
+                    status: ::reqwest::StatusCode,
+                    headers: &::reqwest::header::HeaderMap,
+                ) -> ::std::result::Result<Self, ::std::boxed::Box<HeaderDecodeError>> {
+                    ::std::result::Result::Ok(Self { #(#reads)* })
+                }
+            },
+        )
+    };
+    quote! {
+        #[doc = #doc]
+        ///
+        #contract
+        /// Every header the response carries, these included, is also on
+        /// [`ResponseValue::headers`], as it arrived.
+        #[derive(Debug, Clone)]
+        pub struct #name {
+            #(#fields)*
+        }
+
+        impl #name {
+            #read
+        }
+    }
+}
+
+/// The row a generated reader hands the support runtime for one header: everything its rules
+/// need, spelled from the finalized contract.
+fn header_row(header: &ResponseHeader) -> TokenStream {
+    let name = &header.wire_name;
+    let origin = header.origin.to_string();
+    let required = header.required;
+    let json = header.style.content();
+    let list = header.style.array() && !json;
+    let spelled = header.spelled;
+    quote! {
+        support::HeaderRow {
+            name: #name,
+            origin: #origin,
+            required: #required,
+            json: #json,
+            list: #list,
+            spelled: #spelled,
+        }
+    }
+}
+
+/// One typed header's doc comment: the wire name it is read from, then what the description says
+/// about it or, where it says nothing, where it is declared, and what its requirement means here.
+fn header_docs(header: &ResponseHeader, decoding: Decoding, config: &Config) -> TokenStream {
+    let name = format!(" The `{}` header.", header.wire_name);
+    let prose = docs_prose(&header.docs, config.docs);
+    let described = if prose.is_empty() {
+        let origin = format!(" Generated from `{}`.", header.origin);
+        quote! { #[doc = #origin] }
+    } else {
+        prose
+    };
+    let required = header.required.then(|| {
+        if decoding.is_lenient() {
+            quote! {
+                ///
+                /// The description requires it; a response without it reads as `None`, and its
+                /// report says so.
+            }
+        } else {
+            quote! {
+                ///
+                /// The description requires it, so a response without it fails.
+            }
+        }
+    });
+    let deprecated = header.docs.deprecated.then(|| quote! { #[deprecated] });
+    quote! {
+        #[doc = #name]
+        #[doc = ""]
+        #described
+        #required
+        #deprecated
     }
 }
 
@@ -1927,12 +2291,16 @@ pub(crate) fn takes_params(operation: &OperationContract) -> bool {
 
 /// `FooParams`: the caller-built struct of every input the operation takes.
 pub(crate) fn params_name(operation: &OperationContract) -> proc_macro2::Ident {
-    format_ident!("{}Params", operation.rust_name.type_stem())
+    format_ident!("{}{}", operation.rust_name.type_stem(), type_suffix::PARAMS)
 }
 
 /// `FooRequest`: the params bound to a client, ready to send.
 fn request_name(operation: &OperationContract) -> proc_macro2::Ident {
-    format_ident!("{}Request", operation.rust_name.type_stem())
+    format_ident!(
+        "{}{}",
+        operation.rust_name.type_stem(),
+        type_suffix::REQUEST
+    )
 }
 
 fn ident(name: &RustIdent) -> proc_macro2::Ident {
