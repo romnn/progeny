@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793686266529,
+  "lastUpdate": 1793719588490,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -2967,6 +2967,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 236.40625,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "92e7698ca9db938aa449cefab9f05e094882aced",
+          "message": "fix(generate): keep operation types clear of the client and server module names (#137)\n\nAn operation's types are named after its stem, and nothing checked them\nagainst the support types the generated client and server re-export, so\nan operation `decode` with several failure arms defined a second\n`DecodeError`, and `rejection` a second `RejectionResponse`, and the crate\ndid not compile. Such an operation now takes the next suffix, as one\ncolliding with another operation already does, and the arm header types\nstay clear of the same names.\n\nCloses #136",
+          "timestamp": "2026-11-03T16:19:06+01:00",
+          "tree_id": "ef0bdd3fb13ab4c03b1d7c999e5dac3f57bc2f3e",
+          "url": "https://github.com/romnn/progeny/commit/92e7698ca9db938aa449cefab9f05e094882aced"
+        },
+        "date": 1793719587054,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 35.774053333333335,
+            "range": "± 0.86",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2810.17578125,
+            "range": "± 1.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 12.454467666666666,
+            "range": "± 0.21",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1130.489583015442,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.9605853333333334,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 236.3255205154419,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
