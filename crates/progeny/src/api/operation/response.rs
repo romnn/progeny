@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use super::Build;
 use super::body::is_json;
 use crate::api::{
-    HeaderTypes, OperationContract, ResponseArm, ResponseBody, ResponseContract, StatusPattern,
-    type_suffix,
+    HeaderTypes, MODULE_TYPES, OperationContract, ResponseArm, ResponseBody, ResponseContract,
+    StatusPattern, type_suffix,
 };
 use crate::contract::{Namer, RustIdent, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
@@ -186,7 +186,8 @@ impl Build<'_> {
 /// also `fooBad`'s request builder, and `foo`'s `500` is `FooInternalServerError`, which is
 /// `fooInternalServer`'s enum of failures.
 /// So every name a renderer builds from a stem and one of the [`type_suffix::ALL`] tails is
-/// claimed first, for every operation, whether it is generated or not.
+/// claimed first, for every operation, whether it is generated or not, beside the
+/// [`MODULE_TYPES`] the operations' modules already hold.
 /// Then each arm in model order takes the first of `FooBadRequest`, `FooBadRequest2`, … whose
 /// payload and group are both free, so the two always share a spelling.
 pub(super) fn name_header_types(operations: &mut [OperationContract]) {
@@ -196,6 +197,7 @@ pub(super) fn name_header_types(operations: &mut [OperationContract]) {
             let stem = operation.rust_name.type_stem();
             type_suffix::ALL.map(|suffix| RustIdent::stem_type(&stem, suffix).to_string())
         })
+        .chain(MODULE_TYPES.map(str::to_owned))
         .collect();
     for operation in operations.iter_mut() {
         let stem = operation.rust_name.type_stem();
