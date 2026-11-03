@@ -96,7 +96,8 @@ pub enum BreakageClass {
     /// A union whose "any combination may match" semantics has no faithful Rust type.
     WildUnion,
     /// An operation whose method name the document did not choose: it declared no `operationId`,
-    /// or declared one that sanitizes to a name another operation already has.
+    /// declared one that sanitizes to a name another operation already has, or declared one whose
+    /// types would take a name the generated module already holds, as `decode` would `DecodeError`.
     ///
     /// Aggregated, because the first case is a property of a document rather than of an operation —
     /// 1,052 of the corpus's 1,058 records are it, and a record each would be a snapshot nobody

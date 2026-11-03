@@ -386,6 +386,40 @@ pub(crate) mod type_suffix {
     pub(crate) const HEADERS: &str = "Headers";
 }
 
+/// The types the generated `client` and `server` modules hold beside the operations' own: their
+/// fixed items and the support types they re-export.
+///
+/// An operation's types share those modules, so none of them may take one of these names:
+/// `decode`'s enum of failures would be `DecodeError`, the client's re-exported decoding error.
+pub(crate) const MODULE_TYPES: [&str; 14] = [
+    // The client module.
+    "BodyReadError",
+    "BodyTooLarge",
+    "Client",
+    "DecodeError",
+    "Degraded",
+    "Degradations",
+    "Error",
+    "HeaderDecodeError",
+    "HeaderProblem",
+    "Observer",
+    "ResponseValue",
+    // The server module.
+    "Api",
+    "Rejection",
+    "RejectionResponse",
+];
+
+/// The module type that one of the operation types built from `stem` would take, if any.
+pub(crate) fn module_type_taken_by(stem: &str) -> Option<&'static str> {
+    type_suffix::ALL.into_iter().find_map(|suffix| {
+        let name = RustIdent::stem_type(stem, suffix);
+        MODULE_TYPES
+            .into_iter()
+            .find(|module_type| *module_type == name.as_str())
+    })
+}
+
 /// One declared response header with a typed field.
 ///
 /// Only a header whose declaration the `simple` style can write and read back unchanged gets

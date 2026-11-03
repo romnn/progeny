@@ -51,7 +51,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `discriminator-edge-case` | A discriminator whose mappings are incomplete or name variants implicitly. |
 | `inheritance-discriminator` | A discriminator and mapping on a schema with no `oneOf`/`anyOf`, read as the union its mapping names. |
 | `wild-union` | A union whose "any combination may match" semantics has no faithful Rust type. |
-| `colliding-operation-id` | An operation without an `operationId`, or one that sanitizes to a name another operation has. |
+| `colliding-operation-id` | An operation without an `operationId`, one that sanitizes to a name another operation has, or one whose types would take a name the generated client or server already holds, such as `decode` and the client's `DecodeError`. |
 | `connection-upgrade` | A switching-protocols response the generated surfaces do not hand over. |
 | `query-serialization-style` | A parameter style combination OpenAPI leaves undefined. |
 | `untyped-response-header` | A declared response header that gets no typed field — an invalid or case-duplicated name, a style other than `simple`, a shape `simple` cannot read back such as an object, a JSON `content` document that may be `null`, `Set-Cookie`, or a field the transport owns such as `Content-Length` or `Connection` — and travels in the raw headers instead. |

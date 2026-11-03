@@ -1173,6 +1173,94 @@ mod tests {
         assert!(rendered.lines().count() > 3, "{rendered}");
     }
 
+    /// The type-namespace names a rendered module's own items take, its re-exports included.
+    fn module_type_names(source: &str) -> eyre::Result<Vec<String>> {
+        fn leaves(tree: &syn::UseTree, names: &mut Vec<String>) {
+            match tree {
+                syn::UseTree::Path(path) => leaves(&path.tree, names),
+                syn::UseTree::Name(name) => names.push(name.ident.to_string()),
+                syn::UseTree::Rename(rename) => names.push(rename.rename.to_string()),
+                syn::UseTree::Group(group) => {
+                    for tree in &group.items {
+                        leaves(tree, names);
+                    }
+                }
+                syn::UseTree::Glob(_) => {}
+            }
+        }
+        let mut names = Vec::new();
+        for item in syn::parse_file(source)?.items {
+            match item {
+                syn::Item::Struct(item) => names.push(item.ident.to_string()),
+                syn::Item::Enum(item) => names.push(item.ident.to_string()),
+                syn::Item::Trait(item) => names.push(item.ident.to_string()),
+                syn::Item::Type(item) => names.push(item.ident.to_string()),
+                syn::Item::Union(item) => names.push(item.ident.to_string()),
+                syn::Item::Mod(item) => names.push(item.ident.to_string()),
+                syn::Item::Use(item) => leaves(&item.tree, &mut names),
+                _ => {}
+            }
+        }
+        Ok(names)
+    }
+
+    /// The rendered client and server modules of `document`.
+    fn client_and_server(document: Value) -> eyre::Result<[String; 2]> {
+        let rendered = files(document, &Config::default())?;
+        let module = |path: &str| {
+            rendered
+                .get(camino::Utf8Path::new(path))
+                .cloned()
+                .ok_or_eyre("the default configuration renders the client and the server")
+        };
+        Ok([module("src/client.rs")?, module("src/server.rs")?])
+    }
+
+    #[test_util::test]
+    fn the_module_types_are_every_type_the_client_and_server_hold_beside_the_operations() {
+        // Every name not built from `listPets`' stem is one of the modules' own, which an
+        // operation's types must stay clear of; one the list misses would collide unrepaired.
+        let mut held = std::collections::BTreeSet::new();
+        for source in client_and_server(pets_document())? {
+            held.extend(module_type_names(&source)?.into_iter().filter(|name| {
+                name.starts_with(|first: char| first.is_ascii_uppercase())
+                    && !name.starts_with("ListPets")
+            }));
+        }
+        let listed = crate::api::MODULE_TYPES
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(held, listed);
+    }
+
+    #[test_util::test]
+    fn operations_named_after_module_types_render_every_name_once() {
+        let failing = json!({
+            "200": {"description": "ok", "content": {"application/json": {"schema": {"type": "string"}}}},
+            "400": {"description": "bad", "content": {"application/json": {"schema": {"type": "string"}}}},
+            "404": {"description": "gone", "content": {"application/json": {"schema": {"type": "string"}}}},
+        });
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "colliding", "version": "1"},
+            "paths": {
+                "/a": {"get": {"operationId": "decode", "responses": failing}},
+                "/b": {"get": {"operationId": "headerDecode", "responses": failing}},
+                "/c": {"get": {"operationId": "bodyRead", "responses": failing}},
+                "/d": {"get": {"operationId": "rejection", "responses": failing}},
+            },
+        });
+        for source in client_and_server(document)? {
+            let mut seen = std::collections::BTreeSet::new();
+            let repeated: Vec<String> = module_type_names(&source)?
+                .into_iter()
+                .filter(|name| !seen.insert(name.clone()))
+                .collect();
+            assert!(repeated.is_empty(), "{repeated:?}");
+        }
+    }
+
     /// One operation returning one component: the smallest document with all three crates.
     fn pets_document() -> Value {
         json!({

@@ -383,15 +383,22 @@ impl Build<'_> {
 
         let unique = self.claim(&wanted);
         if unique != wanted {
-            ctx.report(Diagnostic::new(
-                BreakageClass::CollidingOperationId,
-                Action::Repair,
-                at.clone(),
-                format!(
+            let message = match super::module_type_taken_by(&wanted.type_stem()) {
+                Some(module_type) => format!(
+                    "an operation called `{wanted}` would define a second `{module_type}` beside \
+                     the generated module's own, so it is called `{unique}`"
+                ),
+                None => format!(
                     "another operation is already called `{wanted}`, so this one is called \
                      `{unique}`; the two are told apart by a suffix because nothing in the \
                      document tells them apart"
                 ),
+            };
+            ctx.report(Diagnostic::new(
+                BreakageClass::CollidingOperationId,
+                Action::Repair,
+                at.clone(),
+                message,
             ));
         }
         unique
@@ -399,7 +406,11 @@ impl Build<'_> {
 
     /// A method name that is free in both spellings: its own, and the camel stem the renderers
     /// derive the operation's type names from. A taken stem sends the method name to its next
-    /// suffix, so `x_1` beside `x1` becomes `x_12` rather than colliding at `X1Params`.
+    /// suffix, so `x_1` beside `x1` becomes `x_12` rather than colliding at `X1Params`, and so
+    /// does a stem whose types would take one of [`MODULE_TYPES`]: `decode` becomes `decode2`
+    /// rather than defining a second `DecodeError`.
+    ///
+    /// [`MODULE_TYPES`]: crate::api::MODULE_TYPES
     fn claim(&mut self, wanted: &RustIdent) -> RustIdent {
         loop {
             let candidate = self.namer.unique(wanted.clone());
@@ -407,10 +418,12 @@ impl Build<'_> {
             // `GetXY` and `GetXy` together, which is stricter than the stems themselves, and
             // loosening it would rename operations existing consumers already spell.
             let stem = candidate.type_stem();
-            if self
+            // Claimed even when a module type then refuses it, so the refused stem still keeps a
+            // later operation whose stem folds to the same key from taking it.
+            let free = self
                 .stems
-                .take(&RustIdent::type_name(std::slice::from_ref(&stem)))
-            {
+                .take(&RustIdent::type_name(std::slice::from_ref(&stem)));
+            if free && super::module_type_taken_by(&stem).is_none() {
                 return candidate;
             }
         }
@@ -541,6 +554,78 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test_util::test]
+    fn an_operation_whose_types_would_take_a_module_type_takes_a_suffix() {
+        // `decode` has a single arm, so it generates no `DecodeError`; it is renamed anyway, so an
+        // operation's name does not depend on how many arms it declares.
+        let done = json!({"204": {"description": "done"}});
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/a": {"get": {"operationId": "decode", "responses": done}},
+            "/b": {"get": {"operationId": "header_decode", "responses": done}},
+            "/c": {"get": {"operationId": "bodyRead", "responses": done}},
+            "/d": {"get": {"operationId": "rejection", "responses": done}},
+            "/e": {"get": {"operationId": "decode2", "responses": done}},
+        })))?;
+        let names: Vec<&str> = model
+            .operations()
+            .iter()
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "decode2",
+                "header_decode2",
+                "body_read2",
+                "rejection2",
+                "decode22"
+            ]
+        );
+        let reported: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::CollidingOperationId)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(reported.len(), 5, "{reported:#?}");
+        for module_type in [
+            "DecodeError",
+            "HeaderDecodeError",
+            "BodyReadError",
+            "RejectionResponse",
+        ] {
+            assert!(
+                reported
+                    .iter()
+                    .any(|detail| detail.contains(&format!("a second `{module_type}`"))),
+                "{reported:#?}"
+            );
+        }
+        assert!(
+            reported
+                .iter()
+                .any(|detail| detail.contains("another operation is already called `decode2`")),
+            "{reported:#?}"
+        );
+    }
+
+    #[test_util::test]
+    fn a_stem_a_module_type_refuses_still_keeps_its_folded_spelling_taken() {
+        // `d_e_c_o_d_e`'s stem `DECODE` folds to the key `decode`'s refused stem `Decode` claimed,
+        // so it keeps the `d_e_c_o_d_e3` it had before module types were reserved.
+        let done = json!({"204": {"description": "done"}});
+        let (model, _) = model_of(with_paths(json!({
+            "/a": {"get": {"operationId": "decode", "responses": done}},
+            "/b": {"get": {"operationId": "decode2", "responses": done}},
+            "/c": {"get": {"operationId": "d_e_c_o_d_e", "responses": done}},
+        })))?;
+        let names: Vec<&str> = model
+            .operations()
+            .iter()
+            .map(|operation| operation.rust_name.as_str())
+            .collect();
+        assert_eq!(names, ["decode2", "decode22", "d_e_c_o_d_e3"]);
     }
 
     #[test_util::test]
