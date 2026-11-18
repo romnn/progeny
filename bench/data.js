@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795023011806,
+  "lastUpdate": 1795033539732,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3166,6 +3166,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 324.0794267654419,
             "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "12ac38ab184ea65abc4ad933b48d11518662b3db",
+          "message": "feat(generate): build a server error reply from its status (#143)\n\n* fix(cli): drop the must_use that ExitCode already carries\n\n* feat(generate): build a server error reply from its status\n\nA server response enum whose operation declares `default`, and whose\n`4XX` and `5XX` exact and range arms and `default` all carry one body\ntype, implements the new `server::ErrorResponse<B>`. Its\n`error(status, raw_headers, body)` builds the arm a client reads the\nstatus by: the exact arm, then the range arm of the status's class, then\n`default`, so `default` never takes a status another error arm claims.\nAn arm with typed headers gets them unset and the raw headers as `raw`.\n\n`ErrorResponse` joins the names an operation's types stay clear of.\n\nCloses #140\n\n* fix(generate): pick an error arm among the arms a client decodes by",
+          "timestamp": "2026-11-18T21:19:58+01:00",
+          "tree_id": "d9108e5c1747407054da414ec1b8bdc5ecc0ed06",
+          "url": "https://github.com/romnn/progeny/commit/12ac38ab184ea65abc4ad933b48d11518662b3db"
+        },
+        "date": 1795033539002,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.081592999999998,
+            "range": "± 0.16",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2815.649739265442,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.686491,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1130.079426765442,
+            "range": "± 0.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6378523333333334,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.5169267654419,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
