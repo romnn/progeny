@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794154217333,
+  "lastUpdate": 1795023011806,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3102,6 +3102,72 @@ window.BENCHMARK_DATA = {
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4f4188e6a3e07f0f532c22a26e322502421a3acd",
+          "message": "fix(generate): send a multipart union of strings as a text part (#142)\n\n* fix(generate): send a multipart union of strings as a text part\n\nA multipart member typed as a union whose every branch is a string was\nwritten as a JSON part, so it arrived quoted. It is now a text part, as a\nstring or a string enum is, and the server keeps its text instead of\nreading the JSON it might spell, so a string such as `123` stays a string.\nA union that may hold a number, an object, a list or raw bytes stays one\nJSON part, and so does any member whose encoding declares a JSON content\ntype.\n\nCloses #138\n\n* fix(cli): drop the must_use that ExitCode already carries\n\n* fix(generate): decide a multipart part's kind and text in one walk\n\n* fix(generate): ignore a styled part's content type as OpenAPI does\n\n* fix(generate): keep every other part's content type as it was",
+          "timestamp": "2026-11-18T18:24:09+01:00",
+          "tree_id": "b06ffe6a00173d6d3638679c947b2b2c5d7e5917",
+          "url": "https://github.com/romnn/progeny/commit/4f4188e6a3e07f0f532c22a26e322502421a3acd"
+        },
+        "date": 1795023011511,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 26.186728666666667,
+            "range": "± 0.13",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2903.3359375,
+            "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.92718,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1217.65625,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6662296666666666,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 324.0794267654419,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
         ]
       }
