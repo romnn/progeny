@@ -66,14 +66,16 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         //! Every response variant carries its `headers`: the group of headers its arm declares,
         //! each typed and optional like a read form's member, beside `raw` for every other
         //! header, or a bare `HeaderMap` where the arm declares none.
-        //! They are attached only once the body has encoded, so a reply that fails on the way
-        //! out is a `500` without them.
+        //! They are attached only once the body has encoded, so a reply that fails before it is
+        //! sent is a `500` without them.
         //!
         //! A binary body is an `axum::body::Body`, which streams: a handler can pass a file
         //! through without holding it whole, and `body.into()` turns a `Vec<u8>` or `Bytes`
         //! it already holds into one frame of known length, sent with its `Content-Length`.
-        //! Its headers are sent before its first bytes, so a stream that fails partway ends the
-        //! response early instead, which a client reads as a body that broke off.
+        //! Its status and headers are sent before its first bytes, so a stream that fails partway
+        //! ends the response early instead.
+        //! An HTTP/1.1 client reads that as a body that broke off, by the missing last chunk or
+        //! the bytes short of its `Content-Length`.
 
         use super::operations;
         use super::support;

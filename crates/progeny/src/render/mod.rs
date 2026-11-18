@@ -4554,6 +4554,10 @@ mod tests {
                 "/ping": {"get": {"operationId": "ping", "responses": {
                     "200": {"description": "ok", "content": {"text/plain": {
                         "schema": {"type": "string"}}}}}}},
+                "/report": {"get": {"operationId": "report", "responses": {
+                    "200": {"description": "ok", "content": {"text/plain": {
+                        "schema": {"type": "string"}}}},
+                    "default": bytes}}},
             },
         });
         let config = Config {
@@ -4576,6 +4580,7 @@ mod tests {
         // A stream is sent once, so only the enum without one is `Clone`.
         assert!(flat.contains("#[derive(Debug)]pubenumDownloadResponse{"), "{server}");
         assert!(flat.contains("#[derive(Debug,Clone)]pubenumPingResponse{"), "{server}");
+        assert!(flat.contains("#[derive(Debug)]pubenumReportResponse{"), "{server}");
         // A binary error body builds through the constructor as the stream it is.
         assert!(flat.contains("implsupport::ErrorResponse<::axum::body::Body>forDownloadResponse"), "{server}");
 

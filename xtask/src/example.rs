@@ -784,19 +784,14 @@ impl server::Api for Double {
                     Ok::<_, std::io::Error>(axum::body::Bytes::from_static(chunk.as_bytes()))
                 }),
             )),
-            // A store that fails once its first chunk is out. The yield in between lets the
-            // server flush the head and that chunk, so the failure is one partway through the
-            // body rather than one before the response began.
-            _ => axum::body::Body::from_stream(futures_util::stream::unfold(0u8, |sent| async move {
-                match sent {
-                    0 => Some((Ok(axum::body::Bytes::from_static(b"partial ")), 1)),
-                    1 => {
-                        tokio::task::yield_now().await;
-                        Some((Err(std::io::Error::other("the store failed")), 2))
-                    }
-                    _ => None,
-                }
-            })),
+            // A store that fails once its first chunk is out. The chunk is larger than the
+            // server's write buffer, so the server sends the head and the chunk before it asks
+            // the stream again: the failure is one partway through the body, never one before
+            // the response began.
+            _ => axum::body::Body::from_stream(futures_util::stream::iter([
+                Ok(axum::body::Bytes::from(vec![b'.'; 1 << 20])),
+                Err(std::io::Error::other("the store failed")),
+            ])),
         };
         server::StreamBytesResponse::Ok {
             headers: server::StreamBytesOkHeaders {
