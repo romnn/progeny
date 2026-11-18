@@ -8,7 +8,7 @@ use crate::api::style::{self, ParamShape};
 use crate::api::{BodyContract, FormSpec, PartKind, PartSpec, Style, reading};
 use crate::contract::{ContractKind, Contracts, Format, TypeContract, TypeIndex, TypeRef};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
-use crate::doc::{MediaType, Operation};
+use crate::doc::{Encoding, MediaType, Operation};
 
 /// A request body position, lowered once per declared media type.
 ///
@@ -298,11 +298,11 @@ impl Build<'_> {
     /// what the type actually carries, and a part list derived from anything else could describe a
     /// member the emitted type does not have.
     fn part_specs(&self, ty: &TypeRef, entry: &MediaType) -> Vec<PartSpec> {
-        let declared: BTreeMap<&str, &str> = entry
+        let encodings: BTreeMap<&str, &Encoding> = entry
             .encoding
             .iter()
             .flatten()
-            .filter_map(|(name, encoding)| Some((name.as_str(), encoding.content_type.as_deref()?)))
+            .map(|(name, encoding)| (name.as_str(), encoding))
             .collect();
         // A nullable body is an `Option` of the struct and a cycle-broken one a `Box` of it;
         // the parts belong to the struct either way.
@@ -326,26 +326,37 @@ impl Build<'_> {
             .iter()
             .filter(|field| field.capture.is_none())
             .map(|field| {
+                let encoding = encodings.get(field.wire_name.as_str());
                 // A `contentType` naming several types — `cloudflare` writes ten of them separated
                 // by commas — is a list of what the server accepts, not an instruction about what
                 // to send. Only a single type is a decision.
-                let content_type = declared
-                    .get(field.wire_name.as_str())
+                let content_type = encoding
+                    .and_then(|encoding| encoding.content_type.as_deref())
                     .filter(|declared| !declared.contains(','))
-                    .map(|declared| (*declared).to_owned());
-                let (shaped_kind, repeated) = part_of(&field.ty, self.contracts);
+                    .map(ToOwned::to_owned);
+                let shaped = part_of(&field.ty, self.contracts);
                 // A part the encoding declares JSON is written and read as JSON, so a string in
                 // it keeps the quotes a JSON reader expects.
-                let declared_json = content_type.as_deref().is_some_and(is_json);
-                let kind = match shaped_kind {
-                    PartKind::Text if declared_json => PartKind::Json,
-                    PartKind::Text | PartKind::File | PartKind::Json => shaped_kind,
+                // An explicit `style`, `explode` or `allowReserved` serializes the part by style
+                // instead, and OpenAPI then ignores the `contentType`.
+                let styled = encoding.is_some_and(|encoding| {
+                    encoding.style.is_some()
+                        || encoding.explode.is_some()
+                        || encoding.allow_reserved.is_some()
+                });
+                let declared_json = !styled && content_type.as_deref().is_some_and(is_json);
+                let part = match shaped.kind {
+                    PartKind::Text if declared_json => Part {
+                        kind: PartKind::Json,
+                        keeps_text: false,
+                        ..shaped
+                    },
+                    PartKind::Text | PartKind::File | PartKind::Json => shaped,
                 };
                 PartSpec {
-                    keeps_text: kind == PartKind::Text
-                        && is_string(element_of(&field.ty, repeated), self.contracts),
-                    kind,
-                    repeated,
+                    kind: part.kind,
+                    repeated: part.repeated,
+                    keeps_text: part.keeps_text,
                     content_type,
                     wire_name: field.wire_name.clone(),
                 }
@@ -515,129 +526,105 @@ fn preference(media_type: &str) -> u8 {
 ///
 /// A recursive member, such as `Tree(Vec<Tree>)`, is a JSON part: its structure has no faithful
 /// text form.
-fn part_of(ty: &TypeRef, contracts: &Contracts) -> (PartKind, bool) {
+fn part_of(ty: &TypeRef, contracts: &Contracts) -> Part {
     part_within(ty, contracts, &mut BTreeSet::new())
+}
+
+/// What one member of a multipart body becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Part {
+    kind: PartKind,
+    /// Whether the member is a sequence, written as one part per element.
+    repeated: bool,
+    /// Whether each part's text is the value itself, because what one part holds is a string on
+    /// the wire: [`PartSpec::keeps_text`].
+    keeps_text: bool,
+}
+
+impl Part {
+    /// One part of JSON.
+    const JSON: Self = Self {
+        kind: PartKind::Json,
+        repeated: false,
+        keeps_text: false,
+    };
+
+    /// One part written as its text, which is the value itself when `string`.
+    fn text(string: bool) -> Self {
+        Self {
+            kind: PartKind::Text,
+            repeated: false,
+            keeps_text: string,
+        }
+    }
 }
 
 /// [`part_of`], knowing the named types the walk has already looked into.
 ///
 /// Each step follows exactly one wrapped type, so the set is also the walk's path, and a type met
 /// again is one that holds itself.
-fn part_within(
-    ty: &TypeRef,
-    contracts: &Contracts,
-    followed: &mut BTreeSet<TypeIndex>,
-) -> (PartKind, bool) {
+/// A union's branches are walked apart, each with its own copy of the path, because two branches
+/// naming the same type are not a cycle.
+fn part_within(ty: &TypeRef, contracts: &Contracts, followed: &mut BTreeSet<TypeIndex>) -> Part {
     match ty {
-        TypeRef::Upload => (PartKind::File, false),
+        TypeRef::Upload => Part {
+            kind: PartKind::File,
+            repeated: false,
+            keeps_text: false,
+        },
         // An option or a presence says nothing about the shape on the wire; a box says nothing at
         // all.
         TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
             part_within(inner, contracts, followed)
         }
         // The one wrapper that does say something: each element is its own part.
+        // An element that is itself a sequence is written as its JSON text, which is no string.
         TypeRef::Vec(inner) | TypeRef::Array(inner, _) => {
-            let (kind, _) = part_within(inner, contracts, followed);
-            (kind, true)
+            let element = part_within(inner, contracts, followed);
+            Part {
+                kind: element.kind,
+                repeated: true,
+                keeps_text: element.keeps_text && !element.repeated,
+            }
         }
-        TypeRef::Bool
-        | TypeRef::Integer(_)
-        | TypeRef::F64
-        | TypeRef::String
-        | TypeRef::Format(_) => (PartKind::Text, false),
-        TypeRef::Named(index) if !followed.insert(*index) => (PartKind::Json, false),
+        TypeRef::String => Part::text(true),
+        // Raw binary is no string: a text part cannot carry bytes that are not UTF-8.
+        TypeRef::Format(format) => Part::text(*format != Format::Binary),
+        TypeRef::Bool | TypeRef::Integer(_) | TypeRef::F64 => Part::text(false),
+        TypeRef::Named(index) if !followed.insert(*index) => Part::JSON,
         // A string enum is a string on the wire, an alias is what it names, and a newtype is the
         // one value it wraps.
-        // A union of strings is a string too, whichever branch holds it.
-        // A union that may hold a number or a boolean beside a string is JSON: as text, `5` the
-        // number and `"5"` the string would be the same part.
         TypeRef::Named(index) => match contracts.get(*index).map(TypeContract::kind) {
-            Some(ContractKind::StringEnum { .. }) => (PartKind::Text, false),
-            Some(ContractKind::Enum { .. }) if is_string(ty, contracts) => (PartKind::Text, false),
+            Some(ContractKind::StringEnum { .. }) => Part::text(true),
             Some(ContractKind::Alias { target }) => part_within(target, contracts, followed),
             Some(ContractKind::Newtype { inner }) => {
-                match part_within(inner, contracts, followed) {
-                    (PartKind::Text, false) => (PartKind::Text, false),
-                    _ => (PartKind::Json, false),
+                let wrapped = part_within(inner, contracts, followed);
+                match wrapped.kind {
+                    PartKind::Text if !wrapped.repeated => wrapped,
+                    PartKind::Text | PartKind::File | PartKind::Json => Part::JSON,
                 }
             }
-            _ => (PartKind::Json, false),
+            // A union of strings is a string too, whichever branch holds it.
+            // A union that may hold a number or a boolean beside a string is JSON: as text, `5`
+            // the number and `"5"` the string would be the same part.
+            Some(ContractKind::Enum { variants, .. }) => {
+                let strings = variants.iter().all(|variant| {
+                    part_within(&variant.ty, contracts, &mut followed.clone()) == Part::text(true)
+                });
+                if strings { Part::text(true) } else { Part::JSON }
+            }
+            Some(
+                ContractKind::Struct { .. }
+                | ContractKind::TaggedEnum { .. }
+                | ContractKind::CarriedTagEnum { .. }
+                | ContractKind::KeyedEnum { .. }
+                | ContractKind::Tuple { .. },
+            )
+            | None => Part::JSON,
         },
         // A map, a tuple or a degraded `Value` is structured, and structured members have no
         // faithful text form.
-        _ => (PartKind::Json, false),
-    }
-}
-
-/// Whether a value of type `ty` is a string on the wire, whatever text it holds.
-///
-/// A string, a textual format, a string enum, a name for one of these, and a union whose every
-/// branch is one.
-/// Raw binary is not, because a text part cannot carry bytes that are not UTF-8.
-fn is_string(ty: &TypeRef, contracts: &Contracts) -> bool {
-    is_string_within(ty, contracts, &mut BTreeSet::new())
-}
-
-/// [`is_string`], knowing the named types on the walk's path, where a name met again is a type
-/// that holds itself rather than a string.
-fn is_string_within(
-    ty: &TypeRef,
-    contracts: &Contracts,
-    followed: &mut BTreeSet<TypeIndex>,
-) -> bool {
-    match ty {
-        TypeRef::String => true,
-        TypeRef::Format(format) => *format != Format::Binary,
-        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-            is_string_within(inner, contracts, followed)
-        }
-        TypeRef::Named(index) => {
-            if !followed.insert(*index) {
-                return false;
-            }
-            let string = match contracts.get(*index).map(TypeContract::kind) {
-                Some(ContractKind::StringEnum { .. }) => true,
-                Some(ContractKind::Alias { target: inner } | ContractKind::Newtype { inner }) => {
-                    is_string_within(inner, contracts, followed)
-                }
-                Some(ContractKind::Enum { variants, .. }) => variants
-                    .iter()
-                    .all(|variant| is_string_within(&variant.ty, contracts, followed)),
-                Some(
-                    ContractKind::Struct { .. }
-                    | ContractKind::TaggedEnum { .. }
-                    | ContractKind::CarriedTagEnum { .. }
-                    | ContractKind::KeyedEnum { .. }
-                    | ContractKind::Tuple { .. },
-                )
-                | None => false,
-            };
-            // Sibling branches may name the same type, which is not a cycle.
-            followed.remove(index);
-            string
-        }
-        TypeRef::Unit
-        | TypeRef::Bool
-        | TypeRef::Integer(_)
-        | TypeRef::F64
-        | TypeRef::Upload
-        | TypeRef::Value
-        | TypeRef::Vec(_)
-        | TypeRef::Map(_)
-        | TypeRef::Array(..)
-        | TypeRef::Tuple(_) => false,
-    }
-}
-
-/// The type one part of a member holds: the element of a repeated member, and the member itself
-/// otherwise.
-fn element_of(ty: &TypeRef, repeated: bool) -> &TypeRef {
-    match ty {
-        TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
-            element_of(inner, repeated)
-        }
-        TypeRef::Vec(element) | TypeRef::Array(element, _) if repeated => element,
-        other => other,
+        TypeRef::Unit | TypeRef::Value | TypeRef::Map(_) | TypeRef::Tuple(_) => Part::JSON,
     }
 }
 
@@ -786,10 +773,16 @@ mod tests {
                             {"type": "string", "pattern": "^ct_"},
                             {"type": "string", "format": "binary"},
                         ]},
+                        "aliased": {"$ref": "#/components/schemas/Subjects"},
+                        "nested": {"type": "array", "items": {"$ref": "#/components/schemas/Subjects"}},
                         "quoted": {"$ref": "#/components/schemas/Subject"},
+                        "styled": {"$ref": "#/components/schemas/Subject"},
                         "count": {"type": "integer"},
                     },
-                }, "encoding": {"quoted": {"contentType": "application/json"}}}}},
+                }, "encoding": {
+                    "quoted": {"contentType": "application/json"},
+                    "styled": {"contentType": "application/json", "style": "form"},
+                }}}},
                 "responses": {"204": {"description": "done"}},
             }},
         }));
@@ -798,6 +791,7 @@ mod tests {
                 {"$ref": "#/components/schemas/ContactId"},
                 {"$ref": "#/components/schemas/Kind"},
             ]},
+            "Subjects": {"type": "array", "items": {"$ref": "#/components/schemas/Subject"}},
             "ContactId": {"type": "string", "pattern": "^ct_"},
             "Kind": {"type": "string", "enum": ["submission", "contact"]},
         }});
@@ -824,6 +818,16 @@ mod tests {
             part("subjects"),
             Some((Text, true, true, items(Reading::Keep)))
         );
+        assert_eq!(
+            part("aliased"),
+            Some((Text, true, true, items(Reading::Keep)))
+        );
+        // A list of lists has each inner list written as its JSON text, as a list of lists of
+        // strings has.
+        assert_eq!(
+            part("nested"),
+            Some((Text, true, false, items(Reading::Spelled)))
+        );
         // A number is a text part re-read as the value its text spells.
         assert_eq!(part("count"), Some((Text, false, false, Reading::Spelled)));
         // A union that may hold a number, an object, a list or raw bytes is one JSON part.
@@ -831,8 +835,10 @@ mod tests {
         assert_eq!(part("shaped"), Some((Json, false, false, Reading::Keep)));
         assert_eq!(part("listed"), Some((Json, false, false, Reading::Keep)));
         assert_eq!(part("raw"), Some((Json, false, false, Reading::Keep)));
-        // An encoding that declares JSON makes even a union of strings a JSON part.
+        // An encoding that declares JSON makes even a union of strings a JSON part, unless it also
+        // declares a style, which OpenAPI then serializes the part by.
         assert_eq!(part("quoted"), Some((Json, false, false, Reading::Keep)));
+        assert_eq!(part("styled"), Some((Text, false, true, Reading::Keep)));
     }
 
     /// A recursive member meets its own type again on the way to its part kind, and is one JSON
