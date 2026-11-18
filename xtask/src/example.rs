@@ -60,8 +60,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let keyed = with_streamed_bytes(&with_problem_arms(&with_response_headers(
-        &with_security_schemes(bytes)?,
+    let keyed = with_string_union_member(&with_streamed_bytes(&with_problem_arms(
+        &with_response_headers(&with_security_schemes(bytes)?)?,
     )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
@@ -391,6 +391,32 @@ fn with_streamed_bytes(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
     )
 }
 
+/// The subject with a photo `subject` that is a union of strings, which no other gate needs.
+///
+/// A union of strings is a string on the wire, so the client sends it as a text part and the
+/// server keeps its text; one that spells a number is still the string.
+fn with_string_union_member(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const SUBJECT: &str = indoc::indoc! {"
+        subject:
+          description: What the photo is filed under.
+          oneOf:
+            - {type: string, pattern: '^[0-9a-z_]+$'}
+            - {type: string, const: submission}
+    "};
+    spliced(
+        bytes,
+        &[Insertion {
+            after: &[
+                "operationId: uploadPetPhoto\n",
+                "                  description: An optional numeric rating.\n",
+                "                  format: int32\n",
+            ],
+            text: SUBJECT,
+            indent: "                ",
+        }],
+    )
+}
+
 /// YAML lines to add to the subject.
 struct Insertion<'a> {
     /// Lines found one after another, the first anywhere and each later one after the last; the
@@ -484,6 +510,7 @@ struct Seen {
     probe_caller: Option<String>,
     photo_note: Option<String>,
     photo_file: Option<String>,
+    photo_subject: Option<String>,
 }
 
 /// Cloneable rather than shared behind an `Arc` from outside, because `router` takes the
@@ -647,6 +674,7 @@ impl server::Api for Double {
         self.record(|seen| {
             seen.photo_note = body.note.clone();
             seen.photo_file = Some(body.file.clone());
+            seen.photo_subject = body.subject.as_ref().map(|subject| format!("{subject:?}"));
         });
         // A type only a response yields has no strict form; its read form is written out, and
         // `Default` fills whatever the answer leaves unsaid.
@@ -1076,6 +1104,29 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                 (axum::http::StatusCode::CREATED, headers)
             }),
         )
+        // The `subject` part of a photo upload, headers and content as they arrived, answered as
+        // the photo's note.
+        .route(
+            "/pets/{pet_id}/photo",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                let text = String::from_utf8_lossy(&body).into_owned();
+                let subject = text
+                    .split("--")
+                    .find(|section| section.contains("name=\"subject\""))
+                    .unwrap_or_default()
+                    .to_owned();
+                (
+                    axum::http::StatusCode::CREATED,
+                    axum::Json(serde_json::json!({
+                        "petId": 5,
+                        "filename": "photo",
+                        "contentType": "image/png",
+                        "fileSize": 0,
+                        "note": subject,
+                    })),
+                )
+            }),
+        )
         // A paged listing whose second page has an item that cannot be read: the stream must
         // not skip it quietly.
         .route(
@@ -1221,6 +1272,7 @@ async fn a_multipart_body_survives_the_round_trip() {
                 file: "not really a png".to_owned(),
                 note: Some("a note".to_owned()),
                 rating: Some(4),
+                subject: Some(types::UploadPetPhotoBodySubject::Text(Box::new("123".to_owned()))),
             },
         })
         .send()
@@ -1228,7 +1280,32 @@ async fn a_multipart_body_survives_the_round_trip() {
     let seen = double.seen();
     assert_eq!(seen.photo_file.as_deref(), Some("not really a png"));
     assert_eq!(seen.photo_note.as_deref(), Some("a note"));
+    // A union of strings arrives as the string it was sent as, although its text spells a number.
+    assert_eq!(seen.photo_subject.as_deref(), Some("Text(\"123\")"));
     assert_eq!(reply.into_value().pet_id, Some(5));
+}
+
+#[test_util::test]
+async fn a_union_of_strings_is_sent_as_a_text_part() {
+    // The raw server answers with the `subject` part as it arrived, so this reads the wire rather
+    // than what the generated server made of it.
+    let client = raw_serving().await?;
+    let reply = client
+        .upload_pet_photo(client::UploadPetPhotoParams {
+            pet_id: 5,
+            body: types::UploadPetPhotoBody {
+                file: "not really a png".to_owned(),
+                note: None,
+                rating: None,
+                subject: Some(types::UploadPetPhotoBodySubject::Text(Box::new("123".to_owned()))),
+            },
+        })
+        .send()
+        .await?;
+    let part = reply.into_value().note.ok_or_eyre("the raw server saw a `subject` part")?;
+    // A text part: no media type, which RFC 7578 reads as `text/plain`, and the string unquoted.
+    assert!(!part.to_ascii_lowercase().contains("content-type"), "{part:?}");
+    assert!(part.ends_with("name=\"subject\"\r\n\r\n123\r\n"), "{part:?}");
 }
 
 #[test_util::test]

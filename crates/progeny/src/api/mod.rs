@@ -281,6 +281,13 @@ pub(crate) struct PartSpec {
     /// and this describes how many there are, and a member typed `Value` that happens to hold an
     /// array at run time is one JSON part rather than several.
     pub(crate) repeated: bool,
+    /// Whether a text part's text is the member's value as it is, because the member is a string
+    /// on the wire.
+    ///
+    /// The server then keeps the text rather than reading the JSON it might spell, which a union of
+    /// strings needs: `123` is one of its strings, and read as JSON it is a number no branch
+    /// accepts.
+    pub(crate) keeps_text: bool,
     /// The per-part content type the body's `encoding` declared, if it declared one.
     pub(crate) content_type: Option<String>,
 }
