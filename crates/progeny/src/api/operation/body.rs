@@ -327,24 +327,25 @@ impl Build<'_> {
             .filter(|field| field.capture.is_none())
             .map(|field| {
                 let encoding = encodings.get(field.wire_name.as_str());
+                // An explicit `style`, `explode` or `allowReserved` serializes the part by style,
+                // and OpenAPI then ignores its `contentType`.
+                let styled = encoding.is_some_and(|encoding| {
+                    encoding.style.is_some()
+                        || encoding.explode.is_some()
+                        || encoding.allow_reserved.is_some()
+                });
                 // A `contentType` naming several types — `cloudflare` writes ten of them separated
                 // by commas — is a list of what the server accepts, not an instruction about what
                 // to send. Only a single type is a decision.
                 let content_type = encoding
+                    .filter(|_| !styled)
                     .and_then(|encoding| encoding.content_type.as_deref())
                     .filter(|declared| !declared.contains(','))
                     .map(ToOwned::to_owned);
                 let shaped = part_of(&field.ty, self.contracts);
                 // A part the encoding declares JSON is written and read as JSON, so a string in
                 // it keeps the quotes a JSON reader expects.
-                // An explicit `style`, `explode` or `allowReserved` serializes the part by style
-                // instead, and OpenAPI then ignores the `contentType`.
-                let styled = encoding.is_some_and(|encoding| {
-                    encoding.style.is_some()
-                        || encoding.explode.is_some()
-                        || encoding.allow_reserved.is_some()
-                });
-                let declared_json = !styled && content_type.as_deref().is_some_and(is_json);
+                let declared_json = content_type.as_deref().is_some_and(is_json);
                 let part = match shaped.kind {
                     PartKind::Text if declared_json => Part {
                         kind: PartKind::Json,
@@ -839,6 +840,12 @@ mod tests {
         // declares a style, which OpenAPI then serializes the part by.
         assert_eq!(part("quoted"), Some((Json, false, false, Reading::Keep)));
         assert_eq!(part("styled"), Some((Text, false, true, Reading::Keep)));
+        let content_type = |wire: &str| {
+            let part = parts.iter().find(|part| part.wire_name == wire)?;
+            part.content_type.as_deref()
+        };
+        assert_eq!(content_type("quoted"), Some("application/json"));
+        assert_eq!(content_type("styled"), None);
     }
 
     /// A recursive member meets its own type again on the way to its part kind, and is one JSON
