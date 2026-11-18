@@ -92,7 +92,7 @@ Which crates the generated types use for the formats that have a choice. The def
 | --- | --- |
 | `date-time` | `"string"` (default), `"chrono"`, `"time"`, `"jiff"` — for `date-time`, `date` and `time` |
 | `uuid` | `"string"` (default), `"uuid"` |
-| `bytes` | `"vec"` (default), `"bytes"` — for raw binary bodies; base64 inside JSON stays `String` |
+| `bytes` | `"vec"` (default), `"bytes"` — for raw binary request bodies and the bodies the client reads; a server's binary response is always a streaming `axum::body::Body`, and base64 inside JSON stays `String` |
 | `integers` | `"wide"` (default): `i64`, or `u64` where a `minimum` of zero rules out a sign. `"by-format"`: the width and sign the `format` names, `int8` to `uint64` |
 
 ```toml

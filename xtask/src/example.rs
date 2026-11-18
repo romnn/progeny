@@ -60,7 +60,9 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let keyed = with_problem_arms(&with_response_headers(&with_security_schemes(bytes)?)?)?;
+    let keyed = with_streamed_bytes(&with_problem_arms(&with_response_headers(
+        &with_security_schemes(bytes)?,
+    )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
@@ -349,6 +351,41 @@ fn with_problem_arms(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
         &[Insertion {
             after: &["\npaths:\n"],
             text: PROBLEMS,
+            indent: "  ",
+        }],
+    )
+}
+
+/// The subject with a binary response that declares a header, which no other gate needs.
+///
+/// `streamBytes` answers the body its path names: `whole`, bytes held in memory, `chunks`, a
+/// stream of three chunks, and `broken`, a stream that fails after its first chunk.
+fn with_streamed_bytes(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const STREAM: &str = indoc::indoc! {"
+        /stream/{mode}:
+          get:
+            operationId: streamBytes
+            summary: Answer a binary body the way the mode says
+            parameters:
+              - name: mode
+                in: path
+                required: true
+                schema: {type: string}
+            responses:
+              \"200\":
+                description: The bytes
+                headers:
+                  X-Chunks:
+                    schema: {type: integer}
+                content:
+                  application/octet-stream:
+                    schema: {type: string, format: binary}
+    "};
+    spliced(
+        bytes,
+        &[Insertion {
+            after: &["\npaths:\n"],
+            text: STREAM,
             indent: "  ",
         }],
     )
@@ -729,7 +766,44 @@ impl server::Api for Double {
     async fn download_bytes(&self, _context: ()) -> server::DownloadBytesResponse {
         server::DownloadBytesResponse::Ok {
             headers: Default::default(),
-            body: Box::new(vec![0, 255, b'{', b'\n']),
+            body: Box::new(vec![0, 255, b'{', b'\n'].into()),
+        }
+    }
+
+    async fn stream_bytes(
+        &self,
+        _context: (),
+        path: server::StreamBytesPath,
+    ) -> server::StreamBytesResponse {
+        let body = match path.mode.as_str() {
+            // Bytes already in memory: one frame of known length.
+            "whole" => axum::body::Body::from(axum::body::Bytes::from_static(b"whole body")),
+            // Three chunks yielded one at a time, the way a file streams from storage.
+            "chunks" => axum::body::Body::from_stream(futures_util::stream::iter(
+                ["first ", "second ", "third"].map(|chunk| {
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(chunk.as_bytes()))
+                }),
+            )),
+            // A store that fails once its first chunk is out. The yield in between lets the
+            // server flush the head and that chunk, so the failure is one partway through the
+            // body rather than one before the response began.
+            _ => axum::body::Body::from_stream(futures_util::stream::unfold(0u8, |sent| async move {
+                match sent {
+                    0 => Some((Ok(axum::body::Bytes::from_static(b"partial ")), 1)),
+                    1 => {
+                        tokio::task::yield_now().await;
+                        Some((Err(std::io::Error::other("the store failed")), 2))
+                    }
+                    _ => None,
+                }
+            })),
+        };
+        server::StreamBytesResponse::Ok {
+            headers: server::StreamBytesOkHeaders {
+                x_chunks: Some(3),
+                ..Default::default()
+            },
+            body: Box::new(body),
         }
     }
 
@@ -866,6 +940,14 @@ impl server::Api for Gatekeeper {
 
     async fn range_arms(&self, _: Caller, path: server::RangeArmsPath) -> server::RangeArmsResponse {
         self.inner.range_arms((), path).await
+    }
+
+    async fn stream_bytes(
+        &self,
+        _: Caller,
+        path: server::StreamBytesPath,
+    ) -> server::StreamBytesResponse {
+        self.inner.stream_bytes((), path).await
     }
 
     async fn download_bytes(&self, _: Caller) -> server::DownloadBytesResponse {
@@ -1373,6 +1455,48 @@ async fn the_server_writes_declared_non_json_bodies_and_content_types() {
         Some(&reqwest::header::HeaderValue::from_static("text/plain"))
     );
     assert_eq!(text.text().await?, "plain text\nthat is not JSON");
+}
+
+/// A binary body streams: a stream of chunks arrives whole with the declared header and no
+/// promised length, and bytes held in memory arrive with their `Content-Length`.
+#[test_util::test]
+async fn a_binary_body_streams_to_the_client_with_its_declared_headers() {
+    let (_, client) = serving().await?;
+
+    let streamed = client
+        .stream_bytes(client::StreamBytesParams { mode: "chunks".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(values(streamed.headers(), "content-length"), Vec::<String>::new());
+    assert_eq!(values(streamed.headers(), "transfer-encoding"), ["chunked"]);
+    assert_eq!(values(streamed.headers(), "content-type"), ["application/octet-stream"]);
+    let streamed = streamed.into_value();
+    assert_eq!(streamed.headers.x_chunks, Some(3));
+    assert_eq!(streamed.body.as_slice(), b"first second third");
+
+    let whole = client
+        .stream_bytes(client::StreamBytesParams { mode: "whole".to_owned() })
+        .send()
+        .await?;
+    assert_eq!(values(whole.headers(), "content-length"), ["10"]);
+    assert_eq!(whole.into_value().body.as_slice(), b"whole body");
+}
+
+/// A stream that fails partway ends the response early, which the client reads as a body that
+/// broke off after a `200`, never as a shorter body that succeeded.
+#[test_util::test]
+async fn a_binary_stream_that_fails_partway_aborts_the_response() {
+    let (_, client) = serving().await?;
+    let error = client
+        .stream_bytes(client::StreamBytesParams { mode: "broken".to_owned() })
+        .send()
+        .await
+        .err()
+        .ok_or_eyre("a stream that fails partway is not a success")?;
+    let client::Error::BodyRead(read) = &error else {
+        eyre::bail!("expected BodyRead, got {error:?}");
+    };
+    assert_eq!(read.status().as_u16(), 200);
 }
 
 /// Start the gatekeeper behind a middleware that turns an `x-caller` header into the request

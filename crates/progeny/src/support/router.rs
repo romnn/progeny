@@ -495,16 +495,16 @@ pub fn respond_text(
     respond_raw(status, content_type, body, headers)
 }
 
-/// One declared binary arm's reply.
-pub fn respond_bytes<T>(
+/// One declared binary arm's reply, streaming its body as the handler's stream yields it.
+///
+/// Nothing is buffered here: a body of known length, such as one built from `Bytes`, keeps its
+/// exact size hint and is sent with its `Content-Length`.
+pub fn respond_bytes(
     status: u16,
     content_type: &'static str,
-    body: T,
+    body: ::axum::body::Body,
     headers: ResponseHeaders,
-) -> ::axum::response::Response
-where
-    T: ::axum::response::IntoResponse,
-{
+) -> ::axum::response::Response {
     respond_raw(status, content_type, body, headers)
 }
 
@@ -924,6 +924,22 @@ mod tests {
         let response = super::respond_empty(1000, headers);
         assert_eq!(response.status(), 500);
         assert_eq!(values(&response, "location"), [] as [String; 0]);
+    }
+
+    /// A binary body built from bytes in memory is one frame whose length the writer keeps, which
+    /// is what lets the transport send its `Content-Length`.
+    #[test_util::test]
+    fn a_binary_body_held_in_memory_keeps_its_exact_length() {
+        use ::axum::body::HttpBody as _;
+
+        let shared = ::axum::body::Body::from(::axum::body::Bytes::from_static(b"%PDF-1.7"));
+        let owned = ::axum::body::Body::from(b"%PDF".to_vec());
+        for (body, length) in [(shared, 8), (owned, 4)] {
+            let response = super::respond_bytes(200, "application/pdf", body, no_headers());
+            assert_eq!(response.status(), 200);
+            assert_eq!(values(&response, "content-type"), ["application/pdf"]);
+            assert_eq!(response.body().size_hint().exact(), Some(length));
+        }
     }
 
     #[test_util::test]

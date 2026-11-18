@@ -445,6 +445,11 @@ replaces the arm's media type. A declared `Content-Type` gets no field, as OpenA
 field the transport owns, such as `Content-Length`, `Transfer-Encoding` or `Connection`, is
 reported as `untyped-response-header` and travels in `raw`.
 
+A binary arm's body is a `Box<axum::body::Body>`, which streams: a handler passes a stored file
+through without holding it whole, and `Box::new(bytes.into())` sends a `Vec<u8>` or `Bytes` it
+already holds as one frame with its `Content-Length`. A stream that fails after the first bytes
+ends the response early, which a client reads as a body that broke off.
+
 An operation that declares `default`, and whose `4XX` and `5XX` arms and `default` all carry one
 body type, gets an `ErrorResponse` constructor for its response enum. It builds the arm a client
 reads a status by, the exact arm first, then the range arm of its class, then `default`, so a

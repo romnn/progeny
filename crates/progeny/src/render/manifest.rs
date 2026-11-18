@@ -257,19 +257,14 @@ fn package_name(config: &Config, suffix: &str) -> String {
 }
 
 fn client_uses_bytes(api: &ApiModel, config: &Config) -> bool {
-    config.formats.bytes == BytesRepr::Bytes
-        && (has_raw_responses(api)
-            || api
-                .operations()
-                .iter()
-                .any(|operation| matches!(operation.body, Some(BodyContract::Bytes { .. }))))
+    config.formats.bytes == BytesRepr::Bytes && (has_raw_responses(api) || has_raw_bodies(api))
 }
 
 fn server_uses_bytes(api: &ApiModel, config: &Config) -> bool {
-    // Both directions: a raw response is written as `Bytes`, and a raw request body is handed
-    // to the handler as `Bytes` — the argument type comes from the same `body_type` the client
-    // uses.
-    config.formats.bytes == BytesRepr::Bytes && (has_raw_responses(api) || has_raw_bodies(api))
+    // Only a raw request body, which is handed to the handler as `Bytes`: the argument type comes
+    // from the same `body_type` the client uses.
+    // A raw response is a streaming `axum::body::Body` whatever the configuration says.
+    config.formats.bytes == BytesRepr::Bytes && has_raw_bodies(api)
 }
 
 fn has_raw_bodies(api: &ApiModel) -> bool {
@@ -297,17 +292,8 @@ pub(super) fn render(
     server: bool,
     streams: bool,
 ) -> String {
-    let raw_responses = api.operations().iter().any(|operation| {
-        operation
-            .responses
-            .arms
-            .iter()
-            .chain(&operation.responses.default)
-            .any(|arm| matches!(arm.body, ResponseBody::Bytes { .. }))
-    });
-    let raw = raw_responses || has_raw_bodies(api);
-    let client_bytes = config.formats.bytes == BytesRepr::Bytes && client && raw;
-    let server_bytes = config.formats.bytes == BytesRepr::Bytes && server && raw;
+    let client_bytes = client && client_uses_bytes(api, config);
+    let server_bytes = server && server_uses_bytes(api, config);
     let bytes = client_bytes || server_bytes;
     let gates = gate_features(contracts);
     let mut out = crate_package(config);

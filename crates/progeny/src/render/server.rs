@@ -28,7 +28,7 @@ use crate::config::Config;
 use crate::contract::{Contracts, RustIdent, TypeRef};
 
 use super::types::{
-    docs as docs_of, response_enum_type_path, response_type_path, type_path as type_tokens,
+    docs as docs_of, response_type_path, type_path as type_tokens,
 };
 
 /// Render the server module.
@@ -68,6 +68,12 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         //! header, or a bare `HeaderMap` where the arm declares none.
         //! They are attached only once the body has encoded, so a reply that fails on the way
         //! out is a `500` without them.
+        //!
+        //! A binary body is an `axum::body::Body`, which streams: a handler can pass a file
+        //! through without holding it whole, and `body.into()` turns a `Vec<u8>` or `Bytes`
+        //! it already holds into one frame of known length, sent with its `Content-Length`.
+        //! Its headers are sent before its first bytes, so a stream that fails partway ends the
+        //! response early instead, which a client reads as a body that broke off.
 
         use super::operations;
         use super::support;
@@ -348,11 +354,22 @@ fn response_enum(
 
     let error_constructor = error_constructor(operation, contracts, config);
 
+    // A streaming body can be sent once, so an enum with a binary arm cannot be cloned.
+    let streams = arms
+        .iter()
+        .chain(&operation.responses.default)
+        .any(|arm| matches!(arm.body, ResponseBody::Bytes { .. }));
+    let derives = if streams {
+        quote! { #[derive(Debug)] }
+    } else {
+        quote! { #[derive(Debug, Clone)] }
+    };
+
     quote! {
         #(#groups)*
 
         #[doc = #doc]
-        #[derive(Debug, Clone)]
+        #derives
         pub enum #name {
             #empty
             #(#variants)*
@@ -428,7 +445,7 @@ fn error_constructor(
     };
 
     let name = response_name(operation);
-    let body_type = response_type_path(&default.body, contracts, config);
+    let body_type = response_body_type(&default.body, contracts, config);
     Some(quote! {
         impl support::ErrorResponse<#body_type> for #name {
             fn error(
@@ -559,9 +576,10 @@ fn variant_fields(arm: &ResponseArm, contracts: &Contracts, config: &Config) -> 
             quote! { #group }
         },
     );
+    // Boxed like every non-empty payload, so an enum's size does not depend on its body types.
     let body = has_body(arm).then(|| {
-        let ty = response_enum_type_path(&arm.body, contracts, config);
-        quote! { body: #ty, }
+        let ty = response_body_type(&arm.body, contracts, config);
+        quote! { body: Box<#ty>, }
     });
     quote! { #status headers: #headers, #body }
 }
@@ -575,6 +593,20 @@ fn variant_pattern(arm: &ResponseArm) -> TokenStream {
 
 fn has_body(arm: &ResponseArm) -> bool {
     !matches!(arm.body, ResponseBody::Empty)
+}
+
+/// The type a handler answers an arm's body with.
+///
+/// The client's type, except for a binary body, which streams: a handler passes a file through
+/// without holding it whole, and bytes it already holds convert with `From` into one frame of
+/// known length.
+fn response_body_type(body: &ResponseBody, contracts: &Contracts, config: &Config) -> TokenStream {
+    match body {
+        ResponseBody::Bytes { .. } => quote! { ::axum::body::Body },
+        ResponseBody::Json { .. } | ResponseBody::Text { .. } | ResponseBody::Empty => {
+            response_type_path(body, contracts, config)
+        }
+    }
 }
 
 /// The `default` arm's reply, refusing a status another arm claims.

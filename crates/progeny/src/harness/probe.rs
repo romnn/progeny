@@ -198,13 +198,8 @@ pub enum ProbeValue {
     },
     /// Text written verbatim.
     Text(String),
-    /// Bytes written without JSON serialization.
-    Bytes {
-        /// The configured Rust byte representation.
-        ty: String,
-        /// The raw octets.
-        bytes: Vec<u8>,
-    },
+    /// Bytes written without JSON serialization, as the server's streaming body.
+    Bytes(Vec<u8>),
     /// No response body.
     Empty,
 }
@@ -327,7 +322,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         planned
     });
 
-    let answer = match probe_answer(operation, contracts, config) {
+    let answer = match probe_answer(operation, contracts) {
         Ok(answer) => Some(answer),
         Err(reason) => {
             skip.get_or_insert(reason);
@@ -356,7 +351,6 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
 fn probe_answer(
     operation: &OperationContract,
     contracts: &Contracts,
-    config: &Config,
 ) -> Result<ProbeAnswer, String> {
     let (arm, status) = success_arm(operation).ok_or_else(|| {
         "no declared success status; only `default` or errors, and which status a `default` answers \
@@ -370,12 +364,7 @@ fn probe_answer(
                 .to_string(),
         },
         ResponseBody::Text { .. } => ProbeValue::Text("probe".to_owned()),
-        ResponseBody::Bytes { .. } => ProbeValue::Bytes {
-            ty: test_path(&render::types::response_type_path(
-                &arm.body, contracts, config,
-            )),
-            bytes: b"probe".to_vec(),
-        },
+        ResponseBody::Bytes { .. } => ProbeValue::Bytes(b"probe".to_vec()),
         ResponseBody::Empty => ProbeValue::Empty,
     };
     Ok(ProbeAnswer {
@@ -481,10 +470,7 @@ fn through_wrappers<'a>(ty: &'a TypeRef, contracts: &'a Contracts) -> &'a TypeRe
 /// types};`), so the same type is `types::X` there. Respelled here, beside the renderer that
 /// owns the original spelling — the consumer once patched it back with its own string
 /// replacement, and a changed qualification would have slipped past that silently.
-fn test_path(rendered: &proc_macro2::TokenStream) -> String {
-    test_type(rendered).0
-}
-
+/// Also says whether the path names a deprecated type.
 fn test_type(rendered: &proc_macro2::TokenStream) -> (String, bool) {
     let rendered = rendered.to_string();
     let deprecated = rendered.contains(":: __progeny_deprecated :: ");
