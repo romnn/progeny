@@ -383,64 +383,45 @@ fn response_enum(
 /// The arm is picked as the client's status match picks it: the exact arm for the status, then
 /// the range arm of its class, then `default`, so `default` never takes a status another error
 /// arm claims.
-/// The first of two arms for one status wins, as it does in the client.
+/// The first of two arms for one status or one class is the one a client decodes by, so the
+/// other takes no part here either.
 fn error_constructor(
     operation: &OperationContract,
     contracts: &Contracts,
     config: &Config,
 ) -> Option<TokenStream> {
     let default = operation.responses.default.as_ref()?;
-    let error_arms: Vec<&ResponseArm> = operation
-        .responses
-        .arms
-        .iter()
-        .filter(|arm| is_error(arm.status))
-        .collect();
+    let error_arms = reachable_error_arms(&operation.responses.arms);
 
-    let body = error_body(default, contracts)?;
+    let body = error_body(default, contracts, config)?;
     let shared = error_arms
         .iter()
-        .all(|arm| error_body(arm, contracts).as_ref() == Some(&body));
+        .all(|arm| error_body(arm, contracts, config).as_ref() == Some(&body));
     if !shared {
         return None;
     }
 
-    let mut exact_codes = std::collections::BTreeSet::new();
-    let exact: Vec<TokenStream> = error_arms
-        .iter()
-        .filter_map(|arm| match arm.status {
-            StatusPattern::Exact(code) if exact_codes.insert(code) => {
-                let constructed = constructed_error(arm);
-                Some(quote! { #code => #constructed, })
+    // Each range arm is a guard after every exact arm rather than a range pattern, which an exact
+    // arm at its lower bound overlaps and a class of exact arms can leave unreachable: both are
+    // lints in the consumer's build.
+    let dispatched = error_arms.iter().map(|arm| {
+        let constructed = constructed_error(arm);
+        match arm.status {
+            StatusPattern::Exact(code) => quote! { #code => #constructed, },
+            StatusPattern::Range(class) => {
+                let class = u16::from(class);
+                quote! { _ if status / 100 == #class => #constructed, }
             }
-            StatusPattern::Exact(_) | StatusPattern::Range(_) => None,
-        })
-        .collect();
-    let mut classes = std::collections::BTreeSet::new();
-    let ranges: Vec<TokenStream> = error_arms
-        .iter()
-        .filter_map(|arm| match arm.status {
-            StatusPattern::Range(class) if classes.insert(class) => {
-                let low = u16::from(class) * 100;
-                let high = low + 99;
-                let constructed = constructed_error(arm);
-                Some(quote! { #low..=#high => #constructed, })
-            }
-            StatusPattern::Exact(_) | StatusPattern::Range(_) => None,
-        })
-        .collect();
+        }
+    });
     let fallback = constructed_error(default);
-
     // A `match` with nothing but its fallback is a lint in the consumer's build.
-    let dispatch = if exact.is_empty() && ranges.is_empty() {
+    let dispatch = if error_arms.is_empty() {
         fallback
     } else {
-        let overlap = super::client::overlapping_arm_expectation(&error_arms);
         quote! {
-            #overlap
             match status {
-                #(#exact)*
-                #(#ranges)*
+                #(#dispatched)*
                 _ => #fallback,
             }
         }
@@ -462,7 +443,18 @@ fn error_constructor(
     })
 }
 
-/// Whether an arm answers an error: a `4XX` or `5XX` status or range, or `default`.
+/// The `4XX` and `5XX` exact and range arms a client can decode a status by, exact arms first.
+///
+/// The first arm for a status or a class shadows any later one, as it does in the client's status
+/// match.
+fn reachable_error_arms(arms: &[ResponseArm]) -> Vec<&ResponseArm> {
+    let mut seen = std::collections::BTreeSet::new();
+    arms.iter()
+        .filter(|arm| is_error(arm.status) && seen.insert(arm.status))
+        .collect()
+}
+
+/// Whether an exact or range arm answers an error: a `4XX` or `5XX` status or range.
 fn is_error(status: StatusPattern) -> bool {
     match status {
         StatusPattern::Exact(code) => (400..600).contains(&code),
@@ -471,18 +463,24 @@ fn is_error(status: StatusPattern) -> bool {
     }
 }
 
-/// The body type an error arm carries, as the Rust type it is: a JSON body's type with its aliases
-/// resolved, a text body's `String`, which is a JSON string's too, or the binary body.
+/// The body type an error arm carries, as the Rust type a handler hands it in.
+///
+/// Compared as spelled under the configuration, with aliases resolved, so a JSON string, a
+/// `text/plain` body and a format the configuration keeps as `String` are one type.
 #[derive(Debug, PartialEq, Eq)]
-enum ErrorBody<'a> {
-    Typed(&'a TypeRef),
+enum ErrorBody {
+    Typed(String),
     Bytes,
 }
 
-fn error_body<'a>(arm: &'a ResponseArm, contracts: &'a Contracts) -> Option<ErrorBody<'a>> {
+fn error_body(arm: &ResponseArm, contracts: &Contracts, config: &Config) -> Option<ErrorBody> {
+    let typed = |ty: &TypeRef| {
+        let spelled = type_tokens(contracts.unaliased(ty), contracts, config);
+        Some(ErrorBody::Typed(spelled.to_string()))
+    };
     match &arm.body {
-        ResponseBody::Json { ty, .. } => Some(ErrorBody::Typed(contracts.unaliased(ty))),
-        ResponseBody::Text { .. } => Some(ErrorBody::Typed(&TypeRef::String)),
+        ResponseBody::Json { ty, .. } => typed(ty),
+        ResponseBody::Text { .. } => typed(&TypeRef::String),
         ResponseBody::Bytes { .. } => Some(ErrorBody::Bytes),
         ResponseBody::Empty => None,
     }

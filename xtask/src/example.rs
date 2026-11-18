@@ -275,6 +275,7 @@ fn with_response_headers(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
 /// `problemArms` answers the status its path names, through the `ErrorResponse` constructor its
 /// response enum gets: `400` and `404` exactly, the `404` with a typed header, `503` exactly,
 /// `4XX` for any other `4xx`, and `default` for anything else.
+/// `rangeArms` declares the two error classes and `default` alone.
 fn with_problem_arms(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
     const PROBLEMS: &str = indoc::indoc! {"
         /problems/{status}:
@@ -309,6 +310,31 @@ fn with_problem_arms(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
                     schema: {$ref: \"#/components/schemas/Error\"}
               \"503\":
                 description: Unavailable
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              default:
+                description: Anything else
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+        /ranges/{status}:
+          get:
+            operationId: rangeArms
+            summary: Answer the error arm a status selects among ranges alone
+            parameters:
+              - name: status
+                in: path
+                required: true
+                schema: {type: integer, format: int32}
+            responses:
+              \"4XX\":
+                description: A client error
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              \"5XX\":
+                description: A server error
                 content:
                   application/json:
                     schema: {$ref: \"#/components/schemas/Error\"}
@@ -689,6 +715,17 @@ impl server::Api for Double {
         server::ProblemArmsResponse::error(status, raw, problem)
     }
 
+    async fn range_arms(
+        &self,
+        _context: (),
+        path: server::RangeArmsPath,
+    ) -> server::RangeArmsResponse {
+        use server::ErrorResponse as _;
+
+        let status = u16::try_from(path.status).unwrap_or(500);
+        server::RangeArmsResponse::error(status, Default::default(), types::read::Error::default())
+    }
+
     async fn download_bytes(&self, _context: ()) -> server::DownloadBytesResponse {
         server::DownloadBytesResponse::Ok {
             headers: Default::default(),
@@ -825,6 +862,10 @@ impl server::Api for Gatekeeper {
         path: server::ProblemArmsPath,
     ) -> server::ProblemArmsResponse {
         self.inner.problem_arms((), path).await
+    }
+
+    async fn range_arms(&self, _: Caller, path: server::RangeArmsPath) -> server::RangeArmsResponse {
+        self.inner.range_arms((), path).await
     }
 
     async fn download_bytes(&self, _: Caller) -> server::DownloadBytesResponse {
@@ -1475,6 +1516,23 @@ fn the_error_constructor_picks_the_arm_a_client_reads_the_status_by() {
     // Any other status selects `default`.
     assert_eq!(arm(500), "Default(500)");
     assert_eq!(arm(599), "Default(599)");
+
+    // Ranges alone select by class.
+    let ranged = |status: u16| {
+        let built = server::RangeArmsResponse::error(
+            status,
+            axum::http::HeaderMap::new(),
+            types::read::Error::default(),
+        );
+        match built {
+            server::RangeArmsResponse::Status4xx { status, .. } => format!("Status4xx({status})"),
+            server::RangeArmsResponse::Status5xx { status, .. } => format!("Status5xx({status})"),
+            server::RangeArmsResponse::Default { status, .. } => format!("Default({status})"),
+        }
+    };
+    assert_eq!(ranged(404), "Status4xx(404)");
+    assert_eq!(ranged(502), "Status5xx(502)");
+    assert_eq!(ranged(302), "Default(302)");
 }
 
 /// The reply the constructor built reaches the client as the arm it built, with its status, its

@@ -3431,16 +3431,16 @@ mod tests {
             "400u16=>{Self::BadRequest{headers:raw_headers,body,}}",
             "404u16=>{Self::NotFound{headers:ProblemsNotFoundHeaders{raw:raw_headers,..::std::default::Default::default()},body,}}",
             "503u16=>{Self::Status503{headers:raw_headers,body,}}",
-            "400u16..=499u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
+            "_ifstatus/100==4u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
             "_=>{Self::Default{status,headers:raw_headers,body,}}",
         ] {
             assert!(server.contains(arm), "the constructor has `{arm}`:\n{server}");
         }
-        // `400` is the lower bound of `4XX`, which it is matched before.
-        assert!(
-            server.contains("clippy::match_overlapping_arm,reason=\"OpenAPIgivesanexactstatusprecedenceoveritsdeclaredstatusrange\")]matchstatus{400u16"),
-            "{server}"
-        );
+        // The exact arms come before the range, which is a guard rather than a pattern that the
+        // `400` at its lower bound would overlap.
+        let exact = server.find("400u16=>{Self::BadRequest").ok_or_eyre("the `400` arm")?;
+        let range = server.find("_ifstatus/100==4u16").ok_or_eyre("the `4XX` arm")?;
+        assert!(exact < range, "{server}");
     }
 
     /// No constructor where an error arm carries another body, or none, or where nothing takes a
@@ -3453,6 +3453,8 @@ mod tests {
             "schema": {"type": "string"}}}});
         let plain = json!({"description": "failed", "content": {"text/plain": {
             "schema": {"type": "string"}}}});
+        let identified = json!({"description": "failed", "content": {"application/json": {
+            "schema": {"type": "string", "format": "uuid"}}}});
         let ok = json!({"description": "ok", "content": {"application/json": {
             "schema": {"type": "boolean"}}}});
         let (server, implemented) = error_constructors(json!({
@@ -3468,15 +3470,22 @@ mod tests {
                     "200": ok, "default": problem}}},
                 "/textual": {"get": {"operationId": "textual", "responses": {
                     "200": ok, "404": text, "default": plain}}},
+                "/identified": {"get": {"operationId": "identified", "responses": {
+                    "404": identified, "default": plain}}},
+                "/shadowed": {"get": {"operationId": "shadowed", "responses": {
+                    "0404": problem, "404": {"description": "gone"}, "default": problem}}},
             },
             "components": {"schemas": {"Problem": {"type": "object", "properties": {
                 "title": {"type": "string"}}}}},
         }))?;
-        // A JSON string and a text body are both a `String`.
+        // A JSON string, a format the configuration keeps as text, and a text body are all a
+        // `String`; the second `404`, which a client never decodes by, does not count.
         assert_eq!(
             implemented,
             [
                 "DefaultedResponse<super::types::read::Problem>",
+                "IdentifiedResponse<::std::string::String>",
+                "ShadowedResponse<super::types::read::Problem>",
                 "TextualResponse<::std::string::String>",
             ],
             "{server}"

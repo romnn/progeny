@@ -1784,8 +1784,32 @@ fn dispatch(
 
     let success_arms = arm_matches(&successes, success, successes.len() > 1, false, reading);
     let failure_arms = arm_matches(&failures, failure, wrapped_failure, true, reading);
-    let every_arm: Vec<&ResponseArm> = operation.responses.arms.iter().collect();
-    let overlap = overlapping_arm_expectation(&every_arm);
+    let ranges: BTreeSet<u8> = operation
+        .responses
+        .arms
+        .iter()
+        .filter_map(|arm| match arm.status {
+            crate::api::StatusPattern::Range(hundreds) => Some(hundreds),
+            crate::api::StatusPattern::Exact(_) => None,
+        })
+        .collect();
+    // Clippy reports this lint only when the exact arm is the range's lower bound; an interior
+    // exact arm such as `404` before `4XX` is intentionally accepted, so expecting it there would
+    // create an unfulfilled-lint warning in the generated crate.
+    let overlapping = operation.responses.arms.iter().any(|arm| match arm.status {
+        crate::api::StatusPattern::Exact(code) => {
+            code % 100 == 0 && ranges.contains(&u8::try_from(code / 100).unwrap_or(u8::MAX))
+        }
+        crate::api::StatusPattern::Range(_) => false,
+    });
+    let overlap = overlapping.then(|| {
+        quote! {
+            #[expect(
+                clippy::match_overlapping_arm,
+                reason = "OpenAPI gives an exact status precedence over its declared status range"
+            )]
+        }
+    });
     let fallback = match (&operation.responses.default, claims_success) {
         // No `default`: a status the document never mentioned has no shape progeny has ever seen.
         (None, _) => quote! {
@@ -1825,36 +1849,6 @@ fn dispatch(
             #fallback
         }
     }
-}
-
-/// The expectation a `match` over `arms`' statuses needs when an exact arm is the lower bound of
-/// a range arm, which it is matched before.
-///
-/// Clippy reports this lint only when the exact arm is the range's lower bound; an interior
-/// exact arm such as `404` before `4XX` is intentionally accepted, so expecting it there would
-/// create an unfulfilled-lint warning in the generated crate.
-pub(super) fn overlapping_arm_expectation(arms: &[&ResponseArm]) -> Option<TokenStream> {
-    let ranges: BTreeSet<u8> = arms
-        .iter()
-        .filter_map(|arm| match arm.status {
-            crate::api::StatusPattern::Range(hundreds) => Some(hundreds),
-            crate::api::StatusPattern::Exact(_) => None,
-        })
-        .collect();
-    let overlapping = arms.iter().any(|arm| match arm.status {
-        crate::api::StatusPattern::Exact(code) => {
-            code % 100 == 0 && ranges.contains(&u8::try_from(code / 100).unwrap_or(u8::MAX))
-        }
-        crate::api::StatusPattern::Range(_) => false,
-    });
-    overlapping.then(|| {
-        quote! {
-            #[expect(
-                clippy::match_overlapping_arm,
-                reason = "OpenAPI gives an exact status precedence over its declared status range"
-            )]
-        }
-    })
 }
 
 /// One `match` arm per declared status.
