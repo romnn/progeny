@@ -60,7 +60,9 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let keyed = with_string_union_member(&with_response_headers(&with_security_schemes(bytes)?)?)?;
+    let keyed = with_string_union_member(&with_problem_arms(&with_response_headers(
+        &with_security_schemes(bytes)?,
+    )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
@@ -266,6 +268,91 @@ fn with_response_headers(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
                 indent: "          ",
             },
         ],
+    )
+}
+
+/// The subject with an operation whose error arms all answer the `Error` schema, which no other
+/// gate needs.
+///
+/// `problemArms` answers the status its path names, through the `ErrorResponse` constructor its
+/// response enum gets: `400` and `404` exactly, the `404` with a typed header, `503` exactly,
+/// `4XX` for any other `4xx`, and `default` for anything else.
+/// `rangeArms` declares the two error classes and `default` alone.
+fn with_problem_arms(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const PROBLEMS: &str = indoc::indoc! {"
+        /problems/{status}:
+          get:
+            operationId: problemArms
+            summary: Answer the error arm a status selects
+            parameters:
+              - name: status
+                in: path
+                required: true
+                schema: {type: integer, format: int32}
+            responses:
+              \"204\":
+                description: No problem
+              \"400\":
+                description: Bad request
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              \"404\":
+                description: Missing
+                headers:
+                  X-Problem:
+                    schema: {type: string}
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              \"4XX\":
+                description: Any other client error
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              \"503\":
+                description: Unavailable
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              default:
+                description: Anything else
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+        /ranges/{status}:
+          get:
+            operationId: rangeArms
+            summary: Answer the error arm a status selects among ranges alone
+            parameters:
+              - name: status
+                in: path
+                required: true
+                schema: {type: integer, format: int32}
+            responses:
+              \"4XX\":
+                description: A client error
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              \"5XX\":
+                description: A server error
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+              default:
+                description: Anything else
+                content:
+                  application/json:
+                    schema: {$ref: \"#/components/schemas/Error\"}
+    "};
+    spliced(
+        bytes,
+        &[Insertion {
+            after: &["\npaths:\n"],
+            text: PROBLEMS,
+            indent: "  ",
+        }],
     )
 }
 
@@ -629,6 +716,46 @@ impl server::Api for Double {
         }
     }
 
+    async fn problem_arms(
+        &self,
+        _context: (),
+        path: server::ProblemArmsPath,
+    ) -> server::ProblemArmsResponse {
+        use server::ErrorResponse as _;
+
+        let Ok(status) = u16::try_from(path.status) else {
+            return server::ProblemArmsResponse::NoContent {
+                headers: Default::default(),
+            };
+        };
+        if status == 204 {
+            return server::ProblemArmsResponse::NoContent {
+                headers: Default::default(),
+            };
+        }
+        // One problem for every failure, with a header the description declares nowhere, as a
+        // service answering from a shared problem type would.
+        let mut raw = axum::http::HeaderMap::new();
+        raw.insert("x-trace", axum::http::HeaderValue::from_static("problem"));
+        let problem = types::read::Error {
+            code: Some(i64::from(status)),
+            message: Some("problem".to_owned()),
+            ..Default::default()
+        };
+        server::ProblemArmsResponse::error(status, raw, problem)
+    }
+
+    async fn range_arms(
+        &self,
+        _context: (),
+        path: server::RangeArmsPath,
+    ) -> server::RangeArmsResponse {
+        use server::ErrorResponse as _;
+
+        let status = u16::try_from(path.status).unwrap_or(500);
+        server::RangeArmsResponse::error(status, Default::default(), types::read::Error::default())
+    }
+
     async fn download_bytes(&self, _context: ()) -> server::DownloadBytesResponse {
         server::DownloadBytesResponse::Ok {
             headers: Default::default(),
@@ -757,6 +884,18 @@ impl server::Api for Gatekeeper {
 
     async fn named_arms_bad(&self, _: Caller) -> server::NamedArmsBadResponse {
         self.inner.named_arms_bad(()).await
+    }
+
+    async fn problem_arms(
+        &self,
+        _: Caller,
+        path: server::ProblemArmsPath,
+    ) -> server::ProblemArmsResponse {
+        self.inner.problem_arms((), path).await
+    }
+
+    async fn range_arms(&self, _: Caller, path: server::RangeArmsPath) -> server::RangeArmsResponse {
+        self.inner.range_arms((), path).await
     }
 
     async fn download_bytes(&self, _: Caller) -> server::DownloadBytesResponse {
@@ -1424,6 +1563,94 @@ async fn a_generated_rejection_sees_the_context() {
 /// A `default` answered with a status another arm claims is the handler's defect, refused `500`
 /// rather than sent as a body a client would decode as that arm's, and without the headers the
 /// handler gave the `default`.
+/// The constructor picks the arm the client's status match reads a status by: the arm that
+/// declares it, then the range arm of its class, then `default`, which never takes a status
+/// another error arm claims.
+#[test_util::test]
+fn the_error_constructor_picks_the_arm_a_client_reads_the_status_by() {
+    use server::ErrorResponse as _;
+
+    let arm = |status: u16| {
+        let built = server::ProblemArmsResponse::error(
+            status,
+            axum::http::HeaderMap::new(),
+            types::read::Error::default(),
+        );
+        match built {
+            server::ProblemArmsResponse::NoContent { .. } => "NoContent".to_owned(),
+            server::ProblemArmsResponse::BadRequest { .. } => "BadRequest".to_owned(),
+            server::ProblemArmsResponse::NotFound { .. } => "NotFound".to_owned(),
+            server::ProblemArmsResponse::Status503 { .. } => "Status503".to_owned(),
+            server::ProblemArmsResponse::Status4xx { status, .. } => format!("Status4xx({status})"),
+            server::ProblemArmsResponse::Default { status, .. } => format!("Default({status})"),
+        }
+    };
+    // Every declared error status selects its own arm.
+    assert_eq!(arm(400), "BadRequest");
+    assert_eq!(arm(404), "NotFound");
+    assert_eq!(arm(503), "Status503");
+    // An undeclared status in the declared `4XX` class selects the range arm, never `default`.
+    assert_eq!(arm(418), "Status4xx(418)");
+    assert_eq!(arm(499), "Status4xx(499)");
+    // Any other status selects `default`.
+    assert_eq!(arm(500), "Default(500)");
+    assert_eq!(arm(599), "Default(599)");
+
+    // Ranges alone select by class.
+    let ranged = |status: u16| {
+        let built = server::RangeArmsResponse::error(
+            status,
+            axum::http::HeaderMap::new(),
+            types::read::Error::default(),
+        );
+        match built {
+            server::RangeArmsResponse::Status4xx { status, .. } => format!("Status4xx({status})"),
+            server::RangeArmsResponse::Status5xx { status, .. } => format!("Status5xx({status})"),
+            server::RangeArmsResponse::Default { status, .. } => format!("Default({status})"),
+        }
+    };
+    assert_eq!(ranged(404), "Status4xx(404)");
+    assert_eq!(ranged(502), "Status5xx(502)");
+    assert_eq!(ranged(302), "Default(302)");
+}
+
+/// The reply the constructor built reaches the client as the arm it built, with its status, its
+/// media type and the raw headers it was handed, an arm with typed headers included.
+#[test_util::test]
+async fn an_error_built_from_a_status_reaches_the_client_as_its_arm() {
+    let (_, client) = serving().await?;
+    for status in [400u16, 404, 418, 503, 500] {
+        let error = client
+            .problem_arms(client::ProblemArmsParams { status: i64::from(status) })
+            .send()
+            .await
+            .err()
+            .ok_or_eyre("every error status is a declared failure")?;
+        let client::Error::Declared(response) = &error else {
+            eyre::bail!("expected a declared error, got {error:?}");
+        };
+        assert_eq!(response.status(), status);
+        assert_eq!(values(response.headers(), "x-trace"), ["problem"]);
+        assert_eq!(values(response.headers(), "content-type"), ["application/json"]);
+        let (arm, body) = match response.value() {
+            client::ProblemArmsError::BadRequest(body) => ("BadRequest", &**body),
+            client::ProblemArmsError::NotFound(found) => ("NotFound", &found.body),
+            client::ProblemArmsError::Status503(body) => ("Status503", &**body),
+            client::ProblemArmsError::Status4xx(body) => ("Status4xx", &**body),
+            client::ProblemArmsError::Default(body) => ("Default", &**body),
+        };
+        let expected = match status {
+            400 => "BadRequest",
+            404 => "NotFound",
+            418 => "Status4xx",
+            503 => "Status503",
+            _ => "Default",
+        };
+        assert_eq!(arm, expected, "{status}");
+        assert_eq!(body.code, Some(i64::from(status)));
+    }
+}
+
 #[test_util::test]
 async fn a_default_answered_with_a_claimed_status_is_refused() {
     let (_, client) = serving().await?;

@@ -398,7 +398,7 @@ pub(crate) mod type_suffix {
 ///
 /// An operation's types share those modules, so none of them may take one of these names:
 /// `decode`'s enum of failures would be `DecodeError`, the client's re-exported decoding error.
-pub(crate) const MODULE_TYPES: [&str; 14] = [
+pub(crate) const MODULE_TYPES: [&str; 15] = [
     // The client module.
     "BodyReadError",
     "BodyTooLarge",
@@ -413,6 +413,7 @@ pub(crate) const MODULE_TYPES: [&str; 14] = [
     "ResponseValue",
     // The server module.
     "Api",
+    "ErrorResponse",
     "Rejection",
     "RejectionResponse",
 ];

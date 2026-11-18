@@ -25,9 +25,11 @@ use crate::api::{
     type_suffix,
 };
 use crate::config::Config;
-use crate::contract::{Contracts, RustIdent};
+use crate::contract::{Contracts, RustIdent, TypeRef};
 
-use super::types::{docs as docs_of, response_enum_type_path, type_path as type_tokens};
+use super::types::{
+    docs as docs_of, response_enum_type_path, response_type_path, type_path as type_tokens,
+};
 
 /// Render the server module.
 pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -> TokenStream {
@@ -71,7 +73,7 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         use super::support;
 
         #[doc(inline)]
-        pub use super::support::{Rejection, RejectionResponse};
+        pub use super::support::{ErrorResponse, Rejection, RejectionResponse};
 
         /// The API this description defines.
         ///
@@ -344,6 +346,8 @@ fn response_enum(
         }
     });
 
+    let error_constructor = error_constructor(operation, contracts, config);
+
     quote! {
         #(#groups)*
 
@@ -364,7 +368,143 @@ fn response_enum(
                 }
             }
         }
+
+        #error_constructor
     }
+}
+
+/// The `support::ErrorResponse` implementation of an operation's response enum, when it has one.
+///
+/// Rendered when the operation declares `default` and every one of its error arms carries the
+/// same body type: its `4XX` and `5XX` exact and range arms, and `default`.
+/// Without `default` a status no arm names would have nowhere to land, and an arm without that
+/// body would have to drop the caller's.
+///
+/// The arm is picked as the client's status match picks it: the exact arm for the status, then
+/// the range arm of its class, then `default`, so `default` never takes a status another error
+/// arm claims.
+/// The first of two arms for one status or one class is the one a client decodes by, so the
+/// other takes no part here either.
+fn error_constructor(
+    operation: &OperationContract,
+    contracts: &Contracts,
+    config: &Config,
+) -> Option<TokenStream> {
+    let default = operation.responses.default.as_ref()?;
+    let error_arms = reachable_error_arms(&operation.responses.arms);
+
+    let body = error_body(default, contracts, config)?;
+    let shared = error_arms
+        .iter()
+        .all(|arm| error_body(arm, contracts, config).as_ref() == Some(&body));
+    if !shared {
+        return None;
+    }
+
+    // Each range arm is a guard after every exact arm rather than a range pattern, which an exact
+    // arm at its lower bound overlaps and a class of exact arms can leave unreachable: both are
+    // lints in the consumer's build.
+    let dispatched = error_arms.iter().map(|arm| {
+        let constructed = constructed_error(arm);
+        match arm.status {
+            StatusPattern::Exact(code) => quote! { #code => #constructed, },
+            StatusPattern::Range(class) => {
+                let class = u16::from(class);
+                quote! { _ if status / 100 == #class => #constructed, }
+            }
+        }
+    });
+    let fallback = constructed_error(default);
+    // A `match` with nothing but its fallback is a lint in the consumer's build.
+    let dispatch = if error_arms.is_empty() {
+        fallback
+    } else {
+        quote! {
+            match status {
+                #(#dispatched)*
+                _ => #fallback,
+            }
+        }
+    };
+
+    let name = response_name(operation);
+    let body_type = response_type_path(&default.body, contracts, config);
+    Some(quote! {
+        impl support::ErrorResponse<#body_type> for #name {
+            fn error(
+                status: ::std::primitive::u16,
+                raw_headers: ::axum::http::HeaderMap,
+                body: #body_type,
+            ) -> Self {
+                let body = ::std::boxed::Box::new(body);
+                #dispatch
+            }
+        }
+    })
+}
+
+/// The `4XX` and `5XX` exact and range arms a client can decode a status by, exact arms first.
+///
+/// The first arm for a status or a class shadows any later one, as it does in the client's status
+/// match.
+fn reachable_error_arms(arms: &[ResponseArm]) -> Vec<&ResponseArm> {
+    let mut seen = std::collections::BTreeSet::new();
+    arms.iter()
+        .filter(|arm| is_error(arm.status) && seen.insert(arm.status))
+        .collect()
+}
+
+/// Whether an exact or range arm answers an error: a `4XX` or `5XX` status or range.
+fn is_error(status: StatusPattern) -> bool {
+    match status {
+        StatusPattern::Exact(code) => (400..600).contains(&code),
+        // `default` is `Range(0)`, and is handled on its own.
+        StatusPattern::Range(class) => class == 4 || class == 5,
+    }
+}
+
+/// The body type an error arm carries, as the Rust type a handler hands it in.
+///
+/// Compared as spelled under the configuration, with aliases resolved, so a JSON string, a
+/// `text/plain` body and a format the configuration keeps as `String` are one type.
+#[derive(Debug, PartialEq, Eq)]
+enum ErrorBody {
+    Typed(String),
+    Bytes,
+}
+
+fn error_body(arm: &ResponseArm, contracts: &Contracts, config: &Config) -> Option<ErrorBody> {
+    let typed = |ty: &TypeRef| {
+        let spelled = type_tokens(contracts.unaliased(ty), contracts, config);
+        Some(ErrorBody::Typed(spelled.to_string()))
+    };
+    match &arm.body {
+        ResponseBody::Json { ty, .. } => typed(ty),
+        ResponseBody::Text { .. } => typed(&TypeRef::String),
+        ResponseBody::Bytes { .. } => Some(ErrorBody::Bytes),
+        ResponseBody::Empty => None,
+    }
+}
+
+/// One error arm built from the constructor's `status`, `raw_headers` and boxed `body`.
+///
+/// Typed headers start from their defaults, so the raw headers are all the arm sends.
+fn constructed_error(arm: &ResponseArm) -> TokenStream {
+    let variant = format_ident!("{}", arm.rust_name.as_str());
+    // `default` is `Range(0)` in the model, so this covers it too.
+    let status = matches!(arm.status, StatusPattern::Range(_)).then(|| quote! { status, });
+    let headers = if let Some(types) = &arm.header_types {
+        let group = ident(&types.group);
+        quote! {
+            #group {
+                raw: raw_headers,
+                ..::std::default::Default::default()
+            }
+        }
+    } else {
+        quote! { raw_headers }
+    };
+    quote! { Self::#variant { #status headers: #headers, body } }
 }
 
 /// An exact or range arm's reply, refusing a status outside a range arm's class.

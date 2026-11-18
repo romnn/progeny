@@ -445,6 +445,17 @@ replaces the arm's media type. A declared `Content-Type` gets no field, as OpenA
 field the transport owns, such as `Content-Length`, `Transfer-Encoding` or `Connection`, is
 reported as `untyped-response-header` and travels in `raw`.
 
+An operation that declares `default`, and whose `4XX` and `5XX` arms and `default` all carry one
+body type, gets an `ErrorResponse` constructor for its response enum. It builds the arm a client
+reads a status by, the exact arm first, then the range arm of its class, then `default`, so a
+service that answers every failure from one problem type needs no list of arms per operation:
+
+```rust
+fn problem<R: server::ErrorResponse<types::read::Problem>>(problem: Problem) -> R {
+    R::error(problem.status, problem.headers, problem.body) // `418` under `4XX` lands on `4XX`
+}
+```
+
 Headers are attached only once the body has encoded. A body or typed header value the server cannot
 write, a status HTTP has no code for, and a `default` answered with a status an exact or range arm
 of the same operation claims are all the handler's defects, answered `500` without the arm's

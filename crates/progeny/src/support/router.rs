@@ -536,6 +536,27 @@ where
     headers.attach(response)
 }
 
+/// A response enum built from an error status, the body to answer it with and the raw headers.
+///
+/// An operation's response enum implements it when the operation declares `default` and every
+/// error arm carries the body `B`: each `4XX` and `5XX` status and range the operation declares,
+/// and `default`.
+/// A handler that answers every failure with one problem type can then build any operation's
+/// error reply from a status, without naming the arm that declares it.
+pub trait ErrorResponse<B> {
+    /// The error arm a client reads `status` by, carrying `body` and `raw_headers`.
+    ///
+    /// The arm is picked in the order the client's status match picks it: the arm declaring
+    /// `status` itself, then the range arm of its class, then `default` with `status`.
+    /// So `default` never takes a status another error arm claims, and an operation that declares
+    /// `4XX` answers `418` through it.
+    /// An arm with typed headers gets each of them unset, and `raw_headers` as its `raw`.
+    ///
+    /// A status that is no error, such as `200`, also lands on `default`, which answers it as
+    /// `default` answers any status: a `500` where another arm claims it.
+    fn error(status: u16, raw_headers: ::axum::http::HeaderMap, body: B) -> Self;
+}
+
 impl ::axum::response::IntoResponse for super::serve::RejectionResponse {
     fn into_response(self) -> ::axum::response::Response {
         let (status, body) = self.into_parts();

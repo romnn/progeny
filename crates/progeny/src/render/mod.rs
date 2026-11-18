@@ -3379,6 +3379,124 @@ mod tests {
         );
     }
 
+    /// The generated server, whitespace removed, and the response enums it implements
+    /// `ErrorResponse` for, each with the body type it names.
+    fn error_constructors(document: Value) -> eyre::Result<(String, Vec<String>)> {
+        let generated = files(document, &Config::default())?;
+        let server: String = generated
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .ok_or_eyre("a server")?
+            .split_whitespace()
+            .collect();
+        let implemented = server
+            .split("implsupport::ErrorResponse<")
+            .skip(1)
+            .filter_map(|rest| {
+                let (body, rest) = rest.split_once(">for")?;
+                let (name, _) = rest.split_once('{')?;
+                Some(format!("{name}<{body}>"))
+            })
+            .collect();
+        Ok((server, implemented))
+    }
+
+    /// Every error arm of an operation that shares one problem body is built from its status:
+    /// exact arms first, then the range arm of the status's class, then `default`, as the
+    /// client's status match picks them.
+    #[test_util::test]
+    fn shared_error_bodies_get_a_constructor_that_picks_the_arm_by_status() {
+        let problem = json!({"description": "failed", "content": {"application/problem+json": {
+            "schema": {"$ref": "#/components/schemas/Problem"}}}});
+        let mut reasoned = problem.clone();
+        reasoned["headers"] = json!({"X-Reason": {"schema": {"type": "string"}}});
+        let (server, implemented) = error_constructors(json!({
+            "openapi": "3.1.0",
+            "paths": {"/problems": {"get": {"operationId": "problems", "responses": {
+                "200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"type": "boolean"}}}},
+                "400": problem,
+                "404": reasoned,
+                "4XX": problem,
+                "503": problem,
+                "default": problem,
+            }}}},
+            "components": {"schemas": {"Problem": {"type": "object", "properties": {
+                "title": {"type": "string"}}}}},
+        }))?;
+        assert_eq!(implemented, ["ProblemsResponse<super::types::read::Problem>"], "{server}");
+
+        // Exact arms, the one with a typed header given its raw headers, then the `4XX` range,
+        // then `default` for everything else.
+        for arm in [
+            "400u16=>{Self::BadRequest{headers:raw_headers,body,}}",
+            "404u16=>{Self::NotFound{headers:ProblemsNotFoundHeaders{raw:raw_headers,..::std::default::Default::default()},body,}}",
+            "503u16=>{Self::Status503{headers:raw_headers,body,}}",
+            "_ifstatus/100==4u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
+            "_=>{Self::Default{status,headers:raw_headers,body,}}",
+        ] {
+            assert!(server.contains(arm), "the constructor has `{arm}`:\n{server}");
+        }
+        // The exact arms come before the range, which is a guard rather than a pattern that the
+        // `400` at its lower bound would overlap.
+        let exact = server.find("400u16=>{Self::BadRequest").ok_or_eyre("the `400` arm")?;
+        let range = server.find("_ifstatus/100==4u16").ok_or_eyre("the `4XX` arm")?;
+        assert!(exact < range, "{server}");
+    }
+
+    /// No constructor where an error arm carries another body, or none, or where nothing takes a
+    /// status no arm declares; one where every error arm's body is the same Rust type.
+    #[test_util::test]
+    fn only_operations_whose_error_arms_share_a_body_get_a_constructor() {
+        let problem = json!({"description": "failed", "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/Problem"}}}});
+        let text = json!({"description": "failed", "content": {"application/json": {
+            "schema": {"type": "string"}}}});
+        let plain = json!({"description": "failed", "content": {"text/plain": {
+            "schema": {"type": "string"}}}});
+        let identified = json!({"description": "failed", "content": {"application/json": {
+            "schema": {"type": "string", "format": "uuid"}}}});
+        let ok = json!({"description": "ok", "content": {"application/json": {
+            "schema": {"type": "boolean"}}}});
+        let (server, implemented) = error_constructors(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/mixed": {"get": {"operationId": "mixed", "responses": {
+                    "404": problem, "409": text, "default": problem}}},
+                "/empty": {"get": {"operationId": "empty", "responses": {
+                    "401": {"description": "who"}, "default": problem}}},
+                "/undefaulted": {"get": {"operationId": "undefaulted", "responses": {
+                    "404": problem, "409": problem}}},
+                "/defaulted": {"get": {"operationId": "defaulted", "responses": {
+                    "200": ok, "default": problem}}},
+                "/textual": {"get": {"operationId": "textual", "responses": {
+                    "200": ok, "404": text, "default": plain}}},
+                "/identified": {"get": {"operationId": "identified", "responses": {
+                    "404": identified, "default": plain}}},
+                "/shadowed": {"get": {"operationId": "shadowed", "responses": {
+                    "0404": problem, "404": {"description": "gone"}, "default": problem}}},
+            },
+            "components": {"schemas": {"Problem": {"type": "object", "properties": {
+                "title": {"type": "string"}}}}},
+        }))?;
+        // A JSON string, a format the configuration keeps as text, and a text body are all a
+        // `String`; the second `404`, which a client never decodes by, does not count.
+        assert_eq!(
+            implemented,
+            [
+                "DefaultedResponse<super::types::read::Problem>",
+                "IdentifiedResponse<::std::string::String>",
+                "ShadowedResponse<super::types::read::Problem>",
+                "TextualResponse<::std::string::String>",
+            ],
+            "{server}"
+        );
+        // A constructor with `default` alone builds it without a `match`.
+        assert!(
+            server.contains("letbody=::std::boxed::Box::new(body);Self::Default{status,headers:raw_headers,body,}}"),
+            "{server}"
+        );
+    }
+
     /// An operation declaring no responses answers `204` with whatever headers its handler
     /// writes.
     #[test_util::test]
