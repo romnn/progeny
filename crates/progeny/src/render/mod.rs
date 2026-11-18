@@ -3423,7 +3423,11 @@ mod tests {
             "components": {"schemas": {"Problem": {"type": "object", "properties": {
                 "title": {"type": "string"}}}}},
         }))?;
-        assert_eq!(implemented, ["ProblemsResponse<super::types::read::Problem>"], "{server}");
+        assert_eq!(
+            implemented,
+            ["ProblemsResponse<super::types::read::Problem>"],
+            "{server}"
+        );
 
         // Exact arms, the one with a typed header given its raw headers, then the `4XX` range,
         // then `default` for everything else.
@@ -3434,12 +3438,19 @@ mod tests {
             "_ifstatus/100==4u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
             "_=>{Self::Default{status,headers:raw_headers,body,}}",
         ] {
-            assert!(server.contains(arm), "the constructor has `{arm}`:\n{server}");
+            assert!(
+                server.contains(arm),
+                "the constructor has `{arm}`:\n{server}"
+            );
         }
         // The exact arms come before the range, which is a guard rather than a pattern that the
         // `400` at its lower bound would overlap.
-        let exact = server.find("400u16=>{Self::BadRequest").ok_or_eyre("the `400` arm")?;
-        let range = server.find("_ifstatus/100==4u16").ok_or_eyre("the `4XX` arm")?;
+        let exact = server
+            .find("400u16=>{Self::BadRequest")
+            .ok_or_eyre("the `400` arm")?;
+        let range = server
+            .find("_ifstatus/100==4u16")
+            .ok_or_eyre("the `4XX` arm")?;
         assert!(exact < range, "{server}");
     }
 
@@ -4538,6 +4549,86 @@ mod tests {
     /// The manifest declares every crate the rendered surface names, not only what the named
     /// types use.
     ///
+    /// A binary response arm carries a streaming body however the configuration spells bytes,
+    /// is written without being buffered, and makes its enum one that cannot be cloned; the
+    /// server needs no `bytes` crate for it, while the client still buffers into `Bytes`.
+    #[test_util::test]
+    fn a_binary_response_streams_whatever_the_configuration_says() {
+        let bytes = json!({"description": "bytes", "content": {"application/pdf": {
+            "schema": {"type": "string", "format": "binary"}}}});
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "files", "version": "1"},
+            "paths": {
+                "/files": {"get": {"operationId": "download", "responses": {
+                    "200": bytes, "4XX": bytes, "default": bytes}}},
+                "/ping": {"get": {"operationId": "ping", "responses": {
+                    "200": {"description": "ok", "content": {"text/plain": {
+                        "schema": {"type": "string"}}}}}}},
+                "/report": {"get": {"operationId": "report", "responses": {
+                    "200": {"description": "ok", "content": {"text/plain": {
+                        "schema": {"type": "string"}}}},
+                    "default": bytes}}},
+            },
+        });
+        let config = Config {
+            formats: crate::config::Formats {
+                bytes: crate::config::BytesRepr::Bytes,
+                ..crate::config::Formats::default()
+            },
+            ..Config::default()
+        };
+        let rendered = files(document, &config)?;
+        let server = &rendered[camino::Utf8Path::new("src/server.rs")];
+        let flat: String = server.split_whitespace().collect();
+
+        // Every binary arm, a range and `default` included, holds the stream, which the writer
+        // takes whole.
+        assert!(
+            flat.contains("Ok{headers:::axum::http::HeaderMap,body:Box<::axum::body::Body>}"),
+            "{server}"
+        );
+        assert!(flat.contains("Status4xx{status:::std::primitive::u16,headers:::axum::http::HeaderMap,body:Box<::axum::body::Body>,}"), "{server}");
+        assert!(
+            flat.contains("support::respond_bytes(200u16,\"application/pdf\",*body,"),
+            "{server}"
+        );
+        assert!(!server.contains("::bytes::Bytes"), "{server}");
+        // A stream is sent once, so only the enum without one is `Clone`.
+        assert!(
+            flat.contains("#[derive(Debug)]pubenumDownloadResponse{"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("#[derive(Debug,Clone)]pubenumPingResponse{"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("#[derive(Debug)]pubenumReportResponse{"),
+            "{server}"
+        );
+        // A binary error body builds through the constructor as the stream it is.
+        assert!(
+            flat.contains("implsupport::ErrorResponse<::axum::body::Body>forDownloadResponse"),
+            "{server}"
+        );
+
+        // The client still buffers into the configured `Bytes`; the server names no `bytes`.
+        let client = &rendered[camino::Utf8Path::new("src/client.rs")];
+        assert!(client.contains("::bytes::Bytes"), "{client}");
+        let manifest = &rendered[camino::Utf8Path::new("Cargo.toml")];
+        let server_feature = manifest
+            .lines()
+            .find(|line| line.starts_with("server = "))
+            .ok_or_eyre("a server feature")?;
+        assert!(!server_feature.contains("dep:bytes"), "{manifest}");
+        let client_feature = manifest
+            .lines()
+            .find(|line| line.starts_with("client = "))
+            .ok_or_eyre("a client feature")?;
+        assert!(client_feature.contains("dep:bytes"), "{manifest}");
+    }
+
     /// A `format: uuid` that appears only as a parameter gets no named contract on purpose — a
     /// `pub type` alias for one scalar would be noise — but the params struct still spells `uuid::Uuid`.
     /// Binary request and response bodies under `formats.bytes = "bytes"` spell `::bytes::Bytes`
@@ -4591,7 +4682,9 @@ mod tests {
         assert!(client.contains("uuid::Uuid"), "{client}");
         assert!(client.contains("::bytes::Bytes"), "{client}");
         let server = &rendered[camino::Utf8Path::new("src/server.rs")];
-        assert!(server.contains("Box<::bytes::Bytes>"), "{server}");
+        // A binary response streams whatever the configuration says.
+        assert!(server.contains("Box<::axum::body::Body>"), "{server}");
+        assert!(!server.contains("Box<::bytes::Bytes>"), "{server}");
         let flat: String = server.split_whitespace().collect();
         assert!(
             flat.contains(r#"respond_bytes(200u16,"application/octet-stream""#),
