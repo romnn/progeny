@@ -66,8 +66,8 @@ pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -
         //! Every response variant carries its `headers`: the group of headers its arm declares,
         //! each typed and optional like a read form's member, beside `raw` for every other
         //! header, or a bare `HeaderMap` where the arm declares none.
-        //! They are attached only once the body has encoded, so a reply that fails before it is
-        //! sent is a `500` without them.
+        //! They are attached only once the body has encoded, so a body or a typed header the
+        //! server cannot write makes the reply a `500` without them.
         //!
         //! A binary body is an `axum::body::Body`, which streams: a handler can pass a file
         //! through without holding it whole, and `body.into()` turns a `Vec<u8>` or `Bytes`
