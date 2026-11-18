@@ -71,7 +71,6 @@ impl Invocation {
 /// Takes the whole of [`std::env::args`] rather than a pre-trimmed tail, because which leading
 /// elements are the program's own name is exactly what [`Invocation`] knows and a caller
 /// should not have to.
-#[must_use]
 pub fn main(invocation: Invocation, argv: impl Iterator<Item = String>) -> ExitCode {
     match run(invocation, argv) {
         Ok(code) => code,
