@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795033539732,
+  "lastUpdate": 1795038543788,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3231,6 +3231,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 235.5169267654419,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1b7dde4cb741995c5e4e26159b84c2df80aa38b1",
+          "message": "feat(generate)!: stream binary server responses (#144)\n\n* fix(cli): drop the must_use that ExitCode already carries\n\n* feat(generate): build a server error reply from its status\n\nA server response enum whose operation declares `default`, and whose\n`4XX` and `5XX` exact and range arms and `default` all carry one body\ntype, implements the new `server::ErrorResponse<B>`. Its\n`error(status, raw_headers, body)` builds the arm a client reads the\nstatus by: the exact arm, then the range arm of the status's class, then\n`default`, so `default` never takes a status another error arm claims.\nAn arm with typed headers gets them unset and the raw headers as `raw`.\n\n`ErrorResponse` joins the names an operation's types stay clear of.\n\nCloses #140\n\n* fix(generate): pick an error arm among the arms a client decodes by\n\n* feat(generate)!: stream binary server responses\n\nA binary server response arm now carries `Box<axum::body::Body>` instead\nof a buffered `Vec<u8>` or `Bytes`, and `support::respond_bytes` passes\nit through, so a handler can stream a stored file without holding it\nwhole. Bytes already in memory convert with `.into()` into one frame\nwhose exact length is sent as `Content-Length`. A stream that fails after\nthe head is sent ends the response early, which the client reads as a\nbody that broke off.\n\nA response enum with a binary arm derives only `Debug`, since a stream\ncannot be cloned. `formats.bytes` no longer affects server responses; it\nstill types raw request bodies and the bodies the client reads.\n\nCloses #141\n\n* fix(generate): make the stream abort test fail past the head, and say when a client sees it\n\n* docs(generate): say which write failures answer 500\n\n* style(generate): format the multipart, error constructor and streaming changes",
+          "timestamp": "2026-11-18T22:41:50+01:00",
+          "tree_id": "28620bfe5698e7e90f7a21c735e366842652fd30",
+          "url": "https://github.com/romnn/progeny/commit/1b7dde4cb741995c5e4e26159b84c2df80aa38b1"
+        },
+        "date": 1795038543233,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 34.469568333333335,
+            "range": "± 1.39",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2813.64453125,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 12.243613000000002,
+            "range": "± 0.07",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1127.704426765442,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.9721266666666667,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.359375,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
