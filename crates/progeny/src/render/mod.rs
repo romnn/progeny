@@ -3423,7 +3423,11 @@ mod tests {
             "components": {"schemas": {"Problem": {"type": "object", "properties": {
                 "title": {"type": "string"}}}}},
         }))?;
-        assert_eq!(implemented, ["ProblemsResponse<super::types::read::Problem>"], "{server}");
+        assert_eq!(
+            implemented,
+            ["ProblemsResponse<super::types::read::Problem>"],
+            "{server}"
+        );
 
         // Exact arms, the one with a typed header given its raw headers, then the `4XX` range,
         // then `default` for everything else.
@@ -3434,12 +3438,19 @@ mod tests {
             "_ifstatus/100==4u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
             "_=>{Self::Default{status,headers:raw_headers,body,}}",
         ] {
-            assert!(server.contains(arm), "the constructor has `{arm}`:\n{server}");
+            assert!(
+                server.contains(arm),
+                "the constructor has `{arm}`:\n{server}"
+            );
         }
         // The exact arms come before the range, which is a guard rather than a pattern that the
         // `400` at its lower bound would overlap.
-        let exact = server.find("400u16=>{Self::BadRequest").ok_or_eyre("the `400` arm")?;
-        let range = server.find("_ifstatus/100==4u16").ok_or_eyre("the `4XX` arm")?;
+        let exact = server
+            .find("400u16=>{Self::BadRequest")
+            .ok_or_eyre("the `400` arm")?;
+        let range = server
+            .find("_ifstatus/100==4u16")
+            .ok_or_eyre("the `4XX` arm")?;
         assert!(exact < range, "{server}");
     }
 
@@ -4573,16 +4584,34 @@ mod tests {
 
         // Every binary arm, a range and `default` included, holds the stream, which the writer
         // takes whole.
-        assert!(flat.contains("Ok{headers:::axum::http::HeaderMap,body:Box<::axum::body::Body>}"), "{server}");
+        assert!(
+            flat.contains("Ok{headers:::axum::http::HeaderMap,body:Box<::axum::body::Body>}"),
+            "{server}"
+        );
         assert!(flat.contains("Status4xx{status:::std::primitive::u16,headers:::axum::http::HeaderMap,body:Box<::axum::body::Body>,}"), "{server}");
-        assert!(flat.contains("support::respond_bytes(200u16,\"application/pdf\",*body,"), "{server}");
+        assert!(
+            flat.contains("support::respond_bytes(200u16,\"application/pdf\",*body,"),
+            "{server}"
+        );
         assert!(!server.contains("::bytes::Bytes"), "{server}");
         // A stream is sent once, so only the enum without one is `Clone`.
-        assert!(flat.contains("#[derive(Debug)]pubenumDownloadResponse{"), "{server}");
-        assert!(flat.contains("#[derive(Debug,Clone)]pubenumPingResponse{"), "{server}");
-        assert!(flat.contains("#[derive(Debug)]pubenumReportResponse{"), "{server}");
+        assert!(
+            flat.contains("#[derive(Debug)]pubenumDownloadResponse{"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("#[derive(Debug,Clone)]pubenumPingResponse{"),
+            "{server}"
+        );
+        assert!(
+            flat.contains("#[derive(Debug)]pubenumReportResponse{"),
+            "{server}"
+        );
         // A binary error body builds through the constructor as the stream it is.
-        assert!(flat.contains("implsupport::ErrorResponse<::axum::body::Body>forDownloadResponse"), "{server}");
+        assert!(
+            flat.contains("implsupport::ErrorResponse<::axum::body::Body>forDownloadResponse"),
+            "{server}"
+        );
 
         // The client still buffers into the configured `Bytes`; the server names no `bytes`.
         let client = &rendered[camino::Utf8Path::new("src/client.rs")];

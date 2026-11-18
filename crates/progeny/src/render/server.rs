@@ -27,9 +27,7 @@ use crate::api::{
 use crate::config::Config;
 use crate::contract::{Contracts, RustIdent, TypeRef};
 
-use super::types::{
-    docs as docs_of, response_type_path, type_path as type_tokens,
-};
+use super::types::{docs as docs_of, response_type_path, type_path as type_tokens};
 
 /// Render the server module.
 pub(super) fn render(model: &ApiModel, contracts: &Contracts, config: &Config) -> TokenStream {

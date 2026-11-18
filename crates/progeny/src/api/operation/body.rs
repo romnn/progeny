@@ -804,7 +804,12 @@ mod tests {
         let part = |wire: &str| {
             let part = parts.iter().find(|part| part.wire_name == wire)?;
             let row = members.iter().find(|member| member.wire_name == wire)?;
-            Some((part.kind, part.repeated, part.keeps_text, row.reading.clone()))
+            Some((
+                part.kind,
+                part.repeated,
+                part.keeps_text,
+                row.reading.clone(),
+            ))
         };
         let items = |row: Reading| Reading::Items(Box::new(row));
 

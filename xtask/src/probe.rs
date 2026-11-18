@@ -482,7 +482,10 @@ fn answer_value(answer: &progeny::harness::ProbeAnswer) -> String {
             format!("{}.to_owned()", json_literal(text))
         }
         progeny::harness::ProbeValue::Bytes(bytes) => {
-            format!("::axum::body::Body::from(::std::vec!{:?})", bytes.as_slice())
+            format!(
+                "::axum::body::Body::from(::std::vec!{:?})",
+                bytes.as_slice()
+            )
         }
         progeny::harness::ProbeValue::Empty => "()".to_owned(),
     }
