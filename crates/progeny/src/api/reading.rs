@@ -85,18 +85,23 @@ pub(crate) fn form(ty: &TypeRef, contracts: &Contracts) -> Reading {
 ///
 /// A file part arrives as the object an `Upload` reads and a JSON part as the value its JSON
 /// spells, so both keep what the parser built.
+/// A text part that [keeps its text](PartSpec::keeps_text) keeps it in each of its parts.
 /// A captured member has no row in the part table, so it reads as one JSON part of the whole value
 /// or as repeated parts of a sequence, whichever arrived.
 pub(crate) fn multipart(ty: &TypeRef, parts: &[PartSpec], contracts: &Contracts) -> Reading {
     let mut reading = Plan { contracts }.body(ty, Arrival::Whole);
     if let Reading::Object { members, .. } = &mut reading {
         for member in members {
-            let built = parts.iter().any(|part| {
-                part.wire_name == member.wire_name
-                    && matches!(part.kind, PartKind::File | PartKind::Json)
-            });
-            if built {
-                member.reading = Reading::Keep;
+            let Some(part) = parts.iter().find(|part| part.wire_name == member.wire_name) else {
+                continue;
+            };
+            match part.kind {
+                PartKind::File | PartKind::Json => member.reading = Reading::Keep,
+                PartKind::Text if part.keeps_text && part.repeated => {
+                    member.reading = Reading::Items(Box::new(Reading::Keep));
+                }
+                PartKind::Text if part.keeps_text => member.reading = Reading::Keep,
+                PartKind::Text => {}
             }
         }
     }
