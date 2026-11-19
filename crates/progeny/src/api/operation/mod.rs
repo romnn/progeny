@@ -55,6 +55,7 @@ pub(super) fn run(
         contracts,
         config,
         content_positions: BTreeMap::new(),
+        repeated_positions: BTreeMap::new(),
         namer: Namer::default(),
         stems: Namer::default(),
         schemes: super::security::schemes(resolved, ctx),
@@ -104,6 +105,9 @@ struct Build<'a> {
     /// Every content position visited and the media types it declares, recorded only while
     /// [`Config::media_types`] has entries to validate against.
     content_positions: BTreeMap<String, Vec<String>>,
+    /// The content position of every response dropped for repeating another's status, and the
+    /// key whose arm is generated instead, recorded under the same condition.
+    repeated_positions: BTreeMap<String, String>,
     /// Method names, kept unique across the whole client.
     namer: Namer,
     /// The camel stems the renderers build per-operation type names from (`X1Params`,
@@ -120,6 +124,17 @@ impl Build<'_> {
     /// Every [`Config::media_types`] entry, checked against the positions the walk visited.
     fn check_media_type_requests(&self) -> Result<(), RejectError> {
         for (position, requested) in &self.config.media_types {
+            // A rejection ends generation before any diagnostic is shown, so it says itself why
+            // the position generates nothing.
+            if let Some(first) = self.repeated_positions.get(position) {
+                return Err(RejectError::new(
+                    RejectKind::UnsatisfiableConfig,
+                    format!(
+                        "the configuration picks a media type at `{position}`, a response that \
+                         names the same status as `{first}`, and only `{first}`'s arm is generated"
+                    ),
+                ));
+            }
             let Some(declared) = self.content_positions.get(position) else {
                 return Err(RejectError::new(
                     RejectKind::UnsatisfiableConfig,
