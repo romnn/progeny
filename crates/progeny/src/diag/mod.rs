@@ -107,6 +107,11 @@ pub enum BreakageClass {
     /// An operation declares a switching-protocols response, but the generated HTTP surfaces do
     /// not hand the upgraded connection to either side.
     ConnectionUpgrade,
+    /// Two response keys of one operation that name the same status or range, such as `4XX` and
+    /// `4xx`, or `404` and `0404`.
+    /// The key that sorts first gets the arm and the other is dropped, because a client decodes a
+    /// status by one arm only.
+    RepeatedStatus,
     /// A (location, style, explode, shape) parameter combination OpenAPI leaves undefined.
     QuerySerializationStyle,
     /// A declared response header progeny gives no typed field: its name is not an HTTP field
@@ -203,7 +208,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -219,6 +224,7 @@ impl BreakageClass {
         Self::WildUnion,
         Self::CollidingOperationId,
         Self::ConnectionUpgrade,
+        Self::RepeatedStatus,
         Self::QuerySerializationStyle,
         Self::UntypedResponseHeader,
         Self::InvalidExample,
@@ -262,6 +268,7 @@ impl BreakageClass {
             Self::WildUnion => "wild-union",
             Self::CollidingOperationId => "colliding-operation-id",
             Self::ConnectionUpgrade => "connection-upgrade",
+            Self::RepeatedStatus => "repeated-status",
             Self::QuerySerializationStyle => "query-serialization-style",
             Self::UntypedResponseHeader => "untyped-response-header",
             Self::InvalidExample => "invalid-example",
@@ -353,6 +360,7 @@ impl BreakageClass {
             Self::MissingFinalLineBreak
             | Self::DiscriminatorEdgeCase
             | Self::ConnectionUpgrade
+            | Self::RepeatedStatus
             | Self::NonproductiveCycle
             | Self::NonConsumingCycle
             | Self::InheritanceCycle

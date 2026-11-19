@@ -1,6 +1,6 @@
 //! The status arms: parsed from the response keys, typed, and put in overlap order.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Build;
 use super::body::is_json;
@@ -28,6 +28,8 @@ impl Build<'_> {
         let mut used = Namer::default();
         let mut accept = Vec::new();
         let mut arms = Vec::new();
+        // The key each pattern's arm came from.
+        let mut claimed = BTreeMap::new();
         for (status, node) in &responses.statuses {
             let Some(pattern) = parse_status(status) else {
                 ctx.report(Diagnostic::new(
@@ -41,6 +43,21 @@ impl Build<'_> {
                 ));
                 continue;
             };
+            // `4XX` and `4xx`, or `404` and `0404`, are one pattern, and a client decodes a status
+            // by one arm only: a second arm would be an unreachable match arm in the client and a
+            // server variant no client could ever receive.
+            if let Some(first) = claimed.get(&pattern) {
+                ctx.report(Diagnostic::new(
+                    BreakageClass::RepeatedStatus,
+                    Action::Degrade,
+                    at.child(status.clone()),
+                    format!(
+                        "`{status}` names the same status as `{first}`, whose arm is generated"
+                    ),
+                ));
+                continue;
+            }
+            claimed.insert(pattern, status);
             if pattern == StatusPattern::Exact(101) {
                 ctx.report(Diagnostic::new(
                     BreakageClass::ConnectionUpgrade,
@@ -442,6 +459,75 @@ mod tests {
                 .iter()
                 .any(|found| found.class() == crate::BreakageClass::ConnectionUpgrade)
         );
+    }
+
+    /// Two keys naming one status or one range get one arm, from the key that sorts first, and the
+    /// other is reported rather than generated.
+    ///
+    /// The competing keys carry different bodies, so the test also says which one won.
+    #[test_util::test]
+    fn a_repeated_status_keeps_the_arm_of_the_key_that_sorts_first() -> eyre::Result<()> {
+        let json = json!({"application/json": {"schema": {"type": "integer"}}});
+        let text = json!({"text/plain": {"schema": {"type": "string"}}});
+        let (model, diagnostics) = model_of(with_paths(json!({
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "responses": {
+                        "4XX": {"description": "upper", "content": json.clone()},
+                        "4xx": {"description": "lower", "content": text.clone()},
+                        "0404": {"description": "padded", "content": json},
+                        "404": {"description": "plain", "content": text},
+                    },
+                },
+            },
+        })))?;
+
+        // One arm per pattern, each from the key that sorts first: `0404` and `4XX`.
+        let arms = &model.operations()[0].responses.arms;
+        let kept: Vec<_> = arms
+            .iter()
+            .map(|arm| (arm.status, arm.origin.to_string()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (
+                    StatusPattern::Exact(404),
+                    "/paths/~1pets/get/responses/0404".to_owned()
+                ),
+                (
+                    StatusPattern::Range(4),
+                    "/paths/~1pets/get/responses/4XX".to_owned()
+                ),
+            ]
+        );
+        assert!(
+            arms.iter()
+                .all(|arm| matches!(arm.body, ResponseBody::Json { .. })),
+            "{arms:?}"
+        );
+
+        // Each dropped key is reported at its own place, naming the key that won.
+        let repeated: Vec<_> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::RepeatedStatus)
+            .map(|found| (found.location().to_string(), found.detail().to_owned()))
+            .collect();
+        assert_eq!(
+            repeated,
+            [
+                (
+                    "/paths/~1pets/get/responses/404".to_owned(),
+                    "`404` names the same status as `0404`, whose arm is generated".to_owned()
+                ),
+                (
+                    "/paths/~1pets/get/responses/4xx".to_owned(),
+                    "`4xx` names the same status as `4XX`, whose arm is generated".to_owned()
+                ),
+            ]
+        );
+        Ok(())
     }
 
     #[test_util::test]
