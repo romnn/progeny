@@ -180,12 +180,16 @@ tasks:
 
   # The fuzz targets are a workspace of their own, and the differential harness is copied into a
   # crate xtask assembles, so `cargo fmt --all` reaches neither.
+  # Arguments are cargo's and reach the workspace alone, but a `--check` among them checks all
+  # three, so `task format -- --check` never rewrites a file.
   format:
     desc: "format cargo workspace, the fuzz targets and the differential harness"
+    vars:
+      CHECK: '{{if contains "--check" .CLI_ARGS}}--check{{end}}'
     cmds:
       - cargo fmt --all {{.CLI_ARGS}}
-      - cargo fmt --manifest-path fuzz/Cargo.toml {{.CLI_ARGS}}
-      - rustfmt --edition 2024 {{.CLI_ARGS}} corpus/differential/assertions.rs
+      - cargo fmt --manifest-path fuzz/Cargo.toml {{.CHECK}}
+      - rustfmt --edition 2024 {{.CHECK}} corpus/differential/assertions.rs
 
   format:check:
     desc: "check the formatting `task format` would apply, without writing it"
