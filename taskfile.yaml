@@ -178,10 +178,20 @@ tasks:
     cmds:
       - hugo server --disableFastRender {{.CLI_ARGS}}
 
+  # The fuzz targets are a workspace of their own, and the differential harness is copied into a
+  # crate xtask assembles, so `cargo fmt --all` reaches neither.
   format:
-    desc: "format cargo workspace"
+    desc: "format cargo workspace, the fuzz targets and the differential harness"
     cmds:
       - cargo fmt --all {{.CLI_ARGS}}
+      - cargo fmt --manifest-path fuzz/Cargo.toml {{.CLI_ARGS}}
+      - rustfmt --edition 2024 {{.CLI_ARGS}} corpus/differential/assertions.rs
+
+  format:check:
+    desc: "check the formatting `task format` would apply, without writing it"
+    cmds:
+      - task: format
+        vars: { CLI_ARGS: "--check" }
 
   test:
     desc: "test cargo workspace (unit only; nextest default profile)"

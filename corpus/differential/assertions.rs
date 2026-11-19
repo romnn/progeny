@@ -13,9 +13,7 @@ use color_eyre::eyre::{self, OptionExt as _, bail};
 use differential::{derived, hand};
 
 /// Deserialize a payload through both renderings and compare what came out.
-fn both(
-    payload: &str,
-) -> eyre::Result<Result<(String, String), (String, String)>> {
+fn both(payload: &str) -> eyre::Result<Result<(String, String), (String, String)>> {
     let left = serde_json::from_str::<derived::types::Spike>(payload)
         .and_then(|value| serde_json::to_string(&value));
     let right = serde_json::from_str::<hand::types::Spike>(payload)
@@ -119,10 +117,7 @@ fn preserved_presence_distinguishes_omit_null_and_value_on_the_wire() {
     let (value_left, value_right) = both(r#"{"required":"a","clearable":"set"}"#)?
         .map_err(|(left, right)| eyre::eyre!("both refused a value: {left} / {right}"))?;
     assert_eq!(value_left, value_right);
-    assert!(
-        value_left.contains("\"clearable\":\"set\""),
-        "{value_left}"
-    );
+    assert!(value_left.contains("\"clearable\":\"set\""), "{value_left}");
 }
 
 #[test_util::test]
@@ -223,11 +218,9 @@ fn a_fixed_arity_member_given_too_many_elements_is_refused_by_both() {
 #[test_util::test]
 fn a_struct_with_no_members_round_trips_through_both() {
     let left = serde_json::from_str::<derived::types::Empty>("{}")
-        .and_then(|value| serde_json::to_string(&value))
-        ?;
+        .and_then(|value| serde_json::to_string(&value))?;
     let right = serde_json::from_str::<hand::types::Empty>("{}")
-        .and_then(|value| serde_json::to_string(&value))
-        ?;
+        .and_then(|value| serde_json::to_string(&value))?;
     assert_eq!(left, right);
 }
 
@@ -235,11 +228,9 @@ fn a_struct_with_no_members_round_trips_through_both() {
 fn a_fieldless_enum_reads_and_writes_the_same_bytes() {
     for payload in [r#""in-progress""#, r#""done""#, r#""unknown""#] {
         let left = serde_json::from_str::<derived::types::State>(payload)
-            .and_then(|value| serde_json::to_string(&value))
-            ?;
+            .and_then(|value| serde_json::to_string(&value))?;
         let right = serde_json::from_str::<hand::types::State>(payload)
-            .and_then(|value| serde_json::to_string(&value))
-            ?;
+            .and_then(|value| serde_json::to_string(&value))?;
         assert_eq!(left, right);
         assert_eq!(left, payload);
     }
@@ -282,10 +273,7 @@ fn the_read_form_decodes_and_reports_the_same_way() {
         right.degradations.to_string()
     );
     // Decoded on its own, a read form keys its report at its own site under both strategies.
-    assert_eq!(
-        left.degradations.root(),
-        derived::types::read::Spike::SITE
-    );
+    assert_eq!(left.degradations.root(), derived::types::read::Spike::SITE);
     assert_eq!(right.degradations.root(), hand::types::read::Spike::SITE);
     // A required member absent, a member of the wrong type, an unlisted enum value, and an
     // undeclared member: four sites, four entries.
@@ -416,7 +404,11 @@ fn a_self_naming_union_read_form_routes_the_same_way() {
     ] {
         let left = derived::types::Decoded::<derived::types::read::Tool>::from_json(payload)?;
         let right = hand::types::Decoded::<hand::types::read::Tool>::from_json(payload)?;
-        assert!(left.degradations.is_empty(), "{payload}: {}", left.degradations);
+        assert!(
+            left.degradations.is_empty(),
+            "{payload}: {}",
+            left.degradations
+        );
         assert_eq!(serde_json::to_string(&left.value)?, payload);
         assert_eq!(serde_json::to_string(&right.value)?, payload);
     }
@@ -451,10 +443,8 @@ fn members_beside_a_union_round_trip_through_the_flattened_union() {
         r#"{"type":"image","url":"https://x","detail":"high"}"#,
         r#"{"fileId":"f1","type":"image"}"#,
     ] {
-        let (left, right) = round_trip::<
-            derived::types::ImageUserInput,
-            hand::types::ImageUserInput,
-        >(payload)?;
+        let (left, right) =
+            round_trip::<derived::types::ImageUserInput, hand::types::ImageUserInput>(payload)?;
         assert_eq!(left, right, "{payload}");
         // The same members come back, in the order the struct writes them.
         assert_eq!(
@@ -478,8 +468,7 @@ fn members_beside_a_union_round_trip_through_the_flattened_union() {
         r#"{"label":"home","lat":1.5,"lon":2.5}"#,
         r#"{"street":"Main","city":"X"}"#,
     ] {
-        let (left, right) =
-            round_trip::<derived::types::Located, hand::types::Located>(payload)?;
+        let (left, right) = round_trip::<derived::types::Located, hand::types::Located>(payload)?;
         assert_eq!(left, right, "{payload}");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&left)?,
@@ -517,9 +506,8 @@ fn a_self_naming_union_reads_a_branch_with_a_flattened_union_by_its_tag() {
     }
     // The tag decides the branch, so a payload no earlier branch could hold is never mistaken
     // for the image.
-    let audio = serde_json::from_str::<hand::types::UserInput>(
-        r#"{"type":"localAudio","path":"/a.wav"}"#,
-    )?;
+    let audio =
+        serde_json::from_str::<hand::types::UserInput>(r#"{"type":"localAudio","path":"/a.wav"}"#)?;
     assert!(matches!(audio, hand::types::UserInput::LocalAudio(_)));
     let image = serde_json::from_str::<hand::types::UserInput>(
         r#"{"type":"image","uri":"u","detail":"high"}"#,
@@ -535,13 +523,19 @@ fn a_self_naming_union_reads_a_branch_with_a_flattened_union_by_its_tag() {
 /// under both strategies.
 #[test_util::test]
 fn a_union_matched_by_shape_reads_each_payload_into_its_branch() {
-    for payload in [r#"{"items":{"enum":["a"]}}"#, r#"{"items":{"anyOf":["a"]}}"#] {
+    for payload in [
+        r#"{"items":{"enum":["a"]}}"#,
+        r#"{"items":{"anyOf":["a"]}}"#,
+    ] {
         let (left, right) =
             round_trip::<derived::types::MultiSelect, hand::types::MultiSelect>(payload)?;
         assert_eq!((left.as_str(), right.as_str()), (payload, payload));
     }
     let titled = serde_json::from_str::<hand::types::MultiSelect>(r#"{"items":{"anyOf":["a"]}}"#)?;
-    assert!(matches!(titled, hand::types::MultiSelect::TitledMultiSelect(_)));
+    assert!(matches!(
+        titled,
+        hand::types::MultiSelect::TitledMultiSelect(_)
+    ));
 
     for payload in [r#"{"enum":["a"]}"#, r#"{"enum":["a"],"enumNames":["A"]}"#] {
         let (left, right) =
@@ -578,8 +572,14 @@ fn a_union_of_itself_and_null_refuses_other_values_instead_of_recursing() {
     serde_json::from_str::<derived::types::Maybe>("null")?;
     serde_json::from_str::<hand::types::Maybe>("null")?;
     for payload in ["1", "{}", "[null]"] {
-        assert!(serde_json::from_str::<derived::types::Maybe>(payload).is_err(), "{payload}");
-        assert!(serde_json::from_str::<hand::types::Maybe>(payload).is_err(), "{payload}");
+        assert!(
+            serde_json::from_str::<derived::types::Maybe>(payload).is_err(),
+            "{payload}"
+        );
+        assert!(
+            serde_json::from_str::<hand::types::Maybe>(payload).is_err(),
+            "{payload}"
+        );
     }
     for payload in [
         r#"{"a":1,"b":null,"c":null,"label":"x"}"#,
@@ -645,8 +645,7 @@ fn a_null_in_a_required_member_typed_through_an_alias_round_trips() {
 #[test_util::test]
 fn a_family_of_one_round_trips_through_its_tag() {
     let payload = r#"{"type":"OTEL","endpoint":"https://x","logTypes":["EVENTS"]}"#;
-    let (left, right) =
-        round_trip::<derived::types::LogExport, hand::types::LogExport>(payload)?;
+    let (left, right) = round_trip::<derived::types::LogExport, hand::types::LogExport>(payload)?;
     assert_eq!((left.as_str(), right.as_str()), (payload, payload));
     // The subtype holds the base's members and its own, the consumed tag aside.
     let derived::types::LogExport::Otel(read) = serde_json::from_str(payload)? else {

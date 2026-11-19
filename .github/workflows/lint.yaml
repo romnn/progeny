@@ -50,6 +50,26 @@ jobs:
       - name: Lint (all feature combinations × targets)
         run: task lint:fc
 
+  # A job of its own, so unformatted code fails within a minute and the lint job still reports
+  # Clippy's findings on the same commit.
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+          cache: true
+          env: false
+      - run: mise install task
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: task format:check
+
   spellcheck:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
