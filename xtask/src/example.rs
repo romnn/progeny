@@ -620,7 +620,9 @@ impl server::Api for Double {
             x_legacy_id: Some(7),
             raw,
         };
-        server::CreatePetsResponse::Created { headers }
+        server::CreatePetsResponse::Created {
+            headers: Box::new(headers),
+        }
     }
 
     async fn list_pets_paged(
@@ -663,10 +665,10 @@ impl server::Api for Double {
         if path.pet_id == "misrouted" {
             return server::ShowPetByIdResponse::Default {
                 status: 200,
-                headers: server::ShowPetByIdDefaultHeaders {
+                headers: Box::new(server::ShowPetByIdDefaultHeaders {
                     x_request_id: Some("r-1".to_owned()),
                     ..Default::default()
-                },
+                }),
                 body: Box::new(types::read::Error {
                     code: Some(200),
                     message: Some("not a pet".to_owned()),
@@ -696,7 +698,7 @@ impl server::Api for Double {
             _ => Default::default(),
         };
         server::ShowPetByIdResponse::Ok {
-            headers,
+            headers: Box::new(headers),
             body: Box::new(types::read::Pet::from(types::Pet {
                 id: 7,
                 name: path.pet_id,
@@ -758,11 +760,11 @@ impl server::Api for Double {
             // A reply whose declared headers are all it says, one of them text a reader must
             // not mistake for the boolean it spells.
             _ => server::TypedErrorsResponse::NoContent {
-                headers: server::TypedErrorsNoContentHeaders {
+                headers: Box::new(server::TypedErrorsNoContentHeaders {
                     x_outcome: Some("none".to_owned()),
                     x_flag: Some("true".to_owned()),
                     ..Default::default()
-                },
+                }),
             },
         }
     }
@@ -775,10 +777,10 @@ impl server::Api for Double {
         // The refusal's header group is numbered apart from `namedArmsBad`'s request builder.
         if path.kind == "refused" {
             return server::NamedArmsResponse::BadRequest {
-                headers: server::NamedArmsBadRequest2Headers {
+                headers: Box::new(server::NamedArmsBadRequest2Headers {
                     x_reason: Some("named apart".to_owned()),
                     ..Default::default()
-                },
+                }),
             };
         }
         server::NamedArmsResponse::NoContent {
@@ -863,10 +865,10 @@ impl server::Api for Double {
             ])),
         };
         server::StreamBytesResponse::Ok {
-            headers: server::StreamBytesOkHeaders {
+            headers: Box::new(server::StreamBytesOkHeaders {
                 x_chunks: Some(3),
                 ..Default::default()
-            },
+            }),
             body: Box::new(body),
         }
     }

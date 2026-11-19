@@ -363,7 +363,7 @@ fn handler(operation: &ProbeOp) -> String {
         || "headers: ::std::default::Default::default()".to_owned(),
         |headers| {
             write_header_group(&mut out, headers);
-            "headers".to_owned()
+            "headers: Box::new(headers)".to_owned()
         },
     );
     let body = match &answer.value {

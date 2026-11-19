@@ -416,10 +416,10 @@ impl server::Api for Service {
     ) -> server::ShowPetByIdResponse {
         let pet = self.pets.find(&principal, &path.pet_id).await;
         server::ShowPetByIdResponse::Ok {
-            headers: server::ShowPetByIdOkHeaders {
+            headers: Box::new(server::ShowPetByIdOkHeaders {
                 etag: Some(pet.version.to_string()), // a header the `200` declares
                 ..Default::default()
-            },
+            }),
             body: Box::new(pet.into()),
         }
     }
