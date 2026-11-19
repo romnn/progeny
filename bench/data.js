@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795038543788,
+  "lastUpdate": 1795126038267,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3298,6 +3298,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 235.359375,
             "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "316948e4b251841f344b332f242d324b69eec249",
+          "message": "ci(lint): check formatting in CI (#149)\n\n* ci(lint): check formatting in a job of its own\n\n`task format:check` runs `task format` with `--check`, and `task format`\nnow also reaches the fuzz workspace and the differential harness, which\n`cargo fmt --all` from the root does not. The harness was unformatted, so\nthis formats it.\n\nCloses #148\n\n* fix(ci): pass cargo's format arguments to the workspace alone\n\n`task format -- -p progeny` handed `-p` to the fuzz workspace too, which\nhas no such package. Arguments now reach `cargo fmt --all` alone, and a\n`--check` among them is also passed to the fuzz and harness commands, so a\ncheck never rewrites a file.",
+          "timestamp": "2026-11-19T23:00:36+01:00",
+          "tree_id": "9f98793a7a5d3e4709a6fbc201ba226bba8999c7",
+          "url": "https://github.com/romnn/progeny/commit/316948e4b251841f344b332f242d324b69eec249"
+        },
+        "date": 1795126037164,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 32.37140366666667,
+            "range": "± 1.11",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2901.51171875,
+            "range": "± 0.7",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.255983666666665,
+            "range": "± 0.46",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1217.009114265442,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7836636666666665,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 324.0807285308838,
+            "range": "± 0.5",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
