@@ -281,6 +281,17 @@ fn wiring(class: BreakageClass) -> Wiring {
                 },
             },
         }))),
+        BreakageClass::RepeatedStatus => Wiring::Fixture(paths(json!({
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "responses": {
+                        "4XX": {"description": "client error"},
+                        "4xx": {"description": "client error"},
+                    },
+                },
+            },
+        }))),
         BreakageClass::QuerySerializationStyle => Wiring::Fixture(paths(json!({
             "/pets": {
                 "get": {

@@ -3508,6 +3508,34 @@ mod tests {
         );
     }
 
+    /// A range declared twice in two casings is one arm on both sides: the client's status match
+    /// has no unreachable second arm, and the server has no variant a client could never receive.
+    #[test_util::test]
+    fn a_range_declared_in_two_casings_is_one_arm() -> eyre::Result<()> {
+        let failed = json!({"description": "failed", "content": {"application/json": {
+            "schema": {"type": "string"}}}});
+        let generated = files(
+            json!({
+                "openapi": "3.1.0",
+                "paths": {"/pets": {"get": {"operationId": "listPets", "responses": {
+                    "200": {"description": "ok"}, "4XX": failed.clone(), "4xx": failed}}}},
+            }),
+            &Config::default(),
+        )?;
+        let flat = |path: &str| -> eyre::Result<String> {
+            let source = generated
+                .get(camino::Utf8Path::new(path))
+                .ok_or_eyre("a generated file")?;
+            Ok(source.split_whitespace().collect())
+        };
+        let client = flat("src/client.rs")?;
+        assert_eq!(client.matches("400u16..=499u16").count(), 1, "{client}");
+        let server = flat("src/server.rs")?;
+        assert!(server.contains("Status4xx{"), "{server}");
+        assert!(!server.contains("Status4xx2"), "{server}");
+        Ok(())
+    }
+
     /// An operation declaring no responses answers `204` with whatever headers its handler
     /// writes.
     #[test_util::test]

@@ -462,13 +462,9 @@ fn error_constructor(
 
 /// The `4XX` and `5XX` exact and range arms a client can decode a status by, exact arms first.
 ///
-/// The first arm for a status or a class shadows any later one, as it does in the client's status
-/// match.
+/// The model keeps one arm per status or class, so each is one a client can reach.
 fn reachable_error_arms(arms: &[ResponseArm]) -> Vec<&ResponseArm> {
-    let mut seen = std::collections::BTreeSet::new();
-    arms.iter()
-        .filter(|arm| is_error(arm.status) && seen.insert(arm.status))
-        .collect()
+    arms.iter().filter(|arm| is_error(arm.status)).collect()
 }
 
 /// Whether an exact or range arm answers an error: a `4XX` or `5XX` status or range.
