@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795137134730,
+  "lastUpdate": 1795143638686,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3496,6 +3496,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 324.3307285308838,
             "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5065147576753cc3103ef0af2019588376a226a4",
+          "message": "fix(generate): allow type_complexity in every module that spells schema types (#153)\n\n* fix(generate): allow type_complexity in every module that spells schema types\n\nA per-field `#[expect(clippy::type_complexity)]` relied on a copy of\nClippy's scoring, and reached only struct fields. Cloudflare republished\nits description with a union variant whose payload is\n`Box<Option<Vec<Option<BTreeMap<String, Value>>>>>`, which no expectation\ncovered, so the generated types failed `cargo clippy -D warnings`.\n\nWhether the lint fires depends on the consumer's threshold and on Clippy's\nscoring, neither of which the generator sees, and an expectation that does\nnot fire is itself a warning in the consumer's build. The types, client and\nserver modules now open with one inner `#![allow]` instead, and the score\ncopy is gone. AGENTS.md says which suppressions generated code expects and\nwhich it allows.\n\n* fix(generate): pin the nested payload and name only deprecated as expected",
+          "timestamp": "2026-11-20T03:55:00+01:00",
+          "tree_id": "81b6e5ddd2240f45bfcd71a69c897f4c37f60af1",
+          "url": "https://github.com/romnn/progeny/commit/5065147576753cc3103ef0af2019588376a226a4"
+        },
+        "date": 1795143638008,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.927859333333334,
+            "range": "± 0.1",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2903.18359375,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.000405333333335,
+            "range": "± 0.02",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1216.7994785308838,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6576443333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 323.87890625,
+            "range": "± 0.4",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
