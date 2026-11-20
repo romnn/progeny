@@ -79,10 +79,10 @@ jobs:
       - name: Fetch corpus
         uses: ./.github/actions/fetch-corpus
       # Round-trip, reference resolution, dialect convergence, generation, determinism and the
-      # diagnostics snapshots, for all 78.
+      # diagnostics snapshots, for every document.
       - name: Run the corpus
         run: task corpus
-      # Compiling 78 generated crates is minutes-to-hours, so pull requests compile the reviewed
+      # Compiling every generated crate is minutes-to-hours, so pull requests compile the reviewed
       # 8-document tier and the full matrix is a deliberate, on-demand run.
       # This lints them too, with warnings denied: a warning in generated code is a defect its
       # consumer meets in their own build, about source they did not write.
@@ -131,8 +131,8 @@ jobs:
         run: task differential
 
   corpus-full:
-    name: conformance corpus (all 78, compiled)
-    # Not on pull requests: compiling 78 generated crates is hours. Nightly and on demand, because
+    name: conformance corpus (every document, compiled)
+    # Not on pull requests: compiling every generated crate is hours. Nightly and on demand, because
     # the alternative is what already happened once — `weather-gov`'s client did not compile for a
     # whole stage, and the 8-document tier could not see it.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -156,6 +156,42 @@ jobs:
         run: task corpus:compile:all -- --jobs 1
       - name: The wire differential over the whole tier
         run: task probe
+
+  lint-generated:
+    name: generated crates on Rust ${{ matrix.toolchain }}
+    # The generated code must have no warnings on any Rust release a consumer might build it with,
+    # and each release brings new lints, so this lints it on the oldest release the generated
+    # manifests accept and on the four newest stable ones.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - "1.88" # the oldest release the generated manifests accept: `RUST_VERSION` in manifest.rs
+          - stable minus 3 releases
+          - stable minus 2 releases
+          - stable minus 1 release
+          - stable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+          cache: true
+          env: false
+      - run: mise install task
+      # The release under test first, then stable, which stays the default that builds xtask.
+      - id: rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch corpus
+        uses: ./.github/actions/fetch-corpus
+      - run: task corpus:lint TOOLCHAIN=${{ steps.rust.outputs.name }}
 
   publish:
     name: publish (dry-run)

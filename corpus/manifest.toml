@@ -1,9 +1,11 @@
 # progeny conformance corpus — provenance manifest
 #
-# 78 real-world OpenAPI documents. Vendor specs are NOT committed: they total
-# ~117 MB and their redistribution rights vary by publisher. `cargo xtask corpus
-# --fetch` downloads each `url` into `corpus/cache/` (gitignored); only this
-# manifest and specs marked `local = true` live in git.
+# 78 real-world OpenAPI documents, plus hermetic fixtures that each pin a generated
+# crate shape a real document is too large to stand in for. Vendor specs are NOT
+# committed: they total ~117 MB and their redistribution rights vary by publisher.
+# `cargo xtask corpus --fetch` downloads each `url` into `corpus/cache/`
+# (gitignored); only this manifest and specs marked `local = true` live in git.
+# A committed spec that cannot be read fails every corpus run, selected or not.
 #
 # Fields:
 #   url          upstream source; absent for local specs
@@ -80,6 +82,13 @@ bad_examples = [
   "CreateMessageParamsWithoutStream",
   "Message",
 ]
+
+[[spec]]
+name = "bare-operation"
+version = "3.1"
+file = "bare-operation.yaml"
+local = true
+notes = "Hermetic fixture: one parameterless operation answering 204, the smallest crate with both edges (#157)."
 
 [[spec]]
 name = "bfl"
@@ -193,6 +202,13 @@ version = "3.0"
 url = "https://raw.githubusercontent.com/DeepLcom/openapi/main/openapi.yaml"
 file = "deepl.yaml"
 notes = "official; multipart, patternProperties"
+
+[[spec]]
+name = "deprecated-request-body"
+version = "3.1"
+file = "deprecated-request-body.yaml"
+local = true
+notes = "Hermetic fixture: a deprecated component named only by a request body, whose alias only the edges use (#155)."
 
 [[spec]]
 name = "discord"

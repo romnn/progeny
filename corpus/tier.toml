@@ -1,7 +1,7 @@
 # The quick tier: the specs every pull request exercises in full.
 #
 # Model-level checks (round-trip, convergence, diagnostics snapshots, determinism) run over
-# all 78 specs on every run because they are cheap. Compile-checking a generated crate is
+# every spec on every run because they are cheap. Compile-checking a generated crate is
 # not cheap, so the expensive per-spec assertions run over this list on pull requests and
 # over the whole corpus nightly and before a release. Nothing is sampled silently: the
 # corpus runner prints what the tier skipped.

@@ -639,7 +639,7 @@ task test:doc               # doc tests
 task lint:fc                # every feature combination × target, warnings denied
 task lint:layers            # the one-directional layer rule
 task typos                  # prose, excluding the vendor documents and their snapshots
-task corpus                 # all 78: round-trip, resolve, generate, snapshot
+task corpus                 # every document: round-trip, resolve, generate, snapshot
 task corpus:compile         # the quick tier, compiled and linted, in the default serde mode
 task corpus:compile -- --serde derive        # and through the escape hatch
 task payloads               # serde against the payloads the documents carry
