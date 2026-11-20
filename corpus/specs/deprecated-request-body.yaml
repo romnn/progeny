@@ -1,0 +1,22 @@
+openapi: "3.1.0"
+info:
+  title: Deprecated request body
+  version: "1.0"
+paths:
+  /notes:
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Note"
+      responses:
+        "204":
+          description: Stored
+components:
+  schemas:
+    Note:
+      type: string
+      deprecated: true

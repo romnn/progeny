@@ -163,19 +163,105 @@ pub fn write_test(directory: &Utf8Path, file_name: &str, source: &str) -> eyre::
 pub struct Compiled {
     pub ok: bool,
     /// The first few lines of what rustc said, when it said anything.
+    ///
+    /// One line per failing feature selection under the feature matrix, each led by its flags.
     pub complaint: String,
 }
 
-/// `cargo check` a generated crate, in the target directory of a worker slot.
-pub fn check(directory: &Utf8Path, clippy: bool, slot: usize) -> eyre::Result<Compiled> {
+/// The features a generated crate compiles its client and server behind.
+const EDGE_FEATURES: [&str; 2] = ["client", "server"];
+
+/// A cargo feature selection a generated crate is checked under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Features {
+    /// Every feature the crate declares.
+    All,
+    /// None at all, which leaves the shared types alone.
+    NoDefault,
+    /// One edge feature over no defaults.
+    Only(&'static str),
+}
+
+impl Features {
+    /// The cargo flags that select these features.
+    fn args(self) -> Vec<&'static str> {
+        match self {
+            // The client module sits behind a cargo feature so a consumer of the shared types
+            // alone does not compile an HTTP stack.
+            // Without this the gate would check everything *except* the half of the output that
+            // has a network protocol in it.
+            Self::All => vec!["--all-features"],
+            Self::NoDefault => vec!["--no-default-features"],
+            Self::Only(feature) => vec!["--no-default-features", "--features", feature],
+        }
+    }
+}
+
+/// The feature selections the feature matrix checks a generated crate under.
+///
+/// All features, none, and each edge feature alone, read from the `[features]` table of the
+/// emitted manifest: a document whose server is omitted declares no `server` feature, so it gets
+/// no leg for one.
+/// A consumer that turns an edge off compiles code no `--all-features` build ever sees, such as a
+/// type only that edge named, which is otherwise left unused.
+pub fn feature_matrix(directory: &Utf8Path) -> eyre::Result<Vec<Features>> {
+    let manifest = directory.join("Cargo.toml");
+    let text =
+        std::fs::read_to_string(&manifest).wrap_err_with(|| format!("reading {manifest}"))?;
+    matrix_of(&manifest, &text)
+}
+
+fn matrix_of(manifest: &Utf8Path, text: &str) -> eyre::Result<Vec<Features>> {
+    let parsed: toml::Table =
+        toml::from_str(text).wrap_err_with(|| format!("parsing {manifest}"))?;
+    if !parsed.contains_key("package") {
+        bail!("{manifest} declares no package, and the feature matrix checks one crate");
+    }
+    let declared = parsed.get("features").and_then(toml::Value::as_table);
+    let edges = EDGE_FEATURES
+        .into_iter()
+        .filter(|feature| declared.is_some_and(|features| features.contains_key(*feature)))
+        .map(Features::Only);
+    Ok([Features::All, Features::NoDefault]
+        .into_iter()
+        .chain(edges)
+        .collect())
+}
+
+/// `cargo check` a generated crate under every selection of [`feature_matrix`].
+///
+/// Every leg runs, so one report names each selection that fails rather than the first.
+pub fn check_matrix(directory: &Utf8Path, clippy: bool, slot: usize) -> eyre::Result<Compiled> {
+    let mut complaints = Vec::new();
+    for features in feature_matrix(directory)? {
+        let compiled = check(directory, clippy, slot, features)?;
+        if !compiled.ok {
+            complaints.push(format!(
+                "{}: {}",
+                features.args().join(" "),
+                compiled.complaint
+            ));
+        }
+    }
+    Ok(Compiled {
+        ok: complaints.is_empty(),
+        complaint: complaints.join("\n"),
+    })
+}
+
+/// `cargo check` a generated crate under one feature selection, in the target directory of a
+/// worker slot.
+pub fn check(
+    directory: &Utf8Path,
+    clippy: bool,
+    slot: usize,
+    features: Features,
+) -> eyre::Result<Compiled> {
     let mut command = cargo_in(directory, slot);
     command
         .arg(if clippy { "clippy" } else { "check" })
         .arg("--all-targets")
-        // The client module sits behind a cargo feature so a consumer of the shared types alone
-        // does not compile an HTTP stack. Without this the gate would check everything *except*
-        // the half of the output that has a network protocol in it.
-        .arg("--all-features")
+        .args(features.args())
         .arg("--quiet");
     if clippy {
         // Generated warnings are product defects a user sees, so they fail the gate.
@@ -230,6 +316,9 @@ pub fn require_cargo() -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use camino::Utf8Path;
+    use color_eyre::eyre;
+
+    use super::Features;
 
     /// The job count is what stands between the compile gates and a runner that dies without
     /// saying why, so it is asserted rather than trusted to survive the next edit here.
@@ -241,6 +330,66 @@ mod tests {
             .find(|(key, _)| *key == std::ffi::OsStr::new("CARGO_BUILD_JOBS"))
             .and_then(|(_, value)| value);
         assert_eq!(jobs, Some(std::ffi::OsStr::new("1")));
+    }
+
+    /// A leg per edge feature the manifest declares, and none for one it does not, so a crate
+    /// generated without a server is never asked to build one.
+    #[test_util::test]
+    fn the_feature_matrix_has_a_leg_per_declared_edge_feature() {
+        let manifest = Utf8Path::new("Cargo.toml");
+        let both = indoc::indoc! {r#"
+            [package]
+            name = "api"
+
+            [features]
+            default = ["client", "server", "rustls"]
+            client = ["dep:reqwest"]
+            server = ["dep:axum", "dep:tokio"]
+            rustls = ["reqwest?/rustls"]
+        "#};
+        assert_eq!(
+            super::matrix_of(manifest, both)?,
+            [
+                Features::All,
+                Features::NoDefault,
+                Features::Only("client"),
+                Features::Only("server"),
+            ]
+        );
+
+        let client_only = indoc::indoc! {r#"
+            [package]
+            name = "api"
+
+            [features]
+            default = ["client"]
+            client = ["dep:reqwest"]
+        "#};
+        assert_eq!(
+            super::matrix_of(manifest, client_only)?,
+            [Features::All, Features::NoDefault, Features::Only("client")]
+        );
+
+        // A types-only crate declares no features at all, and still builds without its defaults.
+        let types_only = indoc::indoc! {r#"
+            [package]
+            name = "api"
+        "#};
+        assert_eq!(
+            super::matrix_of(manifest, types_only)?,
+            [Features::All, Features::NoDefault]
+        );
+    }
+
+    /// A workspace has no crate-level features to vary, so the matrix refuses it rather than
+    /// passing a check that selected nothing.
+    #[test]
+    fn the_feature_matrix_refuses_a_workspace() {
+        let workspace = indoc::indoc! {r#"
+            [workspace]
+            members = ["api-types", "api-client"]
+        "#};
+        assert!(super::matrix_of(Utf8Path::new("Cargo.toml"), workspace).is_err());
     }
 
     #[test]

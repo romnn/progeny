@@ -79,10 +79,10 @@ jobs:
       - name: Fetch corpus
         uses: ./.github/actions/fetch-corpus
       # Round-trip, reference resolution, dialect convergence, generation, determinism and the
-      # diagnostics snapshots, for all 78.
+      # diagnostics snapshots, for every document.
       - name: Run the corpus
         run: task corpus
-      # Compiling 78 generated crates is minutes-to-hours, so pull requests compile the reviewed
+      # Compiling every generated crate is minutes-to-hours, so pull requests compile the reviewed
       # 8-document tier and the full matrix is a deliberate, on-demand run.
       # This lints them too, with warnings denied: a warning in generated code is a defect its
       # consumer meets in their own build, about source they did not write.
@@ -129,10 +129,19 @@ jobs:
         run: task probe -- --serde derive petstore-31
       - name: Differential serde harness
         run: task differential
+      # Every step above builds a generated crate with all its features, unlike a consumer that
+      # turns the `client` or `server` feature off: that build leaves unused whatever only the
+      # dropped edge names, such as a deprecated request body's alias.
+      # Only crate packaging has those features, so this runs in the default packaging, over the
+      # small documents and the committed fixtures that pin the shapes this has broken on.
+      - name: The generated crates under each feature selection
+        run: >-
+          task corpus -- --compile --clippy --feature-matrix --jobs 1 --only petstore-31 --only oxide
+          --only deprecated-request-body --only bare-operation
 
   corpus-full:
-    name: conformance corpus (all 78, compiled)
-    # Not on pull requests: compiling 78 generated crates is hours. Nightly and on demand, because
+    name: conformance corpus (every document, compiled)
+    # Not on pull requests: compiling every generated crate is hours. Nightly and on demand, because
     # the alternative is what already happened once — `weather-gov`'s client did not compile for a
     # whole stage, and the 8-document tier could not see it.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

@@ -2,8 +2,9 @@
 //!
 //! Vendor documents are not committed — they total roughly 117 MB and their redistribution rights
 //! vary by publisher — so `corpus/manifest.toml` carries the provenance and `--fetch` downloads
-//! each one into a gitignored cache. The single exception is `petstore-31`, which is hand-written,
-//! hermetic, and therefore the one document an offline run can always assert against.
+//! each one into a gitignored cache.
+//! The exceptions are the `local` documents in `corpus/specs`: `petstore-31` and a few fixtures,
+//! hand-written and hermetic, and therefore the documents an offline run can always assert against.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -63,6 +64,14 @@ pub struct Args {
     /// Also run clippy over the generated crates, with warnings denied.
     #[arg(long, requires = "compile")]
     clippy: bool,
+
+    /// Check each generated crate under every feature selection a consumer can make.
+    ///
+    /// All features, no default features, and each edge feature the crate declares (`client`,
+    /// `server`) alone.
+    /// Only crate packaging has those features, so any other packaging is refused.
+    #[arg(long, requires = "compile")]
+    feature_matrix: bool,
 
     /// Write a per-document timing report here, as JSON.
     #[arg(long, value_name = "PATH")]
@@ -218,7 +227,9 @@ struct Clean {
 
 pub fn run(args: &Args) -> eyre::Result<()> {
     let specs = load_manifest()?;
+    require_committed(&specs)?;
     let selected = select(&specs, args)?;
+    require_crate_packaging(args)?;
 
     println!(
         "corpus: {} documents in the manifest, {} selected ({} committed, {} exercise the \
@@ -260,6 +271,12 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             "corpus: generated crates are written to {} and compiled with a shared target \
              directory",
             generated::scratch_root()
+        );
+    }
+    if args.feature_matrix {
+        println!(
+            "corpus: each generated crate is checked with all features, with no default features, \
+             and with each edge feature it declares alone"
         );
     }
 
@@ -308,7 +325,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         bail!("{failures} documents and {convergence_failures} dialect pairs failed");
     }
 
-    verdict(&outcomes)
+    verdict(&specs, &args.only, &outcomes)
 }
 
 pub fn load_manifest() -> eyre::Result<Vec<Spec>> {
@@ -344,6 +361,38 @@ pub fn selected(names: &[String]) -> eyre::Result<Vec<(Spec, Vec<u8>)>> {
         out.push((spec.clone(), bytes));
     }
     Ok(out)
+}
+
+/// Refuse the feature matrix under any packaging but a single crate.
+///
+/// Only a crate gates its client and server behind features; a workspace splits them into crates
+/// of their own, and a module is compiled under its includer's features.
+fn require_crate_packaging(args: &Args) -> eyre::Result<()> {
+    let packaging = args
+        .packaging
+        .map_or_else(progeny::Packaging::default, Into::into);
+    if args.feature_matrix && packaging != progeny::Packaging::Crate {
+        bail!(
+            "`--feature-matrix` checks a crate's `client` and `server` features, which only crate \
+             packaging has; drop `--packaging` or pass `--packaging crate`"
+        );
+    }
+    Ok(())
+}
+
+/// Fail unless every committed document can be read, whether this run selected it or not.
+///
+/// A committed document is part of the checkout, so one that cannot be read is a broken tree
+/// rather than a download that failed, and nothing a later run fetches will bring it back.
+/// The fixtures among them are what the compile gates are pointed at to pin a shape, and one
+/// that went missing would otherwise let those gates pass on what was left.
+fn require_committed(specs: &[Spec]) -> eyre::Result<()> {
+    for spec in specs.iter().filter(|spec| spec.local) {
+        let path = document_path(spec);
+        std::fs::read(&path)
+            .wrap_err_with(|| format!("reading {path}, which `{}` commits", spec.name))?;
+    }
+    Ok(())
 }
 
 /// Check the manifest itself before trusting anything it says.
@@ -694,7 +743,11 @@ fn check(spec: &Spec, args: &Args, slot: usize) -> eyre::Result<(Outcome, Option
         .sum();
     let compiled = if args.compile {
         let directory = generated::write(&spec.name, &output)?;
-        Some(generated::check(&directory, args.clippy, slot)?)
+        Some(if args.feature_matrix {
+            generated::check_matrix(&directory, args.clippy, slot)?
+        } else {
+            generated::check(&directory, args.clippy, slot, generated::Features::All)?
+        })
     } else {
         None
     };
@@ -889,7 +942,9 @@ fn describe_clean(
     if let Some(compiled) = compiled {
         totals.compiled += 1;
         if !compiled.ok {
-            println!("              {}", compiled.complaint);
+            for line in compiled.complaint.lines() {
+                println!("              {line}");
+            }
         }
     }
     if show_diagnostics {
@@ -1109,10 +1164,19 @@ fn write_timings(path: &Utf8Path, outcomes: &[(String, Outcome, Duration)]) -> e
 
 /// Decide whether the run passed.
 ///
-/// A document that could not be read is infrastructure rather than a finding — one corpus member
-/// has no cached copy at all and is fetched live from a vendor endpoint. More than one missing
-/// means the cache is not populated, and a run over nothing must not read as a pass.
-fn verdict(outcomes: &[(String, Outcome, Duration)]) -> eyre::Result<()> {
+/// A fetched document that could not be read is infrastructure rather than a finding — one corpus
+/// member has no cached copy at all and is fetched live from a vendor endpoint.
+/// More than one missing means the cache is not populated, and a run over nothing must not read as
+/// a pass.
+///
+/// The tolerance covers nothing the run cannot do without.
+/// A committed document is part of the checkout, and a document named with `--only` is the whole
+/// point of the run, so either one unreadable fails it.
+fn verdict(
+    specs: &[Spec],
+    only: &[String],
+    outcomes: &[(String, Outcome, Duration)],
+) -> eyre::Result<()> {
     let broken = outcomes
         .iter()
         .filter(|(_, outcome, _)| {
@@ -1122,13 +1186,25 @@ fn verdict(outcomes: &[(String, Outcome, Duration)]) -> eyre::Result<()> {
             )
         })
         .count();
-    let unavailable = outcomes
+    let (required, unavailable): (Vec<&str>, Vec<&str>) = outcomes
         .iter()
         .filter(|(_, outcome, _)| matches!(outcome, Outcome::Unavailable(_)))
-        .count();
+        .map(|(name, _, _)| name.as_str())
+        .partition(|name| {
+            only.iter().any(|named| named == name)
+                || specs.iter().any(|spec| spec.name == *name && spec.local)
+        });
+    let unavailable = unavailable.len();
 
     if broken > 0 {
         bail!("{broken} documents did not round-trip through the model");
+    }
+    if !required.is_empty() {
+        bail!(
+            "{} could not be read, and a committed document or one named with `--only` may not \
+             be missing; run `cargo xtask corpus --fetch`",
+            required.join(", ")
+        );
     }
     if unavailable > 1 {
         bail!(
@@ -1141,10 +1217,12 @@ fn verdict(outcomes: &[(String, Outcome, Duration)]) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use clap::Parser as _;
     use color_eyre::eyre::{self, OptionExt as _};
 
-    use super::{Args, Spec, select};
+    use super::{Args, Outcome, Spec, require_committed, require_crate_packaging, select, verdict};
 
     /// `Args` is a subcommand's argument group, so parsing it needs something to hang it on.
     #[derive(Debug, clap::Parser)]
@@ -1197,5 +1275,88 @@ mod tests {
             .err()
             .ok_or_eyre("a name no document carries cannot be excluded")?;
         assert!(error.to_string().contains("petstore-30"), "{error}");
+    }
+
+    fn unavailable(name: &str) -> (String, Outcome, Duration) {
+        (
+            name.to_owned(),
+            Outcome::Unavailable(format!("{name}: not found")),
+            Duration::ZERO,
+        )
+    }
+
+    fn fetched(name: &str) -> eyre::Result<Spec> {
+        toml::from_str(&indoc::formatdoc! {r#"
+            name = "{name}"
+            url = "https://example.invalid/{name}.json"
+        "#})
+        .map_err(Into::into)
+    }
+
+    /// One fetched document may be missing, because one corpus member is only ever fetched live
+    /// and its endpoint is not progeny's to keep up; a second means the cache is not populated.
+    #[test_util::test]
+    fn one_unreadable_fetched_document_is_tolerated() {
+        let specs = vec![fetched("launchdarkly")?, fetched("oxide")?];
+        verdict(&specs, &[], &[unavailable("launchdarkly")])?;
+        assert!(
+            verdict(
+                &specs,
+                &[],
+                &[unavailable("launchdarkly"), unavailable("oxide")]
+            )
+            .is_err()
+        );
+    }
+
+    /// A run pointed at a document by name has checked nothing if that document is missing, so
+    /// the tolerance for one unreadable fetched document does not reach it.
+    #[test_util::test]
+    fn a_named_document_that_cannot_be_read_fails_the_run() {
+        let specs = vec![fetched("oxide")?];
+        let error = verdict(&specs, &["oxide".to_owned()], &[unavailable("oxide")])
+            .err()
+            .ok_or_eyre("a document named with `--only` may not be missing")?;
+        assert!(error.to_string().contains("oxide"), "{error}");
+    }
+
+    /// A committed document missing from the checkout is a broken tree, never the one tolerated
+    /// download failure.
+    #[test_util::test]
+    fn a_committed_document_that_cannot_be_read_fails_the_run() {
+        let specs = manifest(&["bare-operation"])?;
+        assert!(verdict(&specs, &[], &[unavailable("bare-operation")]).is_err());
+
+        // The same holds before any document is checked, for one the run did not even select.
+        let present: Spec = toml::from_str(indoc::indoc! {r#"
+            name = "petstore-31"
+            file = "petstore-31.yaml"
+            local = true
+        "#})?;
+        require_committed(std::slice::from_ref(&present))?;
+        let mut specs = manifest(&["no-such-fixture"])?;
+        specs.insert(0, present);
+        let error = require_committed(&specs)
+            .err()
+            .ok_or_eyre("an unreadable committed document fails the run")?;
+        assert!(
+            format!("{error:#}").contains("no-such-fixture"),
+            "{error:#}"
+        );
+    }
+
+    /// Workspace packaging puts the client and server in crates of their own, so there is no
+    /// feature to turn off and the matrix would check nothing it claims to.
+    #[test_util::test]
+    fn the_feature_matrix_is_refused_outside_crate_packaging() {
+        let refused = parse(&["--compile", "--feature-matrix", "--packaging", "workspace"]);
+        assert!(require_crate_packaging(&refused).is_err());
+        require_crate_packaging(&parse(&["--compile", "--feature-matrix"]))?;
+        require_crate_packaging(&parse(&[
+            "--compile",
+            "--feature-matrix",
+            "--packaging",
+            "crate",
+        ]))?;
     }
 }

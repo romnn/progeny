@@ -1,0 +1,11 @@
+openapi: "3.1.0"
+info:
+  title: Bare operation
+  version: "1.0"
+paths:
+  /ping:
+    post:
+      operationId: ping
+      responses:
+        "204":
+          description: Pong
