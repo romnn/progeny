@@ -61,10 +61,8 @@ pub(crate) fn run(
             .operations()
             .iter()
             .any(|operation| operation.registrable.is_some());
-    let external_api_modules = config.packaging == Packaging::Workspace;
     let decoding = decoding(contracts, api, config);
-    let types::Rendered { root, read } =
-        types::render(contracts, api, http || serves, external_api_modules, config);
+    let types::Rendered { root, read } = types::render(contracts, api, http || serves, config);
     let mut types_body = schema_type_lints();
     types_body.extend(root);
     types_body.extend(read);
@@ -3917,10 +3915,10 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("pub(crate) mod __progeny_deprecated"),
+            rendered.contains("pub mod __progeny_deprecated"),
             "{rendered}"
         );
-        assert!(rendered.contains("pub(crate) type Retired"), "{rendered}");
+        assert!(rendered.contains("pub type Retired"), "{rendered}");
         assert!(
             rendered.contains("pub revocation: Option<__progeny_deprecated::Retired>"),
             "{rendered}"
@@ -3949,7 +3947,7 @@ mod tests {
             &Config::default(),
         )?;
         assert!(rendered.contains("pub type Retired"), "{rendered}");
-        assert!(!rendered.contains("pub(crate) type Retired"), "{rendered}");
+        assert!(!rendered.contains("__progeny_deprecated"), "{rendered}");
     }
 
     #[test_util::test]

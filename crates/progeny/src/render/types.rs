@@ -68,12 +68,10 @@ pub(super) fn render(
     contracts: &Contracts,
     api: &ApiModel,
     api_modules: bool,
-    external_api_modules: bool,
     config: &Config,
 ) -> Rendered {
     let (root_needed, read_needed) = deprecated_alias_names(contracts, api, api_modules);
-    let deprecated =
-        deprecated_aliases(contracts, &root_needed, Scope::Types, external_api_modules);
+    let deprecated = deprecated_aliases(contracts, &root_needed, Scope::Types);
     let mut root = Vec::new();
     let mut read = Vec::new();
     for contract in contracts.types() {
@@ -89,8 +87,7 @@ pub(super) fn render(
         }
     }
     let read = contracts.has_read_forms().then(|| {
-        let deprecated =
-            deprecated_aliases(contracts, &read_needed, Scope::Read, external_api_modules);
+        let deprecated = deprecated_aliases(contracts, &read_needed, Scope::Read);
         let shared = contracts
             .types()
             .iter()
@@ -153,17 +150,15 @@ pub(super) fn render(
 /// macro expansions cannot inherit a field's `#[expect]`, so aliases are the only way to keep those
 /// internal uses clean without a broad `#[allow(deprecated)]`. Each module of the type layer
 /// carries its own, aliasing what that module's items name.
+///
+/// Public, though hidden: some aliases are named only by the client or the server, which a crate
+/// compiles behind features and a workspace puts in other crates. A public item is never dead
+/// code, while a crate-private one a disabled edge alone names would be.
 fn deprecated_aliases(
     contracts: &Contracts,
     needed: &BTreeSet<String>,
     scope: Scope,
-    external_api_modules: bool,
 ) -> TokenStream {
-    let visibility = if external_api_modules {
-        quote! { pub }
-    } else {
-        quote! { pub(crate) }
-    };
     let aliases: Vec<TokenStream> = contracts
         .types()
         .iter()
@@ -180,7 +175,7 @@ fn deprecated_aliases(
                     deprecated,
                     reason = "generated internals need a non-deprecated path to this public contract"
                 )]
-                #visibility type #name = super::#name;
+                pub type #name = super::#name;
             }
         })
         .collect();
@@ -189,7 +184,7 @@ fn deprecated_aliases(
     }
     quote! {
         #[doc(hidden)]
-        #visibility mod __progeny_deprecated {
+        pub mod __progeny_deprecated {
             #(#aliases)*
         }
     }
