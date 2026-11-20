@@ -65,7 +65,8 @@ pub(crate) fn run(
     let decoding = decoding(contracts, api, config);
     let types::Rendered { root, read } =
         types::render(contracts, api, http || serves, external_api_modules, config);
-    let mut types_body = root;
+    let mut types_body = schema_type_lints();
+    types_body.extend(root);
     types_body.extend(read);
     if decoding.is_lenient() {
         // The report vocabulary beside the types it describes, so a consumer of the types crate
@@ -79,9 +80,21 @@ pub(crate) fn run(
     // Under the same gate as the client and regardless of `Emit`: the module has no dependency,
     // so a flag would be a knob nothing needs, and nothing to call is nothing to reflect.
     let operations_body = has_operations.then(|| operations::render(api));
-    let client_body =
-        http.then(|| client::render(api, contracts, config, client_decoding(api, decoding)));
-    let server_body = serves.then(|| server::render(api, contracts, config));
+    let client_body = http.then(|| {
+        let mut body = schema_type_lints();
+        body.extend(client::render(
+            api,
+            contracts,
+            config,
+            client_decoding(api, decoding),
+        ));
+        body
+    });
+    let server_body = serves.then(|| {
+        let mut body = schema_type_lints();
+        body.extend(server::render(api, contracts, config));
+        body
+    });
     let mut modules = vec![("types", types_body.clone())];
     for (name, body) in [
         ("operations", &operations_body),
@@ -140,6 +153,24 @@ pub(crate) fn run(
         }
     }
     files
+}
+
+/// The inner attribute each module that spells the description's types opens with: the types, the
+/// client and the server.
+///
+/// A field or a variant payload is as nested as its schema, and whether that trips
+/// `type_complexity` depends on the consumer's `type-complexity-threshold` and on Clippy's scoring,
+/// neither of which the generator can see.
+/// So it is an `allow` rather than an `expect`, which would be unfulfilled, and so a warning in the
+/// consumer's build, wherever the lint does not fire.
+/// Inner rather than outer, because `clippy::allow_attributes` lints only the outer form.
+fn schema_type_lints() -> TokenStream {
+    quote! {
+        #![allow(
+            clippy::type_complexity,
+            reason = "every type mirrors the description's schemas, nested as deeply as they are"
+        )]
+    }
 }
 
 /// The support module of a one-crate or module rendering, when anything calls into it.
@@ -4249,6 +4280,78 @@ mod tests {
                 "src/types.rs"
             ]
         );
+    }
+
+    /// Every module that spells the description's types allows `type_complexity` once, as an
+    /// inner attribute, in every packaging, and nothing expects it.
+    ///
+    /// The fixture nests a schema the way `cloudflare`'s snapshot response does, as a union
+    /// variant's payload, which no per-field expectation ever reached.
+    #[test_util::test]
+    fn every_module_spelling_schema_types_allows_type_complexity() {
+        let map = json!({"type": "object", "additionalProperties": true});
+        let nested = json!({"oneOf": [
+            {"type": ["object", "null"], "additionalProperties": true},
+            {"type": ["array", "null"], "items": {"type": ["object", "null"], "additionalProperties": true}},
+        ]});
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/snapshot": {"post": {
+                "operationId": "snapshot",
+                "requestBody": {"content": {"application/json": {"schema": {
+                    "type": "object", "properties": {"json": nested.clone(), "extra": map},
+                }}}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": nested,
+                }}}},
+            }}},
+        });
+        let allows = |attrs: &[syn::Attribute]| {
+            attrs.iter().any(|attr| {
+                matches!(attr.style, syn::AttrStyle::Inner(_))
+                    && attr.path().is_ident("allow")
+                    && quote::ToTokens::to_token_stream(attr)
+                        .to_string()
+                        .contains("clippy :: type_complexity")
+            })
+        };
+
+        // One file per module, in a crate and in a workspace.
+        for packaging in [Packaging::Crate, Packaging::Workspace] {
+            let config = Config {
+                packaging,
+                ..Config::default()
+            };
+            let rendered = files(document.clone(), &config)?;
+            for module in ["types.rs", "client.rs", "server.rs"] {
+                let (path, text) = rendered
+                    .iter()
+                    .find(|(path, _)| path.file_name() == Some(module))
+                    .ok_or_eyre("the module is generated")?;
+                assert!(allows(&syn::parse_file(text)?.attrs), "{path}:\n{text}");
+                assert!(!text.contains("expect(clippy::type_complexity"), "{path}");
+            }
+        }
+
+        // Nested modules in the one file a module packaging writes.
+        let config = Config {
+            packaging: Packaging::Module,
+            ..Config::default()
+        };
+        let text = &files(document, &config)?[camino::Utf8Path::new("progeny.rs")];
+        let file = syn::parse_file(text)?;
+        for module in ["types", "client", "server"] {
+            let attrs = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Mod(nested) if nested.ident == module => Some(&nested.attrs),
+                    _ => None,
+                })
+                .ok_or_eyre("the module is generated")?;
+            assert!(allows(attrs), "{module}:\n{text}");
+        }
+        assert!(!text.contains("expect(clippy::type_complexity"), "{text}");
     }
 
     /// The stem guard, at the one place it used to panic: a digit-led `operationId` is a

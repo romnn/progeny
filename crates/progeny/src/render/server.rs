@@ -255,8 +255,7 @@ fn group_struct(
             quote! { ::std::option::Option<#ty> }
         };
         let docs = docs_of(&param.docs, config.docs);
-        let nesting = super::types::type_complexity(&ty);
-        quote! { #docs #nesting pub #field: #ty, }
+        quote! { #docs pub #field: #ty, }
     });
     // `PartialEq` is deliberately absent. A generated type carries only the derives the
     // configuration asked for, and a group struct holding one that lacks `PartialEq` cannot derive
@@ -720,9 +719,8 @@ fn header_group(
         let field = ident(&header.rust_name);
         let ty = type_tokens(&header.ty, contracts, config);
         let ty = quote! { ::std::option::Option<#ty> };
-        let nesting = super::types::type_complexity(&ty);
         let docs = header_docs(header, config);
-        quote! { #docs #nesting pub #field: #ty, }
+        quote! { #docs pub #field: #ty, }
     });
     // Each typed header is handed over as JSON, which the support runtime spells in one place,
     // with whether the description declares it a list, which a JSON value alone cannot say.
