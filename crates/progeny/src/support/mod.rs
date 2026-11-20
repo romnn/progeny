@@ -98,186 +98,20 @@ const ROUTER: &str = include_str!("router.rs");
 /// the same two ways as the client runtime it joins.
 const CREDENTIALS: &str = include_str!("credentials.rs");
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ServerUse {
-    pub(crate) json: bool,
-    pub(crate) form: bool,
-    pub(crate) multipart: bool,
-    pub(crate) text: bool,
-    pub(crate) bytes: bool,
-    /// Any body-bearing operation whose media-type gate is emitted — one that does *not*
-    /// declare its own `Content-Type` header parameter.
-    pub(crate) media_type_gate: bool,
-    /// Any operation with a parameter or a body, whose handler takes the request apart.
-    pub(crate) decodes: bool,
-    pub(crate) path: bool,
-    pub(crate) query: bool,
-    pub(crate) header: bool,
-    pub(crate) cookie: bool,
-    pub(crate) json_response: bool,
-    /// Any arm that declares no content, or an operation that declares no responses at all.
-    pub(crate) empty_response: bool,
-    pub(crate) text_response: bool,
-    pub(crate) byte_response: bool,
-    /// Any response header with a typed field, which the server writes through the style table.
-    pub(crate) response_header: bool,
-    pub(crate) styles: StyleUse,
-    pub(crate) parts: PartUse,
-}
-
-impl ServerUse {
-    const ALL: Self = Self {
-        json: true,
-        form: true,
-        multipart: true,
-        text: true,
-        bytes: true,
-        media_type_gate: true,
-        decodes: true,
-        path: true,
-        query: true,
-        header: true,
-        cookie: true,
-        json_response: true,
-        empty_response: true,
-        text_response: true,
-        byte_response: true,
-        response_header: true,
-        styles: StyleUse::ALL,
-        parts: PartUse::ALL,
-    };
-}
-
+/// The parts of the shipped client runtime a client carries only where its description reaches
+/// them.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ClientUse {
-    pub(crate) form: bool,
+    /// Any multipart request body, which ships the multipart writer.
     pub(crate) multipart: bool,
-    pub(crate) json_response: bool,
-    pub(crate) empty_response: bool,
-    pub(crate) text_response: bool,
-    pub(crate) byte_response: bool,
-    pub(crate) query: bool,
-    pub(crate) path: bool,
-    pub(crate) matrix: bool,
-    pub(crate) header: bool,
-    pub(crate) cookie: bool,
-    /// Any query parameter with `allowReserved: true` — the one caller of the
-    /// reserved-expansion encoder.
-    pub(crate) reserved: bool,
-    /// Any header the client marks sensitive: a declared credential header parameter, or the
-    /// cookie header its cookie parameters are sent in.
-    pub(crate) sensitive_header: bool,
-    /// Any response header with a typed field, which the client reads through the header
-    /// decoders.
-    pub(crate) response_header: bool,
-    /// Where the security schemes progeny sends put their credentials; any at all ships the held
-    /// credentials.
-    pub(crate) credentials: PlaceUse,
-    pub(crate) styles: StyleUse,
-    pub(crate) parts: PartUse,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct StyleUse {
-    pub(crate) form: bool,
-    pub(crate) simple: bool,
-    pub(crate) label: bool,
-    pub(crate) matrix: bool,
-    pub(crate) space_delimited: bool,
-    pub(crate) pipe_delimited: bool,
-    pub(crate) deep_object: bool,
-}
-
-impl StyleUse {
-    const ALL: Self = Self {
-        form: true,
-        simple: true,
-        label: true,
-        matrix: true,
-        space_delimited: true,
-        pipe_delimited: true,
-        deep_object: true,
-    };
-
-    fn contains(self, variant: &syn::Ident) -> bool {
-        match variant.to_string().as_str() {
-            "Form" => self.form,
-            "Simple" => self.simple,
-            "Label" => self.label,
-            "Matrix" => self.matrix,
-            "SpaceDelimited" => self.space_delimited,
-            "PipeDelimited" => self.pipe_delimited,
-            "DeepObject" => self.deep_object,
-            _ => true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct PartUse {
-    pub(crate) text: bool,
-    pub(crate) file: bool,
-    pub(crate) json: bool,
+    /// Any security scheme progeny sends, which ships the held credentials.
+    pub(crate) credentials: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PresenceUse {
     Omitted,
     Preserved,
-}
-
-/// Where a client's credentials go, by the kind of scheme that sends them.
-///
-/// Decides which of the shipped credential machinery a precise edge can reach, so what it cannot
-/// is expected dead rather than reported.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct PlaceUse {
-    pub(crate) header: bool,
-    pub(crate) query: bool,
-    pub(crate) cookie: bool,
-    pub(crate) bearer: bool,
-    pub(crate) basic: bool,
-}
-
-impl PlaceUse {
-    const ALL: Self = Self {
-        header: true,
-        query: true,
-        cookie: true,
-        bearer: true,
-        basic: true,
-    };
-
-    pub(crate) fn any(self) -> bool {
-        self.header || self.query || self.cookie || self.bearer || self.basic
-    }
-
-    /// Why the item `name` of the shipped credentials is dead, when nothing these places send
-    /// reaches it.
-    fn unreached(self, name: &str) -> Option<&'static str> {
-        let held_header = self.header || self.bearer || self.basic;
-        match name {
-            "Header" if !self.header => Some("this description sends no header `apiKey`"),
-            "Query" if !self.query => Some("this description sends no query `apiKey`"),
-            "Cookie" if !self.cookie => Some("this description sends no cookie `apiKey`"),
-            "Authorization" if !self.bearer && !self.basic => {
-                Some("this description sends no bearer, basic, OAuth2 or OpenID Connect scheme")
-            }
-            "Text" | "set_text" if !self.query && !self.cookie => {
-                Some("this description sends no query or cookie `apiKey`")
-            }
-            "set" | "Held::Header" if !held_header => {
-                Some("this description sends no credential in a header")
-            }
-            "set_bearer" if !self.bearer => {
-                Some("this description sends no bearer, OAuth2 or OpenID Connect scheme")
-            }
-            "set_basic" | "base64_encode" if !self.basic => {
-                Some("this description sends no basic scheme")
-            }
-            _ => None,
-        }
-    }
 }
 
 /// Whether a client holds credentials, which ships `credentials.rs` beside the client runtime.
@@ -299,23 +133,6 @@ impl From<bool> for PresenceUse {
             Self::Preserved
         } else {
             Self::Omitted
-        }
-    }
-}
-
-impl PartUse {
-    const ALL: Self = Self {
-        text: true,
-        file: true,
-        json: true,
-    };
-
-    fn contains(self, variant: &syn::Ident) -> bool {
-        match variant.to_string().as_str() {
-            "Text" => self.text,
-            "File" => self.file,
-            "Json" => self.json,
-            _ => true,
         }
     }
 }
@@ -352,17 +169,14 @@ pub(crate) fn tokens(
         },
         body_limit,
         ClientUse {
-            credentials: if credentials == CredentialUse::Held {
-                PlaceUse::ALL
-            } else {
-                PlaceUse::default()
-            },
+            credentials: credentials == CredentialUse::Held,
             ..ClientUse::default()
         },
-        ServerUse::ALL,
         decoding,
     );
+    let allow_dead_code = allow_dead_code();
     quote::quote! {
+        #allow_dead_code
         #buffered
         #degradations
         #lenient
@@ -379,12 +193,34 @@ pub(crate) fn types_tokens(presence: bool, decoding: Decoding) -> proc_macro2::T
     let lenient = decoding.lenient().map(lenient_tokens);
     let presence = presence.then(|| presence_tokens(decoding));
     let upload = source_items(UPLOAD);
+    let allow_dead_code = allow_dead_code();
     quote::quote! {
+        #allow_dead_code
         #buffered
         #degradations
         #lenient
         #presence
         #upload
+    }
+}
+
+/// The inner attribute every generated support module opens with.
+///
+/// The runtime is shared by every description, and which parts of it one description reaches
+/// varies.
+/// Whether the consumer's toolchain calls the rest dead varies too: Rust 1.88 treats an item that
+/// carries `#[expect(dead_code)]` as live, and so everything it calls, where later releases do
+/// not.
+/// No expectation progeny places is fulfilled under both, and an unfulfilled expectation is itself
+/// a warning in the consumer's build, so this is an `allow`.
+/// It is inner rather than outer because `clippy::allow_attributes` lints only the outer form, and
+/// a consumer denying that lint must still be able to build the module.
+fn allow_dead_code() -> proc_macro2::TokenStream {
+    quote::quote! {
+        #![allow(
+            dead_code,
+            reason = "the support runtime is shared by every description; which parts one uses varies, and so does whether the toolchain calls the rest dead"
+        )]
     }
 }
 
@@ -434,11 +270,9 @@ fn degradations_tokens(lenient: bool) -> proc_macro2::TokenStream {
 /// Shipped without the lenient decoder, it leaves out the methods only that decoder calls, which
 /// would otherwise be dead code in the consumer's build.
 fn degradations_module(lenient: bool) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(DEGRADATIONS) else {
-        return source_without_file_expectation(DEGRADATIONS);
+    let Some(mut file) = shipped(DEGRADATIONS) else {
+        return DEGRADATIONS.parse().unwrap_or_default();
     };
-    remove_dead_code_file_expectation(&mut file);
-    file.items.retain(|item| !is_test_module(item));
     if !lenient {
         drop_methods(&mut file, "Degradations", &["merge_tolerated"]);
     }
@@ -477,7 +311,7 @@ impl LeafUse {
 /// The lenient decoder as a submodule, with the leaf impls the configuration needs and its
 /// vocabulary re-exported at the support root beside the report's.
 fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
-    let lenient = source_without_file_expectation(LENIENT);
+    let lenient = source(LENIENT);
     let mut leaf_types: Vec<proc_macro2::TokenStream> = Vec::new();
     if leaves.chrono {
         leaf_types.push(quote::quote! {
@@ -629,12 +463,11 @@ fn presence_lenient_tokens() -> proc_macro2::TokenStream {
 pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2::TokenStream {
     // Shipped only where the multipart writer's `super::base64_decode` needs resolving; with no
     // multipart body in the description nothing here would be live at all.
-    let upload = used.multipart.then(|| upload_source(UPLOAD, true));
+    let upload = used.multipart.then(|| source_items(UPLOAD));
     let edges = edge_tokens(
         Edge::CLIENT,
         crate::config::BodyLimit::default(),
         used,
-        ServerUse::default(),
         decoding,
     );
     // Lenient: the report is the types crate's, because the `Lenient` impls there record into
@@ -653,7 +486,9 @@ pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2:
             pub use degradations::{Decoded, Degradations};
         }
     };
+    let allow_dead_code = allow_dead_code();
     quote::quote! {
+        #allow_dead_code
         #vocabulary
         #upload
         #edges
@@ -661,70 +496,23 @@ pub(crate) fn client_tokens(used: ClientUse, decoding: Decoding) -> proc_macro2:
 }
 
 /// Support owned by a generated server crate.
-pub(crate) fn server_tokens(
-    body_limit: crate::config::BodyLimit,
-    used: ServerUse,
-) -> proc_macro2::TokenStream {
-    let upload = upload_source(UPLOAD, false);
+///
+/// The upload source is spliced in only so the multipart submodule's `super::` calls resolve: the
+/// type a server parses into lives in the types it imports.
+pub(crate) fn server_tokens(body_limit: crate::config::BodyLimit) -> proc_macro2::TokenStream {
+    let upload = source_items(UPLOAD);
     let edges = edge_tokens(
         Edge::SERVER,
         body_limit,
         ClientUse::default(),
-        used,
         Decoding::Strict,
     );
+    let allow_dead_code = allow_dead_code();
     quote::quote! {
+        #allow_dead_code
         #upload
         #edges
     }
-}
-
-/// The upload source for an edge crate, with the half the edge cannot reach expected dead.
-///
-/// An edge crate's multipart machinery calls exactly one base64 direction — the client's writer
-/// decodes the object form, the server's parser encodes into it — and never names `Upload`
-/// itself: the type an edge serializes lives in the types it imports, and this splice exists
-/// only so the multipart submodule's `super::` calls resolve. rustc treats an item referenced
-/// solely from a dead item's impls as dead too, which is why the visitor is expected alongside
-/// the struct.
-fn upload_source(text: &str, client: bool) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
-        return text.parse().unwrap_or_default();
-    };
-    remove_dead_code_file_expectation(&mut file);
-    file.items.retain(|item| !is_test_module(item));
-    let unused = if client {
-        "base64_encode"
-    } else {
-        "base64_decode"
-    };
-    for item in &mut file.items {
-        match item {
-            syn::Item::Struct(structure)
-                if structure.ident == "Upload" || structure.ident == "UploadVisitor" =>
-            {
-                expect_dead_code(
-                    &mut structure.attrs,
-                    "the edge names the types module's `Upload`, never this splice's",
-                );
-            }
-            syn::Item::Impl(implementation) if implementation.trait_.is_none() => {
-                expect_dead_code(
-                    &mut implementation.attrs,
-                    "the edge names the types module's `Upload`, never this splice's",
-                );
-            }
-            syn::Item::Fn(function) if function.sig.ident == unused => {
-                expect_dead_code(
-                    &mut function.attrs,
-                    "this generated edge calls only the other base64 direction",
-                );
-            }
-            _ => {}
-        }
-    }
-    let items = file.items;
-    quote::quote! { #(#items)* }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -732,6 +520,7 @@ struct Edge {
     client: bool,
     server: bool,
     gated: bool,
+    /// Whether the edge is a workspace crate of its own, whose `ClientUse` says what it reaches.
     precise: bool,
 }
 
@@ -754,7 +543,6 @@ fn edge_tokens(
     edge: Edge,
     body_limit: crate::config::BodyLimit,
     client_use: ClientUse,
-    server_use: ServerUse,
     decoding: Decoding,
 ) -> proc_macro2::TokenStream {
     let Edge {
@@ -770,23 +558,9 @@ fn edge_tokens(
     // here and submodules there, so a path that resolves while progeny compiles resolves in the
     // consumer's crate too. Flattening them was a standing chance for the two to disagree, and the
     // disagreement would surface as a compile error in somebody else's build.
-    let style = if precise {
-        client
-            .then(|| style_source(STYLE, Some(client_use), None))
-            .or_else(|| server.then(|| style_source(STYLE, None, Some(server_use))))
-    } else {
-        Some(source_items(STYLE))
-    };
-    let multipart = if precise && client && !client_use.multipart {
-        None
-    } else if precise {
-        client
-            .then(|| multipart_source(MULTIPART, true, client_use.parts))
-            .or_else(|| server.then(|| multipart_source(MULTIPART, false, server_use.parts)))
-    } else {
-        Some(source_items(MULTIPART))
-    };
-    let style = style.map(|style| quote::quote! { pub mod style { #style } });
+    let style = source(STYLE);
+    // A client crate whose description sends no multipart body leaves the writer out.
+    let multipart = (!precise || !client || client_use.multipart).then(|| source(MULTIPART));
     let multipart = multipart.map(|multipart| quote::quote! { pub mod multipart { #multipart } });
 
     // Gated only in crate mode. A module tree is `include!`d into somebody else's crate, which has
@@ -799,13 +573,12 @@ fn edge_tokens(
     // items that name one — putting each in its own module is what lets one attribute cover all of
     // them rather than one per item.
     let wire = client.then(|| {
-        let wire = client_source(HTTP, precise.then_some(client_use), decoding);
+        let wire = client_source(HTTP, decoding);
         // Only a description with a scheme progeny sends holds credentials, so only its client
         // pays for them, under either packaging.
-        let credentials = client_use
-            .credentials
-            .any()
-            .then(|| credentials_source(CREDENTIALS, precise.then_some(client_use.credentials)));
+        // Spliced flat into the client runtime's module, so its items arrive without the file's
+        // own attributes.
+        let credentials = client_use.credentials.then(|| source_items(CREDENTIALS));
         quote::quote! {
             #calling
             pub mod wire {
@@ -817,12 +590,8 @@ fn edge_tokens(
         }
     });
     let serve = server.then(|| {
-        let serve = if precise {
-            source(SERVE)
-        } else {
-            source_items(SERVE)
-        };
-        let router = with_body_limit(ROUTER, body_limit, server_use, precise);
+        let serve = source(SERVE);
+        let router = with_body_limit(ROUTER, body_limit);
         quote::quote! {
             #serving
             pub mod serve { #serve }
@@ -836,7 +605,7 @@ fn edge_tokens(
     });
 
     quote::quote! {
-        #style
+        pub mod style { #style }
 
         #multipart
 
@@ -858,129 +627,48 @@ fn edge_tokens(
 /// `support::consts` module the shipped files `use`, one mechanism for every knob — rather than
 /// adding a second rewrite beside this one. Building that module today, for one knob, would be the
 /// speculative generality this project refuses everywhere else.
-fn with_body_limit(
-    text: &str,
-    limit: crate::config::BodyLimit,
-    used: ServerUse,
-    precise: bool,
-) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
+fn with_body_limit(text: &str, limit: crate::config::BodyLimit) -> proc_macro2::TokenStream {
+    let Some(mut file) = shipped(text) else {
         return text.parse().unwrap_or_default();
     };
-    if !precise {
-        file.attrs.clear();
-    }
     let bytes = limit.0;
-    file.items = file
-        .items
-        .into_iter()
-        .filter(|item| !is_test_module(item))
-        .map(|mut item| match &mut item {
-            syn::Item::Const(konst) if konst.ident == "BODY_LIMIT" => {
-                *konst.expr = syn::parse_quote! { #bytes };
-                item
-            }
-            syn::Item::Fn(function) => {
-                if precise {
-                    if let Some(kind) = unused_body_reader(&function.sig.ident, used) {
-                        let reason = format!("this description declares no {kind} request body");
-                        function
-                            .attrs
-                            .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
-                    }
-                    if let Some(kind) = unused_response_writer(&function.sig.ident, used) {
-                        let reason = format!("this description declares no {kind} response body");
-                        function
-                            .attrs
-                            .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
-                    }
-                    if function.sig.ident == "header_element" && !used.response_header {
-                        expect_dead_code(&mut function.attrs, NO_TYPED_RESPONSE_HEADER);
-                    }
-                    if function.sig.ident == "receive" && !used.decodes {
-                        expect_dead_code(
-                            &mut function.attrs,
-                            "this description declares no parameter and no request body",
-                        );
-                    }
-                }
-                item
-            }
-            syn::Item::Impl(implementation) => {
-                if precise {
-                    let typed_headers = impl_type_is(implementation, "ResponseHeaders");
-                    for implementation_item in &mut implementation.items {
-                        let syn::ImplItem::Fn(function) = implementation_item else {
-                            continue;
-                        };
-                        if typed_headers && function.sig.ident == "typed" && !used.response_header {
-                            expect_dead_code(&mut function.attrs, NO_TYPED_RESPONSE_HEADER);
-                        }
-                        if let Some(location) = unused_parameter_reader(&function.sig.ident, used) {
-                            let reason =
-                                format!("this description declares no {location} parameter");
-                            function
-                                .attrs
-                                .push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
-                        }
-                    }
-                }
-                item
-            }
-            _ => item,
-        })
-        .collect();
+    for item in &mut file.items {
+        if let syn::Item::Const(konst) = item
+            && konst.ident == "BODY_LIMIT"
+        {
+            *konst.expr = syn::parse_quote! { #bytes };
+        }
+    }
     quote::quote! { #file }
 }
 
-/// Why the writer of typed response headers is dead in a server whose arms type none.
-const NO_TYPED_RESPONSE_HEADER: &str = "this description declares no typed response header";
-
-fn unused_body_reader(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
-    match name.to_string().as_str() {
-        "json_body" if !used.json => Some("JSON"),
-        "form_body" if !used.form => Some("form-urlencoded"),
-        "multipart_body" if !used.multipart => Some("multipart"),
-        "text_body" if !used.text => Some("text"),
-        "byte_body" if !used.bytes => Some("raw-byte"),
-        _ => None,
-    }
-}
-
-fn unused_parameter_reader(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
-    match name.to_string().as_str() {
-        "path_value" if !used.path => Some("path"),
-        "query_value" if !used.query => Some("query"),
-        "header_value" if !used.header => Some("header"),
-        "cookie_value" if !used.cookie => Some("cookie"),
-        // The media-type gate guards a body read except where a declared `Content-Type`
-        // parameter stands it down, so it is dead exactly when no handler emits it;
-        // "parameter" is close enough for the reason string's shape.
-        "mismatched_media_type" if !used.media_type_gate => Some("gated body"),
-        _ => None,
-    }
-}
-
-fn unused_response_writer(name: &syn::Ident, used: ServerUse) -> Option<&'static str> {
-    match name.to_string().as_str() {
-        "respond_json" if !used.json_response => Some("JSON"),
-        "respond_empty" if !used.empty_response => Some("empty"),
-        "respond_text" if !used.text_response => Some("text"),
-        "respond_bytes" if !used.byte_response => Some("raw-byte"),
-        "respond_raw" if !used.text_response && !used.byte_response => Some("non-JSON"),
-        _ => None,
-    }
-}
-
-/// One shipped file as tokens, without the tests that verify it here.
+/// One shipped file as it goes into a generated crate.
 ///
-/// The tests belong beside the code they test and have no business in a consumer's crate: they
-/// would be compile time nobody asked for, in a module a consumer cannot even read the source of.
+/// The tests that verify it here are left out: they belong beside the code they test and have no
+/// business in a consumer's crate, where they would be compile time nobody asked for, in a module
+/// a consumer cannot even read the source of.
+/// So is the file-wide `dead_code` expectation progeny's own build needs, where the file is
+/// compiled but mostly not called: in a generated crate the support module's [`allow_dead_code`]
+/// decides instead.
+fn shipped(text: &str) -> Option<syn::File> {
+    let mut file = syn::parse_file(text).ok()?;
+    file.items.retain(|item| !is_test_module(item));
+    file.attrs.retain(|attribute| {
+        let suppression =
+            attribute.path().is_ident("expect") || attribute.path().is_ident("cfg_attr");
+        !(suppression
+            && quote::quote! { #attribute }
+                .to_string()
+                .contains("dead_code"))
+    });
+    Some(file)
+}
+
+/// One shipped file as tokens, with its own inner attributes.
 fn source(text: &str) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
+    let Some(file) = shipped(text) else {
         return text.parse().unwrap_or_default();
     };
-    file.items.retain(|item| !is_test_module(item));
     quote::quote! { #file }
 }
 
@@ -999,35 +687,11 @@ fn drop_methods(file: &mut syn::File, ty: &str, names: &[&str]) {
     }
 }
 
-/// One shipped file as tokens with its `cfg_attr` dead-code expectation removed: every item is
-/// live in a generated crate, so the expectation progeny needs would go unfulfilled there.
-fn source_without_file_expectation(text: &str) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
-        return text.parse().unwrap_or_default();
-    };
-    remove_dead_code_file_expectation(&mut file);
-    file.items.retain(|item| !is_test_module(item));
-    quote::quote! { #file }
-}
-
-fn source_items(text: &str) -> proc_macro2::TokenStream {
-    let Ok(file) = syn::parse_file(text) else {
-        return text.parse().unwrap_or_default();
-    };
-    let items = file.items.into_iter().filter(|item| !is_test_module(item));
-    quote::quote! { #(#items)* }
-}
-
-/// The client runtime, with the items this description cannot reach expected dead when `used`
-/// says what it reaches, and the lenient decoders left out when nothing is decoded leniently —
+/// The client runtime, with the lenient decoders left out when nothing is decoded leniently —
 /// they name a trait that only exists then.
 /// Decoded leniently, the strict header decoder goes instead, because no arm calls it.
-fn client_source(
-    text: &str,
-    used: Option<ClientUse>,
-    decoding: Decoding,
-) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
+fn client_source(text: &str, decoding: Decoding) -> proc_macro2::TokenStream {
+    let Some(mut file) = shipped(text) else {
         return text.parse().unwrap_or_default();
     };
     // The report and its vocabulary stay: `ResponseValue` carries a report whichever way its
@@ -1048,115 +712,17 @@ fn client_source(
     };
     let strict_decoder = |item: &syn::Item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "strict_header");
     file.items.retain(|item| {
-        !is_test_module(item)
-            && if decoding.is_lenient() {
-                !strict_decoder(item)
-            } else {
-                !lenient_decoder(item)
-            }
+        if decoding.is_lenient() {
+            !strict_decoder(item)
+        } else {
+            !lenient_decoder(item)
+        }
     });
     // The constructor that takes a decoded report, and the header reader that records into one
     if !decoding.is_lenient() {
         drop_methods(&mut file, "ResponseValue", &["decoded", "read_headers"]);
     }
-    if let Some(used) = used {
-        expect_unreached_client_items(&mut file, used, decoding);
-    }
     quote::quote! { #file }
-}
-
-/// Expect every item of the client runtime dead that nothing this description generates reaches.
-fn expect_unreached_client_items(file: &mut syn::File, used: ClientUse, decoding: Decoding) {
-    for item in &mut file.items {
-        match item {
-            syn::Item::Struct(structure) if structure.ident == "NotAForm" && !used.multipart => {
-                expect_dead_code(
-                    &mut structure.attrs,
-                    "this description declares no multipart request body",
-                );
-            }
-            syn::Item::Struct(structure)
-                if structure.ident == "HeaderRow" && !used.response_header =>
-            {
-                expect_dead_code(&mut structure.attrs, NO_TYPED_RESPONSE_HEADER);
-            }
-            syn::Item::Fn(function) => match function.sig.ident.to_string().as_str() {
-                "header_value" | "header_scalar" | "lenient_header" | "strict_header"
-                    if !used.response_header =>
-                {
-                    expect_dead_code(&mut function.attrs, NO_TYPED_RESPONSE_HEADER);
-                }
-                // A lenient client reads at least a JSON body or a typed header, or it would be
-                // strict; one that reads only headers never decodes a body leniently.
-                "decode_lenient" | "decode_lenient_slice" if !used.json_response => {
-                    expect_dead_code(
-                        &mut function.attrs,
-                        "this description declares no JSON response body",
-                    );
-                }
-                "to_value" if !used.form && !used.multipart => expect_dead_code(
-                    &mut function.attrs,
-                    "this description declares no form or multipart request body",
-                ),
-                // The strict decoder reads every empty body, and a JSON one only where responses
-                // are not read leniently.
-                "decode_json" if !used.empty_response && decoding.is_lenient() => expect_dead_code(
-                    &mut function.attrs,
-                    "this client reads JSON leniently and declares no empty response body",
-                ),
-                "decode_json" if !used.empty_response && !used.json_response => expect_dead_code(
-                    &mut function.attrs,
-                    "this description declares no JSON or empty response body",
-                ),
-                "decode_text" if !used.text_response => expect_dead_code(
-                    &mut function.attrs,
-                    "this description declares no text response body",
-                ),
-                "decode_bytes" if !used.byte_response => expect_dead_code(
-                    &mut function.attrs,
-                    "this description declares no raw-byte response body",
-                ),
-                "sensitive_header" if !used.sensitive_header => expect_dead_code(
-                    &mut function.attrs,
-                    "this description declares no credential header or cookie parameter",
-                ),
-                _ => {}
-            },
-            syn::Item::Impl(implementation)
-                if impl_type_is(implementation, "NotAForm") && !used.multipart =>
-            {
-                for implementation_item in &mut implementation.items {
-                    if let syn::ImplItem::Fn(function) = implementation_item
-                        && function.sig.ident == "new"
-                    {
-                        expect_dead_code(
-                            &mut function.attrs,
-                            "this description declares no multipart request body",
-                        );
-                    }
-                }
-            }
-            // `read_headers` is never dead: it is public on a type the client re-exports, so only
-            // the crate-private constructor can be.
-            syn::Item::Impl(implementation)
-                if implementation.trait_.is_none()
-                    && impl_type_is(implementation, "ResponseValue") =>
-            {
-                for implementation_item in &mut implementation.items {
-                    let syn::ImplItem::Fn(function) = implementation_item else {
-                        continue;
-                    };
-                    if function.sig.ident == "decoded" && !used.json_response {
-                        expect_dead_code(
-                            &mut function.attrs,
-                            "this description declares no JSON response body",
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn impl_type_is(implementation: &syn::ItemImpl, expected: &str) -> bool {
@@ -1169,184 +735,13 @@ fn impl_type_is(implementation: &syn::ItemImpl, expected: &str) -> bool {
         .is_some_and(|segment| segment.ident == expected)
 }
 
-/// The held credentials, with what the description's schemes cannot reach expected dead when
-/// `used` says which they are.
-///
-/// Spliced flat into the client runtime's module, so its items arrive without the file's own
-/// attributes.
-fn credentials_source(text: &str, used: Option<PlaceUse>) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
+/// One shipped file as its items alone, without the file's own inner attributes.
+fn source_items(text: &str) -> proc_macro2::TokenStream {
+    let Some(file) = shipped(text) else {
         return text.parse().unwrap_or_default();
     };
-    file.items.retain(|item| !is_test_module(item));
-    let Some(used) = used else {
-        let items = &file.items;
-        return quote::quote! { #(#items)* };
-    };
-    for item in &mut file.items {
-        match item {
-            syn::Item::Enum(enumeration) => {
-                let held = enumeration.ident == "Held";
-                for variant in &mut enumeration.variants {
-                    let name = variant.ident.to_string();
-                    let key = if held && name == "Header" {
-                        "Held::Header".to_owned()
-                    } else {
-                        name
-                    };
-                    if let Some(reason) = used.unreached(&key) {
-                        expect_dead_code(&mut variant.attrs, reason);
-                    }
-                }
-            }
-            syn::Item::Fn(function) => {
-                if let Some(reason) = used.unreached(&function.sig.ident.to_string()) {
-                    expect_dead_code(&mut function.attrs, reason);
-                }
-            }
-            syn::Item::Impl(implementation) => {
-                for implementation_item in &mut implementation.items {
-                    if let syn::ImplItem::Fn(function) = implementation_item
-                        && let Some(reason) = used.unreached(&function.sig.ident.to_string())
-                    {
-                        expect_dead_code(&mut function.attrs, reason);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let items = &file.items;
+    let items = file.items;
     quote::quote! { #(#items)* }
-}
-
-fn expect_dead_code(attributes: &mut Vec<syn::Attribute>, reason: &str) {
-    attributes.push(syn::parse_quote! { #[expect(dead_code, reason = #reason)] });
-}
-
-fn style_source(
-    text: &str,
-    client: Option<ClientUse>,
-    server: Option<ServerUse>,
-) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
-        return text.parse().unwrap_or_default();
-    };
-    remove_dead_code_file_expectation(&mut file);
-    file.items.retain(|item| !is_test_module(item));
-    for item in &mut file.items {
-        match item {
-            syn::Item::Fn(function)
-                if !style_function_used(&function.sig.ident, client, server) =>
-            {
-                expect_dead_code(
-                    &mut function.attrs,
-                    "this generated edge does not call this serialization direction",
-                );
-            }
-            syn::Item::Enum(enumeration) if enumeration.ident == "Style" => {
-                let mut styles = client.map_or_else(
-                    || server.map_or(StyleUse::ALL, |used| used.styles),
-                    |used| used.styles,
-                );
-                // Both directions construct the default form and compare against deep-object
-                // inside the shared table itself, even when the generated API never writes either
-                // variant explicitly.
-                styles.form = true;
-                styles.deep_object = true;
-                for variant in &mut enumeration.variants {
-                    if !styles.contains(&variant.ident) {
-                        expect_dead_code(
-                            &mut variant.attrs,
-                            "this description does not use this parameter style",
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    quote::quote! { #file }
-}
-
-fn style_function_used(
-    name: &syn::Ident,
-    client: Option<ClientUse>,
-    server: Option<ServerUse>,
-) -> bool {
-    match name.to_string().as_str() {
-        // Both query paths produce their pairs here: the reqwest-encoded one and the
-        // reserved-expansion one.
-        "query_pairs" => client.is_some_and(|used| used.query || used.reserved),
-        "form_body" => client.is_some_and(|used| used.form),
-        "from_query" => server.is_some_and(|used| used.query),
-        "query_object" => server.is_some_and(|used| used.form),
-        "path_segment" => client.is_some_and(|used| used.path),
-        "matrix_segment" => client.is_some_and(|used| used.matrix),
-        "header_value" => {
-            client.is_some_and(|used| used.header)
-                || server.is_some_and(|used| used.response_header)
-        }
-        "cookie_pair" => client.is_some_and(|used| used.cookie),
-        "reserved_pair" => client.is_some_and(|used| used.reserved),
-        "from_path" => server.is_some_and(|used| used.path),
-        "from_header" => server.is_some_and(|used| used.header),
-        "from_cookie" => server.is_some_and(|used| used.cookie),
-        _ => true,
-    }
-}
-
-fn multipart_source(text: &str, client: bool, mut parts: PartUse) -> proc_macro2::TokenStream {
-    let Ok(mut file) = syn::parse_file(text) else {
-        return text.parse().unwrap_or_default();
-    };
-    remove_dead_code_file_expectation(&mut file);
-    file.items.retain(|item| !is_test_module(item));
-    // The shared runtime's inference path constructs both defaults. Only `File` depends entirely
-    // on the description emitting a corresponding `PartSpec`.
-    parts.text = true;
-    parts.json = true;
-    for item in &mut file.items {
-        match item {
-            syn::Item::Fn(function) => {
-                let opposite_direction = if client {
-                    matches!(
-                        function.sig.ident.to_string().as_str(),
-                        "boundary_of" | "parse"
-                    )
-                } else {
-                    function.sig.ident == "body"
-                };
-                if opposite_direction {
-                    expect_dead_code(
-                        &mut function.attrs,
-                        "this generated edge does not call this multipart direction",
-                    );
-                }
-            }
-            syn::Item::Enum(enumeration) if enumeration.ident == "PartKind" => {
-                for variant in &mut enumeration.variants {
-                    if !parts.contains(&variant.ident) {
-                        expect_dead_code(
-                            &mut variant.attrs,
-                            "this description does not use this multipart part kind",
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    quote::quote! { #file }
-}
-
-fn remove_dead_code_file_expectation(file: &mut syn::File) {
-    file.attrs.retain(|attribute| {
-        !(attribute.path().is_ident("cfg_attr")
-            && quote::quote! { #attribute }
-                .to_string()
-                .contains("dead_code"))
-    });
 }
 
 /// The same, as items alone.
@@ -1543,162 +938,32 @@ mod tests {
         );
     }
 
-    /// A precise client expects dead exactly the credential machinery its schemes cannot reach,
-    /// and an imprecise one, whose support module is public, expects nothing.
+    /// Each decoding ships the header decoder its arms call and leaves out the other, and a strict
+    /// client leaves out the body decoder and the methods only the lenient decoders call.
     #[test_util::test]
-    fn credential_machinery_a_description_cannot_reach_is_expected_dead() {
-        let query_only = super::PlaceUse {
-            query: true,
-            ..super::PlaceUse::default()
-        };
-        let pruned = super::credentials_source(super::CREDENTIALS, Some(query_only));
-        let file: syn::File = syn::parse2(pruned)?;
-        let mut expected = Vec::new();
-        let mut note = |name: String, attributes: &[syn::Attribute]| {
-            if attributes
-                .iter()
-                .any(|attribute| attribute.path().is_ident("expect"))
-            {
-                expected.push(name);
-            }
-        };
-        for item in &file.items {
-            match item {
-                syn::Item::Enum(enumeration) => {
-                    for variant in &enumeration.variants {
-                        note(
-                            format!("{}::{}", enumeration.ident, variant.ident),
-                            &variant.attrs,
-                        );
-                    }
-                }
-                syn::Item::Fn(function) => note(function.sig.ident.to_string(), &function.attrs),
-                syn::Item::Impl(implementation) => {
-                    for inner in &implementation.items {
-                        if let syn::ImplItem::Fn(function) = inner {
-                            note(function.sig.ident.to_string(), &function.attrs);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        expected.sort();
-        assert_eq!(
-            expected,
-            [
-                "Held::Header",
-                "Place::Authorization",
-                "Place::Cookie",
-                "Place::Header",
-                "base64_encode",
-                "set",
-                "set_basic",
-                "set_bearer",
-            ]
-        );
-        let imprecise = super::credentials_source(super::CREDENTIALS, None).to_string();
-        assert!(!imprecise.contains("expect"), "{imprecise}");
-    }
-
-    /// The strict decoder reads every empty body and, unless responses are read leniently, every
-    /// JSON one, so a precise client expects it dead only when neither reaches it.
-    #[test_util::test]
-    fn the_strict_decoder_is_expected_dead_when_no_response_reaches_it() {
-        let lenient = super::Decoding::Lenient(super::LeafUse::default());
-        let strict = super::Decoding::Strict;
-        let json = super::ClientUse {
-            json_response: true,
-            ..super::ClientUse::default()
-        };
-        let empty = super::ClientUse {
-            empty_response: true,
-            ..super::ClientUse::default()
-        };
-        let expected_dead = |used: super::ClientUse, decoding: super::Decoding| {
-            let file: syn::File =
-                syn::parse2(super::client_source(super::HTTP, Some(used), decoding))?;
-            let decoder = file
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    syn::Item::Fn(function) if function.sig.ident == "decode_json" => {
-                        Some(function)
-                    }
-                    _ => None,
-                })
-                .ok_or_eyre("the client runtime ships `decode_json`")?;
-            eyre::Ok(
-                decoder
-                    .attrs
-                    .iter()
-                    .any(|attribute| attribute.path().is_ident("expect")),
-            )
-        };
-
-        // Lenient: only an empty body reaches it
-        assert!(expected_dead(json, lenient)?);
-        assert!(!expected_dead(empty, lenient)?);
-
-        // Strict: a JSON or an empty body reaches it
-        assert!(!expected_dead(json, strict)?);
-        assert!(!expected_dead(empty, strict)?);
-        assert!(expected_dead(super::ClientUse::default(), strict)?);
-    }
-
-    /// Each decoding ships the header decoder its arms call and leaves out the other, and a
-    /// precise client expects the header machinery dead where no arm types a header, and a
-    /// lenient one its body decoder where it reads only headers.
-    #[test_util::test]
-    fn the_header_decoders_follow_the_decoding_and_the_arms() {
-        /// Whether each named item ships, and whether it carries a `dead_code` expectation:
-        /// `None` when it is left out.
-        fn shipped(
-            used: super::ClientUse,
-            decoding: super::Decoding,
-            names: &[&str],
-        ) -> eyre::Result<Vec<Option<bool>>> {
-            let file: syn::File =
-                syn::parse2(super::client_source(super::HTTP, Some(used), decoding))?;
-            let expects = |attributes: &[syn::Attribute]| {
-                attributes
-                    .iter()
-                    .any(|attribute| attribute.path().is_ident("expect"))
-            };
+    fn the_header_decoders_follow_the_decoding() {
+        /// Whether each named item ships.
+        fn shipped(decoding: super::Decoding, names: &[&str]) -> eyre::Result<Vec<bool>> {
+            let file: syn::File = syn::parse2(super::client_source(super::HTTP, decoding))?;
             let find = |name: &str| {
-                file.items.iter().find_map(|item| match item {
-                    syn::Item::Fn(function) if function.sig.ident == name => {
-                        Some(expects(&function.attrs))
-                    }
-                    syn::Item::Struct(structure) if structure.ident == name => {
-                        Some(expects(&structure.attrs))
-                    }
+                file.items.iter().any(|item| {
+                    match item {
+                    syn::Item::Fn(function) => function.sig.ident == name,
+                    syn::Item::Struct(structure) => structure.ident == name,
                     syn::Item::Impl(implementation)
                         if super::impl_type_is(implementation, "ResponseValue") =>
                     {
-                        implementation.items.iter().find_map(|member| match member {
-                            syn::ImplItem::Fn(method) if method.sig.ident == name => {
-                                Some(expects(&method.attrs))
-                            }
-                            _ => None,
+                        implementation.items.iter().any(|member| {
+                            matches!(member, syn::ImplItem::Fn(method) if method.sig.ident == name)
                         })
                     }
-                    _ => None,
+                    _ => false,
+                }
                 })
             };
             Ok(names.iter().map(|name| find(name)).collect())
         }
 
-        let lenient = super::Decoding::Lenient(super::LeafUse::default());
-        let strict = super::Decoding::Strict;
-        let headers = super::ClientUse {
-            response_header: true,
-            ..super::ClientUse::default()
-        };
-        let json = super::ClientUse {
-            json_response: true,
-            ..super::ClientUse::default()
-        };
         let names = [
             "HeaderRow",
             "header_value",
@@ -1709,107 +974,86 @@ mod tests {
             "decoded",
         ];
 
-        // Lenient, reading headers and no JSON body: the body decoder is the dead half
+        // Lenient: everything but the strict header reader
         assert_eq!(
-            shipped(headers, lenient, &names)?,
-            [
-                Some(false),
-                Some(false),
-                Some(false),
-                None,
-                Some(false),
-                Some(true),
-                Some(true)
-            ]
+            shipped(super::Decoding::Lenient(super::LeafUse::default()), &names)?,
+            [true, true, true, false, true, true, true]
         );
-        // Lenient, reading a JSON body and no header: the header machinery is, except the
-        // method public on a type the client re-exports, which nothing can call dead
+        // Strict: the strict header reader, and nothing that records into a report
         assert_eq!(
-            shipped(json, lenient, &names)?,
-            [
-                Some(true),
-                Some(true),
-                Some(true),
-                None,
-                Some(false),
-                Some(false),
-                Some(false)
-            ]
-        );
-        // Strict: the strict reader alone, live where an arm types a header
-        assert_eq!(
-            shipped(headers, strict, &names)?,
-            [
-                Some(false),
-                Some(false),
-                None,
-                Some(false),
-                None,
-                None,
-                None
-            ]
-        );
-        assert_eq!(
-            shipped(json, strict, &names)?,
-            [Some(true), Some(true), None, Some(true), None, None, None]
+            shipped(super::Decoding::Strict, &names)?,
+            [true, true, false, true, false, false, false]
         );
     }
 
-    /// A precise server writes typed response headers only where an arm declares one, so the
-    /// writer and the style row it spells them with are expected dead everywhere else.
+    /// Every support module opens with the one inner `allow(dead_code)` and carries no
+    /// `dead_code` expectation, whichever entry point assembles it.
+    ///
+    /// Which parts of the runtime a description reaches, and whether the consumer's toolchain
+    /// calls the rest dead, are both beyond progeny's knowledge, so an expectation anywhere in the
+    /// module would be unfulfilled in somebody's build.
     #[test_util::test]
-    fn the_typed_header_writer_is_expected_dead_when_no_arm_types_a_header() {
-        /// Whether each of the writer's pieces carries a `dead_code` expectation.
-        fn expected_dead(used: super::ServerUse) -> eyre::Result<[bool; 3]> {
-            let router: syn::File = syn::parse2(super::with_body_limit(
-                super::ROUTER,
-                crate::config::BodyLimit::default(),
-                used,
-                true,
-            ))?;
-            let style: syn::File =
-                syn::parse2(super::style_source(super::STYLE, None, Some(used)))?;
-            let expects = |attributes: &[syn::Attribute]| {
-                attributes
-                    .iter()
-                    .any(|attribute| attribute.path().is_ident("expect"))
-            };
-            let function = |file: &syn::File, name: &str| {
-                file.items.iter().find_map(|item| match item {
-                    syn::Item::Fn(function) if function.sig.ident == name => {
-                        Some(expects(&function.attrs))
-                    }
-                    _ => None,
-                })
-            };
-            let typed = router.items.iter().find_map(|item| match item {
-                syn::Item::Impl(implementation)
-                    if super::impl_type_is(implementation, "ResponseHeaders") =>
-                {
-                    implementation.items.iter().find_map(|member| match member {
-                        syn::ImplItem::Fn(method) if method.sig.ident == "typed" => {
-                            Some(expects(&method.attrs))
-                        }
-                        _ => None,
-                    })
+    fn every_support_module_allows_dead_code_and_expects_none() {
+        let lenient = super::Decoding::Lenient(super::LeafUse {
+            chrono: true,
+            time: true,
+            jiff: true,
+            uuid: true,
+            indexmap: true,
+        });
+        let mut modules = Vec::new();
+        for decoding in [super::Decoding::Strict, lenient] {
+            for client in [false, true] {
+                for server in [false, true] {
+                    modules.push(super::tokens(
+                        client,
+                        server,
+                        true,
+                        BodyLimit::default(),
+                        true.into(),
+                        decoding,
+                        client.into(),
+                    ));
                 }
-                _ => None,
-            });
-            Ok([
-                typed.ok_or_eyre("the runtime ships `ResponseHeaders::typed`")?,
-                function(&router, "header_element")
-                    .ok_or_eyre("the runtime ships `header_element`")?,
-                function(&style, "header_value")
-                    .ok_or_eyre("the style table ships `header_value`")?,
-            ])
+            }
+            modules.push(super::types_tokens(true, decoding));
+            for multipart in [false, true] {
+                for credentials in [false, true] {
+                    modules.push(super::client_tokens(
+                        super::ClientUse {
+                            multipart,
+                            credentials,
+                        },
+                        decoding,
+                    ));
+                }
+            }
         }
+        modules.push(super::server_tokens(BodyLimit::default()));
 
-        assert_eq!(expected_dead(super::ServerUse::default())?, [true; 3]);
-        let typed = super::ServerUse {
-            response_header: true,
-            ..super::ServerUse::default()
-        };
-        assert_eq!(expected_dead(typed)?, [false; 3]);
+        for module in modules {
+            let file: syn::File = syn::parse2(module)?;
+            let suppressions: Vec<String> = file
+                .attrs
+                .iter()
+                .filter(|attribute| !attribute.path().is_ident("doc"))
+                .map(|attribute| quote::quote! { #attribute }.to_string())
+                .collect();
+            assert_eq!(suppressions.len(), 1, "{suppressions:?}");
+            let allow: String = suppressions
+                .first()
+                .ok_or_eyre("the module carries a suppression")?
+                .split_whitespace()
+                .collect();
+            assert!(allow.starts_with("#![allow(dead_code,reason="), "{allow}");
+            // The allow is the only mention of the lint: no item or nested file expects it.
+            let flat: String = quote::quote! { #file }
+                .to_string()
+                .split_whitespace()
+                .collect();
+            assert!(!flat.contains("expect(dead_code"), "{flat}");
+            assert_eq!(flat.matches("dead_code").count(), 1, "{flat}");
+        }
     }
 
     /// The body ceiling is a knob, and the shipped constant is what it turns.

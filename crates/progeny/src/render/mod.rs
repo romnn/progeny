@@ -509,179 +509,20 @@ fn insert_server_crate(files: &mut BTreeMap<Utf8PathBuf, String>, edge: &EdgeCra
     files.insert(directory.join("src/server.rs"), source(body));
     files.insert(
         directory.join("src/support.rs"),
-        source(&crate::support::server_tokens(
-            config.body_limit,
-            server_use(api),
-        )),
+        source(&crate::support::server_tokens(config.body_limit)),
     );
 }
 
+/// What a workspace's client crate reaches of the runtime it may leave out.
 fn client_use(api: &ApiModel) -> crate::support::ClientUse {
-    let mut used = crate::support::ClientUse::default();
-    for operation in api.operations() {
-        match &operation.body {
-            Some(crate::api::BodyContract::Form { specs, .. }) => {
-                used.form = true;
-                used.styles.form = true;
-                for spec in specs {
-                    note_style(&mut used.styles, spec.style);
-                }
-            }
-            Some(crate::api::BodyContract::Multipart { parts, .. }) => {
-                used.multipart = true;
-                used.parts.text = true;
-                used.parts.json = true;
-                for part in parts {
-                    note_part(&mut used.parts, part.kind);
-                }
-            }
-            Some(
-                crate::api::BodyContract::Json { .. }
-                | crate::api::BodyContract::Text { .. }
-                | crate::api::BodyContract::Bytes { .. },
+    crate::support::ClientUse {
+        multipart: api.operations().iter().any(|operation| {
+            matches!(
+                operation.body,
+                Some(crate::api::BodyContract::Multipart { .. })
             )
-            | None => {}
-        }
-        for arm in operation
-            .responses
-            .arms
-            .iter()
-            .chain(operation.responses.default.iter())
-        {
-            match arm.body {
-                crate::api::ResponseBody::Json { .. } => used.json_response = true,
-                crate::api::ResponseBody::Empty => used.empty_response = true,
-                crate::api::ResponseBody::Text { .. } => used.text_response = true,
-                crate::api::ResponseBody::Bytes { .. } => used.byte_response = true,
-            }
-            if !arm.headers.is_empty() {
-                used.response_header = true;
-            }
-        }
-        for parameter in &operation.params {
-            note_style(&mut used.styles, parameter.style.style());
-            match parameter.style.location() {
-                crate::api::Location::Path
-                    if parameter.style.style() == crate::api::Style::Matrix =>
-                {
-                    used.matrix = true;
-                }
-                crate::api::Location::Path => used.path = true,
-                crate::api::Location::Query => {
-                    if parameter.style.allow_reserved() {
-                        used.reserved = true;
-                    } else {
-                        used.query = true;
-                    }
-                }
-                crate::api::Location::Header => used.header = true,
-                crate::api::Location::Cookie => used.cookie = true,
-            }
-            // A cookie parameter rides the cookie header, which is sent sensitive whole.
-            if parameter.credential || parameter.style.location() == crate::api::Location::Cookie {
-                used.sensitive_header = true;
-            }
-        }
-    }
-    for scheme in api.schemes() {
-        let places = &mut used.credentials;
-        match scheme.place {
-            crate::api::Place::Header(_) => places.header = true,
-            crate::api::Place::Query(_) => places.query = true,
-            crate::api::Place::Cookie(_) => places.cookie = true,
-            crate::api::Place::Bearer => places.bearer = true,
-            crate::api::Place::Basic => places.basic = true,
-        }
-    }
-    used
-}
-
-fn server_use(api: &ApiModel) -> crate::support::ServerUse {
-    let mut used = crate::support::ServerUse::default();
-    for operation in api
-        .operations()
-        .iter()
-        .filter(|operation| operation.registrable.is_some())
-    {
-        if operation.body.is_some()
-            && super::render::client::content_type_param(operation).is_none()
-        {
-            used.media_type_gate = true;
-        }
-        if operation.body.is_some() || !operation.params.is_empty() {
-            used.decodes = true;
-        }
-        match &operation.body {
-            Some(crate::api::BodyContract::Json { .. }) => used.json = true,
-            Some(crate::api::BodyContract::Form { specs, .. }) => {
-                used.form = true;
-                used.styles.form = true;
-                for spec in specs {
-                    note_style(&mut used.styles, spec.style);
-                }
-            }
-            Some(crate::api::BodyContract::Multipart { parts, .. }) => {
-                used.multipart = true;
-                used.parts.text = true;
-                for part in parts {
-                    note_part(&mut used.parts, part.kind);
-                }
-            }
-            Some(crate::api::BodyContract::Text { .. }) => used.text = true,
-            Some(crate::api::BodyContract::Bytes { .. }) => used.bytes = true,
-            None => {}
-        }
-        for parameter in &operation.params {
-            note_style(&mut used.styles, parameter.style.style());
-            match parameter.style.location() {
-                crate::api::Location::Path => used.path = true,
-                crate::api::Location::Query => used.query = true,
-                crate::api::Location::Header => used.header = true,
-                crate::api::Location::Cookie => used.cookie = true,
-            }
-        }
-        for arm in operation
-            .responses
-            .arms
-            .iter()
-            .chain(operation.responses.default.iter())
-        {
-            match arm.body {
-                crate::api::ResponseBody::Text { .. } => used.text_response = true,
-                crate::api::ResponseBody::Bytes { .. } => used.byte_response = true,
-                crate::api::ResponseBody::Json { .. } => used.json_response = true,
-                crate::api::ResponseBody::Empty => used.empty_response = true,
-            }
-            // Written through `header_value`, which names no style variant.
-            if !arm.headers.is_empty() {
-                used.response_header = true;
-            }
-        }
-        // An operation that declares no responses answers `204` with nothing.
-        if operation.responses.arms.is_empty() && operation.responses.default.is_none() {
-            used.empty_response = true;
-        }
-    }
-    used
-}
-
-fn note_style(used: &mut crate::support::StyleUse, style: crate::api::Style) {
-    match style {
-        crate::api::Style::Form => used.form = true,
-        crate::api::Style::Simple => used.simple = true,
-        crate::api::Style::Label => used.label = true,
-        crate::api::Style::Matrix => used.matrix = true,
-        crate::api::Style::SpaceDelimited => used.space_delimited = true,
-        crate::api::Style::PipeDelimited => used.pipe_delimited = true,
-        crate::api::Style::DeepObject => used.deep_object = true,
-    }
-}
-
-fn note_part(used: &mut crate::support::PartUse, kind: crate::api::PartKind) {
-    match kind {
-        crate::api::PartKind::Text => used.text = true,
-        crate::api::PartKind::File => used.file = true,
-        crate::api::PartKind::Json => used.json = true,
+        }),
+        credentials: !api.schemes().is_empty(),
     }
 }
 
@@ -1902,6 +1743,92 @@ mod tests {
         );
     }
 
+    /// Every support module, in every packaging and under either decoding, opens with the one
+    /// inner `allow(dead_code)`, and no generated file expects the lint.
+    ///
+    /// Which parts of the shared runtime a description reaches, and whether the consumer's
+    /// toolchain calls the rest dead, are both beyond progeny's knowledge, so an expectation would
+    /// be unfulfilled in somebody's build.
+    /// The description reaches a little of everything, so every shipped file is spliced in.
+    #[test_util::test]
+    fn every_support_module_allows_dead_code_and_nothing_expects_it() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/pets/{id}": {"post": {
+                    "operationId": "updatePet",
+                    "security": [{"key": []}],
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+                        {"name": "q", "in": "query", "schema": {"type": "string"}},
+                        {"name": "X-Trace", "in": "header", "schema": {"type": "string"}},
+                        {"name": "session", "in": "cookie", "schema": {"type": "string"}},
+                    ],
+                    "requestBody": {"required": true, "content": {"multipart/form-data": {
+                        "schema": {"type": "object", "properties": {
+                            "photo": {"type": "string", "contentMediaType": "image/png"},
+                            "note": {"type": "string"},
+                        }},
+                    }}},
+                    "responses": {"200": {
+                        "description": "updated",
+                        "headers": {"X-Rate": {"schema": {"type": "integer"}}},
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}},
+                    }},
+                }},
+                "/pets": {"put": {
+                    "operationId": "replacePets",
+                    "requestBody": {"required": true, "content": {"application/x-www-form-urlencoded": {
+                        "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+                    }}},
+                    "responses": {"204": {"description": "replaced"}},
+                }},
+            },
+            "components": {
+                "schemas": {"Pet": {"type": "object", "properties": {
+                    "name": {"type": "string"},
+                    "born": {"type": "string", "format": "date-time"},
+                }}},
+                "securitySchemes": {"key": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}},
+            },
+        });
+        for packaging in [Packaging::Crate, Packaging::Workspace, Packaging::Module] {
+            for decoding in [
+                crate::config::Decoding::Strict,
+                crate::config::Decoding::Lenient,
+            ] {
+                let config = Config {
+                    decoding,
+                    packaging,
+                    ..Config::default()
+                };
+                let rendered = files(document.clone(), &config)?;
+                let mut supports = 0;
+                for (path, text) in &rendered {
+                    let flat: String = text.split_whitespace().collect();
+                    assert!(!flat.contains("expect(dead_code"), "{path}: {text}");
+                    let opens = if path.as_str() == "progeny.rs" {
+                        flat.contains("pubmodsupport{#![allow(dead_code,")
+                    } else if path.as_str().ends_with("src/support.rs") {
+                        flat.starts_with("#![allow(dead_code,")
+                    } else {
+                        continue;
+                    };
+                    assert!(opens, "{path} does not open with the allow: {text}");
+                    assert_eq!(flat.matches("dead_code").count(), 1, "{path}: {text}");
+                    supports += 1;
+                }
+                // One support module per crate: three in a workspace, one otherwise.
+                let expected = if packaging == Packaging::Workspace {
+                    3
+                } else {
+                    1
+                };
+                assert_eq!(supports, expected, "{:?}", rendered.keys());
+            }
+        }
+    }
+
     #[test_util::test]
     fn a_declared_content_type_parameter_outranks_the_bodys_own() {
         // cloudflare's R2 object upload, in miniature: an octet-stream body *and* a declared
@@ -1924,8 +1851,8 @@ mod tests {
                 }},
             },
         });
-        // Workspace packaging: the per-edge crates are where the dead-code surgery runs, and
-        // they are what `task corpus:compile` checks under `-D warnings`.
+        // Workspace packaging: the per-edge crates are what `task corpus:compile` checks under
+        // `-D warnings`.
         let config = Config {
             packaging: crate::config::Packaging::Workspace,
             ..Config::default()
@@ -1941,14 +1868,14 @@ mod tests {
         assert!(client.contains("if !declared_content_type {"), "{client}");
         let server = &rendered[camino::Utf8Path::new("api-server/src/server.rs")];
         assert!(!server.contains("mismatched_media_type"), "{server}");
-        // With every body op gated off, the shipped reader method is expected-dead rather
-        // than a `-D warnings` failure in the generated crate.
-        let support = &rendered[camino::Utf8Path::new("api-server/src/support.rs")];
-        let at = support
-            .find("fn mismatched_media_type")
-            .ok_or_eyre("the method ships")?;
-        let above = &support[at.saturating_sub(2000)..at];
-        assert!(above.contains("expect(dead_code"), "{above}");
+        // With every body op gated off, the shipped reader method still ships, under the support
+        // module's own `allow(dead_code)` rather than an expectation of its own.
+        let support: String = rendered[camino::Utf8Path::new("api-server/src/support.rs")]
+            .split_whitespace()
+            .collect();
+        assert!(support.contains("fnmismatched_media_type"), "{support}");
+        assert!(support.starts_with("#![allow(dead_code,"), "{support}");
+        assert!(!support.contains("expect(dead_code"), "{support}");
     }
 
     #[test_util::test]
@@ -5255,9 +5182,9 @@ mod tests {
 
     /// A client that reads no JSON body but a typed header reads that header leniently, so it is
     /// rendered lenient: its workspace crate takes the report vocabulary from the types crate and
-    /// expects the body decoder it never calls dead, rather than leaving it out of a runtime the
-    /// header decoder shares.
-    /// A server whose operations decode nothing expects its request reader dead.
+    /// ships the body decoder it never calls, rather than leaving it out of a runtime the header
+    /// decoder shares.
+    /// A server whose operations decode nothing still ships its request reader.
     #[test_util::test]
     fn a_client_that_reads_only_typed_headers_is_lenient() {
         let document = json!({
@@ -5297,9 +5224,7 @@ mod tests {
         );
         let flat: String = client_support.split_whitespace().collect();
         assert!(
-            flat.contains(
-                "#[expect(dead_code,reason=\"thisdescriptiondeclaresnoJSONresponsebody\")]pubasyncfndecode_lenient<"
-            ),
+            flat.contains("pubasyncfndecode_lenient<"),
             "{client_support}"
         );
         assert!(flat.contains("pubfnlenient_header<"), "{client_support}");
@@ -5322,9 +5247,7 @@ mod tests {
             .split_whitespace()
             .collect();
         assert!(
-            server_support.contains(
-                "#[expect(dead_code,reason=\"thisdescriptiondeclaresnoparameterandnorequestbody\")]pubasyncfnreceive("
-            ),
+            server_support.contains("pubasyncfnreceive("),
             "{server_support}"
         );
     }
