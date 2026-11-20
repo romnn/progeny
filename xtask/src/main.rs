@@ -51,6 +51,8 @@ enum Command {
     Example(example::Args),
     /// The same, generated for any document: every servable operation, driven over a socket.
     Probe(probe::Args),
+    /// Print the minimum Rust version every generated crate declares, and nothing else.
+    Msrv,
 }
 
 fn main() -> eyre::Result<()> {
@@ -65,6 +67,10 @@ fn main() -> eyre::Result<()> {
         Command::Payloads(args) => payloads::run(&args),
         Command::Example(args) => example::run(&args),
         Command::Probe(args) => probe::run(&args),
+        Command::Msrv => {
+            println!("{}", progeny::RUST_VERSION);
+            Ok(())
+        }
         // The same run as `corpus`, writing what it would otherwise compare against.
         Command::RegenSnapshots(mut args) => {
             args.write_snapshots = true;

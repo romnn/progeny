@@ -104,6 +104,14 @@ pub struct Args {
     /// blind to what a strict client warns about.
     #[arg(long, value_name = "DECODING", requires = "compile")]
     decoding: Option<DecodingChoice>,
+
+    /// Build the generated crates on this rustup toolchain rather than the one running xtask.
+    ///
+    /// Only the generated crates: xtask itself, and the generation, stay where they are.
+    /// CI passes the minimum Rust version the generated manifests declare (`xtask msrv`), because a
+    /// build on stable cannot tell whether that floor holds.
+    #[arg(long, value_name = "NAME", requires = "compile")]
+    toolchain: Option<String>,
 }
 
 /// The two serde strategies, as a command-line word.
@@ -271,6 +279,12 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             "corpus: generated crates are written to {} and compiled with a shared target \
              directory",
             generated::scratch_root()
+        );
+    }
+    if let Some(toolchain) = &args.toolchain {
+        println!(
+            "corpus: generated crates are built on toolchain {toolchain}: {}",
+            generated::toolchain_cargo(toolchain)?
         );
     }
     if args.feature_matrix {
@@ -743,10 +757,14 @@ fn check(spec: &Spec, args: &Args, slot: usize) -> eyre::Result<(Outcome, Option
         .sum();
     let compiled = if args.compile {
         let directory = generated::write(&spec.name, &output)?;
+        let builder = generated::Builder {
+            slot,
+            toolchain: args.toolchain.as_deref(),
+        };
         Some(if args.feature_matrix {
-            generated::check_matrix(&directory, args.clippy, slot)?
+            generated::check_matrix(&directory, args.clippy, builder)?
         } else {
-            generated::check(&directory, args.clippy, slot, generated::Features::All)?
+            generated::check(&directory, args.clippy, builder, generated::Features::All)?
         })
     } else {
         None
@@ -1342,6 +1360,35 @@ mod tests {
         assert!(
             format!("{error:#}").contains("no-such-fixture"),
             "{error:#}"
+        );
+    }
+
+    /// The toolchain composes with every other compile option the MSRV gate runs under, and
+    /// means nothing without a compile.
+    #[test]
+    fn a_toolchain_composes_with_the_compile_options() {
+        let args = parse(&[
+            "--compile",
+            "--clippy",
+            "--feature-matrix",
+            "--decoding",
+            "strict",
+            "--toolchain",
+            "1.88.0",
+        ]);
+        assert_eq!(args.toolchain.as_deref(), Some("1.88.0"));
+        assert!(args.clippy && args.feature_matrix);
+        let args = parse(&[
+            "--compile",
+            "--packaging",
+            "workspace",
+            "--toolchain",
+            "1.88.0",
+        ]);
+        assert_eq!(args.toolchain.as_deref(), Some("1.88.0"));
+        assert!(
+            Invocation::try_parse_from(["corpus", "--toolchain", "1.88.0"]).is_err(),
+            "`--toolchain` without `--compile` builds nothing"
         );
     }
 

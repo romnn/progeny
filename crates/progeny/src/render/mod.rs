@@ -1169,6 +1169,65 @@ mod tests {
         })
     }
 
+    /// Every package progeny emits declares [`crate::RUST_VERSION`], the floor CI compiles the
+    /// generated crates on, and resolves its dependencies under resolver 3, which picks versions
+    /// that floor can build.
+    #[test_util::test]
+    fn every_emitted_manifest_declares_the_minimum_rust_version_and_resolver_3() {
+        let package = |manifest: &toml::Table, key: &str| {
+            manifest
+                .get("package")
+                .and_then(|package| package.get(key))
+                .and_then(toml::Value::as_str)
+                .map(ToOwned::to_owned)
+        };
+
+        // Crate packaging: a package on edition 2024 already defaults to resolver 3, so the
+        // edition is what this asserts.
+        let as_crate = files(pets_document(), &Config::default())?;
+        let manifest: toml::Table = toml::from_str(
+            as_crate
+                .get(camino::Utf8Path::new("Cargo.toml"))
+                .ok_or_eyre("crate manifest")?,
+        )?;
+        assert_eq!(
+            package(&manifest, "rust-version").as_deref(),
+            Some(crate::RUST_VERSION)
+        );
+        assert_eq!(package(&manifest, "edition").as_deref(), Some("2024"));
+
+        // Workspace packaging: a virtual root has no edition to default from, so it names the
+        // resolver, and each member declares the floor itself.
+        let config = Config {
+            packaging: Packaging::Workspace,
+            ..Config::default()
+        };
+        let rendered = files(pets_document(), &config)?;
+        let root: toml::Table = toml::from_str(
+            rendered
+                .get(camino::Utf8Path::new("Cargo.toml"))
+                .ok_or_eyre("workspace root manifest")?,
+        )?;
+        let resolver = root
+            .get("workspace")
+            .and_then(|workspace| workspace.get("resolver"))
+            .and_then(toml::Value::as_str);
+        assert_eq!(resolver, Some("3"));
+        for member in ["api-types", "api-client", "api-server"] {
+            let path = format!("{member}/Cargo.toml");
+            let manifest: toml::Table = toml::from_str(
+                rendered
+                    .get(camino::Utf8Path::new(&path))
+                    .ok_or_eyre(path)?,
+            )?;
+            assert_eq!(
+                package(&manifest, "rust-version").as_deref(),
+                Some(crate::RUST_VERSION),
+                "{member}"
+            );
+        }
+    }
+
     #[test_util::test]
     fn a_workspace_has_three_feature_isolated_crates() {
         let config = Config {
@@ -1187,7 +1246,7 @@ mod tests {
             .ok_or_eyre("types manifest")?;
         assert!(types_manifest.contains(r#"name = "api-types""#));
         assert!(types_manifest.contains(r#"edition = "2024""#));
-        assert!(types_manifest.contains(r#"rust-version = "1.88""#));
+        assert!(types_manifest.contains(&format!("rust-version = {:?}", crate::RUST_VERSION)));
         assert!(!types_manifest.contains("[features]"), "{types_manifest}");
 
         for half in ["client", "server"] {
@@ -4199,7 +4258,10 @@ mod tests {
         // manifest states the floor rather than leaving an older toolchain to find out mid-module.
         let manifest = &as_crate[camino::Utf8Path::new("Cargo.toml")];
         assert!(manifest.contains("edition = \"2024\""), "{manifest}");
-        assert!(manifest.contains("rust-version = \"1.88\""), "{manifest}");
+        assert!(
+            manifest.contains(&format!("rust-version = {:?}", crate::RUST_VERSION)),
+            "{manifest}"
+        );
 
         let module = Config {
             packaging: Packaging::Module,
