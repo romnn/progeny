@@ -3921,6 +3921,29 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("pub(crate) type Retired"), "{rendered}");
+        // Whether an alias is used is the consumer's build to decide: one the client or the server
+        // alone names is unused once that edge is compiled out. So the module allows `dead_code`
+        // as an inner attribute and expects none.
+        let module = syn::parse_file(&rendered)?
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                syn::Item::Mod(module) if module.ident == "__progeny_deprecated" => Some(module),
+                _ => None,
+            })
+            .ok_or_eyre("the alias module is generated")?;
+        assert!(
+            module.attrs.iter().any(|attribute| {
+                matches!(attribute.style, syn::AttrStyle::Inner(_))
+                    && attribute.path().is_ident("allow")
+                    && quote::ToTokens::to_token_stream(attribute)
+                        .to_string()
+                        .contains("dead_code")
+            }),
+            "{rendered}"
+        );
+        let flat: String = rendered.split_whitespace().collect();
+        assert!(!flat.contains("expect(dead_code"), "{rendered}");
         assert!(
             rendered.contains("pub revocation: Option<__progeny_deprecated::Retired>"),
             "{rendered}"

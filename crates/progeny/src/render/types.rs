@@ -153,6 +153,14 @@ pub(super) fn render(
 /// macro expansions cannot inherit a field's `#[expect]`, so aliases are the only way to keep those
 /// internal uses clean without a broad `#[allow(deprecated)]`. Each module of the type layer
 /// carries its own, aliasing what that module's items name.
+///
+/// Some aliases are named only by the client or the server, which a crate compiles behind
+/// features and a module packaging may leave unreached, so whether one is used is the consumer's
+/// build to decide.
+/// The module therefore allows `dead_code` rather than expecting it, as an inner attribute because
+/// `clippy::allow_attributes` lints only the outer form.
+/// It stays crate-private where it can, since a public module of the same name in every generated
+/// crate would collide in a consumer that glob re-exports two of them.
 fn deprecated_aliases(
     contracts: &Contracts,
     needed: &BTreeSet<String>,
@@ -180,6 +188,7 @@ fn deprecated_aliases(
                     deprecated,
                     reason = "generated internals need a non-deprecated path to this public contract"
                 )]
+                #[doc(hidden)]
                 #visibility type #name = super::#name;
             }
         })
@@ -190,6 +199,10 @@ fn deprecated_aliases(
     quote! {
         #[doc(hidden)]
         #visibility mod __progeny_deprecated {
+            #![allow(
+                dead_code,
+                reason = "an alias the client or the server alone names is unused where the consumer's build leaves that edge out"
+            )]
             #(#aliases)*
         }
     }
