@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795188549716,
+  "lastUpdate": 1795193105236,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3693,6 +3693,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 235.3528642654419,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8f34d74dbd5d70888f57e5a04b4c3fcd4f63d9e2",
+          "message": "fix(generate): allow dead_code in the deprecated-alias module (#158)\n\n* fix(generate): keep a deprecated type's alias live without the edges\n\nA crate's hidden aliases for deprecated types were crate-private, and an\nalias that only the client or the server names, such as a deprecated\nrequest body's, was dead code once `--no-default-features` compiled both\nedges out, failing a consumer denying warnings. The alias module is now\npublic in every packaging, as a workspace's already was, and a public item\nis never dead code.\n\nCloses #155\n\n* fix(generate): allow dead_code in the alias module instead of exporting it\n\nA public `__progeny_deprecated` module in every generated crate collides\nin a consumer that glob re-exports two of them, and a module packaging\nincluded into a private module could still leave an alias unused. Whether\nan alias is used is the consumer's build to decide, so the module stays\ncrate-private where it can and allows `dead_code` as an inner attribute,\nand each alias is hidden from the docs.",
+          "timestamp": "2026-11-20T17:39:05+01:00",
+          "tree_id": "ad1e31d9f7bd3b2e5c65310c040f922d88f29ec5",
+          "url": "https://github.com/romnn/progeny/commit/8f34d74dbd5d70888f57e5a04b4c3fcd4f63d9e2"
+        },
+        "date": 1795193104666,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 27.44010333333333,
+            "range": "± 0.29",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2817,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.551525,
+            "range": "± 0.16",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1128.852864265442,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.7151176666666667,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.2825517654419,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
