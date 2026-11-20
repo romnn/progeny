@@ -508,10 +508,10 @@ fn constructed_error(arm: &ResponseArm) -> TokenStream {
     let headers = if let Some(types) = &arm.header_types {
         let group = ident(&types.group);
         quote! {
-            #group {
+            ::std::boxed::Box::new(#group {
                 raw: raw_headers,
                 ..::std::default::Default::default()
-            }
+            })
         }
     } else {
         quote! { raw_headers }
@@ -564,11 +564,13 @@ fn variant_fields(arm: &ResponseArm, contracts: &Contracts, config: &Config) -> 
     // `default` is `Range(0)` in the model, so this covers it too.
     let status = matches!(arm.status, StatusPattern::Range(_))
         .then(|| quote! { status: ::std::primitive::u16, });
+    // A typed group is boxed like the body, so an enum's size does not depend on how many headers
+    // an arm types either.
     let headers = arm.header_types.as_ref().map_or_else(
         || quote! { ::axum::http::HeaderMap },
         |types| {
             let group = ident(&types.group);
-            quote! { #group }
+            quote! { Box<#group> }
         },
     );
     // Boxed like every non-empty payload, so an enum's size does not depend on its body types.

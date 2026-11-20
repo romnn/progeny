@@ -3260,9 +3260,9 @@ mod tests {
         );
     }
 
-    /// Every variant is a struct variant holding its arm's group, or a bare header map where the
-    /// arm declares none, with no `body` where the arm declares no content, and its writer is
-    /// handed the headers to attach after the body.
+    /// Every variant is a struct variant holding its arm's group, boxed as the body is, or a bare
+    /// header map where the arm declares none, with no `body` where the arm declares no content,
+    /// and its writer is handed the headers to attach after the body.
     #[test_util::test]
     fn every_variant_carries_its_headers_to_the_writer() {
         let server = headers_server()?;
@@ -3270,11 +3270,11 @@ mod tests {
 
         // The variants
         assert!(
-            flat.contains("Accepted{headers:CreateAnalysisAcceptedHeaders,body:Box<"),
+            flat.contains("Accepted{headers:Box<CreateAnalysisAcceptedHeaders>,body:Box<"),
             "{server}"
         );
         assert!(
-            flat.contains("NoContent{headers:CreateAnalysisNoContentHeaders}"),
+            flat.contains("NoContent{headers:Box<CreateAnalysisNoContentHeaders>}"),
             "{server}"
         );
         assert!(
@@ -3405,7 +3405,7 @@ mod tests {
             "{server}"
         );
         assert!(
-            server.contains("BadRequest{headers:FooBadRequest2Headers}"),
+            server.contains("BadRequest{headers:Box<FooBadRequest2Headers>}"),
             "{server}"
         );
     }
@@ -3464,7 +3464,7 @@ mod tests {
         // then `default` for everything else.
         for arm in [
             "400u16=>{Self::BadRequest{headers:raw_headers,body,}}",
-            "404u16=>{Self::NotFound{headers:ProblemsNotFoundHeaders{raw:raw_headers,..::std::default::Default::default()},body,}}",
+            "404u16=>{Self::NotFound{headers:::std::boxed::Box::new(ProblemsNotFoundHeaders{raw:raw_headers,..::std::default::Default::default()}),body,}}",
             "503u16=>{Self::Status503{headers:raw_headers,body,}}",
             "_ifstatus/100==4u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
             "_=>{Self::Default{status,headers:raw_headers,body,}}",
