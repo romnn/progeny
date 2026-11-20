@@ -5305,10 +5305,8 @@ mod tests {
         assert!(flat.contains("pubfnlenient_header<"), "{client_support}");
         assert!(!flat.contains("fnstrict_header"), "{client_support}");
         let client = read("api-client/src/client.rs")?;
-        assert!(
-            !client.contains("a strict decode tolerates nothing"),
-            "{client}"
-        );
+        assert!(client.contains("fn observed<T>("), "{client}");
+        assert!(!client.contains("dead_code"), "{client}");
         assert!(
             client.contains("pub x_mode: ::std::option::Option<super::types::read::Mode>,"),
             "{client}"
@@ -5376,11 +5374,14 @@ mod tests {
             client_support.contains("pub use degradations::{Decoded, Degradations};"),
             "{client_support}"
         );
+        // Nothing it decodes is ever degraded, so it takes an observer without holding or calling
+        // one, and has no code that only a degraded response would reach.
         let client = read("api-client/src/client.rs")?;
-        assert!(
-            client.contains("a strict decode tolerates nothing"),
-            "{client}"
-        );
+        let flat: String = client.split_whitespace().collect();
+        assert!(flat.contains("pubfnobserve(self,_observe:"), "{client}");
+        assert!(!client.contains("struct Observer"), "{client}");
+        assert!(!client.contains("fn observed"), "{client}");
+        assert!(!client.contains("dead_code"), "{client}");
         assert!(!client.contains("Headers"), "{client}");
     }
 

@@ -203,9 +203,11 @@ fn reading_docs(model: &ApiModel, decoding: Decoding) -> TokenStream {
 /// generated — so the verbatim runtime, which knows nothing about any one description, cannot
 /// declare either of these. `Observer` is the client's own business: only `Client::observe` makes
 /// one and only `Client::observed` calls it, so it is not part of what the module exports.
+///
+/// A strict client has `Degraded` alone, because nothing it decodes is ever degraded: see
+/// [`observer_hook`].
 fn observing(decoding: Decoding) -> TokenStream {
-    let unobserved = never_degraded(decoding);
-    quote! {
+    let degraded = quote! {
         /// A response the decoder tolerated something in, as handed to a client's observer.
         ///
         /// Borrowed, because the observer sees every degraded response and most observers count
@@ -219,6 +221,12 @@ fn observing(decoding: Decoding) -> TokenStream {
             /// What the decoder tolerated.
             pub degradations: &'a Degradations,
         }
+    };
+    if !decoding.is_lenient() {
+        return degraded;
+    }
+    quote! {
+        #degraded
 
         /// A hook a client calls with every degraded response, before handing the response back.
         ///
@@ -228,7 +236,6 @@ fn observing(decoding: Decoding) -> TokenStream {
         /// and can change nothing about it. `Send + Sync` so a client holding one can be shared
         /// across tasks.
         #[derive(Clone)]
-        #unobserved
         struct Observer(
             ::std::sync::Arc<dyn Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync>,
         );
@@ -245,7 +252,6 @@ fn observing(decoding: Decoding) -> TokenStream {
             }
 
             /// Hand one degraded response to the function.
-            #unobserved
             fn notify(&self, degraded: Degraded<'_>) {
                 (self.0)(degraded);
             }
@@ -262,22 +268,71 @@ fn observing(decoding: Decoding) -> TokenStream {
     }
 }
 
-/// An expectation for the observer machinery a strictly decoded client never reaches.
+/// What the client holds for its observer, how `observe` stores one, and how a response is shown
+/// to it.
+struct ObserverHook {
+    field: TokenStream,
+    init: TokenStream,
+    observe: TokenStream,
+    observed: TokenStream,
+}
+
+/// The observer hook under the client's decoding.
 ///
-/// A strict decode tolerates nothing, so no response is ever degraded and nothing calls the
-/// hook — the client still *takes* an observer, because its shape is the same under both
-/// decodings and a consumer moves between them without an API fork. Conditional rather than
-/// unconditional so that it is unfulfilled, and therefore a warning, the moment a lenient
-/// client stops calling it.
-fn never_degraded(decoding: Decoding) -> TokenStream {
-    if decoding.is_lenient() {
-        return TokenStream::new();
+/// A strict decode tolerates nothing, so no response is ever degraded and nothing would call the
+/// hook. The client still takes an observer, because its shape is the same under both decodings
+/// and a consumer moves between them without an API fork, but it holds none and shows nothing.
+/// Code no response reaches is not rendered at all: whether rustc calls it dead depends on the
+/// toolchain, since some treat an item expected dead as a root that keeps what it calls alive.
+fn observer_hook(decoding: Decoding) -> ObserverHook {
+    if !decoding.is_lenient() {
+        return ObserverHook {
+            field: TokenStream::new(),
+            init: TokenStream::new(),
+            observe: quote! {
+                #[must_use]
+                pub fn observe(
+                    self,
+                    _observe: impl Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync + 'static,
+                ) -> Self {
+                    self
+                }
+            },
+            observed: TokenStream::new(),
+        };
     }
-    quote! {
-        #[expect(
-            dead_code,
-            reason = "a strict decode tolerates nothing, so no response is ever degraded"
-        )]
+    ObserverHook {
+        field: quote! { observer: ::std::option::Option<Observer>, },
+        init: quote! { observer: ::std::option::Option::None, },
+        observe: quote! {
+            #[must_use]
+            pub fn observe(
+                mut self,
+                observe: impl Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync + 'static,
+            ) -> Self {
+                self.observer = ::std::option::Option::Some(Observer::new(observe));
+                self
+            }
+        },
+        observed: quote! {
+            /// A response on its way back to the caller, shown to the observer if degraded.
+            fn observed<T>(
+                &self,
+                operation: operations::Operation,
+                response: ResponseValue<T>,
+            ) -> ResponseValue<T> {
+                if let ::std::option::Option::Some(observer) = &self.observer
+                    && response.is_degraded()
+                {
+                    observer.notify(Degraded {
+                        operation,
+                        status: response.status(),
+                        degradations: response.degradations(),
+                    });
+                }
+                response
+            }
+        },
     }
 }
 
@@ -289,7 +344,12 @@ fn client_struct(
     decoding: Decoding,
     docs: crate::config::Docs,
 ) -> TokenStream {
-    let unobserved = never_degraded(decoding);
+    let ObserverHook {
+        field: observer_field,
+        init: observer_init,
+        observe,
+        observed,
+    } = observer_hook(decoding);
     let held = credentials(schemes, docs);
     let credential_field = held.as_ref().map(|held| &held.field);
     let credential_init = held.as_ref().map(|held| &held.init);
@@ -308,7 +368,7 @@ fn client_struct(
         pub struct Client {
             base_url: ::std::string::String,
             inner: ::reqwest::Client,
-            observer: ::std::option::Option<Observer>,
+            #observer_field
             reading: support::BodyReading,
             #credential_field
         }
@@ -335,7 +395,7 @@ fn client_struct(
                 Self {
                     base_url,
                     inner,
-                    observer: ::std::option::Option::None,
+                    #observer_init
                     reading: support::BodyReading::default(),
                     #credential_init
                 }
@@ -349,14 +409,7 @@ fn client_struct(
             /// report the response carries. Nothing is logged or counted unless the application
             /// does it here. A crate generated with strict decoding tolerates nothing, so its
             /// observer is never called.
-            #[must_use]
-            pub fn observe(
-                mut self,
-                observe: impl Fn(Degraded<'_>) + ::std::marker::Send + ::std::marker::Sync + 'static,
-            ) -> Self {
-                self.observer = ::std::option::Option::Some(Observer::new(observe));
-                self
-            }
+            #observe
 
             /// The same client, refusing any response body longer than `bytes` with
             /// [`Error::BodyTooLarge`].
@@ -377,24 +430,7 @@ fn client_struct(
 
             #credential_setters
 
-            /// A response on its way back to the caller, shown to the observer if degraded.
-            #unobserved
-            fn observed<T>(
-                &self,
-                operation: operations::Operation,
-                response: ResponseValue<T>,
-            ) -> ResponseValue<T> {
-                if let ::std::option::Option::Some(observer) = &self.observer
-                    && response.is_degraded()
-                {
-                    observer.notify(Degraded {
-                        operation,
-                        status: response.status(),
-                        degradations: response.degradations(),
-                    });
-                }
-                response
-            }
+            #observed
 
             /// The base URL every request is built against.
             #[must_use]
