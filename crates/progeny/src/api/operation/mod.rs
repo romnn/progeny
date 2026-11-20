@@ -105,11 +105,13 @@ struct Build<'a> {
     /// Every content position visited and the media types it declares, recorded only while
     /// [`Config::media_types`] has entries to validate against.
     content_positions: BTreeMap<String, Vec<String>>,
-    /// The multipart members already reported as unable to carry an explicit `null`.
+    /// The multipart members already reported as unable to carry an explicit `null`, each with
+    /// what it loses.
     ///
     /// A member is a schema property, which every operation sending that schema shares, so it is
-    /// reported once rather than once per operation.
-    null_members: BTreeSet<String>,
+    /// reported once per loss rather than once per operation; another operation's encoding can
+    /// lose its `null` another way, which is reported too.
+    null_members: BTreeSet<(String, String)>,
     /// Method names, kept unique across the whole client.
     namer: Namer,
     /// The camel stems the renderers build per-operation type names from (`X1Params`,
