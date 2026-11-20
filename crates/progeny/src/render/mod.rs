@@ -4329,8 +4329,21 @@ mod tests {
                     .find(|(path, _)| path.file_name() == Some(module))
                     .ok_or_eyre("the module is generated")?;
                 assert!(allows(&syn::parse_file(text)?.attrs), "{path}:\n{text}");
-                assert!(!text.contains("expect(clippy::type_complexity"), "{path}");
+                let flat: String = text.split_whitespace().collect();
+                assert!(!flat.contains("expect(clippy::type_complexity"), "{path}");
             }
+            // The union variant really is the nested payload the allowance exists for.
+            let (_, types) = rendered
+                .iter()
+                .find(|(path, _)| path.file_name() == Some("types.rs"))
+                .ok_or_eyre("the types module is generated")?;
+            let flat: String = types.split_whitespace().collect();
+            assert!(
+                flat.contains(
+                    "AnyMapList(Box<Option<Vec<Option<std::collections::BTreeMap<String,serde_json::Value>>>>>"
+                ),
+                "{types}"
+            );
         }
 
         // Nested modules in the one file a module packaging writes.
@@ -4351,7 +4364,8 @@ mod tests {
                 .ok_or_eyre("the module is generated")?;
             assert!(allows(attrs), "{module}:\n{text}");
         }
-        assert!(!text.contains("expect(clippy::type_complexity"), "{text}");
+        let flat: String = text.split_whitespace().collect();
+        assert!(!flat.contains("expect(clippy::type_complexity"), "{text}");
     }
 
     /// The stem guard, at the one place it used to panic: a digit-led `operationId` is a
