@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795132869055,
+  "lastUpdate": 1795137134730,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3430,6 +3430,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 324.2708330154419,
             "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "121c2dd04be42a36a8005fe543d03f3c53849d5a",
+          "message": "fix(generate): send a string as JSON where its multipart encoding says so (#151)\n\n* fix(generate): send a string as JSON where its multipart encoding says so\n\nA multipart member that is a string on the wire, whose encoding declares\na JSON content type, was sent as bare text under that JSON header, so a\nserver honouring the header could not decode it. A plain string, a string\nformat, a string enum and a list of any of them are now written as their\nJSON, as a union of strings already was, and the server parses them back.\nThe rule applies where each string is met, so a list keeps one part per\nelement. An explicit `style`, `explode` or `allowReserved` makes OpenAPI\nignore the content type, so such a member stays a text part.\n\nCloses #145\n\n* fix(generate): keep a declared JSON content type governing, and base64 bare\n\nA styled member's JSON content type no longer turns its strings back into\nbare text: that reversed what a styled union of strings already sent, and\nOpenAPI 3.0 ignores the style fields on multipart encodings altogether.\nBase64 text stays as it is, because it encodes the declared content\nrather than being it, and quoting it corrupts that content.",
+          "timestamp": "2026-11-20T02:06:53+01:00",
+          "tree_id": "9e4b1ff72d6539babdb939021879de46e512d997",
+          "url": "https://github.com/romnn/progeny/commit/121c2dd04be42a36a8005fe543d03f3c53849d5a"
+        },
+        "date": 1795137134456,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.284777333333334,
+            "range": "± 0.21",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2901.811197280884,
+            "range": "± 1.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.810319333333334,
+            "range": "± 0.03",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1216.96875,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6501113333333334,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 324.3307285308838,
+            "range": "± 0.5",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
