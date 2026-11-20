@@ -168,7 +168,7 @@ jobs:
       fail-fast: false
       matrix:
         toolchain:
-          - "1.88" # the oldest release the generated manifests accept: progeny::RUST_VERSION
+          - "1.88" # the oldest release the generated manifests accept: `RUST_VERSION` in manifest.rs
           - stable minus 3 releases
           - stable minus 2 releases
           - stable minus 1 release

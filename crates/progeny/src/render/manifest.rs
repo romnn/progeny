@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use crate::RUST_VERSION;
 use crate::api::{ApiModel, BodyContract, ResponseBody};
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{Contracts, Gate, TypeRef};
@@ -231,6 +230,15 @@ pub(super) fn server_crate(api: &ApiModel, config: &Config) -> String {
 /// before they are copied into the generated crates, and an edition apart lets code that passes
 /// here break there.
 const EDITION: &str = "2024";
+
+/// The floor the emitted source stands on, stated so that an older toolchain says so up front
+/// rather than in the middle of a generated module.
+///
+/// The shipped support runtime already calls `u64::is_multiple_of` (1.87), and 1.88 lets it write
+/// the `let` chains progeny's own code does.
+/// Clippy's `incompatible_msrv` holds the number to every API the generated code calls.
+/// CI's `lint-generated` job lints the generated code on this release, so change both together.
+const RUST_VERSION: &str = "1.88";
 
 fn package(name: &str, version: &str) -> String {
     indoc::formatdoc! {r#"

@@ -98,7 +98,7 @@ tasks:
       - cargo run -p xtask --release -- corpus --quick --compile --clippy --packaging workspace {{.CLI_ARGS}}
 
   corpus:compile:all:
-    desc: "the same, over every document; hours, not minutes"
+    desc: "the same, over all 78 documents; hours, not minutes"
     # The tier is 8 documents and the corpus is 78, so a shape that occurs once is a shape the
     # tier is blind to. `weather-gov` is the standing example: 1 document, 2 operations, a client
     # that did not compile for a whole stage, found by an unrelated errand rather than by a gate.

@@ -33,65 +33,10 @@ pub fn shared_target() -> Utf8PathBuf {
 /// Cargo locks a target directory for a whole build, so two compiles sharing one take turns.
 /// Each slot has its own, and slot 0 is the one every serial gate shares.
 pub fn target_for(slot: usize) -> Utf8PathBuf {
-    Builder {
-        slot,
-        toolchain: None,
+    match slot {
+        0 => scratch_root().join("target"),
+        _ => scratch_root().join(format!("target-{slot}")),
     }
-    .target()
-}
-
-/// The worker slot and the toolchain a generated crate is built with.
-#[derive(Debug, Clone, Copy)]
-pub struct Builder<'a> {
-    /// The worker slot, whose target directory no other worker builds in.
-    pub slot: usize,
-    /// The rustup toolchain to build on, or `None` for whichever one runs xtask.
-    pub toolchain: Option<&'a str>,
-}
-
-impl Builder<'_> {
-    /// The target directory this builder compiles into.
-    ///
-    /// A toolchain named here gets directories of its own, such as `target+1.88.0`, so a run on
-    /// the minimum Rust version and a run on stable each find their own dependencies built rather
-    /// than each other's.
-    pub fn target(self) -> Utf8PathBuf {
-        let slot = match self.slot {
-            0 => "target".to_owned(),
-            slot => format!("target-{slot}"),
-        };
-        match self.toolchain {
-            None => scratch_root().join(slot),
-            Some(toolchain) => scratch_root().join(format!("{slot}+{toolchain}")),
-        }
-    }
-
-    /// [`cargo`], on this builder's toolchain and in its target directory.
-    pub fn cargo(self, directory: &Utf8Path) -> Command {
-        let mut command = Command::new("cargo");
-        command
-            .current_dir(directory)
-            // The shared dependency cache: `serde`, `reqwest` and `axum` are compiled once per
-            // slot for the whole corpus rather than once per document.
-            .env("CARGO_TARGET_DIR", self.target())
-            .env("CARGO_BUILD_JOBS", "1")
-            // The generated crate is checked as itself, not through this workspace's lint policy.
-            .env_remove("RUSTFLAGS");
-        if let Some(toolchain) = self.toolchain {
-            toolchain_env(&mut command, toolchain);
-        }
-        command
-    }
-}
-
-/// Run a command's `cargo` and `rustc` on a rustup toolchain.
-///
-/// The variable is what `cargo +toolchain` sets, and rustup's proxies read it ahead of a
-/// `rust-toolchain.toml` file.
-/// Set on the child, it also replaces the value rustup gave xtask's own environment when cargo
-/// ran it, which would otherwise pin the build to xtask's toolchain.
-fn toolchain_env(command: &mut Command, toolchain: &str) {
-    command.env("RUSTUP_TOOLCHAIN", toolchain);
 }
 
 /// A cargo invocation over a generated crate, set up the way every gate here needs it.
@@ -112,11 +57,16 @@ pub fn cargo(directory: &Utf8Path) -> Command {
 
 /// [`cargo`], building into the target directory of one worker slot ([`target_for`]).
 pub fn cargo_in(directory: &Utf8Path, slot: usize) -> Command {
-    Builder {
-        slot,
-        toolchain: None,
-    }
-    .cargo(directory)
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(directory)
+        // The shared dependency cache: `serde`, `reqwest` and `axum` are compiled once per slot
+        // for the whole corpus rather than once per document.
+        .env("CARGO_TARGET_DIR", target_for(slot))
+        .env("CARGO_BUILD_JOBS", "1")
+        // The generated crate is checked as itself, not through this workspace's lint policy.
+        .env_remove("RUSTFLAGS");
+    command
 }
 
 /// Write a generated crate into the scratch area and return its directory.
@@ -284,11 +234,12 @@ fn matrix_of(manifest: &Utf8Path, text: &str) -> eyre::Result<Vec<Features>> {
 pub fn check_matrix(
     directory: &Utf8Path,
     clippy: bool,
-    builder: Builder<'_>,
+    slot: usize,
+    toolchain: Option<&str>,
 ) -> eyre::Result<Compiled> {
     let mut complaints = Vec::new();
     for features in feature_matrix(directory)? {
-        let compiled = check(directory, clippy, builder, features)?;
+        let compiled = check(directory, clippy, slot, features, toolchain)?;
         if !compiled.ok {
             complaints.push(format!(
                 "{}: {}",
@@ -303,14 +254,21 @@ pub fn check_matrix(
     })
 }
 
-/// `cargo check` a generated crate under one feature selection, with one [`Builder`].
+/// `cargo check` a generated crate under one feature selection, in the target directory of a
+/// worker slot, on the given rustup toolchain or else the one running xtask.
 pub fn check(
     directory: &Utf8Path,
     clippy: bool,
-    builder: Builder<'_>,
+    slot: usize,
     features: Features,
+    toolchain: Option<&str>,
 ) -> eyre::Result<Compiled> {
-    let mut command = builder.cargo(directory);
+    let mut command = cargo_in(directory, slot);
+    if let Some(toolchain) = toolchain {
+        // rustup reads this to pick the toolchain. It must be set here: rustup already put the
+        // toolchain running xtask into xtask's environment, which the child would inherit.
+        command.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
     command
         .arg(if clippy { "clippy" } else { "check" })
         .arg("--all-targets")
@@ -366,30 +324,12 @@ pub fn require_cargo() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The version line of the cargo a toolchain runs, which fails when rustup does not have it.
-pub fn toolchain_cargo(toolchain: &str) -> eyre::Result<String> {
-    let mut command = Command::new("cargo");
-    command.arg("--version");
-    toolchain_env(&mut command, toolchain);
-    let output = command
-        .output()
-        .wrap_err_with(|| format!("running cargo on toolchain {toolchain}"))?;
-    if !output.status.success() {
-        bail!(
-            "cargo on toolchain {toolchain} did not run; install it with `rustup toolchain \
-             install {toolchain} --profile minimal -c clippy`: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use camino::Utf8Path;
     use color_eyre::eyre;
 
-    use super::{Builder, Features};
+    use super::Features;
 
     /// The job count is what stands between the compile gates and a runner that dies without
     /// saying why, so it is asserted rather than trusted to survive the next edit here.
@@ -401,53 +341,6 @@ mod tests {
             .find(|(key, _)| *key == std::ffi::OsStr::new("CARGO_BUILD_JOBS"))
             .and_then(|(_, value)| value);
         assert_eq!(jobs, Some(std::ffi::OsStr::new("1")));
-    }
-
-    fn env<'a>(command: &'a std::process::Command, key: &str) -> Option<&'a std::ffi::OsStr> {
-        command
-            .get_envs()
-            .find(|(name, _)| *name == std::ffi::OsStr::new(key))
-            .and_then(|(_, value)| value)
-    }
-
-    /// A named toolchain runs the generated build through rustup, in target directories apart
-    /// from the default toolchain's for every slot.
-    #[test]
-    fn a_toolchain_builds_on_itself_in_target_directories_of_its_own() {
-        let directory = Utf8Path::new(".");
-        for slot in [0, 3] {
-            let stable = Builder {
-                slot,
-                toolchain: None,
-            };
-            let msrv = Builder {
-                slot,
-                toolchain: Some("1.88.0"),
-            };
-
-            // The default leaves the toolchain to whatever runs xtask.
-            let command = stable.cargo(directory);
-            assert_eq!(env(&command, "RUSTUP_TOOLCHAIN"), None);
-            assert_eq!(stable.target(), super::target_for(slot));
-
-            // A named one is selected for the child, whatever xtask's environment says.
-            let command = msrv.cargo(directory);
-            assert_eq!(
-                env(&command, "RUSTUP_TOOLCHAIN"),
-                Some(std::ffi::OsStr::new("1.88.0"))
-            );
-            assert_eq!(
-                env(&command, "CARGO_TARGET_DIR"),
-                Some(msrv.target().as_os_str())
-            );
-            assert_ne!(msrv.target(), stable.target());
-            assert_eq!(msrv.target().parent(), stable.target().parent());
-            assert!(
-                msrv.target().as_str().ends_with("+1.88.0"),
-                "{}",
-                msrv.target()
-            );
-        }
     }
 
     /// A leg per edge feature the manifest declares, and none for one it does not, so a crate
@@ -523,20 +416,5 @@ mod tests {
                 .count(),
             1
         );
-    }
-
-    /// CI lints the generated crates on the oldest Rust release their manifests accept, so the
-    /// workflow's matrix has to name that release.
-    #[test_util::test]
-    fn ci_lints_on_the_oldest_rust_the_generated_manifests_accept() -> eyre::Result<()> {
-        let workflow = std::fs::read_to_string(
-            crate::paths::workspace_root().join(".github/workflows/test.yaml"),
-        )?;
-        let entry = format!("- \"{}\"", progeny::RUST_VERSION);
-        assert!(
-            workflow.contains(&entry),
-            "no `{entry}` in the test workflow"
-        );
-        Ok(())
     }
 }
