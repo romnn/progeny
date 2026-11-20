@@ -60,8 +60,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
-    let keyed = with_string_union_member(&with_streamed_bytes(&with_problem_arms(
-        &with_response_headers(&with_security_schemes(bytes)?)?,
+    let keyed = with_json_declared_member(&with_string_union_member(&with_streamed_bytes(
+        &with_problem_arms(&with_response_headers(&with_security_schemes(bytes)?)?)?,
     )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
@@ -417,6 +417,45 @@ fn with_string_union_member(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
     )
 }
 
+/// The subject with a photo `label` that is a plain string whose encoding declares JSON, which no
+/// other gate needs.
+///
+/// The part's header says JSON, so its content is the string's JSON, quoted.
+fn with_json_declared_member(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const LABEL: &str = indoc::indoc! {"
+        label:
+          description: A caption, sent as JSON.
+          type: string
+    "};
+    const ENCODING: &str = indoc::indoc! {"
+        encoding:
+          label:
+            contentType: application/json
+    "};
+    spliced(
+        bytes,
+        &[
+            Insertion {
+                after: &[
+                    "operationId: uploadPetPhoto\n",
+                    "          multipart/form-data:\n",
+                ],
+                text: ENCODING,
+                indent: "            ",
+            },
+            Insertion {
+                after: &[
+                    "operationId: uploadPetPhoto\n",
+                    "                  description: An optional numeric rating.\n",
+                    "                  format: int32\n",
+                ],
+                text: LABEL,
+                indent: "                ",
+            },
+        ],
+    )
+}
+
 /// YAML lines to add to the subject.
 struct Insertion<'a> {
     /// Lines found one after another, the first anywhere and each later one after the last; the
@@ -511,6 +550,7 @@ struct Seen {
     photo_note: Option<String>,
     photo_file: Option<String>,
     photo_subject: Option<String>,
+    photo_label: Option<String>,
 }
 
 /// Cloneable rather than shared behind an `Arc` from outside, because `router` takes the
@@ -675,6 +715,7 @@ impl server::Api for Double {
             seen.photo_note = body.note.clone();
             seen.photo_file = Some(body.file.clone());
             seen.photo_subject = body.subject.as_ref().map(|subject| format!("{subject:?}"));
+            seen.photo_label = body.label.clone();
         });
         // A type only a response yields has no strict form; its read form is written out, and
         // `Default` fills whatever the answer leaves unsaid.
@@ -1104,17 +1145,12 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                 (axum::http::StatusCode::CREATED, headers)
             }),
         )
-        // The `subject` part of a photo upload, headers and content as they arrived, answered as
-        // the photo's note.
+        // A photo upload's multipart body, every part's headers and content as they arrived,
+        // answered as the photo's note.
         .route(
             "/pets/{pet_id}/photo",
             axum::routing::post(|body: axum::body::Bytes| async move {
                 let text = String::from_utf8_lossy(&body).into_owned();
-                let subject = text
-                    .split("--")
-                    .find(|section| section.contains("name=\"subject\""))
-                    .unwrap_or_default()
-                    .to_owned();
                 (
                     axum::http::StatusCode::CREATED,
                     axum::Json(serde_json::json!({
@@ -1122,7 +1158,7 @@ async fn raw_serving() -> eyre::Result<client::Client> {
                         "filename": "photo",
                         "contentType": "image/png",
                         "fileSize": 0,
-                        "note": subject,
+                        "note": text,
                     })),
                 )
             }),
@@ -1273,6 +1309,7 @@ async fn a_multipart_body_survives_the_round_trip() {
                 note: Some("a note".to_owned()),
                 rating: Some(4),
                 subject: Some(types::UploadPetPhotoBodySubject::Text(Box::new("123".to_owned()))),
+                label: Some("a caption".to_owned()),
             },
         })
         .send()
@@ -1282,12 +1319,14 @@ async fn a_multipart_body_survives_the_round_trip() {
     assert_eq!(seen.photo_note.as_deref(), Some("a note"));
     // A union of strings arrives as the string it was sent as, although its text spells a number.
     assert_eq!(seen.photo_subject.as_deref(), Some("Text(\"123\")"));
+    // A string sent as the JSON its encoding declares arrives as the string, unquoted.
+    assert_eq!(seen.photo_label.as_deref(), Some("a caption"));
     assert_eq!(reply.into_value().pet_id, Some(5));
 }
 
 #[test_util::test]
-async fn a_union_of_strings_is_sent_as_a_text_part() {
-    // The raw server answers with the `subject` part as it arrived, so this reads the wire rather
+async fn a_string_is_sent_as_text_or_as_the_json_its_encoding_declares() {
+    // The raw server answers with the multipart body as it arrived, so this reads the wire rather
     // than what the generated server made of it.
     let client = raw_serving().await?;
     let reply = client
@@ -1298,14 +1337,33 @@ async fn a_union_of_strings_is_sent_as_a_text_part() {
                 note: None,
                 rating: None,
                 subject: Some(types::UploadPetPhotoBodySubject::Text(Box::new("123".to_owned()))),
+                label: Some("a caption".to_owned()),
             },
         })
         .send()
         .await?;
-    let part = reply.into_value().note.ok_or_eyre("the raw server saw a `subject` part")?;
-    // A text part: no media type, which RFC 7578 reads as `text/plain`, and the string unquoted.
-    assert!(!part.to_ascii_lowercase().contains("content-type"), "{part:?}");
-    assert!(part.ends_with("name=\"subject\"\r\n\r\n123\r\n"), "{part:?}");
+    let body = reply.into_value().note.ok_or_eyre("the raw server answers the body")?;
+    let part = |name: &str| {
+        let marker = format!("name=\"{name}\"");
+        body.split("--")
+            .find(|section| section.contains(&marker))
+            .ok_or_eyre("the raw server saw the part")
+    };
+
+    // A union of strings is a text part: no media type, which RFC 7578 reads as `text/plain`, and
+    // the string unquoted.
+    let subject = part("subject")?;
+    assert!(!subject.to_ascii_lowercase().contains("content-type"), "{subject:?}");
+    assert!(subject.ends_with("name=\"subject\"\r\n\r\n123\r\n"), "{subject:?}");
+
+    // A string whose encoding declares JSON is a JSON part: the declared media type, and the
+    // string quoted as the JSON value it names.
+    let label = part("label")?;
+    assert!(
+        label.to_ascii_lowercase().contains("content-type: application/json\r\n"),
+        "{label:?}"
+    );
+    assert!(label.ends_with("\r\n\r\n\"a caption\"\r\n"), "{label:?}");
 }
 
 #[test_util::test]
