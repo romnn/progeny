@@ -53,7 +53,7 @@ jobs:
       # Before the first benchmark run there is no history yet, and the documentation still deploys.
       # The settings split each benchmark name into its document, strategy, and metric.
       - name: Install the benchmark dashboard
-        uses: romnn/benchtrail@v0.3.0
+        uses: romnn/benchtrail@v0.5.1
         with:
           path: docs/public/bench
           benchmark-data-dir-path: bench
