@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795147625541,
+  "lastUpdate": 1795188549716,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3627,6 +3627,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 235.6627597808838,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b03af77d15d5023e70c4ae7855b1610a52f68b72",
+          "message": "fix(generate): keep generated crates free of unfulfilled dead_code expectations (#157)\n\n* fix(generate): render no observer machinery for a strict client\n\nA strict client expected `dead_code` on its observer, on `notify` and on\n`observed`, which calls `notify`. Rust 1.88, the generated crate's declared\nminimum, treats an item expected dead as a root that keeps what it calls\nalive, so two of the three expectations went unfulfilled and failed a\nconsumer denying warnings; current stable passed.\n\nNothing a strict client decodes is ever degraded, so it now renders no\n`Observer`, no `observer` field and no `observed`, and `observe` keeps its\nsignature for parity while discarding the function. Nothing is dead, so\nnothing needs an expectation on any toolchain.\n\nCloses #154\n\n* fix(generate): allow dead_code once per support module\n\nThe generator tagged each support item it predicted a description would\nnot reach with its own `#[expect(dead_code)]`. That prediction was a hand\nkept copy of the runtime's call graph, and on Rust 1.88, the generated\ncrates' declared minimum, an item expected dead keeps what it calls alive:\na workspace for a single parameterless operation failed with 23\nunfulfilled expectations, and some predictions were wrong on stable too.\n\nWhich runtime items a description reaches, and whether the toolchain calls\nthe rest dead, are not the generator's to decide, so every generated\nsupport module now opens with one inner `#![allow(dead_code)]` and the\nper-item machinery is gone. Item dropping that keeps code out of the\noutput stays.\n\n* docs(generate): say a strict client drops its observer at once",
+          "timestamp": "2026-11-20T16:23:25+01:00",
+          "tree_id": "ecfdcc7586a3316da2f664337044b7481bc1a278",
+          "url": "https://github.com/romnn/progeny/commit/b03af77d15d5023e70c4ae7855b1610a52f68b72"
+        },
+        "date": 1795188548989,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.866744999999998,
+            "range": "± 0.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2817.734375,
+            "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.878231,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1128.4609375,
+            "range": "± 0.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6481913333333332,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.3528642654419,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
