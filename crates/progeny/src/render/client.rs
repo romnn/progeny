@@ -290,6 +290,8 @@ fn observer_hook(decoding: Decoding) -> ObserverHook {
             field: TokenStream::new(),
             init: TokenStream::new(),
             observe: quote! {
+                ///
+                /// This one drops `observe` at once, and anything it captured with it.
                 #[must_use]
                 pub fn observe(
                     self,
