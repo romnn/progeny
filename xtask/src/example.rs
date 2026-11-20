@@ -60,6 +60,11 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             items: "items".to_owned(),
         },
     );
+    // The JSON-declared photo `label` keeps all three presence states, so the round trip shows an
+    // explicit `null` arriving as one rather than as an absent member.
+    config
+        .nullability_overrides
+        .insert(LABEL_POINTER.to_owned(), progeny::SchemaType::String);
     let keyed = with_json_declared_member(&with_string_union_member(&with_streamed_bytes(
         &with_problem_arms(&with_response_headers(&with_security_schemes(bytes)?)?)?,
     )?)?)?;
@@ -417,10 +422,15 @@ fn with_string_union_member(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
     )
 }
 
+/// Where [`with_json_declared_member`] puts the photo `label`, which the run's configuration
+/// overrides to keep its presence states.
+const LABEL_POINTER: &str = "/paths/~1pets~1{petId}~1photo/post/requestBody/content/multipart~1form-data/schema/properties/label";
+
 /// The subject with a photo `label` that is a plain string whose encoding declares JSON, which no
 /// other gate needs.
 ///
-/// The part's header says JSON, so its content is the string's JSON, quoted.
+/// The part's header says JSON, so its content is the string's JSON, quoted, and an explicit
+/// `null` is the JSON `null`.
 fn with_json_declared_member(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
     const LABEL: &str = indoc::indoc! {"
         label:
@@ -520,7 +530,7 @@ fn test_source(krate: &str) -> String {
             use std::sync::{{Arc, Mutex}};
 
             use color_eyre::eyre::{{self, OptionExt as _}};
-            use {krate}::{{client, operations, server, types}};
+            use {krate}::{{client, operations, server, support, types}};
         "}
     );
     out.push_str(RECORDER);
@@ -550,7 +560,7 @@ struct Seen {
     photo_note: Option<String>,
     photo_file: Option<String>,
     photo_subject: Option<String>,
-    photo_label: Option<String>,
+    photo_label: Option<support::Presence<String>>,
 }
 
 /// Cloneable rather than shared behind an `Arc` from outside, because `router` takes the
@@ -717,7 +727,7 @@ impl server::Api for Double {
             seen.photo_note = body.note.clone();
             seen.photo_file = Some(body.file.clone());
             seen.photo_subject = body.subject.as_ref().map(|subject| format!("{subject:?}"));
-            seen.photo_label = body.label.clone();
+            seen.photo_label = Some(body.label.clone());
         });
         // A type only a response yields has no strict form; its read form is written out, and
         // `Default` fills whatever the answer leaves unsaid.
@@ -1311,7 +1321,7 @@ async fn a_multipart_body_survives_the_round_trip() {
                 note: Some("a note".to_owned()),
                 rating: Some(4),
                 subject: Some(types::UploadPetPhotoBodySubject::Text(Box::new("123".to_owned()))),
-                label: Some("a caption".to_owned()),
+                label: support::Presence::Value("a caption".to_owned()),
             },
         })
         .send()
@@ -1322,8 +1332,36 @@ async fn a_multipart_body_survives_the_round_trip() {
     // A union of strings arrives as the string it was sent as, although its text spells a number.
     assert_eq!(seen.photo_subject.as_deref(), Some("Text(\"123\")"));
     // A string sent as the JSON its encoding declares arrives as the string, unquoted.
-    assert_eq!(seen.photo_label.as_deref(), Some("a caption"));
+    assert_eq!(
+        seen.photo_label,
+        Some(support::Presence::Value("a caption".to_owned()))
+    );
     assert_eq!(reply.into_value().pet_id, Some(5));
+}
+
+#[test_util::test]
+async fn a_json_part_tells_an_explicit_null_from_an_omitted_member() {
+    // The `label` keeps all three presence states, and its part is JSON, which is the one part
+    // kind that carries `null`.
+    let (double, client) = serving().await?;
+    let upload = |label| client::UploadPetPhotoParams {
+        pet_id: 5,
+        body: types::UploadPetPhotoBody {
+            file: "not really a png".to_owned(),
+            note: None,
+            rating: None,
+            subject: None,
+            label,
+        },
+    };
+
+    // An explicit null arrives as null rather than as absent
+    client.upload_pet_photo(upload(support::Presence::Null)).send().await?;
+    assert_eq!(double.seen().photo_label, Some(support::Presence::Null));
+
+    // A member left out arrives as left out
+    client.upload_pet_photo(upload(support::Presence::Omitted)).send().await?;
+    assert_eq!(double.seen().photo_label, Some(support::Presence::Omitted));
 }
 
 #[test_util::test]
@@ -1339,7 +1377,7 @@ async fn a_string_is_sent_as_text_or_as_the_json_its_encoding_declares() {
                 note: None,
                 rating: None,
                 subject: Some(types::UploadPetPhotoBodySubject::Text(Box::new("123".to_owned()))),
-                label: Some("a caption".to_owned()),
+                label: support::Presence::Value("a caption".to_owned()),
             },
         })
         .send()
@@ -1366,6 +1404,31 @@ async fn a_string_is_sent_as_text_or_as_the_json_its_encoding_declares() {
         "{label:?}"
     );
     assert!(label.ends_with("\r\n\r\n\"a caption\"\r\n"), "{label:?}");
+
+    // An explicit null in that member is a JSON part too, holding the literal `null`.
+    let reply = client
+        .upload_pet_photo(client::UploadPetPhotoParams {
+            pet_id: 5,
+            body: types::UploadPetPhotoBody {
+                file: "not really a png".to_owned(),
+                note: None,
+                rating: None,
+                subject: None,
+                label: support::Presence::Null,
+            },
+        })
+        .send()
+        .await?;
+    let body = reply.into_value().note.ok_or_eyre("the raw server answers the body")?;
+    let label = body
+        .split("--")
+        .find(|section| section.contains("name=\"label\""))
+        .ok_or_eyre("the raw server saw the null part")?;
+    assert!(
+        label.to_ascii_lowercase().contains("content-type: application/json\r\n"),
+        "{label:?}"
+    );
+    assert!(label.ends_with("\r\n\r\nnull\r\n"), "{label:?}");
 }
 
 #[test_util::test]

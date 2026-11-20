@@ -26,7 +26,7 @@ mod response;
 use super::route::{self, PathTemplate};
 use super::style::Location;
 use super::{ApiModel, Method, OperationContract, ParamContract};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contract::{Contracts, Namer, RustIdent, TypeRef};
@@ -55,6 +55,7 @@ pub(super) fn run(
         contracts,
         config,
         content_positions: BTreeMap::new(),
+        null_members: BTreeSet::new(),
         namer: Namer::default(),
         stems: Namer::default(),
         schemes: super::security::schemes(resolved, ctx),
@@ -104,6 +105,11 @@ struct Build<'a> {
     /// Every content position visited and the media types it declares, recorded only while
     /// [`Config::media_types`] has entries to validate against.
     content_positions: BTreeMap<String, Vec<String>>,
+    /// The multipart members already reported as unable to carry an explicit `null`.
+    ///
+    /// A member is a schema property, which every operation sending that schema shares, so it is
+    /// reported once rather than once per operation.
+    null_members: BTreeSet<String>,
     /// Method names, kept unique across the whole client.
     namer: Namer,
     /// The camel stems the renderers build per-operation type names from (`X1Params`,

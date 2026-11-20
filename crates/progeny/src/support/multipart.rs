@@ -69,12 +69,17 @@ pub fn body(value: &Value, specs: &[PartSpec]) -> Option<(String, Vec<u8>)> {
         // A member the document did not describe still goes on the wire. The specification table
         // says what the document was specific about; it is not the list of what exists, because an
         // `additionalProperties` member or a flattened one is real and absent from it.
-        if member.is_null() {
-            continue;
-        }
         let spec = specs.iter().find(|spec| spec.name == name);
         let kind = spec.map_or_else(|| infer(member), |spec| spec.kind);
         let repeated = spec.is_some_and(|spec| spec.repeated);
+        // Generated `Serialize` leaves an unset member out, so a `null` here is an explicit one.
+        // A single JSON part carries it as the JSON `null`.
+        // A text or file part has no spelling for it, and neither does a repeated member as a
+        // whole, because the reader folds repeated parts into an array and a null list would read
+        // back as a list holding one `null`; those are sent as absent.
+        if member.is_null() && (kind != PartKind::Json || repeated) {
+            continue;
+        }
         for part in split(
             member,
             kind,
@@ -436,9 +441,10 @@ struct Part {
 /// any array, which would put a JSON array where a server looks for several fields.
 fn split(member: &Value, kind: PartKind, repeated: bool, content_type: Option<&str>) -> Vec<Part> {
     match member {
+        // A `null` element keeps its place as a JSON part, and has no spelling as text or a file.
         Value::Array(items) if repeated => items
             .iter()
-            .filter(|item| !item.is_null())
+            .filter(|item| kind == PartKind::Json || !item.is_null())
             .map(|item| one(item, kind, content_type))
             .collect(),
         single => vec![one(single, kind, content_type)],
@@ -763,6 +769,69 @@ mod tests {
         let out = rendered(&json!({"name": null, "kept": "yes"}), &[])?;
         assert!(!out.contains("name=\"name\""), "{out}");
         assert!(out.contains("name=\"kept\""), "{out}");
+    }
+
+    /// An explicit `null` in a JSON member is one part holding the JSON `null`, under its declared
+    /// content type, so the server reads it back as `null` rather than as an absent member.
+    #[test_util::test]
+    fn an_explicit_null_in_a_json_member_is_a_null_part() {
+        let specs = [PartSpec {
+            name: "label",
+            kind: PartKind::Json,
+            repeated: false,
+            content_type: Some("application/json"),
+        }];
+        let out = rendered(&json!({"label": null}), &specs)?;
+        assert_eq!(
+            out,
+            crlf(indoc::indoc! {r#"
+                --progeny-boundary
+                Content-Disposition: form-data; name="label"
+                Content-Type: application/json
+
+                null
+                --progeny-boundary--
+            "#})
+        );
+    }
+
+    /// A `null` element of a repeated JSON member keeps its place among the parts, while a `null`
+    /// for the whole list has no spelling the reader tells apart from `[null]` and is left out.
+    #[test_util::test]
+    fn a_repeated_json_member_keeps_its_null_elements_and_omits_a_null_list() -> eyre::Result<()> {
+        let specs = [spec("ids", PartKind::Json, true)];
+
+        // A null element is a `null` part between its neighbours
+        let (content_type, bytes) =
+            body(&json!({"ids": [1, null, 3]}), &specs).ok_or_eyre("the body is an object")?;
+        let out = String::from_utf8(bytes.clone())?;
+        assert_eq!(out.matches("name=\"ids\"").count(), 3, "{out}");
+        assert!(out.contains(&framed("null")), "{out}");
+        let boundary = super::boundary_of(&content_type).ok_or_eyre("the body has a boundary")?;
+        assert_eq!(
+            super::parse(&bytes, &boundary, &specs)?,
+            json!({"ids": [1, null, 3]})
+        );
+
+        // A null list sends no part at all
+        let out = rendered(&json!({"ids": null, "kept": "yes"}), &specs)?;
+        assert!(!out.contains("name=\"ids\""), "{out}");
+        assert!(out.contains("name=\"kept\""), "{out}");
+        Ok(())
+    }
+
+    /// A text member and a text element have no spelling for `null` that differs from a string, so
+    /// an explicit `null` is left out there.
+    #[test_util::test]
+    fn an_explicit_null_in_a_text_member_is_left_out() {
+        let specs = [
+            spec("note", PartKind::Text, false),
+            spec("tags", PartKind::Text, true),
+        ];
+        let out = rendered(&json!({"note": null, "tags": ["a", null, "b"]}), &specs)?;
+        assert!(!out.contains("name=\"note\""), "{out}");
+        assert_eq!(out.matches("name=\"tags\"").count(), 2, "{out}");
+        assert!(!out.contains(&framed("")), "{out}");
     }
 
     #[test_util::test]
