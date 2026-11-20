@@ -98,12 +98,31 @@ tasks:
       - cargo run -p xtask --release -- corpus --quick --compile --clippy --packaging workspace {{.CLI_ARGS}}
 
   corpus:compile:all:
-    desc: "the same, over all 78 documents; hours, not minutes"
+    desc: "the same, over every document; hours, not minutes"
     # The tier is 8 documents and the corpus is 78, so a shape that occurs once is a shape the
     # tier is blind to. `weather-gov` is the standing example: 1 document, 2 operations, a client
     # that did not compile for a whole stage, found by an unrelated errand rather than by a gate.
     cmds:
       - cargo run -p xtask --release -- corpus --compile --clippy --packaging workspace {{.CLI_ARGS}}
+
+  corpus:lint:
+    desc: "lint the small documents' generated crates on one Rust release: task corpus:lint TOOLCHAIN=1.88"
+    # The generated code must have no warnings on any Rust release a consumer might build it with.
+    # This builds the generated crates of the small documents and the committed fixtures with
+    # clippy, warnings denied, on the given toolchain: in both packagings, in both decoding modes,
+    # and in crate packaging with each of the `client` and `server` features on or off.
+    vars:
+      TOOLCHAIN: '{{.TOOLCHAIN | default "stable"}}'
+      ONLY: --only petstore-31 --only oxide --only deprecated-request-body --only bare-operation
+    cmds:
+      - for: [lenient, strict]
+        cmd: >-
+          cargo run -p xtask --release -- corpus --compile --clippy --jobs 1
+          --toolchain {{.TOOLCHAIN}} --decoding {{.ITEM}} --feature-matrix {{.ONLY}}
+      - for: [lenient, strict]
+        cmd: >-
+          cargo run -p xtask --release -- corpus --compile --clippy --jobs 1
+          --toolchain {{.TOOLCHAIN}} --decoding {{.ITEM}} --packaging workspace {{.ONLY}}
 
   corpus:snapshots:
     desc: "re-record every document's diagnostics snapshot (read the diff first)"

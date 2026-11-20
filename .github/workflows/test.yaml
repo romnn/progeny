@@ -129,31 +129,6 @@ jobs:
         run: task probe -- --serde derive petstore-31
       - name: Differential serde harness
         run: task differential
-      # Every step above builds a generated crate with all its features, unlike a consumer that
-      # turns the `client` or `server` feature off: that build leaves unused whatever only the
-      # dropped edge names, such as a deprecated request body's alias.
-      # Only crate packaging has those features, so this runs in the default packaging, over the
-      # small documents and the committed fixtures that pin the shapes this has broken on.
-      - name: The generated crates under each feature selection
-        run: >-
-          task corpus -- --compile --clippy --feature-matrix --jobs 1 --only petstore-31 --only oxide
-          --only deprecated-request-body --only bare-operation
-      # Every generated manifest declares a minimum Rust version, and every step above builds on
-      # stable, which cannot tell whether that floor holds: Rust 1.88 once saw an unfulfilled
-      # `#[expect(dead_code)]` in generated code that stable did not.
-      # Only the generated crates build on the minimum, in both packagings and both decodings, and
-      # crate packaging under each feature selection; xtask stays on stable.
-      - name: The generated crates on the minimum Rust version
-        run: |
-          msrv="$(cargo run -q -p xtask --release -- msrv)"
-          rustup toolchain install "$msrv" --profile minimal -c clippy
-          only=(--only petstore-31 --only oxide --only deprecated-request-body --only bare-operation)
-          for decoding in lenient strict; do
-            task corpus -- --compile --clippy --toolchain "$msrv" --decoding "$decoding" --jobs 1 \
-              --feature-matrix "${only[@]}"
-            task corpus -- --compile --clippy --toolchain "$msrv" --decoding "$decoding" --jobs 1 \
-              --packaging workspace "${only[@]}"
-          done
 
   corpus-full:
     name: conformance corpus (every document, compiled)
@@ -181,6 +156,42 @@ jobs:
         run: task corpus:compile:all -- --jobs 1
       - name: The wire differential over the whole tier
         run: task probe
+
+  lint-generated:
+    name: generated crates on Rust ${{ matrix.toolchain }}
+    # The generated code must have no warnings on any Rust release a consumer might build it with,
+    # and each release brings new lints, so this lints it on the oldest release the generated
+    # manifests accept and on the four newest stable ones.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - "1.88" # the oldest release the generated manifests accept: progeny::RUST_VERSION
+          - stable minus 3 releases
+          - stable minus 2 releases
+          - stable minus 1 release
+          - stable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+          cache: true
+          env: false
+      - run: mise install task
+      # The release under test first, then stable, which stays the default that builds xtask.
+      - id: rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch corpus
+        uses: ./.github/actions/fetch-corpus
+      - run: task corpus:lint TOOLCHAIN=${{ steps.rust.outputs.name }}
 
   publish:
     name: publish (dry-run)

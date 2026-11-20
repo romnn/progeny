@@ -108,8 +108,8 @@ pub struct Args {
     /// Build the generated crates on this rustup toolchain rather than the one running xtask.
     ///
     /// Only the generated crates: xtask itself, and the generation, stay where they are.
-    /// CI passes the minimum Rust version the generated manifests declare (`xtask msrv`), because a
-    /// build on stable cannot tell whether that floor holds.
+    /// CI runs it on every Rust release in the `lint-generated` matrix, because a lint can fire on
+    /// one release and not another.
     #[arg(long, value_name = "NAME", requires = "compile")]
     toolchain: Option<String>,
 }

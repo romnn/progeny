@@ -524,4 +524,19 @@ mod tests {
             1
         );
     }
+
+    /// CI lints the generated crates on the oldest Rust release their manifests accept, so the
+    /// workflow's matrix has to name that release.
+    #[test_util::test]
+    fn ci_lints_on_the_oldest_rust_the_generated_manifests_accept() -> eyre::Result<()> {
+        let workflow = std::fs::read_to_string(
+            crate::paths::workspace_root().join(".github/workflows/test.yaml"),
+        )?;
+        let entry = format!("- \"{}\"", progeny::RUST_VERSION);
+        assert!(
+            workflow.contains(&entry),
+            "no `{entry}` in the test workflow"
+        );
+        Ok(())
+    }
 }
