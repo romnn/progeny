@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795126038267,
+  "lastUpdate": 1795132869055,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3364,6 +3364,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 324.0807285308838,
             "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "90980b3ae7d86799581a3312b387ba3f26314dc0",
+          "message": "fix(generate): give a repeated status one arm (#150)\n\n* fix(generate): give a repeated status one arm\n\n`4XX` and `4xx`, or `404` and `0404`, parse to one status pattern, and\neach became an arm: the client's status match got an unreachable second\narm, which fails a consumer that denies warnings, and the server got a\nvariant no client could receive. The model now keeps the arm of the key\nthat sorts first and reports the other as `repeated-status`, so every\nrenderer sees one arm per pattern.\n\nCloses #146\n\n* fix(generate): name the generated arm when a pick lands on a repeated status\n\nA media type picked at a response dropped for repeating another's status\ncannot be honoured, and generation stops before any diagnostic is shown,\nso the rejection now names the key whose arm is generated rather than\nclaiming the position declares no content.",
+          "timestamp": "2026-11-20T00:55:22+01:00",
+          "tree_id": "0b5585174ad06908069eba8165806811f3dec4d4",
+          "url": "https://github.com/romnn/progeny/commit/90980b3ae7d86799581a3312b387ba3f26314dc0"
+        },
+        "date": 1795132867922,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 27.01701266666667,
+            "range": "± 0.18",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2902.41015625,
+            "range": "± 0.8",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.444013333333332,
+            "range": "± 0.16",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1216.9869785308838,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6878706666666666,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 324.2708330154419,
+            "range": "± 0.6",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
