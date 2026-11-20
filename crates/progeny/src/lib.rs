@@ -104,17 +104,6 @@ pub use crate::doc::Direction;
 /// only for as long as the two are released together.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The minimum Rust version of the generated crates, which every generated manifest declares as
-/// its `rust-version`.
-///
-/// Stated so that an older toolchain says so up front rather than in the middle of a generated
-/// module.
-/// The shipped support runtime already calls `u64::is_multiple_of` (1.87), and 1.88 lets it write
-/// the `let` chains progeny's own code does.
-/// Clippy's `incompatible_msrv` holds the number to every API the generated code calls, and CI
-/// compiles the generated crates on this toolchain, which `cargo xtask msrv` prints.
-pub const RUST_VERSION: &str = "1.88";
-
 /// Generated source, and everything progeny had to say about the document.
 ///
 /// `diagnostics` is not optional and not a side channel: the only way to obtain generated source
