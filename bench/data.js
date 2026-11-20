@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795193105236,
+  "lastUpdate": 1795218853534,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3759,6 +3759,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 235.2825517654419,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "66aa96f2b1488fbfd6b2673dcc2f7f0f2e7ca83b",
+          "message": "ci(corpus): lint generated crates under each feature selection and Rust release (#164)\n\nChecks crate-packaged generated crates with all features, none, and each edge alone, over two committed fixtures that reproduce #155 and #157, and lints them on Rust 1.88 and the four newest stable releases. Emitted workspaces use resolver 3.\n\nCloses #159\nCloses #160",
+          "timestamp": "2026-11-21T00:48:41+01:00",
+          "tree_id": "56c53756fbe2368dbad254c2b5edee4ad1ceb8e4",
+          "url": "https://github.com/romnn/progeny/commit/66aa96f2b1488fbfd6b2673dcc2f7f0f2e7ca83b"
+        },
+        "date": 1795218852855,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.322605999999997,
+            "range": "± 0.19",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2818.341145515442,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.738137000000002,
+            "range": "± 0.1",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1128.419270515442,
+            "range": "± 0.3",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6418663333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.2239580154419,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
