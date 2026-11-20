@@ -68,10 +68,12 @@ pub(super) fn render(
     contracts: &Contracts,
     api: &ApiModel,
     api_modules: bool,
+    external_api_modules: bool,
     config: &Config,
 ) -> Rendered {
     let (root_needed, read_needed) = deprecated_alias_names(contracts, api, api_modules);
-    let deprecated = deprecated_aliases(contracts, &root_needed, Scope::Types);
+    let deprecated =
+        deprecated_aliases(contracts, &root_needed, Scope::Types, external_api_modules);
     let mut root = Vec::new();
     let mut read = Vec::new();
     for contract in contracts.types() {
@@ -87,7 +89,8 @@ pub(super) fn render(
         }
     }
     let read = contracts.has_read_forms().then(|| {
-        let deprecated = deprecated_aliases(contracts, &read_needed, Scope::Read);
+        let deprecated =
+            deprecated_aliases(contracts, &read_needed, Scope::Read, external_api_modules);
         let shared = contracts
             .types()
             .iter()
@@ -151,14 +154,24 @@ pub(super) fn render(
 /// internal uses clean without a broad `#[allow(deprecated)]`. Each module of the type layer
 /// carries its own, aliasing what that module's items name.
 ///
-/// Public, though hidden: some aliases are named only by the client or the server, which a crate
-/// compiles behind features and a workspace puts in other crates. A public item is never dead
-/// code, while a crate-private one a disabled edge alone names would be.
+/// Some aliases are named only by the client or the server, which a crate compiles behind
+/// features and a module packaging may leave unreached, so whether one is used is the consumer's
+/// build to decide.
+/// The module therefore allows `dead_code` rather than expecting it, as an inner attribute because
+/// `clippy::allow_attributes` lints only the outer form.
+/// It stays crate-private where it can, since a public module of the same name in every generated
+/// crate would collide in a consumer that glob re-exports two of them.
 fn deprecated_aliases(
     contracts: &Contracts,
     needed: &BTreeSet<String>,
     scope: Scope,
+    external_api_modules: bool,
 ) -> TokenStream {
+    let visibility = if external_api_modules {
+        quote! { pub }
+    } else {
+        quote! { pub(crate) }
+    };
     let aliases: Vec<TokenStream> = contracts
         .types()
         .iter()
@@ -175,7 +188,8 @@ fn deprecated_aliases(
                     deprecated,
                     reason = "generated internals need a non-deprecated path to this public contract"
                 )]
-                pub type #name = super::#name;
+                #[doc(hidden)]
+                #visibility type #name = super::#name;
             }
         })
         .collect();
@@ -184,7 +198,11 @@ fn deprecated_aliases(
     }
     quote! {
         #[doc(hidden)]
-        pub mod __progeny_deprecated {
+        #visibility mod __progeny_deprecated {
+            #![allow(
+                dead_code,
+                reason = "an alias the client or the server alone names is unused where the consumer's build leaves that edge out"
+            )]
             #(#aliases)*
         }
     }
