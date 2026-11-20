@@ -27,3 +27,8 @@
 - Every lint suppression must use `#[expect(lint, reason = "…")]`. Never use
   `#[allow(...)]`; fix the underlying issue when an expectation cannot be
   precise and self-validating.
+- Code progeny generates is linted under its consumer's configuration. A
+  suppression it emits is an `expect` only when progeny alone decides whether
+  the lint fires, such as `deprecated` on a use of an item it marked deprecated,
+  and an inner `#![allow(lint, reason = "…")]` when the consumer's
+  configuration, features or toolchain decide, such as a Clippy threshold lint.

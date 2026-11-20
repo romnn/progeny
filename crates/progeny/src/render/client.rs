@@ -2067,10 +2067,8 @@ fn payload_struct(
     });
     let body = has_body(arm).then(|| {
         let ty = response_type_path(&arm.body, contracts, config);
-        let nesting = super::types::type_complexity(&ty);
         quote! {
             /// The body.
-            #nesting
             pub body: #ty,
         }
     });
@@ -2120,9 +2118,8 @@ fn header_group(
         } else {
             ty
         };
-        let nesting = super::types::type_complexity(&ty);
         let docs = header_docs(header, decoding, config);
-        quote! { #docs #nesting pub #field: #ty, }
+        quote! { #docs pub #field: #ty, }
     });
     // Each header is read by the support runtime from its row, which spells the rules once.
     let group = name.to_string();

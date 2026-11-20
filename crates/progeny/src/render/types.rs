@@ -667,55 +667,6 @@ fn tagged_enum(
     }
 }
 
-/// An expectation for a field whose type exceeds Clippy's default complexity threshold.
-///
-/// Kept on the field rather than its struct so an unrelated field cannot satisfy it. The score
-/// mirrors Clippy's type visitor: paths, slices, tuples, and arrays cost ten times their nesting
-/// depth; references and pointers cost one. Generated types do not contain bare function or trait
-/// object types, but those cases are included so this stays correct if the renderer grows them.
-pub(super) fn type_complexity(ty: &TokenStream) -> TokenStream {
-    use syn::visit::Visit as _;
-
-    let Ok(ty) = syn::parse2::<syn::Type>(ty.clone()) else {
-        return TokenStream::new();
-    };
-    let mut visitor = TypeComplexity { score: 0, nest: 1 };
-    visitor.visit_type(&ty);
-    if visitor.score <= 250 {
-        return TokenStream::new();
-    }
-    quote! {
-        #[expect(
-            clippy::type_complexity,
-            reason = "the public field type mirrors the schema and must remain explicit"
-        )]
-    }
-}
-
-struct TypeComplexity {
-    score: u64,
-    nest: u64,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for TypeComplexity {
-    fn visit_type(&mut self, ty: &'ast syn::Type) {
-        let (score, nesting) = match ty {
-            syn::Type::Ptr(_) | syn::Type::Reference(_) => (1, 0),
-            syn::Type::Path(_)
-            | syn::Type::Slice(_)
-            | syn::Type::Tuple(_)
-            | syn::Type::Array(_) => (10 * self.nest, 1),
-            syn::Type::FnPtr(_) => (50 * self.nest, 1),
-            syn::Type::TraitObject(_) => (20 * self.nest, 0),
-            _ => (0, 0),
-        };
-        self.score += score;
-        self.nest += nesting;
-        syn::visit::visit_type(self, ty);
-        self.nest -= nesting;
-    }
-}
-
 /// A type's doc comment.
 ///
 /// A type the document documented says what it is; one it did not says where it came from, which
@@ -810,9 +761,8 @@ fn derived_object(
     let members = fields.iter().map(|field| {
         let member = ident(&field.rust_name);
         let ty = type_ref_in(&field.ty, contracts, config, scope);
-        let nesting = type_complexity(&ty);
         let serde = member_attributes(field, scope);
-        quote! { #serde #nesting #member: #ty, }
+        quote! { #serde #member: #ty, }
     });
     quote! {
         impl<'de> serde::Deserialize<'de> for #name {
@@ -841,7 +791,6 @@ fn member(
 ) -> TokenStream {
     let name = ident(&field.rust_name);
     let ty = type_ref_in(&field.ty, contracts, config, scope);
-    let nesting = type_complexity(&ty);
     // A capture's docs are progeny's own account of what it holds, never the document's prose.
     let setting = if field.is_capture() {
         crate::config::Docs::Schema
@@ -852,10 +801,10 @@ fn member(
     if contract.deser() != DeserStrategy::Derive {
         // No serde attributes at all: the hand-written implementation reads the same contract and
         // does not consult attributes, so leaving them on would be a second source of truth.
-        return quote! { #docs #nesting pub #name: #ty, };
+        return quote! { #docs pub #name: #ty, };
     }
     let serde = member_attributes(field, scope);
-    quote! { #docs #serde #nesting pub #name: #ty, }
+    quote! { #docs #serde pub #name: #ty, }
 }
 
 /// `deny_unknown_fields` where the contract refuses undeclared members.
