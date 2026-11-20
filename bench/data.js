@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795143638686,
+  "lastUpdate": 1795147625541,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3562,6 +3562,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 323.87890625,
             "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c32f58c325bacbdf5269b1c526e8c53a6c30453c",
+          "message": "fix(generate)!: box a server response's typed header group (#152)\n\nA server response variant held its typed header group inline while its\nbody was boxed, so an arm typing many headers outgrew its siblings and\ntripped `clippy::large_enum_variant` in the generated server. The group is\nnow boxed as the body is, so a variant's size no longer depends on how\nmany headers an arm types.\n\nBREAKING CHANGE: a handler answers a typed header group as\n`headers: Box::new(FooOkHeaders { .. })`, or `group.into()`;\n`Default::default()` still works.\n\nCloses #147",
+          "timestamp": "2026-11-20T05:01:33+01:00",
+          "tree_id": "02a2ebdd99a11d80a735495117640375c6985b85",
+          "url": "https://github.com/romnn/progeny/commit/c32f58c325bacbdf5269b1c526e8c53a6c30453c"
+        },
+        "date": 1795147624879,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 24.944680666666667,
+            "range": "± 0.09",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2818.197916030884,
+            "range": "± 1.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 8.792599333333335,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1129.09765625,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6508006666666667,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.6627597808838,
+            "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
