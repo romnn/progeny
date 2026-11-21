@@ -260,15 +260,18 @@ fn under_valgrind(target: &Target, valgrind: &Utf8Path, tool: &str) -> eyre::Res
     std::fs::read_to_string(file).wrap_err_with(|| format!("reading {}", file.display()))
 }
 
-/// Runs the rustc that compiles the package cargo was asked for under a valgrind tool, and every
-/// other rustc as it is.
+/// Runs the rustc that compiles the library of the package cargo was asked for under a valgrind
+/// tool, and every other rustc as it is.
 ///
-/// `-q` keeps valgrind's own messages off the compiler's stderr, which cargo reads as JSON.
+/// Cargo marks the package's build script as primary too, so that one is told apart by its crate
+/// name.
+/// `-q` keeps valgrind's own messages off the compiler's stderr, which cargo reads as JSON, and
+/// `--command-line-only` keeps a `.valgrindrc` or `VALGRIND_OPTS` from changing what is measured.
 /// Cachegrind simulates no cache by default, so it counts instructions alone.
 const VALGRIND_WRAPPER: &str = indoc::indoc! {r#"
     #!/bin/sh
-    if [ -n "$CARGO_PRIMARY_PACKAGE" ]; then
-        exec "$PROGENY_VALGRIND" -q --tool="$PROGENY_VALGRIND_TOOL" \
+    if [ -n "$CARGO_PRIMARY_PACKAGE" ] && [ "$CARGO_CRATE_NAME" != build_script_build ]; then
+        exec "$PROGENY_VALGRIND" -q --command-line-only=yes --tool="$PROGENY_VALGRIND_TOOL" \
             --"$PROGENY_VALGRIND_TOOL"-out-file="$PROGENY_VALGRIND_OUT" "$@"
     fi
     exec "$@"
@@ -292,6 +295,8 @@ fn instructions_in(output: &str) -> eyre::Result<u64> {
 ///
 /// Massif's snapshots are taken at instruction counts, and each one's heap holds until the next,
 /// so the average weighs a snapshot by the instructions until the following one.
+/// It ends at the last snapshot massif kept, so it is an estimate over the snapshots rather than
+/// over every instruction.
 fn heap_in(output: &str) -> eyre::Result<(u64, u64)> {
     let mut snapshots: Vec<(u64, u64)> = Vec::new();
     let mut time = None;

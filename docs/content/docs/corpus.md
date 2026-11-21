@@ -61,7 +61,7 @@ The compile cost of a generated crate is a measured property. On every commit to
 The hosted runners are a pool of different processors, whose times differ by up to a factor of two on one commit, so the headline figures come from valgrind, which runs the compiler on a synthetic processor of its own and gives the same figures on every runner:
 
 - the instructions one compile executes, counted by cachegrind;
-- its peak heap and its average heap over the compile, from massif.
+- its peak heap, and its average heap weighted by the instructions between massif's snapshots.
 
 Only the compiler that builds the generated crate runs under valgrind; its dependencies are built natively first. The native CPU time and peak RSS are still recorded, but they are not stable enough to judge by alone: each CPU time records the runner's processor, and the dashboard keeps one series per processor model, so a change of runner never reads as a change of performance.
 

@@ -137,7 +137,7 @@ pub struct Args {
     ///
     /// Unlike CPU time and peak RSS, these are the same on every processor, so a history recorded
     /// on a pool of different runners can compare them from commit to commit.
-    #[arg(long, value_name = "PATH", conflicts_with = "generate_only")]
+    #[arg(long, value_name = "PATH", conflicts_with = "generate_only", value_parser = program)]
     valgrind: Option<Utf8PathBuf>,
 
     /// Internal: run one command in this fresh process and report what it cost.
@@ -149,6 +149,17 @@ pub struct Args {
         hide = true
     )]
     measure: Vec<String>,
+}
+
+/// A program given on the command line, as cargo can run it from another directory: a path with a
+/// directory is made absolute, while a bare name stays one, to be looked up on `PATH`.
+fn program(given: &str) -> Result<Utf8PathBuf, String> {
+    let path = Utf8PathBuf::from(given);
+    if path.components().count() < 2 {
+        return Ok(path);
+    }
+    let absolute = std::path::absolute(&path).map_err(|error| format!("{given}: {error}"))?;
+    Utf8PathBuf::try_from(absolute).map_err(|error| format!("{given}: {error}"))
 }
 
 /// The serde strategy each variant renders with.
@@ -494,8 +505,11 @@ fn half_spread(values: impl Iterator<Item = f64> + Clone) -> f64 {
 }
 
 /// The compiler the measurements were taken with, or a placeholder when it cannot be asked.
+///
+/// That is the compiler cargo runs: `$RUSTC`, or `rustc` on `PATH`.
 fn rustc_version() -> String {
-    std::process::Command::new("rustc")
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    std::process::Command::new(rustc)
         .arg("--version")
         .output()
         .ok()
@@ -872,7 +886,7 @@ mod tests {
     use super::measure::{Profile, Sample, Summary};
     use super::{
         Environment, HAND_WRITTEN, Target, format_bytes, history_entries, ordered_targets, percent,
-        selected_strategies, short_cpu,
+        program, selected_strategies, short_cpu,
     };
 
     fn target(strategy: &str, member: &str) -> Target {
@@ -1074,6 +1088,20 @@ mod tests {
         }
         // Nothing measured at all, as with no repetitions, is no history either.
         assert!(history_entries(&BTreeMap::new(), &BTreeMap::new(), &environment()).is_err());
+    }
+
+    /// A program path with a directory is made absolute, because cargo runs it from the generated
+    /// crate's directory, and a bare name stays a name for `PATH` to resolve.
+    #[test_util::test]
+    fn a_program_path_survives_a_change_of_directory() -> eyre::Result<()> {
+        assert_eq!(
+            program("valgrind").map_err(|error| eyre::eyre!(error))?,
+            "valgrind"
+        );
+        let relative = program("tools/valgrind").map_err(|error| eyre::eyre!(error))?;
+        assert!(relative.is_absolute(), "{relative}");
+        assert!(relative.ends_with("tools/valgrind"), "{relative}");
+        Ok(())
     }
 
     /// A processor's short name keeps its family and model and drops only the vendor, the marks,

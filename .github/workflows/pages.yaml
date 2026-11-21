@@ -53,6 +53,8 @@ jobs:
       # Before the first benchmark run there is no history yet, and the documentation still deploys.
       # The settings split each benchmark name into its document, strategy, and metric, and each CPU
       # time into one series per processor model, which its environment records.
+      # Lines are colored by processor, because there are more models than dash styles.
+      # Each typed point names its metric's label and direction; the settings only order the charts.
       - name: Install the benchmark dashboard
         uses: romnn/benchtrail@v0.5.1
         with:
@@ -66,11 +68,11 @@ jobs:
               "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
               "label": "{{document}} / {{strategy}} ({{cpu}})",
               "metrics": {
-                "instructions": { "label": "Instructions (cachegrind)", "direction": "lower", "order": 0 },
-                "peak heap": { "label": "Peak heap (massif)", "direction": "lower", "order": 1 },
-                "average heap": { "label": "Average heap (massif)", "direction": "lower", "order": 2 },
-                "cpu": { "label": "CPU time", "direction": "lower", "order": 3 },
-                "peak rss": { "label": "Peak RSS", "direction": "lower", "order": 4 }
+                "instructions": { "order": 0 },
+                "peak heap": { "order": 1 },
+                "average heap": { "order": 2 },
+                "cpu": { "order": 3 },
+                "peak rss": { "order": 4 }
               },
               "dimensions": {
                 "document": { "label": "Document" },
@@ -78,8 +80,8 @@ jobs:
                 "cpu": { "label": "CPU" }
               },
               "splitEnvironment": ["cpu"],
-              "colorBy": "document",
-              "dashBy": "cpu"
+              "colorBy": "cpu",
+              "dashBy": "document"
             }
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
