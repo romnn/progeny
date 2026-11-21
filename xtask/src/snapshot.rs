@@ -105,6 +105,11 @@ impl Snapshot {
         })
     }
 
+    /// Whether `bytes` are the document this snapshot was taken from.
+    pub fn is_of(&self, bytes: &[u8]) -> bool {
+        self.document == digest(bytes)
+    }
+
     /// Compare against what was recorded for this document.
     pub fn compare(&self, recorded: Option<&Self>) -> Verdict {
         let Some(recorded) = recorded else {
