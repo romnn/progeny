@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795241107419,
+  "lastUpdate": 1795274591864,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -4023,6 +4023,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 234.8958330154419,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a0135e084a313beca6939d46b8dd8f78ca0fffc1",
+          "message": "fix(shape): flatten a union whose branch flattens its own union (#168)\n\nA branch that is itself members beside a union now counts as an object when it flattens by the same rules, and its nested union's members count as its own. Tag settlement demotes a tagged union to a JSON remainder when a union flattened below one of its variants, or a struct around it at the same object level, reads its tag first, so the struct keeps its typed fields.\n\nCloses #167",
+          "timestamp": "2026-11-21T16:17:52+01:00",
+          "tree_id": "971b8b33c6a7adbeaebc885e56b479c3c4129df9",
+          "url": "https://github.com/romnn/progeny/commit/a0135e084a313beca6939d46b8dd8f78ca0fffc1"
+        },
+        "date": 1795274591590,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.870497999999998,
+            "range": "± 0.18",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2817.26953125,
+            "range": "± 1.2",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.015442,
+            "range": "± 0.05",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1128.1484375,
+            "range": "± 0.9",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.654742,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 234.9283847808838,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
