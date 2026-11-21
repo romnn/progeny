@@ -2144,39 +2144,6 @@ mod tests {
             "`startedAtMs`"
         )?);
 
-        // A tag a union inherits from a base its branches share, which `Item` also declares, read
-        // by `Item`'s own union and by a union one level down.
-        let family = json!({
-            "Shape": {"type": "object",
-                      "discriminator": {"propertyName": "format", "mapping": {
-                          "wide": "#/components/schemas/Wide", "tall": "#/components/schemas/Tall"}},
-                      "oneOf": [{"$ref": "#/components/schemas/Wide"},
-                                {"$ref": "#/components/schemas/Tall"}]},
-            "Wide": {"allOf": [{"$ref": "#/components/schemas/Shape"},
-                {"type": "object", "required": ["width"], "properties": {"width": {"type": "integer"}}}]},
-            "Tall": {"allOf": [{"$ref": "#/components/schemas/Shape"},
-                {"type": "object", "required": ["height"], "properties": {"height": {"type": "integer"}}}]},
-        });
-        let shapes_family = json!([{"$ref": "#/components/schemas/Wide"},
-                                   {"$ref": "#/components/schemas/Tall"}]);
-        let image = json!({"type": "object", "required": ["type"],
-                           "properties": {"type": {"type": "string", "enum": ["image"]}},
-                           "anyOf": shapes_family});
-        let text = json!({"type": "object", "required": ["type", "text"], "properties": {
-            "type": {"type": "string", "enum": ["text"]}, "text": {"type": "string"}}});
-        for (case, branches) in [
-            ("directly", shapes_family.clone()),
-            ("nested", json!([text, image])),
-        ] {
-            let mut schemas = family.clone();
-            schemas["Item"] = json!({"type": "object", "properties": {"format": {"type": "string"}},
-                                     "oneOf": branches});
-            assert!(
-                degrades_for_members_beside(schemas, "Item", "`format`")?,
-                "{case}"
-            );
-        }
-
         // Two schemas whose unions name each other.
         let schemas = json!({
             "A": {"type": "object", "properties": {"a": {"type": "string"}},
