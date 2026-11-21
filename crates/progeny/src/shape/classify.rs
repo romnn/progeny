@@ -579,7 +579,6 @@ fn union(
         // the branches at all before treating this as a union.
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(strings) => Shape::StringEnum(strings),
-        Reading::Numbers(numbers) => listed_number(&numbers),
         Reading::Variants(rest) => match told_apart(resolved, view, rest) {
             Ok(shape) => shape,
             Err((rest, reason)) => match spread_union(resolved, view, &rest) {
@@ -1030,7 +1029,6 @@ fn spread_union(
         Reading::Empty => return None,
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(strings) => Shape::StringEnum(strings),
-        Reading::Numbers(numbers) => listed_number(&numbers),
         Reading::Variants(spread) => told_apart(resolved, view, spread).ok()?,
     };
     Some((shape, nullable))
@@ -1502,9 +1500,6 @@ enum Reading {
     /// Branches that only list strings, or read any string, which read as one string enum
     /// ([`folded_strings`]).
     Strings(StringEnum),
-    /// Branches that only list numbers of one type, which read as the one numeric enum of every
-    /// value they list ([`folded_numbers`]).
-    Numbers(Box<View>),
     /// Two or more branches a payload has to be told apart between.
     Variants(Vec<ShapeKey>),
 }
@@ -1530,10 +1525,7 @@ impl Reading {
                     nullable |= null;
                     Self::Strings(strings)
                 }
-                None => match folded_numbers(resolved, &rest) {
-                    Some(numbers) => Self::Numbers(Box::new(numbers)),
-                    None => Self::Variants(rest),
-                },
+                None => Self::Variants(rest),
             },
         };
         (reading, nullable)
@@ -1995,9 +1987,7 @@ fn union_constants(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option
             values: strings.values,
             null: false,
         },
-        Reading::Empty | Reading::Strings(_) | Reading::Numbers(_) | Reading::Variants(_) => {
-            return None;
-        }
+        Reading::Empty | Reading::Strings(_) | Reading::Variants(_) => return None,
     };
     constants.null |= nullable;
     Some(constants)
@@ -2414,12 +2404,6 @@ impl Branch {
                     .then(|| strings.values.into_iter().map(Value::String).collect()),
                 ..View::default()
             })),
-            Reading::Numbers(mut numbers) => {
-                if nullable && let Some(types) = numbers.types.as_mut() {
-                    types.insert(TypeName::Null);
-                }
-                Self::Leaf(numbers)
-            }
             Reading::Variants(branches) => Self::Union(branches),
             // What [`union`] makes of it: `null`, or arbitrary JSON when there is not even that.
             Reading::Empty if nullable => Self::Leaf(Box::new(View {
@@ -2924,10 +2908,7 @@ fn generates_option(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -
     match Reading::of(resolved, &spread) {
         (_, true) => true,
         (Reading::One(inner), false) => generates_option(resolved, &inner, depth.saturating_add(1)),
-        (
-            Reading::Empty | Reading::Strings(_) | Reading::Numbers(_) | Reading::Variants(_),
-            false,
-        ) => false,
+        (Reading::Empty | Reading::Strings(_) | Reading::Variants(_), false) => false,
     }
 }
 
@@ -3061,76 +3042,6 @@ fn same_kind(value: &Value, against: Option<&&Value>) -> bool {
 ///
 /// A branch with something to report, or a union of its own, is not folded in: it is reported and
 /// read where it is classified, and folded into the enum it would never be classified at all.
-/// Whether a branch has something to report, or a union of its own, so it is read where it is
-/// classified rather than folded into another reading.
-fn reported(view: &View) -> bool {
-    !view.uninterpreted.is_empty()
-        || !view.unknown_types.is_empty()
-        || view.conflict.is_some()
-        || view.impossible
-        || view.unions_collide
-        || view.union.is_some()
-}
-
-/// The one numeric enum of every value the branches list, when each branch only lists numbers
-/// under one `type` and signedness they all share and no `format`, as
-/// `anyOf: [{type: number, enum: [-1]}, {type: number, enum: [0]}]` splits one numeric enum across
-/// branches.
-///
-/// Kept as separate variants, the first would read every number and the branches after it would
-/// never be reached.
-/// A `format` is left out because it sizes an integer by the values it must hold, which differ
-/// from branch to branch.
-fn folded_numbers(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<View> {
-    let mut folded: Option<View> = None;
-    let mut values = Vec::new();
-    for branch in branches {
-        let view = merge::view(resolved, branch);
-        let numeric = view.types.as_ref().is_some_and(|types| {
-            !types.is_empty()
-                && types
-                    .iter()
-                    .all(|name| matches!(name, TypeName::Number | TypeName::Integer))
-        });
-        let listed = match (&view.enumeration, &view.constant) {
-            (Some(listed), _) => listed.clone(),
-            (None, Some(value)) => vec![value.clone()],
-            (None, None) => return None,
-        };
-        let alike = folded
-            .as_ref()
-            .is_none_or(|first| first.types == view.types && first.unsigned == view.unsigned);
-        if reported(&view)
-            || !numeric
-            || !alike
-            || view.format.is_some()
-            || !listed.iter().all(Value::is_number)
-        {
-            return None;
-        }
-        values.extend(listed);
-        folded.get_or_insert(view);
-    }
-    let mut folded = folded?;
-    folded.enumeration = Some(values);
-    folded.constant = None;
-    Some(folded)
-}
-
-/// The scalar a numeric enum names: an integer where its type is `integer` alone, and otherwise a
-/// number.
-fn listed_number(view: &View) -> Shape {
-    let integer = view
-        .types
-        .as_ref()
-        .is_some_and(|types| types.len() == 1 && types.contains(&TypeName::Integer));
-    Shape::Scalar(if integer {
-        Scalar::Integer(IntType::wide(!view.unsigned))
-    } else {
-        Scalar::Number
-    })
-}
-
 fn folded_strings(
     resolved: &ResolvedDocument,
     branches: &[ShapeKey],
@@ -3140,7 +3051,13 @@ fn folded_strings(
     let mut null = false;
     for branch in branches {
         let view = merge::view(resolved, branch);
-        if reported(&view) {
+        let reported = !view.uninterpreted.is_empty()
+            || !view.unknown_types.is_empty()
+            || view.conflict.is_some()
+            || view.impossible
+            || view.unions_collide
+            || view.union.is_some();
+        if reported {
             return None;
         }
         let declared = match (&view.enumeration, &view.constant) {

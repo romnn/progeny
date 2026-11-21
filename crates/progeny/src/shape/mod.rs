@@ -2358,50 +2358,6 @@ mod tests {
         assert_eq!(tag_of(inner).as_deref(), Some("format"), "{diagnostics:?}");
     }
 
-    /// A union whose branches each list numbers of one type, one numeric enum split across
-    /// branches as cloudflare writes its `feedback` parameter, reads as that number, as the enum
-    /// would.
-    /// Branches of different types stay a union, because no one number reads them all, and so do
-    /// branches with a `format`, which would size an integer by values its first branch does not
-    /// list.
-    #[test_util::test]
-    fn numbers_listed_across_branches_read_as_their_number() -> eyre::Result<()> {
-        let constant = |kind: &str, value: i64| json!({"type": kind, "enum": [value]});
-        let byte = |value: i64| json!({"type": "integer", "format": "uint8", "enum": [value]});
-        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
-            "Feedback": {"anyOf": [constant("number", -1), constant("number", 0), constant("number", 1)]},
-            "Mixed": {"anyOf": [constant("number", -1), constant("integer", 0)]},
-            "Sized": {"anyOf": [byte(1), byte(300)]},
-        })))?;
-        assert_eq!(
-            shape_of(&shapes, "Feedback")?,
-            &Shape::Scalar(Scalar::Number)
-        );
-        // The other two stay unions, which nothing tells apart.
-        for name in ["Mixed", "Sized"] {
-            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
-        }
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.class() == BreakageClass::WildUnion),
-            "{diagnostics:?}"
-        );
-        Ok(())
-    }
-
-    /// A folded union inside another union is compared by every value it lists: the integer
-    /// branch reads `1`, which the inner union lists after `1.5`, so nothing tells them apart.
-    #[test_util::test]
-    fn a_folded_union_is_compared_by_all_its_values() -> eyre::Result<()> {
-        let outer = json!({"oneOf": [
-            {"type": "integer", "enum": [0]},
-            {"anyOf": [{"type": "number", "enum": [1.5]}, {"type": "number", "enum": [1]}]},
-        ]});
-        assert!(degrades_as_wild_union(json!({"Code": outer}), "Code")?);
-        Ok(())
-    }
-
     /// A member both the struct and a branch could read, or one a closed struct would refuse,
     /// keeps the union degraded, because the flattened struct would give it to one reader.
     #[test_util::test]
@@ -4775,6 +4731,10 @@ mod tests {
             json!({"oneOf": [
                 {"type": "integer", "enum": [1]},
                 {"type": "number", "enum": [2.0]},
+            ]}),
+            json!({"oneOf": [
+                {"type": "number", "enum": [1.5]},
+                {"type": "number", "enum": [2.5]},
             ]}),
         ];
         for schema in degraded {
