@@ -113,4 +113,4 @@ assert_eq!(route, Some(Route::ShowPetById));
 
 ## Doc comments
 
-The `title`, `summary` and `description` the document writes become doc comments, as the vendor wrote them. `docs = "none"` leaves the document's prose out; `#[deprecated]` and the doc comments progeny writes itself stay.
+The `title`, `summary` and `description` the document writes become doc comments, as the vendor wrote them. `docs = "none"` leaves the document's prose out; `#[deprecated]` and the doc comments progeny writes itself stay. A generated manifest declares only the crates the generated code names, so an executable Rust example in a description's prose needs whatever crates it names added by the caller.

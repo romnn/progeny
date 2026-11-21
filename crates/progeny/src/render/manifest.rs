@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::baseline::BaselineUse;
 use crate::api::{ApiModel, BodyContract, ResponseBody};
 use crate::config::{BytesRepr, Config, DateTimeCrate, MapKind, UuidCrate};
 use crate::contract::{Contracts, Gate, TypeRef};
@@ -41,7 +42,7 @@ pub(super) fn workspace(config: &Config, client: bool, server: bool) -> String {
         members = [{}]
         resolver = "3"
         "#,
-        quoted_owned(&members)
+        quoted(&members)
     }
 }
 
@@ -101,24 +102,66 @@ pub(super) fn workspace_readme(config: &Config, client: bool, server: bool) -> S
 /// support module by: the leaves its lenient decoder implements, which an edge crate's typed
 /// header or parameter can need without any type here holding one, and `time` whenever it ships
 /// `support::Rfc3339`.
-pub(super) fn types_crate(contracts: &Contracts, config: &Config, supported: LeafUse) -> String {
+/// `baseline` is what the crate's rendered source names of the crates every rendering may use.
+pub(super) fn types_crate(
+    contracts: &Contracts,
+    config: &Config,
+    supported: LeafUse,
+    baseline: &BaselineUse,
+) -> String {
     let mut out = package(&package_name(config, "types"), &config.package.version);
-    let gates = gate_features(contracts);
-    if !gates.is_empty() {
-        out.push_str("[features]\n");
-        for (feature, wants) in &gates {
-            let _ = writeln!(out, "{feature} = [{}]", quoted(wants));
-        }
-        out.push('\n');
-    }
+    out.push_str(&features_table(gate_features(contracts), baseline));
     out.push_str("[dependencies]\n");
-    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
-    out.push_str("serde_json = \"1\"\n");
+    for line in baseline.dependencies() {
+        let _ = writeln!(out, "{line}");
+    }
     let named = crates_named(Some(contracts), None, config).union(supported);
     for line in dependency_lines(named) {
         let _ = writeln!(out, "{line}");
     }
     out.extend(schemars_dependency(contracts));
+    out
+}
+
+/// One `[features]` entry.
+struct Feature {
+    name: String,
+    /// What the feature turns on, as the TOML list spells each entry.
+    wants: Vec<String>,
+}
+
+fn feature(name: &str, wants: &[&str]) -> Feature {
+    Feature {
+        name: name.to_owned(),
+        wants: wants.iter().map(|&want| want.to_owned()).collect(),
+    }
+}
+
+/// The `[features]` table, or nothing when there is no feature.
+///
+/// `declared` are the features the manifest has for its own reasons, in order.
+/// Each also turns on the baseline crates only its gated source names, and a feature that gates
+/// such a use and is not among them follows them.
+fn features_table(mut declared: Vec<Feature>, baseline: &BaselineUse) -> String {
+    let mut optional = baseline.features();
+    for feature in &mut declared {
+        feature
+            .wants
+            .extend(optional.remove(&feature.name).unwrap_or_default());
+    }
+    declared.extend(
+        optional
+            .into_iter()
+            .map(|(name, wants)| Feature { name, wants }),
+    );
+    if declared.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("[features]\n");
+    for Feature { name, wants } in &declared {
+        let _ = writeln!(out, "{name} = [{}]", quoted(wants));
+    }
+    out.push('\n');
     out
 }
 
@@ -128,7 +171,7 @@ pub(super) fn types_crate(contracts: &Contracts, config: &Config, supported: Lea
 /// have, and a consumer could not turn it on. A JSON Schema gate also turns on the optional
 /// `schemars` dependency; a gate for open derives turns on nothing, because progeny does not know
 /// which crate a derive comes from.
-fn gate_features(contracts: &Contracts) -> BTreeMap<String, Vec<&'static str>> {
+fn gate_features(contracts: &Contracts) -> Vec<Feature> {
     let mut features: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
     for contract in contracts.types() {
         for rule in contract.extra_derives() {
@@ -144,6 +187,9 @@ fn gate_features(contracts: &Contracts) -> BTreeMap<String, Vec<&'static str>> {
         }
     }
     features
+        .iter()
+        .map(|(name, wants)| feature(name, wants))
+        .collect()
 }
 
 /// The `schemars` dependency line, when some type implements `JsonSchema`.
@@ -158,18 +204,22 @@ fn schemars_dependency(contracts: &Contracts) -> Option<&'static str> {
     })
 }
 
-pub(super) fn client_crate(api: &ApiModel, config: &Config, streams: bool) -> String {
+pub(super) fn client_crate(
+    api: &ApiModel,
+    config: &Config,
+    streams: bool,
+    baseline: &BaselineUse,
+) -> String {
     let mut out = package(&package_name(config, "client"), &config.package.version);
-    out.push_str("[features]\n");
     let default: Vec<&str> = REQWEST_FEATURES
         .iter()
         .filter_map(|(name, on)| on.then_some(*name))
         .collect();
-    let _ = writeln!(out, "default = [{}]", quoted(&default));
+    let mut features = vec![feature("default", &default)];
     for (name, _) in REQWEST_FEATURES {
-        let _ = writeln!(out, "{name} = [\"reqwest/{name}\"]");
+        features.push(feature(name, &[format!("reqwest/{name}").as_str()]));
     }
-    out.push('\n');
+    out.push_str(&features_table(features, baseline));
     out.push_str("[dependencies]\n");
     let types = package_name(config, "types");
     let _ = writeln!(
@@ -177,10 +227,9 @@ pub(super) fn client_crate(api: &ApiModel, config: &Config, streams: bool) -> St
         "{types} = {{ path = \"../{types}\", version = \"={}\" }}",
         config.package.version
     );
-    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
-    out.push_str("serde_json = \"1\"\n");
-    out.push_str("indoc = \"2\"\n");
-    out.push_str("thiserror = \"2\"\n");
+    for line in baseline.dependencies() {
+        let _ = writeln!(out, "{line}");
+    }
     out.push_str(
         "reqwest = { version = \"0.13\", default-features = false, features = [\"json\", \
          \"query\"] }\n",
@@ -198,8 +247,9 @@ pub(super) fn client_crate(api: &ApiModel, config: &Config, streams: bool) -> St
     out
 }
 
-pub(super) fn server_crate(api: &ApiModel, config: &Config) -> String {
+pub(super) fn server_crate(api: &ApiModel, config: &Config, baseline: &BaselineUse) -> String {
     let mut out = package(&package_name(config, "server"), &config.package.version);
+    out.push_str(&features_table(Vec::new(), baseline));
     out.push_str("[dependencies]\n");
     let types = package_name(config, "types");
     let _ = writeln!(
@@ -207,10 +257,9 @@ pub(super) fn server_crate(api: &ApiModel, config: &Config) -> String {
         "{types} = {{ path = \"../{types}\", version = \"={}\" }}",
         config.package.version
     );
-    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
-    out.push_str("serde_json = \"1\"\n");
-    out.push_str("indoc = \"2\"\n");
-    out.push_str("thiserror = \"2\"\n");
+    for line in baseline.dependencies() {
+        let _ = writeln!(out, "{line}");
+    }
     out.push_str("axum = \"0.8\"\n");
     out.push_str(
         "tokio = { version = \"1\", default-features = false, features = [\"rt\", \"macros\"] }\n",
@@ -285,6 +334,9 @@ fn has_raw_responses(api: &ApiModel) -> bool {
     })
 }
 
+/// The one-crate manifest.
+///
+/// `baseline` is what the crate's rendered source names of the crates every rendering may use.
 pub(super) fn render(
     contracts: &Contracts,
     api: &ApiModel,
@@ -292,15 +344,13 @@ pub(super) fn render(
     client: bool,
     server: bool,
     streams: bool,
+    baseline: &BaselineUse,
 ) -> String {
     let client_bytes = client && client_uses_bytes(api, config);
     let server_bytes = server && server_uses_bytes(api, config);
     let bytes = client_bytes || server_bytes;
-    let gates = gate_features(contracts);
     let mut out = crate_package(config);
-    if client || server || !gates.is_empty() {
-        out.push_str("[features]\n");
-    }
+    let mut features = Vec::new();
     if client || server {
         // Each half is a feature so that a consumer of one does not compile the other's HTTP stack.
         // Both are on by default because progeny only emits a module when it was asked to; turning
@@ -315,7 +365,7 @@ pub(super) fn render(
                 .filter_map(|(name, on_by_default)| on_by_default.then_some(*name));
             default.extend(on);
         }
-        let _ = writeln!(out, "default = [{}]", quoted(&default));
+        features.push(feature("default", &default));
         if client {
             let mut wants = vec!["dep:reqwest"];
             // The stream helpers ride on the client feature, because a stream is a way of calling
@@ -326,7 +376,7 @@ pub(super) fn render(
             if client_bytes {
                 wants.push("dep:bytes");
             }
-            let _ = writeln!(out, "client = [{}]", quoted(&wants));
+            features.push(feature("client", &wants));
         }
         if server {
             let wants = if server_bytes {
@@ -334,7 +384,7 @@ pub(super) fn render(
             } else {
                 vec!["dep:axum", "dep:tokio"]
             };
-            let _ = writeln!(out, "server = [{}]", quoted(&wants));
+            features.push(feature("server", &wants));
         }
         if client {
             // `reqwest` is public here — the consumer hands `with_client` a `Client` and gets one
@@ -343,25 +393,18 @@ pub(super) fn render(
             // ever adds, so a stack named here is one a consumer can never drop. Forwarding gives
             // the choice an off switch, and `default` keeps the crate working untouched.
             for (name, _) in REQWEST_FEATURES {
-                let _ = writeln!(out, "{name} = [\"reqwest?/{name}\"]");
+                features.push(feature(name, &[format!("reqwest?/{name}").as_str()]));
             }
         }
     }
     // The configuration refused a gate named like one of the features above, so each is a key of
     // its own.
-    for (feature, wants) in &gates {
-        let _ = writeln!(out, "{feature} = [{}]", quoted(wants));
-    }
-    if client || server || !gates.is_empty() {
-        out.push('\n');
-    }
+    features.extend(gate_features(contracts));
+    out.push_str(&features_table(features, baseline));
 
     out.push_str("[dependencies]\n");
-    out.push_str("serde = { version = \"1.0.164\", features = [\"derive\"] }\n");
-    out.push_str("serde_json = \"1\"\n");
-    if client || server {
-        out.push_str("indoc = \"2\"\n");
-        out.push_str("thiserror = \"2\"\n");
+    for line in baseline.dependencies() {
+        let _ = writeln!(out, "{line}");
     }
     if client {
         out.push_str(
@@ -525,18 +568,10 @@ fn collect(ty: &TypeRef, formats: &mut BTreeSet<Format>, maps: &mut bool) {
 }
 
 /// A TOML string list.
-fn quoted(names: &[&str]) -> String {
+fn quoted<S: AsRef<str>>(names: &[S]) -> String {
     names
         .iter()
-        .map(|name| format!("{name:?}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn quoted_owned(names: &[String]) -> String {
-    names
-        .iter()
-        .map(|name| format!("{name:?}"))
+        .map(|name| format!("{:?}", name.as_ref()))
         .collect::<Vec<_>>()
         .join(", ")
 }
