@@ -1525,6 +1525,9 @@ impl Reading {
                     nullable |= null;
                     Self::Strings(strings)
                 }
+                None if numbers_alike(resolved, &rest) => {
+                    rest.into_iter().next().map_or(Self::Empty, Self::One)
+                }
                 None => Self::Variants(rest),
             },
         };
@@ -3042,6 +3045,54 @@ fn same_kind(value: &Value, against: Option<&&Value>) -> bool {
 ///
 /// A branch with something to report, or a union of its own, is not folded in: it is reported and
 /// read where it is classified, and folded into the enum it would never be classified at all.
+/// Whether a branch has something to report, or a union of its own, so it is read where it is
+/// classified rather than folded into another reading.
+fn reported(view: &View) -> bool {
+    !view.uninterpreted.is_empty()
+        || !view.unknown_types.is_empty()
+        || view.conflict.is_some()
+        || view.impossible
+        || view.unions_collide
+        || view.union.is_some()
+}
+
+/// Whether every branch only lists numbers, under one `type`, `format` and signedness they all
+/// share, as `anyOf: [{type: number, enum: [-1]}, {type: number, enum: [0]}]` splits one numeric
+/// enum across branches.
+///
+/// A numeric enum reads as its number, which those three decide, so such a union reads as any one
+/// of its branches.
+/// Kept as separate variants, the first would read every number and the branches after it would
+/// never be reached.
+fn numbers_alike(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> bool {
+    let views: Vec<View> = branches
+        .iter()
+        .map(|branch| merge::view(resolved, branch))
+        .collect();
+    let Some(first) = views.first() else {
+        return false;
+    };
+    views.iter().all(|view| {
+        let numeric = view.types.as_ref().is_some_and(|types| {
+            !types.is_empty()
+                && types
+                    .iter()
+                    .all(|name| matches!(name, TypeName::Number | TypeName::Integer))
+        });
+        let listed = match (&view.enumeration, &view.constant) {
+            (Some(listed), _) => listed.iter().all(Value::is_number),
+            (None, Some(value)) => value.is_number(),
+            (None, None) => false,
+        };
+        !reported(view)
+            && numeric
+            && listed
+            && view.types == first.types
+            && view.format == first.format
+            && view.unsigned == first.unsigned
+    })
+}
+
 fn folded_strings(
     resolved: &ResolvedDocument,
     branches: &[ShapeKey],
@@ -3051,13 +3102,7 @@ fn folded_strings(
     let mut null = false;
     for branch in branches {
         let view = merge::view(resolved, branch);
-        let reported = !view.uninterpreted.is_empty()
-            || !view.unknown_types.is_empty()
-            || view.conflict.is_some()
-            || view.impossible
-            || view.unions_collide
-            || view.union.is_some();
-        if reported {
+        if reported(&view) {
             return None;
         }
         let declared = match (&view.enumeration, &view.constant) {
