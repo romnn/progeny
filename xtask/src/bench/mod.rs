@@ -35,7 +35,7 @@ use camino::Utf8PathBuf;
 use clap::Args as ClapArgs;
 use color_eyre::eyre::{self, WrapErr as _, bail};
 
-use measure::Summary;
+use measure::{Profile, Summary};
 use plan::{Target, key_of};
 
 #[derive(Debug, ClapArgs)]
@@ -132,6 +132,14 @@ pub struct Args {
     #[arg(long, value_name = "PATH", conflicts_with = "generate_only")]
     json: Option<Utf8PathBuf>,
 
+    /// Also profile one compile of each crate under this valgrind: the instructions it executes,
+    /// from cachegrind, and its peak and average heap, from massif.
+    ///
+    /// Unlike CPU time and peak RSS, these are the same on every processor, so a history recorded
+    /// on a pool of different runners can compare them from commit to commit.
+    #[arg(long, value_name = "PATH", conflicts_with = "generate_only", value_parser = program)]
+    valgrind: Option<Utf8PathBuf>,
+
     /// Internal: run one command in this fresh process and report what it cost.
     #[arg(
         long,
@@ -141,6 +149,17 @@ pub struct Args {
         hide = true
     )]
     measure: Vec<String>,
+}
+
+/// A program given on the command line, as cargo can run it from another directory: a path with a
+/// directory is made absolute, while a bare name stays one, to be looked up on `PATH`.
+fn program(given: &str) -> Result<Utf8PathBuf, String> {
+    let path = Utf8PathBuf::from(given);
+    if path.components().count() < 2 {
+        return Ok(path);
+    }
+    let absolute = std::path::absolute(&path).map_err(|error| format!("{given}: {error}"))?;
+    Utf8PathBuf::try_from(absolute).map_err(|error| format!("{given}: {error}"))
 }
 
 /// The serde strategy each variant renders with.
@@ -235,12 +254,17 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         }
     }
 
+    // Profiled once every timed repetition is done, so the instrumented compiles cost the timed
+    // ones nothing.
+    let profiles = profile_all(&subjects, args.valgrind.as_deref())?;
+
     report(&summaries);
     report_workspaces(&subjects, &summaries);
     report_packaging(&subjects, &summaries);
     compare(&subjects, &summaries);
     if let Some(path) = &args.json {
-        let entries = history_entries(&summaries, &rustc_version())?;
+        let environment = Environment::detect(args.valgrind.as_deref())?;
+        let entries = history_entries(&summaries, &profiles, &environment)?;
         std::fs::write(path, serde_json::to_string_pretty(&entries)?)
             .wrap_err_with(|| format!("writing {path}"))?;
     }
@@ -261,6 +285,30 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
+/// The valgrind profile of every target, keyed as the summaries are, or none without a valgrind.
+fn profile_all(
+    subjects: &[(String, Vec<Target>)],
+    valgrind: Option<&camino::Utf8Path>,
+) -> eyre::Result<BTreeMap<String, Profile>> {
+    let mut profiles = BTreeMap::new();
+    let Some(valgrind) = valgrind else {
+        return Ok(profiles);
+    };
+    println!();
+    for target in subjects.iter().flat_map(|(_, targets)| targets) {
+        let profile = measure::profile(target, valgrind)?;
+        println!(
+            "  {}: {} instructions, {} peak heap, {} average heap",
+            key_of(target),
+            profile.instructions,
+            format_bytes(profile.peak_heap_bytes),
+            format_bytes(profile.average_heap_bytes)
+        );
+        profiles.insert(key_of(target), profile);
+    }
+    Ok(profiles)
+}
+
 /// One point of the history, in `github-action-benchmark`'s `customSmallerIsBetter` format.
 #[derive(Debug, serde::Serialize)]
 struct HistoryEntry {
@@ -269,24 +317,69 @@ struct HistoryEntry {
     unit: &'static str,
     value: f64,
     /// Shown beside the value; half the spread of the repetitions kept.
-    range: String,
-    /// Shown in the point's tooltip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    range: Option<String>,
+    /// benchtrail's typed payload: the point's dimensions, metric and environment, and a note.
     extra: String,
 }
 
-/// The measurements as `github-action-benchmark` entries: CPU seconds and peak resident set size
-/// per variant, which a shared runner reports more steadily than wall clock.
+/// What a point was recorded with: things that move the figures without any change to the code.
+#[derive(Debug)]
+struct Environment {
+    rustc: String,
+    /// The processor as the host names it, shown beside each time.
+    cpu_name: String,
+    /// The processor's short name, [`short_cpu`], which splits each time into one series per model.
+    cpu: String,
+    /// The valgrind that counted the instructions, when any were counted.
+    valgrind: Option<String>,
+}
+
+impl Environment {
+    fn detect(valgrind: Option<&camino::Utf8Path>) -> eyre::Result<Self> {
+        let cpu_name = cpu_model();
+        let valgrind = valgrind
+            .map(|valgrind| {
+                let output = std::process::Command::new(valgrind)
+                    .arg("--version")
+                    .output()
+                    .wrap_err_with(|| format!("running {valgrind}"))?;
+                Ok::<_, eyre::Report>(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            })
+            .transpose()?;
+        Ok(Self {
+            rustc: rustc_version(),
+            cpu: short_cpu(&cpu_name),
+            cpu_name,
+            valgrind,
+        })
+    }
+}
+
+/// The measurements as `github-action-benchmark` entries: per variant, its valgrind profile when
+/// one was taken, its mean CPU time, and its mean peak resident set size.
+///
+/// Each entry carries benchtrail's typed payload.
+/// Only CPU time records the processor in its environment, so the dashboard splits it into one
+/// series per model.
+/// The profile, which no model changes, and the peak RSS, which is a question of memory rather than
+/// of the model, stay one series each.
+/// The compiler is in every environment, because a toolchain update moves every figure.
 ///
 /// A variant that kept fewer than two repetitions fails the run.
 /// One sample is a point whose noise nobody can see, and the next commit is compared against it.
 /// The range beside each mean is half the spread of what was kept.
 fn history_entries(
     summaries: &BTreeMap<String, Summary>,
-    rustc: &str,
+    profiles: &BTreeMap<String, Profile>,
+    environment: &Environment,
 ) -> eyre::Result<Vec<HistoryEntry>> {
     const MIB: f64 = 1024.0 * 1024.0;
     let mut entries = Vec::new();
     for (key, summary) in summaries {
+        let Some((document, strategy)) = key.split_once('.') else {
+            bail!("{key} names no variant, so it has no place in the history");
+        };
         let kept = summary.kept.len();
         let (Some(cpu), Some(rss)) = (summary.mean_cpu(), summary.mean_rss()) else {
             bail!("{key} kept no repetition, so there is nothing to record for it");
@@ -294,35 +387,114 @@ fn history_entries(
         if kept < 2 {
             bail!("{key} kept {kept} repetition, and a point in the history needs two");
         }
+        let typed = |metric: &str, label: &str, recorded: serde_json::Value, text: &str| {
+            typed_extra([document, strategy], [metric, label], &recorded, text)
+        };
+        let rustc = &environment.rustc;
+
+        if let Some(profile) = profiles.get(key) {
+            let Some(valgrind) = &environment.valgrind else {
+                bail!("{key} has a valgrind profile but no valgrind that took it");
+            };
+            let recorded = serde_json::json!({"rustc": rustc, "valgrind": valgrind});
+            let figures = [
+                (
+                    "instructions",
+                    "Instructions (cachegrind)",
+                    "count",
+                    as_f64(profile.instructions),
+                    "cachegrind",
+                ),
+                (
+                    "peak heap",
+                    "Peak heap (massif)",
+                    "MiB",
+                    as_f64(profile.peak_heap_bytes) / MIB,
+                    "massif",
+                ),
+                (
+                    "average heap",
+                    "Average heap (massif)",
+                    "MiB",
+                    as_f64(profile.average_heap_bytes) / MIB,
+                    "massif",
+                ),
+            ];
+            for (metric, label, unit, value, tool) in figures {
+                entries.push(HistoryEntry {
+                    name: format!("{key} {metric}"),
+                    unit,
+                    value,
+                    range: None,
+                    extra: typed(
+                        metric,
+                        label,
+                        recorded.clone(),
+                        &format!("one {tool} run; {valgrind}; {rustc}"),
+                    ),
+                });
+            }
+        }
         let cpu_samples = summary.kept.iter().map(|sample| sample.cpu_seconds);
         let rss_samples = summary
             .kept
             .iter()
             .map(|sample| as_f64(sample.peak_rss_bytes) / MIB);
-        // The compiler is named beside each point because a toolchain update moves every one.
-        let extra = format!(
-            "{kept} kept, {} discarded, {rustc}",
-            summary.discarded + summary.pressured
+        let text = format!(
+            "{kept} kept, {} discarded; {}; {rustc}",
+            summary.discarded + summary.pressured,
+            environment.cpu_name
         );
         entries.push(HistoryEntry {
             name: format!("{key} cpu"),
             unit: "s",
             value: cpu,
-            range: format!("± {:.2}", half_spread(cpu_samples)),
-            extra: extra.clone(),
+            range: Some(format!("± {:.2}", half_spread(cpu_samples))),
+            extra: typed(
+                "cpu",
+                "CPU time",
+                serde_json::json!({"rustc": rustc, "cpu": environment.cpu}),
+                &text,
+            ),
         });
         entries.push(HistoryEntry {
             name: format!("{key} peak rss"),
             unit: "MiB",
             value: as_f64(rss) / MIB,
-            range: format!("± {:.1}", half_spread(rss_samples)),
-            extra,
+            range: Some(format!("± {:.1}", half_spread(rss_samples))),
+            extra: typed(
+                "peak rss",
+                "Peak RSS",
+                serde_json::json!({"rustc": rustc}),
+                &text,
+            ),
         });
     }
     if entries.is_empty() {
         bail!("nothing was measured, so there is nothing to record");
     }
     Ok(entries)
+}
+
+/// benchtrail's typed payload for one point: its `[document, strategy]` dimensions, its
+/// `[id, label]` metric, which is always lower-is-better here, the environment it was recorded in,
+/// and a note.
+fn typed_extra(
+    [document, strategy]: [&str; 2],
+    [metric, label]: [&str; 2],
+    recorded: &serde_json::Value,
+    text: &str,
+) -> String {
+    serde_json::json!({
+        "benchtrail": {
+            "version": 1,
+            "dimensions": {"document": document, "strategy": strategy},
+            "metric": {"id": metric, "label": label, "direction": "lower"},
+            "environment": recorded,
+        },
+        "text": text,
+    })
+    .to_string()
 }
 
 /// Half the distance between the smallest and the largest value.
@@ -333,13 +505,103 @@ fn half_spread(values: impl Iterator<Item = f64> + Clone) -> f64 {
 }
 
 /// The compiler the measurements were taken with, or a placeholder when it cannot be asked.
+///
+/// That is the compiler cargo runs: `$RUSTC`, or `rustc` on `PATH`.
 fn rustc_version() -> String {
-    std::process::Command::new("rustc")
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    std::process::Command::new(rustc)
         .arg("--version")
         .output()
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map_or_else(|| "rustc unknown".to_owned(), |text| text.trim().to_owned())
+}
+
+/// The processor's model name from `/proc/cpuinfo`, or `unknown` where there is none.
+fn cpu_model() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|info| {
+            info.lines()
+                .find_map(|line| line.strip_prefix("model name"))
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(_, name)| name.trim().to_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// A processor's model name without its noise, which names one series on the dashboard.
+///
+/// Only noise goes: the vendor word, trademark marks, an Intel name's `CPU @ <frequency>`, and an
+/// AMD name's trailing `<N>-Core Processor`, which counts the host's cores rather than the
+/// runner's.
+/// The family word and every model token stay, so two models never share a name: "AMD EPYC 7763
+/// 64-Core Processor" is "EPYC 7763" and "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz" is
+/// "Xeon Platinum 8370C".
+/// Some hosts write the whole name in capitals; such a name gets the vendor's spelling, so it
+/// names the same series.
+/// A name from an unknown vendor, or one that would be left empty, stays as it is.
+fn short_cpu(raw: &str) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let words: Vec<String> = collapsed
+        .split(' ')
+        .map(|word| {
+            ["(R)", "(r)", "(TM)", "(tm)", "(C)", "(c)"]
+                .iter()
+                .fold(word.to_owned(), |word, mark| word.replace(mark, ""))
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let Some(first) = words.first() else {
+        return collapsed;
+    };
+    let Some(vendor) = ["AMD", "Intel", "Apple"]
+        .into_iter()
+        .find(|vendor| first.eq_ignore_ascii_case(vendor))
+    else {
+        return collapsed;
+    };
+    let shouted = first != vendor && !first.chars().any(|c| c.is_ascii_lowercase());
+    let mut model: Vec<String> = words
+        .into_iter()
+        .skip(1)
+        .map(|word| {
+            if shouted && word.chars().all(|c| c.is_ascii_alphabetic()) {
+                let mut word = word.to_ascii_lowercase();
+                if let Some(initial) = word.get_mut(..1) {
+                    initial.make_ascii_uppercase();
+                }
+                word
+            } else {
+                word
+            }
+        })
+        .collect();
+    // `CPU @ 2.80GHz`
+    if let [.., cpu, at, frequency] = model.as_slice()
+        && cpu.eq_ignore_ascii_case("CPU")
+        && at == "@"
+        && frequency.to_ascii_lowercase().ends_with("hz")
+    {
+        model.truncate(model.len().saturating_sub(3));
+    }
+    // `64-Core Processor` or `Processor`
+    if model
+        .last()
+        .is_some_and(|word| word.eq_ignore_ascii_case("Processor"))
+    {
+        model.pop();
+        if model
+            .last()
+            .is_some_and(|word| word.to_ascii_lowercase().ends_with("-core"))
+        {
+            model.pop();
+        }
+    }
+    if model.is_empty() {
+        return collapsed;
+    }
+    model.join(" ")
 }
 
 fn ordered_targets(targets: &[Target], rep: usize) -> Vec<&Target> {
@@ -621,10 +883,10 @@ mod tests {
 
     use color_eyre::eyre;
 
-    use super::measure::{Sample, Summary};
+    use super::measure::{Profile, Sample, Summary};
     use super::{
-        HAND_WRITTEN, Target, format_bytes, history_entries, ordered_targets, percent,
-        selected_strategies,
+        Environment, HAND_WRITTEN, Target, format_bytes, history_entries, ordered_targets, percent,
+        program, selected_strategies, short_cpu,
     };
 
     fn target(strategy: &str, member: &str) -> Target {
@@ -694,37 +956,121 @@ mod tests {
         }
     }
 
-    /// Each variant is two points in the history, its mean CPU time and its mean peak, named so a
-    /// chart per point lines up commit after commit.
+    /// The environment of a run on an EPYC 7763 whose instructions valgrind 3.22 counted.
+    fn environment() -> Environment {
+        Environment {
+            rustc: "rustc 1.99.0".to_owned(),
+            cpu_name: "AMD EPYC 7763 64-Core Processor".to_owned(),
+            cpu: "EPYC 7763".to_owned(),
+            valgrind: Some("valgrind-3.22.0".to_owned()),
+        }
+    }
+
+    /// Each variant is up to five points in the history, named so a chart per point lines up
+    /// commit after commit: its valgrind profile (instructions, peak heap and average heap), its
+    /// mean CPU time, and its mean peak RSS.
+    /// Only the CPU time records the processor, so the dashboard can split that one by model.
     #[test_util::test]
-    fn a_variant_is_recorded_as_its_cpu_time_and_peak() {
+    fn a_variant_is_recorded_as_its_count_cpu_time_and_peak() -> eyre::Result<()> {
         let summary = Summary {
             kept: vec![kept(6.0, 1024 * 1024 * 1024), kept(8.0, 1024 * 1024 * 1024)],
             discarded: 1,
             ..Summary::default()
         };
         let summaries = BTreeMap::from([("oxide.hand-written".to_owned(), summary)]);
-        // Compared as JSON, because the JSON is what the action reads.
-        let entries = serde_json::to_value(history_entries(&summaries, "rustc 1.99.0")?)?;
+        let profile = Profile {
+            instructions: 42_000_000_000,
+            peak_heap_bytes: 1024 * 1024 * 1024,
+            average_heap_bytes: 512 * 1024 * 1024,
+        };
+        let profiles = BTreeMap::from([("oxide.hand-written".to_owned(), profile)]);
+        let entries = history_entries(&summaries, &profiles, &environment())?;
+
+        // Compared as JSON, because the JSON is what the action reads, with each typed payload
+        // read back out of its string.
+        let read: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|entry| {
+                let mut value = serde_json::to_value(entry)?;
+                value["extra"] = serde_json::from_str(&entry.extra)?;
+                Ok::<_, eyre::Report>(value)
+            })
+            .collect::<Result<_, _>>()?;
+        let typed = |metric: &str, label: &str, recorded: serde_json::Value, text: &str| {
+            serde_json::json!({
+                "benchtrail": {
+                    "version": 1,
+                    "dimensions": {"document": "oxide", "strategy": "hand-written"},
+                    "metric": {"id": metric, "label": label, "direction": "lower"},
+                    "environment": recorded,
+                },
+                "text": text,
+            })
+        };
+        let text = "2 kept, 1 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.99.0";
         assert_eq!(
-            entries,
-            serde_json::json!([
-                {
+            read,
+            [
+                serde_json::json!({
+                    "name": "oxide.hand-written instructions",
+                    "unit": "count",
+                    "value": 42_000_000_000.0,
+                    "extra": typed(
+                        "instructions",
+                        "Instructions (cachegrind)",
+                        serde_json::json!({"rustc": "rustc 1.99.0", "valgrind": "valgrind-3.22.0"}),
+                        "one cachegrind run; valgrind-3.22.0; rustc 1.99.0",
+                    ),
+                }),
+                serde_json::json!({
+                    "name": "oxide.hand-written peak heap",
+                    "unit": "MiB",
+                    "value": 1024.0,
+                    "extra": typed(
+                        "peak heap",
+                        "Peak heap (massif)",
+                        serde_json::json!({"rustc": "rustc 1.99.0", "valgrind": "valgrind-3.22.0"}),
+                        "one massif run; valgrind-3.22.0; rustc 1.99.0",
+                    ),
+                }),
+                serde_json::json!({
+                    "name": "oxide.hand-written average heap",
+                    "unit": "MiB",
+                    "value": 512.0,
+                    "extra": typed(
+                        "average heap",
+                        "Average heap (massif)",
+                        serde_json::json!({"rustc": "rustc 1.99.0", "valgrind": "valgrind-3.22.0"}),
+                        "one massif run; valgrind-3.22.0; rustc 1.99.0",
+                    ),
+                }),
+                serde_json::json!({
                     "name": "oxide.hand-written cpu",
                     "unit": "s",
                     "value": 7.0,
                     "range": "± 1.00",
-                    "extra": "2 kept, 1 discarded, rustc 1.99.0",
-                },
-                {
+                    "extra": typed(
+                        "cpu",
+                        "CPU time",
+                        serde_json::json!({"rustc": "rustc 1.99.0", "cpu": "EPYC 7763"}),
+                        text,
+                    ),
+                }),
+                serde_json::json!({
                     "name": "oxide.hand-written peak rss",
                     "unit": "MiB",
                     "value": 1024.0,
                     "range": "± 0.0",
-                    "extra": "2 kept, 1 discarded, rustc 1.99.0",
-                },
-            ])
+                    "extra": typed(
+                        "peak rss",
+                        "Peak RSS",
+                        serde_json::json!({"rustc": "rustc 1.99.0"}),
+                        text,
+                    ),
+                }),
+            ]
         );
+        Ok(())
     }
 
     /// A variant that kept fewer than two repetitions fails the run rather than recording a point
@@ -738,10 +1084,49 @@ mod tests {
                 ..Summary::default()
             };
             let summaries = BTreeMap::from([("okta.hand-written".to_owned(), summary)]);
-            assert!(history_entries(&summaries, "rustc 1.99.0").is_err());
+            assert!(history_entries(&summaries, &BTreeMap::new(), &environment()).is_err());
         }
         // Nothing measured at all, as with no repetitions, is no history either.
-        assert!(history_entries(&BTreeMap::new(), "rustc 1.99.0").is_err());
+        assert!(history_entries(&BTreeMap::new(), &BTreeMap::new(), &environment()).is_err());
+    }
+
+    /// A program path with a directory is made absolute, because cargo runs it from the generated
+    /// crate's directory, and a bare name stays a name for `PATH` to resolve.
+    #[test_util::test]
+    fn a_program_path_survives_a_change_of_directory() -> eyre::Result<()> {
+        assert_eq!(
+            program("valgrind").map_err(|error| eyre::eyre!(error))?,
+            "valgrind"
+        );
+        let relative = program("tools/valgrind").map_err(|error| eyre::eyre!(error))?;
+        assert!(relative.is_absolute(), "{relative}");
+        assert!(relative.ends_with("tools/valgrind"), "{relative}");
+        Ok(())
+    }
+
+    /// A processor's short name keeps its family and model and drops only the vendor, the marks,
+    /// the frequency and the core count, so each model is one series however its host spells it.
+    #[test]
+    fn a_processor_is_named_by_its_family_and_model() {
+        for (raw, short) in [
+            ("AMD EPYC 7763 64-Core Processor", "EPYC 7763"),
+            ("AMD EPYC 9V74 80-Core Processor", "EPYC 9V74"),
+            (
+                "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+                "Xeon Platinum 8370C",
+            ),
+            // Shouted, it is the same model.
+            (
+                "INTEL(R) XEON(R) PLATINUM 8573C CPU @ 2.80GHZ",
+                "Xeon Platinum 8573C",
+            ),
+            ("Apple M3 Pro", "M3 Pro"),
+            // An unknown vendor, or nothing past the vendor, stays as it is.
+            ("Neoverse-N1", "Neoverse-N1"),
+            ("AMD   Processor", "AMD Processor"),
+        ] {
+            assert_eq!(short_cpu(raw), short, "{raw}");
+        }
     }
 
     #[test]

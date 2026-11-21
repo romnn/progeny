@@ -5,10 +5,14 @@
 //! did, and whether memory was thin enough to make the peak a floor. What the *recorded* numbers
 //! have to satisfy before they may be quoted is [`super::baseline`]'s question.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::process::Command;
 use std::time::Duration;
 
 use color_eyre::eyre::{self, ContextCompat, WrapErr, bail};
+
+use camino::Utf8Path;
 
 use super::Args;
 use super::plan::Target;
@@ -155,6 +159,184 @@ impl Summary {
     }
 }
 
+/// Remove the target's own compiled output, keeping its dependencies built.
+///
+/// A cached crate measures nothing.
+/// Package selection is mandatory in a generated workspace: cleaning one member and then checking
+/// workspace defaults made alternating repetitions pay for different sets of crates.
+fn clean(target: &Target) -> eyre::Result<()> {
+    let cleaned = Command::new("cargo")
+        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
+        .args(["clean", "--quiet", "-p", &target.package, "--manifest-path"])
+        .arg(target.directory.join("Cargo.toml"))
+        .status()
+        .wrap_err("running cargo clean")?;
+    if !cleaned.success() {
+        bail!("cargo clean failed for {}", target.package);
+    }
+    Ok(())
+}
+
+/// What one compile of a target's library costs under valgrind, which no processor changes.
+///
+/// CPU time and peak RSS move with the runner's processor and the machine's state; these figures
+/// do not, because valgrind runs the compiler on a synthetic CPU of its own and counts what it
+/// executes and allocates.
+#[derive(Debug)]
+pub(crate) struct Profile {
+    /// The instructions the compile executed, counted by cachegrind.
+    pub(crate) instructions: u64,
+    /// The most heap the compile held at once, its allocator's overhead included, from massif.
+    pub(crate) peak_heap_bytes: u64,
+    /// The heap the compile held on average over its instructions, from massif's snapshots.
+    pub(crate) average_heap_bytes: u64,
+}
+
+/// Profile one compile of the target's library under cachegrind, then one under massif.
+///
+/// Only the rustc that compiles the target's own library runs under valgrind.
+/// Cargo marks that invocation with `CARGO_PRIMARY_PACKAGE`, so its probes and any dependency it
+/// builds stay native and outside the figures.
+pub(super) fn profile(target: &Target, valgrind: &Utf8Path) -> eyre::Result<Profile> {
+    let instructions = instructions_in(&under_valgrind(target, valgrind, "cachegrind")?)?;
+    let (peak_heap_bytes, average_heap_bytes) =
+        heap_in(&under_valgrind(target, valgrind, "massif")?)?;
+    Ok(Profile {
+        instructions,
+        peak_heap_bytes,
+        average_heap_bytes,
+    })
+}
+
+/// Compile the target's library once, its rustc under the valgrind `tool`, and return what the
+/// tool wrote.
+fn under_valgrind(target: &Target, valgrind: &Utf8Path, tool: &str) -> eyre::Result<String> {
+    let scratch = crate::generated::scratch_root();
+    let wrapper = scratch.join("valgrind-rustc.sh");
+    std::fs::write(&wrapper, VALGRIND_WRAPPER).wrap_err_with(|| format!("writing {wrapper}"))?;
+    // Valgrind runs only on Unix, where cargo needs the wrapper to be executable.
+    #[cfg(unix)]
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .wrap_err_with(|| format!("making {wrapper} executable"))?;
+    let out = scratch.join(tool).join(super::key_of(target));
+    if out.exists() {
+        std::fs::remove_dir_all(&out).wrap_err_with(|| format!("emptying {out}"))?;
+    }
+    std::fs::create_dir_all(&out).wrap_err_with(|| format!("creating {out}"))?;
+
+    clean(target)?;
+    let mut command = crate::generated::cargo(&target.directory);
+    disable_incremental(&mut command);
+    command
+        .env("RUSTC_WRAPPER", &wrapper)
+        .env("PROGENY_VALGRIND", valgrind)
+        .env("PROGENY_VALGRIND_TOOL", tool)
+        .env("PROGENY_VALGRIND_OUT", out.join(format!("{tool}.%p")))
+        .args(["check", "--quiet", "--lib"]);
+    select_package(
+        &mut command,
+        &target.package,
+        &target.directory.join("Cargo.toml"),
+    );
+    let status = command
+        .status()
+        .wrap_err_with(|| format!("compiling {} under {tool}", target.directory))?;
+    if !status.success() {
+        bail!("`cargo check` under {tool} failed for {}", target.directory);
+    }
+
+    // One fresh output file proves the library was compiled once, rather than taken from a cache.
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&out)
+        .wrap_err_with(|| format!("reading {out}"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<_, _>>()?;
+    let [file] = files.as_slice() else {
+        bail!(
+            "expected one compile of {} under {tool}, found {} outputs in {out}",
+            target.package,
+            files.len()
+        );
+    };
+    std::fs::read_to_string(file).wrap_err_with(|| format!("reading {}", file.display()))
+}
+
+/// Runs the rustc that compiles the library of the package cargo was asked for under a valgrind
+/// tool, and every other rustc as it is.
+///
+/// Cargo marks the package's build script as primary too.
+/// A build script always compiles as a binary, which `cargo check --lib` builds nothing else as, so
+/// it is told apart by its crate type.
+/// `-q` keeps valgrind's own messages off the compiler's stderr, which cargo reads as JSON, and
+/// `--command-line-only` keeps a `.valgrindrc` or `VALGRIND_OPTS` from changing what is measured.
+/// Cachegrind simulates no cache by default, so it counts instructions alone.
+const VALGRIND_WRAPPER: &str = indoc::indoc! {r#"
+    #!/bin/sh
+    case " $* " in
+        *" --crate-type bin "*) exec "$@" ;;
+    esac
+    if [ -n "$CARGO_PRIMARY_PACKAGE" ]; then
+        exec "$PROGENY_VALGRIND" -q --command-line-only=yes --tool="$PROGENY_VALGRIND_TOOL" \
+            --"$PROGENY_VALGRIND_TOOL"-out-file="$PROGENY_VALGRIND_OUT" "$@"
+    fi
+    exec "$@"
+"#};
+
+/// The instruction count on the `summary:` line of a cachegrind output file.
+fn instructions_in(output: &str) -> eyre::Result<u64> {
+    let count = output
+        .lines()
+        .find_map(|line| line.strip_prefix("summary:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|count| count.parse::<u64>().ok())
+        .context("the cachegrind output has no summary line")?;
+    if count == 0 {
+        bail!("cachegrind counted no instructions");
+    }
+    Ok(count)
+}
+
+/// The peak and the average heap in a massif output file, each with its allocator overhead.
+///
+/// Massif's snapshots are taken at instruction counts, and each one's heap holds until the next,
+/// so the average weighs a snapshot by the instructions until the following one.
+/// It ends at the last snapshot massif kept, so it is an estimate over the snapshots rather than
+/// over every instruction.
+fn heap_in(output: &str) -> eyre::Result<(u64, u64)> {
+    let mut snapshots: Vec<(u64, u64)> = Vec::new();
+    let mut time = None;
+    let mut heap = None;
+    for line in output.lines() {
+        let number = |prefix: &str| {
+            line.strip_prefix(prefix)
+                .and_then(|n| n.parse::<u64>().ok())
+        };
+        if let Some(at) = number("time=") {
+            time = Some(at);
+        } else if let Some(bytes) = number("mem_heap_B=") {
+            heap = Some(bytes);
+        } else if let Some(extra) = number("mem_heap_extra_B=")
+            && let (Some(at), Some(bytes)) = (time.take(), heap.take())
+        {
+            snapshots.push((at, bytes + extra));
+        }
+    }
+    let (Some(&(first, _)), Some(&(last, _))) = (snapshots.first(), snapshots.last()) else {
+        bail!("the massif output has no snapshots");
+    };
+    let peak = snapshots.iter().map(|&(_, bytes)| bytes).max().unwrap_or(0);
+    if last <= first || peak == 0 {
+        bail!("massif recorded no heap over the compile");
+    }
+    let weighted: u128 = snapshots
+        .iter()
+        .zip(snapshots.iter().skip(1))
+        .map(|(&(at, bytes), &(next, _))| u128::from(bytes) * u128::from(next - at))
+        .sum();
+    let average = u64::try_from(weighted / u128::from(last - first))
+        .wrap_err("the average heap does not fit in 64 bits")?;
+    Ok((peak, average))
+}
+
 /// Compile the crate once without measuring, so its dependencies are built and cached.
 pub(super) fn warm_up(target: &Target) -> eyre::Result<()> {
     let mut command = crate::generated::cargo(&target.directory);
@@ -189,19 +371,7 @@ pub(crate) fn order<'a>(variants: &[&'a str], rep: usize) -> Vec<&'a str> {
 
 pub(super) fn measure_once(target: &Target, args: &Args) -> eyre::Result<Sample> {
     wait_for_quiet(args.max_load, args.max_wait)?;
-
-    // A cached crate measures nothing. Package selection is mandatory in a generated workspace:
-    // cleaning one member and then checking workspace defaults made alternating repetitions pay
-    // for different sets of crates.
-    let cleaned = Command::new("cargo")
-        .env("CARGO_TARGET_DIR", crate::generated::shared_target())
-        .args(["clean", "--quiet", "-p", &target.package, "--manifest-path"])
-        .arg(target.directory.join("Cargo.toml"))
-        .status()
-        .wrap_err("running cargo clean")?;
-    if !cleaned.success() {
-        bail!("cargo clean failed for {}", target.package);
-    }
+    clean(target)?;
 
     let available_before = available_memory();
     let load_before = load_average()?;
@@ -435,7 +605,9 @@ pub(crate) fn measure_child(command: &[String]) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sample, Summary, order};
+    use color_eyre::eyre;
+
+    use super::{Sample, Summary, heap_in, instructions_in, order};
 
     #[test]
     fn compile_measurements_disable_incremental_state() {
@@ -574,5 +746,47 @@ mod tests {
         let summary = Summary::default();
         assert!((summary.worst_load() - 0.0).abs() < 1e-9);
         assert_eq!(summary.mean_cpu(), None);
+    }
+
+    /// The count is the first number on cachegrind's `summary:` line, and an output without one,
+    /// or with nothing counted, is an error rather than a zero in the history.
+    #[test_util::test]
+    fn the_count_is_read_from_the_summary_line() -> eyre::Result<()> {
+        let output = indoc::indoc! {"
+            desc: I1 cache:         32768 B, 64 B, 8-way associative
+            cmd: rustc --crate-name corpus_oxide --edition=2024 src/lib.rs
+            events: Ir
+            summary: 42849200346
+        "};
+        assert_eq!(instructions_in(output)?, 42_849_200_346);
+        assert!(instructions_in("events: Ir\n").is_err());
+        assert!(instructions_in("summary: 0\n").is_err());
+        Ok(())
+    }
+
+    /// The peak is the largest snapshot, overhead included, and the average holds each snapshot
+    /// until the next one: 100 bytes for 10 instructions, then 300 for 30, average 250.
+    #[test_util::test]
+    fn the_heap_is_read_from_the_snapshots() -> eyre::Result<()> {
+        let output = indoc::indoc! {"
+            snapshot=0
+            time=0
+            mem_heap_B=90
+            mem_heap_extra_B=10
+            mem_stacks_B=0
+            snapshot=1
+            time=10
+            mem_heap_B=280
+            mem_heap_extra_B=20
+            mem_stacks_B=0
+            snapshot=2
+            time=40
+            mem_heap_B=0
+            mem_heap_extra_B=0
+            mem_stacks_B=0
+        "};
+        assert_eq!(heap_in(output)?, (300, 250));
+        assert!(heap_in("desc: (none)\n").is_err());
+        Ok(())
     }
 }
