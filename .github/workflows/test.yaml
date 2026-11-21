@@ -52,8 +52,15 @@ jobs:
         run: task test:doc
 
   corpus:
-    name: conformance corpus
+    name: conformance corpus (${{ matrix.part }})
     runs-on: ubuntu-24.04
+    # The gates run in three jobs side by side, one per rendering they compile, because one job
+    # running them in turn took over an hour while every other check took ten minutes.
+    # Each job fetches the corpus and builds the generator itself.
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [hand-written, derive, strict]
     # Generated crates are compiled one cargo job at a time, because the largest of them need more
     # rustc than a hosted runner has memory for. That trades wall clock for finishing at all: the
     # 45 minutes this used to allow were sized for a parallel build that never once survived.
@@ -81,53 +88,63 @@ jobs:
       # Round-trip, reference resolution, dialect convergence, generation, determinism and the
       # diagnostics snapshots, for every document.
       - name: Run the corpus
+        if: matrix.part == 'hand-written'
         run: task corpus
       # Compiling every generated crate is minutes-to-hours, so pull requests compile the reviewed
       # 8-document tier and the full matrix is a deliberate, on-demand run.
       # This lints them too, with warnings denied: a warning in generated code is a defect its
       # consumer meets in their own build, about source they did not write.
       - name: Compile and lint the generated crates for the quick tier
+        if: matrix.part == 'hand-written'
         run: task corpus:compile -- --jobs 1
-      # Both serde strategies compile, because both ship. The step above uses the default, which is
-      # the hand-written path; this is the derive escape hatch a caller falls back to for a format
+      # Both serde strategies compile, because both ship. The compile above uses the default, which
+      # is the hand-written path; this is the derive escape hatch a caller falls back to for a format
       # that is not self-describing. An escape hatch nobody runs is not one.
       # Workspace packaging makes Cloudflare's derive rendering three compilation units; its
       # largest measured member is 9.19 GiB rather than the single crate's 14.7 GiB floor.
       - name: The same, with the derive escape hatch
+        if: matrix.part == 'derive'
         run: task corpus:compile -- --serde derive --jobs 1
       # Strict decoding ships a different client runtime: no read forms, no decoder, and under
       # workspace packaging a report of its own in a private support module. Its unused imports
       # went unseen while every gate compiled only the lenient default.
       - name: The same, decoding strictly
+        if: matrix.part == 'strict'
         run: task corpus:compile -- --decoding strict --jobs 1
       # Runs serde against real payloads rather than asking whether source compiles, which makes it
       # the only gate here that can catch output that is wrong on the wire. It found a `default`
       # rendered as `#[serde(default = "…")]`, which put members into 60 requests the caller never
       # set — code that generated, compiled, round-tripped and snapshotted clean.
       - name: Payload round-trips
+        if: matrix.part == 'hand-written'
         run: task payloads -- --jobs 1
       # The same payloads through the derive. The differential harness compares the two strategies
       # on one fixture; this compares each against the payloads the vendors actually wrote, and it
       # is the only gate that can tell them apart on the wire at corpus scale. They agree exactly:
       # 643 checked, 34 vendor defects tolerated, 171 not checkable, both ways.
       - name: Payload round-trips, the derive escape hatch
+        if: matrix.part == 'derive'
         run: task payloads -- --serde derive --jobs 1
       # The only gate that sends a request: the generated client of one description against the
       # generated server of the same one, over a real socket. It found two defects on its first run
       # that no amount of reading the emitted source had.
       - name: The generated client against the generated server
+        if: matrix.part == 'hand-written'
         run: task example
       # The generated form of the step above, for every servable operation of two small documents;
       # the whole tier runs nightly in `corpus-full`. Its first run found a generated server that
       # panicked at startup, which no gate that does not call `router()` could have seen.
       - name: The wire differential over the small documents
+        if: matrix.part == 'hand-written'
         run: task probe -- petstore-31 oxide
       # The derive escape hatch, over a socket: a serde-path defect that surfaces as a rejection
       # rather than a payload mismatch is exactly the probe's class, and the run above only ever
       # drives the default strategy.
       - name: The wire differential through the escape hatch
+        if: matrix.part == 'derive'
         run: task probe -- --serde derive petstore-31
       - name: Differential serde harness
+        if: matrix.part == 'strict'
         run: task differential
 
   corpus-full:
