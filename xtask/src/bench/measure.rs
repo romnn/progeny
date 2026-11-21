@@ -263,14 +263,18 @@ fn under_valgrind(target: &Target, valgrind: &Utf8Path, tool: &str) -> eyre::Res
 /// Runs the rustc that compiles the library of the package cargo was asked for under a valgrind
 /// tool, and every other rustc as it is.
 ///
-/// Cargo marks the package's build script as primary too, so that one is told apart by its crate
-/// name.
+/// Cargo marks the package's build script as primary too.
+/// A build script always compiles as a binary, which `cargo check --lib` builds nothing else as, so
+/// it is told apart by its crate type.
 /// `-q` keeps valgrind's own messages off the compiler's stderr, which cargo reads as JSON, and
 /// `--command-line-only` keeps a `.valgrindrc` or `VALGRIND_OPTS` from changing what is measured.
 /// Cachegrind simulates no cache by default, so it counts instructions alone.
 const VALGRIND_WRAPPER: &str = indoc::indoc! {r#"
     #!/bin/sh
-    if [ -n "$CARGO_PRIMARY_PACKAGE" ] && [ "$CARGO_CRATE_NAME" != build_script_build ]; then
+    case " $* " in
+        *" --crate-type bin "*) exec "$@" ;;
+    esac
+    if [ -n "$CARGO_PRIMARY_PACKAGE" ]; then
         exec "$PROGENY_VALGRIND" -q --command-line-only=yes --tool="$PROGENY_VALGRIND_TOOL" \
             --"$PROGENY_VALGRIND_TOOL"-out-file="$PROGENY_VALGRIND_OUT" "$@"
     fi
