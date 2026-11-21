@@ -11,7 +11,8 @@ use crate::contract::{
 };
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
-use crate::schema::Schema;
+use crate::resolve::ResolvedDocument;
+use crate::schema::{Schema, SchemaId};
 
 /// A request body position, lowered once per declared media type.
 ///
@@ -325,26 +326,6 @@ impl Build<'_> {
         let ContractKind::Struct { fields } = contract.kind() else {
             return Vec::new();
         };
-        // The schema this operation sends, past its references. Equal schemas share one type, so
-        // the type's origin can be another operation's schema, whose encoding may carry the
-        // `null` this one loses.
-        let mut source = entry.schema;
-        let mut followed = BTreeSet::new();
-        while let Some(id) = source
-            && followed.insert(id)
-            && let Some(target) = self.resolved.follow(id)
-        {
-            source = Some(target);
-        }
-        let names_member = |name: &str| {
-            source.is_some_and(|id| match self.resolved.schema(id) {
-                Schema::Object(object) => object
-                    .properties
-                    .as_ref()
-                    .is_some_and(|properties| properties.contains_key(name)),
-                Schema::Bool(_) => false,
-            })
-        };
         // A captured `additionalProperties` field is not a member: its entries arrive under their
         // own names, which no row can describe, and its empty wire name would claim a part
         // literally named `""`.
@@ -361,14 +342,17 @@ impl Build<'_> {
                     .map(|declared| (*declared).to_owned());
                 let json_declared = content_type.as_deref().is_some_and(is_json);
                 let part = part_of(&field.ty, json_declared, self.contracts);
-                // A body schema that only wraps its object, a nullable `oneOf` for one, does not
-                // declare the member itself; the type's origin is the closest location then.
-                let schema = match source {
-                    Some(id) if names_member(field.wire_name.as_str()) => {
-                        self.resolved.schemas().address(id).clone()
-                    }
-                    _ => contract.origin().clone(),
-                };
+                // Equal schemas share one type, whose origin can be another operation's schema, so
+                // the member is found again from the schema this operation sends.
+                let schema = entry
+                    .schema
+                    .and_then(|id| {
+                        declaring(self.resolved, id, &field.wire_name, &mut BTreeSet::new())
+                    })
+                    .map_or_else(
+                        || contract.origin().clone(),
+                        |id| self.resolved.schemas().address(id).clone(),
+                    );
                 let member = schema.child("properties").child(field.wire_name.as_str());
                 if let Some(lost) = lost_null(field, part, self.contracts)
                     && self.null_members.insert((member.to_string(), lost.clone()))
@@ -695,6 +679,37 @@ fn part_within(ty: &TypeRef, walk: Walk<'_>, followed: &mut BTreeSet<TypeIndex>)
         // faithful text form.
         TypeRef::Unit | TypeRef::Value | TypeRef::Map(_) | TypeRef::Tuple(_) => Part::JSON,
     }
+}
+
+/// The schema that declares the property `name`, reached from `id` through references and the
+/// `allOf`, `anyOf` and `oneOf` branches a body composes its object from.
+fn declaring(
+    resolved: &ResolvedDocument,
+    id: SchemaId,
+    name: &str,
+    seen: &mut BTreeSet<SchemaId>,
+) -> Option<SchemaId> {
+    if !seen.insert(id) {
+        return None;
+    }
+    if let Some(target) = resolved.follow(id) {
+        return declaring(resolved, target, name, seen);
+    }
+    let Schema::Object(object) = resolved.schema(id) else {
+        return None;
+    };
+    if object
+        .properties
+        .as_ref()
+        .is_some_and(|properties| properties.contains_key(name))
+    {
+        return Some(id);
+    }
+    [&object.all_of, &object.any_of, &object.one_of]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find_map(|&branch| declaring(resolved, branch, name, seen))
 }
 
 /// What becomes of an explicit `null` a multipart member can hold and its part cannot carry, or
@@ -1326,6 +1341,33 @@ mod tests {
             [
                 "/components/schemas/Tags/properties/tags",
                 "/components/schemas/Tags/properties/tags",
+            ]
+        );
+    }
+
+    /// A body composed with `allOf` reports each member at the branch that declares it.
+    #[test_util::test]
+    fn a_member_of_an_all_of_body_is_reported_at_its_own_branch() {
+        let document = with_paths(json!({
+            "/files": {"post": {
+                "operationId": "upload",
+                "requestBody": {"content": {"multipart/form-data": {"schema": {"allOf": [
+                    {"type": "object", "required": ["left"],
+                     "properties": {"left": {"type": ["string", "null"]}}},
+                    {"type": "object", "required": ["right"],
+                     "properties": {"right": {"type": ["string", "null"]}}},
+                ]}}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        let (_, diagnostics) = model_of(document)?;
+
+        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
+        assert_eq!(
+            multipart_nulls(&diagnostics),
+            [
+                format!("{schema}/allOf/0/properties/left"),
+                format!("{schema}/allOf/1/properties/right"),
             ]
         );
     }
