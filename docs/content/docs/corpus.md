@@ -9,11 +9,13 @@ progeny is measured against 78 real-world published API descriptions rather than
 
 ## The documents
 
-`corpus/manifest.toml` lists each document with its upstream URL and why it is in the corpus. The vendor documents are not committed — they total about 117 MB and their redistribution rights vary by publisher — so `task corpus:fetch` downloads them into `corpus/cache/`. The one exception is `corpus/specs/petstore-31.yaml`, which is hand-written, hermetic, and always available to offline tests.
+`corpus/manifest.toml` lists each document with its upstream URL and why it is in the corpus. The vendor documents are not committed — they total about 117 MB and their redistribution rights vary by publisher — so `task corpus:fetch` downloads them into `corpus/cache/`. The exceptions are the committed specs under `corpus/specs/`, such as the hand-written `petstore-31.yaml`, which are always available to offline tests.
+
+Pull requests and `main` run only pinned documents: the committed ones, and the GitHub-hosted ones the manifest fetches at a recorded commit (`rev`). Each must match the digest in its snapshot, so a publisher cannot change their result. The other documents are live vendor endpoints and run only in the nightly full corpus. Moving a pin means editing its `rev` and re-recording its snapshot with `task corpus:snapshots`, a change reviewed like any other.
 
 ## What every run checks
 
-`task corpus` runs over all 78 documents:
+`task corpus` runs over every document, and `task corpus -- --pinned` over the pinned ones:
 
 - **Round trip.** Each document is read into the model and written back, and the two are compared by value.
 - **References.** Every reference is resolved and accounted for.
@@ -34,11 +36,11 @@ Compiling a generated crate is not cheap, so the compile and payload checks run 
 | --- | --- |
 | `petstore-31` | hermetic and committed — the one document that needs no network |
 | `github-31` | 3.1, about 4 MB, the size ceiling |
-| `posthog` | 3.1, 925 `patternProperties`, 3,743 `anyOf`, 198 `const`, `prefixItems` |
+| `airflow` | 3.1, 639 `anyOf`, `prefixItems`, 626 null-type lines |
 | `cloudflare` | 3.0, very large, 29 self-contradicting example payloads |
 | `okta` | 3.0 YAML, 56 discriminators |
-| `orb` | 3.1, 19 discriminators, null-heavy |
-| `jellyfin` | 3.0, 77 `format: binary` and octet-stream bodies |
+| `lithic` | 3.1, 99 `oneOf`, 86 `const`, `patternProperties` |
+| `influxdb` | 3.0 YAML, binary bodies |
 | `oxide` | 3.0, the predecessor's flagship consumer document |
 
 Each pull request:
