@@ -120,17 +120,6 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             .args(["test", "--quiet", "--all-features", "--test", "probe"])
             .output()
             .wrap_err("running the probe")?;
-        // A document's probe binary and library are built in debug with full debug information,
-        // and the largest run to gigabytes, so each is removed once it has run: kept, they fill a
-        // hosted runner's disk before the tier is through.
-        // The dependencies the documents share stay built.
-        let cleaned = crate::generated::cargo(&directory)
-            .args(["clean", "--quiet", "-p", &config.package.name])
-            .status()
-            .wrap_err_with(|| format!("cleaning up after the probe of {name}"))?;
-        if !cleaned.success() {
-            bail!("cargo clean failed after the probe of {name}");
-        }
         if !run.status.success() {
             failures += 1;
             println!(
@@ -142,6 +131,17 @@ pub fn run(args: &Args) -> eyre::Result<()> {
                     String::from_utf8_lossy(&run.stderr)
                 }
             );
+        }
+        // A document's probe binary and library are built in debug with full debug information,
+        // and the largest run to gigabytes, so each is removed once it has run: kept, they fill a
+        // hosted runner's disk before the tier is through.
+        // The dependencies the documents share stay built.
+        let cleaned = crate::generated::cargo(&directory)
+            .args(["clean", "--quiet", "-p", &config.package.name])
+            .status()
+            .wrap_err_with(|| format!("cleaning up after the probe of {name}"))?;
+        if !cleaned.success() {
+            bail!("cargo clean failed after the probe of {name}");
         }
     }
 
