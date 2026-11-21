@@ -6,9 +6,12 @@ use super::Build;
 use super::param::param_shape;
 use crate::api::style::{self, ParamShape};
 use crate::api::{BodyContract, FormSpec, PartKind, PartSpec, Style, reading};
-use crate::contract::{ContractKind, Contracts, Format, TypeContract, TypeIndex, TypeRef};
+use crate::contract::{
+    ContractKind, Contracts, FieldContract, Format, SkipRule, TypeContract, TypeIndex, TypeRef,
+};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
+use crate::schema::Schema;
 
 /// A request body position, lowered once per declared media type.
 ///
@@ -125,7 +128,7 @@ impl Build<'_> {
     }
 
     fn body_of(
-        &self,
+        &mut self,
         media_type: &str,
         entry: &MediaType,
         required: bool,
@@ -155,7 +158,7 @@ impl Build<'_> {
                 required,
             },
             "multipart/form-data" => {
-                let parts = self.part_specs(&ty, entry);
+                let parts = self.part_specs(&ty, entry, ctx);
                 BodyContract::Multipart {
                     reading: reading::multipart(&ty, &parts, self.contracts),
                     parts,
@@ -297,7 +300,10 @@ impl Build<'_> {
     /// Read from the *contract* rather than from the schema: the contract is the frozen record of
     /// what the type actually carries, and a part list derived from anything else could describe a
     /// member the emitted type does not have.
-    fn part_specs(&self, ty: &TypeRef, entry: &MediaType) -> Vec<PartSpec> {
+    ///
+    /// A member whose explicit `null` the writer sends as absent is reported here, beside the part
+    /// it becomes, as [`BreakageClass::MultipartNull`].
+    fn part_specs(&mut self, ty: &TypeRef, entry: &MediaType, ctx: &mut Ctx) -> Vec<PartSpec> {
         let declared: BTreeMap<&str, &str> = entry
             .encoding
             .iter()
@@ -335,6 +341,37 @@ impl Build<'_> {
                     .map(|declared| (*declared).to_owned());
                 let json_declared = content_type.as_deref().is_some_and(is_json);
                 let part = part_of(&field.ty, json_declared, self.contracts);
+                let lost = lost_nulls(field, part, self.contracts);
+                if let Some(body) = entry.schema
+                    && !lost.is_empty()
+                {
+                    // Where the member is declared, so the records of one document fold by what is
+                    // lost. Without a declaration among this body's own schemas, the body itself,
+                    // naming the member: never another operation's schema.
+                    let (location, detail) = match self.member(entry, &field.wire_name) {
+                        Some(member) => (member, "a multipart member".to_owned()),
+                        // Where the body's schema was written, which a referenced request body
+                        // has too.
+                        None => (
+                            self.resolved.schemas().address(body).clone(),
+                            format!("the multipart member `{}`", field.wire_name),
+                        ),
+                    };
+                    for lost in lost {
+                        if self.null_members.insert((
+                            location.clone(),
+                            field.wire_name.clone(),
+                            lost,
+                        )) {
+                            ctx.report(Diagnostic::new(
+                                BreakageClass::MultipartNull,
+                                Action::Degrade,
+                                location.clone(),
+                                format!("{detail} can hold an explicit `null`, and {lost}"),
+                            ));
+                        }
+                    }
+                }
                 PartSpec {
                     kind: part.kind,
                     repeated: part.repeated,
@@ -344,6 +381,31 @@ impl Build<'_> {
                 }
             })
             .collect()
+    }
+
+    /// Where the body this operation sends declares the member `name`, among the schemas its own
+    /// type is built from.
+    ///
+    /// Equal schemas share one type, whose origin can be another operation's schema, so the type's
+    /// origin is never used.
+    fn member(&self, entry: &MediaType, name: &str) -> Option<JsonPointer> {
+        let declaring = entry.schema.and_then(|body| {
+            crate::shape::key_of(self.resolved, body)
+                .parts()
+                .iter()
+                .map(|part| part.id())
+                .find(|&id| {
+                    matches!(self.resolved.schema(id), Schema::Object(object)
+                        if object.properties.as_ref().is_some_and(|properties| properties.contains_key(name)))
+                })
+        });
+        declaring.map(|id| {
+            self.resolved
+                .schemas()
+                .address(id)
+                .child("properties")
+                .child(name)
+        })
     }
 
     /// Which media type a response position decodes: the configured pick, or the fixed
@@ -596,7 +658,10 @@ fn part_within(ty: &TypeRef, walk: Walk<'_>, followed: &mut BTreeSet<TypeIndex>)
                 keeps_text: element.keeps_text && !element.repeated,
             }
         }
-        // A number or a boolean is written as its text, which is also its JSON.
+        // A number or a boolean is written as its text, which is also its JSON, so the encoding
+        // declaring JSON changes no byte of a value.
+        // It makes the part JSON all the same, because only a JSON part carries an explicit `null`.
+        TypeRef::Bool | TypeRef::Integer(_) | TypeRef::F64 if walk.json_declared => Part::JSON,
         // Raw binary is no string: a text part cannot carry bytes that are not UTF-8.
         TypeRef::Bool | TypeRef::Integer(_) | TypeRef::F64 | TypeRef::Format(Format::Binary) => {
             Part::text(false)
@@ -644,6 +709,82 @@ fn part_within(ty: &TypeRef, walk: Walk<'_>, followed: &mut BTreeSet<TypeIndex>)
         // A map, a tuple or a degraded `Value` is structured, and structured members have no
         // faithful text form.
         TypeRef::Unit | TypeRef::Value | TypeRef::Map(_) | TypeRef::Tuple(_) => Part::JSON,
+    }
+}
+
+/// Each way an explicit `null` the member can hold is lost on the way into its parts.
+fn lost_nulls(field: &FieldContract, part: Part, contracts: &Contracts) -> Vec<&'static str> {
+    let mut lost = Vec::new();
+    if sends_null(field, contracts) {
+        if part.repeated {
+            lost.push("a `null` list has no spelling as repeated parts, so it is sent as absent");
+        } else if part.kind != PartKind::Json {
+            lost.push("a text or file part cannot carry a `null`, so it is sent as absent");
+        }
+    }
+    if part.repeated
+        && part.kind != PartKind::Json
+        && element_of(&field.ty, contracts).is_some_and(|element| holds_null(element, contracts))
+    {
+        lost.push("a `null` element has no spelling as a text or file part, so it is left out");
+    }
+    lost
+}
+
+/// Whether the member's serialized form can write an explicit `null` for the member itself.
+///
+/// The skip rule decides: a member left out when `None` writes no `null` for that `None`, and a
+/// presence-preserving one writes `null` for its null state.
+fn sends_null(field: &FieldContract, contracts: &Contracts) -> bool {
+    match (field.skip_serializing_if, &field.ty) {
+        (SkipRule::WhenOmitted, _) => true,
+        (SkipRule::Never, ty) => holds_null(ty, contracts),
+        (SkipRule::WhenNone, TypeRef::Option(inner)) => holds_null(inner, contracts),
+        (SkipRule::WhenNone, _) => false,
+    }
+}
+
+/// Whether a value of this type can serialize to `null`.
+fn holds_null(ty: &TypeRef, contracts: &Contracts) -> bool {
+    holds_null_within(ty, contracts, &mut BTreeSet::new())
+}
+
+/// [`holds_null`], remembering the named types already met so a recursive type ends.
+///
+/// An untagged union writes whichever branch it holds as that branch alone, so it can write
+/// `null` when any branch can.
+fn holds_null_within(
+    ty: &TypeRef,
+    contracts: &Contracts,
+    followed: &mut BTreeSet<TypeIndex>,
+) -> bool {
+    match contracts.unaliased(ty) {
+        TypeRef::Option(_) | TypeRef::Presence(_) | TypeRef::Unit | TypeRef::Value => true,
+        TypeRef::Boxed(inner) => holds_null_within(inner, contracts, followed),
+        TypeRef::Named(index) if followed.insert(*index) => {
+            match contracts.get(*index).map(TypeContract::kind) {
+                Some(ContractKind::Enum { variants, .. }) => variants
+                    .iter()
+                    .any(|variant| holds_null_within(&variant.ty, contracts, followed)),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The element type of the sequence a repeated member holds, through the wrappers and aliases
+/// [`part_within`] looks through on its way to the sequence.
+fn element_of<'a>(ty: &'a TypeRef, contracts: &'a Contracts) -> Option<&'a TypeRef> {
+    let mut ty = ty;
+    loop {
+        match contracts.unaliased(ty) {
+            TypeRef::Vec(inner) | TypeRef::Array(inner, _) => return Some(inner),
+            TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
+                ty = inner;
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -864,8 +1005,9 @@ mod tests {
     ///
     /// That holds for every string on the wire, through names and lists, and a list stays one part
     /// per element.
-    /// A number's text is already its JSON, and base64 text encodes the declared content rather
-    /// than being it, so both stay text parts.
+    /// A number or a boolean declared JSON is a JSON part too: its text is already its JSON, and
+    /// only a JSON part carries an explicit `null`.
+    /// Base64 text encodes the declared content rather than being it, so it stays a text part.
     #[test_util::test]
     fn a_string_whose_encoding_declares_json_is_a_json_part() {
         use crate::api::PartKind::{Json, Text};
@@ -886,6 +1028,8 @@ mod tests {
                             "type": ["array", "null"], "items": {"$ref": "#/components/schemas/Subject"},
                         }},
                         "count": {"type": "integer"},
+                        "flag": {"type": "boolean"},
+                        "ratio": {"type": "number"},
                         "encoded": {"type": "string", "contentEncoding": "base64"},
                     },
                 }, "encoding": {
@@ -896,6 +1040,8 @@ mod tests {
                     "names": json.clone(),
                     "nested": json.clone(),
                     "count": json.clone(),
+                    "flag": json.clone(),
+                    "ratio": json.clone(),
                     "encoded": json,
                 }}}},
                 "responses": {"204": {"description": "done"}},
@@ -943,9 +1089,342 @@ mod tests {
         assert_eq!(part("nested"), Some((Json, true, false, Reading::Keep)));
         // The same string with no encoding is a text part that keeps its text.
         assert_eq!(part("bare"), Some((Text, false, true, Reading::Keep)));
-        // A number declared JSON is already JSON as text, and base64 text keeps its bytes.
-        assert_eq!(part("count"), Some((Text, false, false, Reading::Spelled)));
+        // Numbers and booleans declared JSON are JSON parts the server parses back.
+        for wire in ["count", "flag", "ratio"] {
+            assert_eq!(
+                part(wire),
+                Some((Json, false, false, Reading::Keep)),
+                "{wire}"
+            );
+        }
+        // Base64 text keeps its bytes.
         assert_eq!(part("encoded"), Some((Text, false, true, Reading::Keep)));
+    }
+
+    /// Every member the `multipart-null` records of a model stand for, sorted.
+    ///
+    /// The class folds per document, so a record names its first member as its location and the
+    /// rest as related locations; a member reported twice appears twice.
+    fn multipart_nulls(diagnostics: &[crate::Diagnostic]) -> Vec<String> {
+        let mut members: Vec<String> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.class() == crate::BreakageClass::MultipartNull)
+            .flat_map(|diagnostic| {
+                std::iter::once(diagnostic.location())
+                    .chain(diagnostic.related())
+                    .map(ToString::to_string)
+            })
+            .collect();
+        members.sort();
+        members
+    }
+
+    /// Every member whose explicit `null` the writer sends as absent is reported once, and a
+    /// member whose `null` reaches the wire is not.
+    ///
+    /// The writer carries a single JSON part's `null` and a repeated JSON member's `null` elements,
+    /// and drops a text or file part's `null` and a repeated member's `null` as a whole.
+    #[test_util::test]
+    fn a_null_a_multipart_part_cannot_carry_is_reported() {
+        let json = json!({"contentType": "application/json"});
+        let document = with_paths(json!({
+            "/files": {"post": {
+                "operationId": "upload",
+                "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {
+                    "type": "object",
+                    "required": ["note", "file", "list", "meta", "count"],
+                    "properties": {
+                        // Reported: a text or file part that can be `null`
+                        "note": {"type": ["string", "null"]},
+                        "kept": {"type": ["string", "null"]},
+                        "file": {"type": ["string", "null"], "format": "binary"},
+                        // Reported: `null` elements of a text list, and a `null` list
+                        "tags": {"type": "array", "items": {"type": ["string", "null"]}},
+                        "list": {"type": ["array", "null"], "items": {
+                            "type": "object", "properties": {"k": {"type": "string"}},
+                        }},
+                        // Not reported: JSON parts carry `null`, and the rest never write one
+                        "meta": {"type": ["object", "null"], "properties": {"k": {"type": "string"}}},
+                        "count": {"type": ["integer", "null"]},
+                        "ids": {"type": "array", "items": {"type": ["integer", "null"]}},
+                        "plain": {"type": "string"},
+                    },
+                }, "encoding": {"count": json.clone(), "ids": json}}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        // `kept` is optional, so it can hold an explicit `null` only while presence is preserved.
+        let config = Config {
+            preserve_optional_nullable: true,
+            ..Config::default()
+        };
+        let (_, diagnostics) = model_with(document, &config)?;
+
+        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
+        let reported = multipart_nulls(&diagnostics);
+        let expected: Vec<String> = ["file", "kept", "list", "note", "tags"]
+            .iter()
+            .map(|name| format!("{schema}/properties/{name}"))
+            .collect();
+        assert_eq!(reported, expected);
+    }
+
+    /// A member is a schema property, so two operations sending one component report its member
+    /// once, while two schemas that merely share a field name are two members.
+    #[test_util::test]
+    fn a_multipart_member_is_reported_once_whichever_operations_send_it() {
+        let shared = |id: &str| {
+            json!({"post": {
+                "operationId": id,
+                "requestBody": {"content": {"multipart/form-data": {
+                    "schema": {"$ref": "#/components/schemas/Note"},
+                }}},
+                "responses": {"204": {"description": "done"}},
+            }})
+        };
+        let inline = json!({"post": {
+            "operationId": "third",
+            "requestBody": {"content": {"multipart/form-data": {"schema": {
+                "type": "object",
+                "required": ["note"],
+                "properties": {
+                    "note": {"type": ["string", "null"]},
+                    "title": {"type": "string"},
+                },
+            }}}},
+            "responses": {"204": {"description": "done"}},
+        }});
+        let mut document = with_paths(json!({
+            "/first": shared("first"),
+            "/second": shared("second"),
+            "/third": inline,
+        }));
+        document["components"] = json!({"schemas": {"Note": {
+            "type": "object",
+            "required": ["note"],
+            "properties": {"note": {"type": ["string", "null"]}},
+        }}});
+        let (_, diagnostics) = model_of(document)?;
+
+        // The shared component's member once, and the inline schema's member of the same name
+        // on its own: the inline schema has a member `Note` lacks, so it is another type rather
+        // than the same one met again.
+        let reported = multipart_nulls(&diagnostics);
+        assert_eq!(
+            reported,
+            [
+                "/components/schemas/Note/properties/note",
+                "/paths/~1third/post/requestBody/content/multipart~1form-data/schema/properties/note",
+            ]
+        );
+    }
+
+    /// Equal inline schemas share one type whose origin is the first of them, so a member is
+    /// reported at the schema of the operation that loses its `null`, not at the one whose
+    /// encoding carries it.
+    #[test_util::test]
+    fn a_lost_null_is_reported_at_the_schema_of_the_operation_that_loses_it() {
+        let operation = |id: &str, encoding: Value| {
+            json!({"post": {
+                "operationId": id,
+                "requestBody": {"content": {"multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["note"],
+                        "properties": {"note": {"type": ["string", "null"]}},
+                    },
+                    "encoding": encoding,
+                }}},
+                "responses": {"204": {"description": "done"}},
+            }})
+        };
+        let document = with_paths(json!({
+            "/a": operation("first", json!({"note": {"contentType": "application/json"}})),
+            "/b": operation("second", json!({})),
+        }));
+        let (_, diagnostics) = model_of(document)?;
+
+        assert_eq!(
+            multipart_nulls(&diagnostics),
+            ["/paths/~1b/post/requestBody/content/multipart~1form-data/schema/properties/note"]
+        );
+    }
+
+    /// One member sent by two operations whose encodings lose its `null` in different ways is
+    /// reported for each way, whichever operation comes first.
+    #[test_util::test]
+    fn each_way_a_shared_member_loses_its_null_is_reported() {
+        let operation = |id: &str, encoding: Value| {
+            json!({"post": {
+                "operationId": id,
+                "requestBody": {"content": {"multipart/form-data": {
+                    "schema": {"$ref": "#/components/schemas/Tags"},
+                    "encoding": encoding,
+                }}},
+                "responses": {"204": {"description": "done"}},
+            }})
+        };
+        let mut document = with_paths(json!({
+            "/a": operation("first", json!({"tags": {"contentType": "application/json"}})),
+            "/b": operation("second", json!({})),
+        }));
+        document["components"] = json!({"schemas": {"Tags": {
+            "type": "object",
+            "required": ["tags"],
+            "properties": {"tags": {
+                "type": ["array", "null"],
+                "items": {"type": ["string", "null"]},
+            }},
+        }}});
+        let (_, diagnostics) = model_of(document)?;
+
+        // The JSON-encoded list keeps its `null` elements and loses only a `null` list; the text
+        // list loses both, a different loss at the same member.
+        let details: std::collections::BTreeSet<&str> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.class() == crate::BreakageClass::MultipartNull)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(details.len(), 2, "{details:?}");
+        assert_eq!(
+            multipart_nulls(&diagnostics),
+            [
+                "/components/schemas/Tags/properties/tags",
+                "/components/schemas/Tags/properties/tags",
+            ]
+        );
+    }
+
+    /// A member no schema of this body declares directly, here behind an `anyOf` two operations
+    /// share one type for, is reported at this operation's own body, naming the member: each such
+    /// member on its own.
+    #[test_util::test]
+    fn a_member_without_a_declaration_of_its_own_is_reported_at_its_body() {
+        let operation = |id: &str, encoding: Value| {
+            json!({"post": {
+                "operationId": id,
+                "requestBody": {"content": {"multipart/form-data": {
+                    "schema": {"anyOf": [
+                        {"type": "object", "required": ["note", "title"], "properties": {
+                            "note": {"type": ["string", "null"]},
+                            "title": {"type": ["string", "null"]},
+                        }},
+                        {"type": "null"},
+                    ]},
+                    "encoding": encoding,
+                }}},
+                "responses": {"204": {"description": "done"}},
+            }})
+        };
+        let document = with_paths(json!({
+            "/a": operation("first", json!({
+                "note": {"contentType": "application/json"},
+                "title": {"contentType": "application/json"},
+            })),
+            "/b": operation("second", json!({})),
+        }));
+        let (_, diagnostics) = model_of(document)?;
+
+        let mut records: Vec<(String, &str)> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.class() == crate::BreakageClass::MultipartNull)
+            .map(|diagnostic| (diagnostic.location().to_string(), diagnostic.detail()))
+            .collect();
+        records.sort();
+        let body = "/paths/~1b/post/requestBody/content/multipart~1form-data/schema";
+        let [(first, note), (second, title)] = records.as_slice() else {
+            eyre::bail!("one record per member of `/b` alone: {records:?}");
+        };
+        assert_eq!((first.as_str(), second.as_str()), (body, body));
+        assert!(note.contains("`note`"), "{note}");
+        assert!(title.contains("`title`"), "{title}");
+    }
+
+    /// A referenced request body reports at the schema where it is written, a pointer that exists.
+    #[test_util::test]
+    fn a_referenced_request_body_reports_where_its_schema_is_written() {
+        let mut document = with_paths(json!({
+            "/upload": {"post": {
+                "operationId": "upload",
+                "requestBody": {"$ref": "#/components/requestBodies/Upload"},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        document["components"] = json!({"requestBodies": {"Upload": {"content": {
+            "multipart/form-data": {"schema": {"anyOf": [
+                {"type": "object", "required": ["note"],
+                 "properties": {"note": {"type": ["string", "null"]}}},
+                {"type": "null"},
+            ]}},
+        }}}});
+        let (_, diagnostics) = model_of(document)?;
+
+        let reported = multipart_nulls(&diagnostics);
+        assert_eq!(
+            reported,
+            ["/components/requestBodies/Upload/content/multipart~1form-data/schema"]
+        );
+    }
+
+    /// A `$ref` beside the `allOf` does not hide the branches: each member is still reported where
+    /// it is declared.
+    #[test_util::test]
+    fn a_reference_beside_all_of_keeps_each_member_at_its_branch() {
+        let mut document = with_paths(json!({
+            "/files": {"post": {
+                "operationId": "upload",
+                "requestBody": {"content": {"multipart/form-data": {"schema": {
+                    "$ref": "#/components/schemas/Base",
+                    "allOf": [
+                        {"type": "object", "required": ["left"],
+                         "properties": {"left": {"type": ["string", "null"]}}},
+                        {"type": "object", "required": ["right"],
+                         "properties": {"right": {"type": ["string", "null"]}}},
+                    ],
+                }}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        document["components"] = json!({"schemas": {"Base": {
+            "type": "object", "properties": {"id": {"type": "string"}},
+        }}});
+        let (_, diagnostics) = model_of(document)?;
+
+        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
+        assert_eq!(
+            multipart_nulls(&diagnostics),
+            [
+                format!("{schema}/allOf/0/properties/left"),
+                format!("{schema}/allOf/1/properties/right"),
+            ]
+        );
+    }
+
+    /// A union of strings is a text part, and a nullable branch makes it able to hold `null`.
+    #[test_util::test]
+    fn a_text_union_with_a_nullable_branch_reports_its_lost_null() {
+        let document = with_paths(json!({
+            "/files": {"post": {
+                "operationId": "upload",
+                "requestBody": {"content": {"multipart/form-data": {"schema": {
+                    "type": "object",
+                    "required": ["owner"],
+                    "properties": {"owner": {"anyOf": [
+                        {"type": ["string", "null"], "format": "uuid"},
+                        {"const": "me"},
+                    ]}},
+                }}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        let (_, diagnostics) = model_of(document)?;
+
+        assert_eq!(
+            multipart_nulls(&diagnostics),
+            [
+                "/paths/~1files/post/requestBody/content/multipart~1form-data/schema/properties/owner"
+            ]
+        );
     }
 
     /// A recursive member meets its own type again on the way to its part kind, and is one JSON

@@ -172,6 +172,10 @@ pub enum BreakageClass {
     /// everywhere, and the multipart parts carry the conventional filename rather than a
     /// caller-chosen one.
     EncodingCollapse,
+    /// A `multipart/form-data` member that can hold an explicit `null` its part cannot carry,
+    /// which the generated client sends as absent: a text or file part, a `null` element of a
+    /// repeated text or file member, or a `null` repeated member as a whole.
+    MultipartNull,
     /// Two shapes whose names sanitize to the same Rust identifier.
     CollidingTypeName,
     /// A derive the caller asked every type for, on a type that cannot have it.
@@ -208,7 +212,7 @@ impl BreakageClass {
             reason = "consumed by the catalogue and the completeness test, which are test-only"
         )
     )]
-    pub(crate) const ALL: [Self; 38] = [
+    pub(crate) const ALL: [Self; 39] = [
         Self::MalformedMember,
         Self::MissingFinalLineBreak,
         Self::NonFiniteNumber,
@@ -242,6 +246,7 @@ impl BreakageClass {
         Self::PresenceCollapse,
         Self::AccessCollapse,
         Self::EncodingCollapse,
+        Self::MultipartNull,
         Self::CollidingTypeName,
         Self::UnsatisfiableDerive,
         Self::NonproductiveCycle,
@@ -286,6 +291,7 @@ impl BreakageClass {
             Self::PresenceCollapse => "presence-collapse",
             Self::AccessCollapse => "access-collapse",
             Self::EncodingCollapse => "encoding-collapse",
+            Self::MultipartNull => "multipart-null",
             Self::CollidingTypeName => "colliding-type-name",
             Self::UnsatisfiableDerive => "unsatisfiable-derive",
             Self::NonproductiveCycle => "nonproductive-cycle",
@@ -353,6 +359,10 @@ impl BreakageClass {
             // no key, and the sentence differs per route. The same split `colliding-operation-id`
             // has.
             | Self::UnregistrableRoute
+            // A scale class like `presence-collapse`, which it follows into multipart bodies: a
+            // document's records fold by what is lost, each member still settled against
+            // `deny.accept` on its own.
+            | Self::MultipartNull
             | Self::UnsatisfiableDerive => Aggregation::PerDocument,
             // The first can occur at most once per document by construction; each of the rest names
             // a distinct set of document locations a reader has to look at, with no useful count to

@@ -77,6 +77,18 @@ fn wiring(class: BreakageClass) -> Wiring {
                 }},
             }),
         )),
+        // A required nullable string is a text part, which has no spelling for `null`.
+        BreakageClass::MultipartNull => Wiring::Fixture(paths(json!({
+            "/notes": {"post": {
+                "operationId": "postNote",
+                "requestBody": {"content": {"multipart/form-data": {"schema": {
+                    "type": "object",
+                    "required": ["note"],
+                    "properties": {"note": {"type": ["string", "null"]}},
+                }}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }))),
         // The marker only costs something where the type crosses the direction it excludes, so
         // the fixture needs an operation: a `readOnly` member in a request body.
         BreakageClass::AccessCollapse => Wiring::Fixture(document_with(

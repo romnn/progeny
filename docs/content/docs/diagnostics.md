@@ -72,6 +72,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `presence-collapse` | An optional and nullable property collapsed onto one `Option`. |
 | `access-collapse` | A `readOnly` or `writeOnly` property in a type that crosses the direction the marker excludes. |
 | `encoding-collapse` | A schema sent as `multipart/form-data` and also used at another wire position. |
+| `multipart-null` | A `multipart/form-data` member that can hold an explicit `null` its part cannot carry — a text or file part, a `null` element of a repeated text or file member, or a `null` repeated member as a whole — which the generated client sends as absent. A JSON part carries `null` as the JSON `null`. |
 | `colliding-type-name` | Two shapes whose names sanitize to the same Rust identifier. |
 | `unsatisfiable-derive` | A derive asked of every type, on a type that cannot have it. |
 | `nonproductive-cycle` | Schemas whose lowered types are aliases and wrappers of one another with no member, element or `null` between them, such as two single-branch `oneOf`s naming each other; no finite value is one, so each is typed as arbitrary JSON. |
