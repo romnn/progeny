@@ -690,3 +690,34 @@ fn a_family_of_one_whose_subtype_is_used_directly_carries_its_tag() {
         round_trip::<derived::types::EmailChannel, hand::types::EmailChannel>(alone)?;
     assert_eq!((left.as_str(), right.as_str()), (alone, alone));
 }
+
+/// A union beside members whose branch is itself members beside a union reads both levels and
+/// writes the same members back, the same bytes under both strategies.
+#[test_util::test]
+fn a_flattened_union_round_trips_through_a_branch_that_flattens_its_own() {
+    for payload in [
+        r#"{"type":"image","fileId":"f","startedAtMs":1}"#,
+        r#"{"type":"image","result":"r"}"#,
+        r#"{"type":"text","text":"t"}"#,
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::ThreadItem, hand::types::ThreadItem>(payload)?;
+        assert_eq!(left, right, "{payload}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&left)?,
+            serde_json::from_str::<serde_json::Value>(payload)?,
+            "{payload}"
+        );
+    }
+    // Both levels are typed: the image is its variant, and its file id the inner union's.
+    let item = serde_json::from_str::<hand::types::ThreadItem>(
+        r#"{"type":"image","fileId":"f","startedAtMs":1}"#,
+    )?;
+    let hand::types::ThreadItemVariant::Image(image) = item.variant else {
+        bail!("the image payload is not the image variant");
+    };
+    assert!(matches!(
+        image.variant,
+        hand::types::ImageThreadItemVariant::FileId(ref id) if id.as_str() == "f"
+    ));
+}
