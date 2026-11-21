@@ -657,7 +657,7 @@ fn told_apart(
 /// A declared or inherited discriminator says which branch each value is, so a union that has one
 /// is read by it instead.
 fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> Option<Shape> {
-    if view.discriminator.is_some() || shared_base_discriminator(resolved, branches).is_some() {
+    if declared_tag(resolved, view, branches).is_some() {
         return None;
     }
     let views = branches
@@ -1017,7 +1017,7 @@ fn spread_union(
     view: &View,
     rest: &[ShapeKey],
 ) -> Option<(Shape, bool)> {
-    if view.discriminator.is_some() || shared_base_discriminator(resolved, rest).is_some() {
+    if declared_tag(resolved, view, rest).is_some() {
         return None;
     }
     let mut spread = Vec::new();
@@ -1220,9 +1220,7 @@ fn flattens_within(
         || view.additional.is_some()
         || view.uniform_pattern.is_some()
         || view.uninterpreted.contains(&"patternProperties");
-    let own_tag = view
-        .discriminator
-        .as_ref()
+    let own_tag = declared_tag(resolved, view, branches)
         .is_some_and(|declared| own.contains(declared.property.as_str()));
     let distinct: BTreeSet<&ShapeKey> = branches.iter().collect();
     if distinct.len() < 2
@@ -1277,6 +1275,8 @@ fn summarize(
                     claims.extend(inner.iter().cloned());
                 }
             }
+            // The union it flattens reads its tag at this level too.
+            claims.extend(declared_tag(resolved, &view, nested).map(|declared| declared.property));
             Some(claims)
         }
         None if object && kind_of(resolved, &view) == Some(Kind::Object) => Some(claims),
@@ -1547,12 +1547,7 @@ fn tagged(
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
-    let inherited = view
-        .discriminator
-        .is_none()
-        .then(|| shared_base_discriminator(resolved, branches))
-        .flatten();
-    let Some(declared) = view.discriminator.as_ref().or(inherited.as_ref()) else {
+    let Some(declared) = declared_tag(resolved, view, branches) else {
         // No discriminator and no way to tell the variants apart. An untagged enum here picks
         // whichever variant happens to deserialize first, which is the predecessor's "wild union
         // semantics" breakage class and the one forbidden failure mode.
@@ -1568,7 +1563,7 @@ fn tagged(
         );
         return Shape::Any;
     };
-    dispatched(resolved, declared, branches, component_names)
+    dispatched(resolved, &declared, branches, component_names)
 }
 
 /// The union a family's base declares, read by its declared tag however many subtypes it lists.
@@ -2033,6 +2028,18 @@ fn admits_null_type(view: &View) -> bool {
 /// its `Verwendung` types — so several are merged when they agree, and refused when they do not:
 /// two bases naming one tag for two different schemas are two answers to "what is this", and
 /// picking one of them would be a guess.
+/// The discriminator a union over `branches` dispatches on: the one its schema declares, or else one
+/// every branch inherits from a shared base.
+fn declared_tag(
+    resolved: &ResolvedDocument,
+    view: &View,
+    branches: &[ShapeKey],
+) -> Option<Discriminated> {
+    view.discriminator
+        .clone()
+        .or_else(|| shared_base_discriminator(resolved, branches))
+}
+
 fn shared_base_discriminator(
     resolved: &ResolvedDocument,
     branches: &[ShapeKey],
