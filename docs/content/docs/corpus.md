@@ -11,7 +11,7 @@ progeny is measured against 78 real-world published API descriptions rather than
 
 `corpus/manifest.toml` lists each document with its upstream URL and why it is in the corpus. The vendor documents are not committed — they total about 117 MB and their redistribution rights vary by publisher — so `task corpus:fetch` downloads them into `corpus/cache/`. The exceptions are the committed specs under `corpus/specs/`, such as the hand-written `petstore-31.yaml`, which are always available to offline tests.
 
-Pull requests and `main` run only pinned documents: the committed ones, and the GitHub-hosted ones the manifest fetches at a recorded commit (`rev`). Each must match the digest in its snapshot, so a publisher cannot change their result. The other documents are live vendor endpoints and run only in the nightly full corpus. Moving a pin means editing its `rev` and re-recording its snapshot with `task corpus:snapshots`, a change reviewed like any other.
+Pull requests and `main` run only pinned documents: the committed ones, and the GitHub-hosted ones the manifest fetches at a recorded commit (`rev`). Each must match the digest in its snapshot, so a publisher cannot change their result. The other documents are live vendor endpoints and run only in the nightly full corpus. Moving a pin means editing its `rev`, downloading the document at that commit into its file under `corpus/cache/`, and re-recording its snapshot with `task corpus:snapshots -- --only <name>`, a change reviewed like any other.
 
 ## What every run checks
 

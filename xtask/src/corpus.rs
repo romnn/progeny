@@ -23,7 +23,8 @@ pub struct Args {
     #[arg(long)]
     fetch: bool,
 
-    /// Re-download even documents that are already cached.
+    /// Re-download even live documents that are already cached; a pinned one is downloaded only
+    /// when its cached copy does not verify.
     ///
     /// A download that fails keeps the cached copy, which is what lets CI fall back to its last
     /// good corpus when a publisher is down or has moved.
@@ -544,19 +545,37 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
     let mut failed = Vec::new();
     let mut pinned_failed = Vec::new();
     for spec in specs {
-        if spec.local {
-            continue;
-        }
         let path = document_path(spec);
         // A pinned document must be the one its snapshot was taken from, so a cached copy that is
-        // not is fetched again, and a download that is not either fails the run.
-        let recorded = spec.pinned().then(|| snapshot::read(&spec.name)).flatten();
+        // not is fetched again, and a download that is not either fails the run. A pinned document
+        // without a snapshot has nothing to be checked against, and fails too.
+        let recorded = if spec.pinned() {
+            let Some(recorded) = snapshot::read(&spec.name) else {
+                pinned_failed.push(format!("{}: no snapshot to check it against", spec.name));
+                continue;
+            };
+            Some(recorded)
+        } else {
+            None
+        };
         let current = |bytes: &[u8]| {
             recorded
                 .as_ref()
                 .is_none_or(|snapshot| snapshot.is_of(bytes))
         };
-        if path.exists() && !refresh && std::fs::read(&path).is_ok_and(|bytes| current(&bytes)) {
+        let cached = std::fs::read(&path).is_ok_and(|bytes| current(&bytes));
+        if spec.local {
+            // Committed, so there is nothing to download: an edit without a re-recorded snapshot.
+            if !cached {
+                pinned_failed.push(format!(
+                    "{}: not the document its snapshot was taken from",
+                    spec.name
+                ));
+            }
+            continue;
+        }
+        // A pinned copy that verifies is the document, so only live ones are refreshed.
+        if cached && (spec.pinned() || !refresh) {
             continue;
         }
         let Some(url) = spec.download_url() else {
@@ -1321,7 +1340,9 @@ mod tests {
     use clap::Parser as _;
     use color_eyre::eyre::{self, OptionExt as _};
 
-    use super::{Args, Outcome, Spec, require_committed, require_crate_packaging, select, verdict};
+    use super::{
+        Args, Outcome, Spec, fetch_all, require_committed, require_crate_packaging, select, verdict,
+    };
 
     /// `Args` is a subcommand's argument group, so parsing it needs something to hang it on.
     #[derive(Debug, clap::Parser)]
@@ -1429,6 +1450,24 @@ mod tests {
         let selected = select(&specs, &parse(&["--pinned"]))?;
         let names: Vec<&str> = selected.iter().map(|spec| spec.name.as_str()).collect();
         assert_eq!(names, ["petstore-31", "oxide"]);
+    }
+
+    /// A committed document is checked against its snapshot without any download, and a pinned
+    /// document with no snapshot to check against fails the fetch.
+    #[test_util::test]
+    fn pinned_documents_are_checked_against_their_snapshots() {
+        let petstore: Spec = toml::from_str(indoc::indoc! {r#"
+            name = "petstore-31"
+            file = "petstore-31.yaml"
+            local = true
+        "#})?;
+        fetch_all(&[petstore], false)?;
+
+        let unrecorded = manifest(&["no-snapshot-records-this"])?;
+        let error = fetch_all(&unrecorded, false)
+            .err()
+            .ok_or_eyre("a pinned document without a snapshot cannot be verified")?;
+        assert!(error.to_string().contains("no snapshot"), "{error}");
     }
 
     /// A pinned document can always be fetched again, so it may never be the one missing.

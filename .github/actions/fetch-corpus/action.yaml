@@ -14,8 +14,9 @@ runs:
   steps:
     # Pinned documents cannot change, so their cache is keyed by what pins them: the manifest's
     # revs and the snapshots' digests. There is no fallback to an older key, whose bytes could pass
-    # for a pin that no longer downloads. Everything else is refreshed daily, falling back to the
-    # last good copy when a publisher is down.
+    # for a pin that no longer downloads. The full corpus is refreshed daily, falling back to its
+    # last good copy when a publisher is down, under a prefix of its own so it never restores a
+    # pinned-only archive.
     - name: Corpus cache key
       id: key
       shell: bash
@@ -24,8 +25,8 @@ runs:
           echo "key=corpus-pinned-${{ hashFiles('corpus/manifest.toml', 'corpus/snapshots/**') }}" >> "$GITHUB_OUTPUT"
           echo "fallback=" >> "$GITHUB_OUTPUT"
         else
-          echo "key=corpus-${{ hashFiles('corpus/manifest.toml') }}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-          echo "fallback=corpus-" >> "$GITHUB_OUTPUT"
+          echo "key=corpus-all-${{ hashFiles('corpus/manifest.toml') }}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "fallback=corpus-all-" >> "$GITHUB_OUTPUT"
         fi
     - name: Restore the corpus
       id: cache
@@ -35,8 +36,8 @@ runs:
         key: ${{ steps.key.outputs.key }}
         restore-keys: ${{ steps.key.outputs.fallback }}
     # A pinned fetch fails when a document does not match its snapshot, so the save below never
-    # stores a wrong one. The full fetch refreshes on the day's first run and keeps the restored
-    # copy of a document whose download fails.
+    # stores a wrong one. The full fetch refreshes the live documents on the day's first run and
+    # keeps the restored copy of one whose download fails.
     - name: Fetch corpus
       shell: bash
       run: >-

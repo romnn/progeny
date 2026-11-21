@@ -8,7 +8,8 @@
 # A committed spec that cannot be read fails every corpus run, selected or not.
 # Pull requests and `main` run only pinned specs, committed or fetched at a `rev`, so a
 # publisher cannot change their result; the others run nightly. Moving a pin is editing
-# `rev` and re-recording the spec's snapshot with `task corpus:snapshots`.
+# `rev`, downloading the spec at that commit into corpus/cache/, and re-recording its
+# snapshot with `task corpus:snapshots -- --only <name>`.
 #
 # Fields:
 #   url          upstream source; absent for local specs

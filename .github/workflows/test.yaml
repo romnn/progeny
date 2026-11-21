@@ -157,6 +157,9 @@ jobs:
         run: task corpus:compile:all -- --jobs 1
       - name: The wire differential over the whole tier
         run: task probe
+      # `jellyfin` left the tier for being live, and is the corpus's only `image/*` upload.
+      - name: The wire differential over jellyfin
+        run: task probe -- jellyfin
 
   lint-generated:
     name: generated crates on Rust ${{ matrix.toolchain }}
