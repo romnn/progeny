@@ -438,3 +438,41 @@ components:
           properties:
             address:
               type: string
+    # Members beside a union one of whose branches is itself members beside a union, as
+    # `schemars` exports a flattened enum one of whose variants flattens another (#167).
+    ThreadItem:
+      type: object
+      properties:
+        startedAtMs:
+          type: [integer, "null"]
+          format: int64
+      oneOf:
+        - title: TextThreadItem
+          type: object
+          required: [type, text]
+          properties:
+            type:
+              type: string
+              enum: [text]
+            text:
+              type: string
+        - title: ImageThreadItem
+          type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [image]
+          anyOf:
+            - title: ImageFileId
+              type: object
+              required: [fileId]
+              properties:
+                fileId:
+                  type: string
+            - title: ImageResult
+              type: object
+              required: [result]
+              properties:
+                result:
+                  type: string

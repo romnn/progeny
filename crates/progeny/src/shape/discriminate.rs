@@ -26,7 +26,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{RootKind, Shape, ShapeKey, ShapeRef, Shapes, TagStyle, Union};
+use super::classify::FLATTEN_DEPTH;
+use super::{RootKind, Shape, ShapeKey, ShapeRef, Shapes, Struct, TagStyle, Union};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 
@@ -38,6 +39,7 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
         return;
     }
     let base_borrowed = borrowed_outside_tagged_unions(shapes);
+    let above = read_above(shapes);
 
     let mut modes: BTreeMap<ShapeKey, Mode> = proposed
         .iter()
@@ -50,7 +52,7 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
     // which no later round revisits.
     let mut reasons: BTreeMap<ShapeKey, String> = BTreeMap::new();
     let outcome = loop {
-        let round = evaluate(shapes, &proposed, &base_borrowed, &modes);
+        let round = evaluate(shapes, &proposed, &base_borrowed, &above, &modes);
         for (key, reason) in &round.demoted {
             reasons.entry(key.clone()).or_insert_with(|| reason.clone());
         }
@@ -162,6 +164,7 @@ fn evaluate(
     shapes: &Shapes,
     proposed: &[(ShapeKey, String)],
     base_borrowed: &BTreeSet<ShapeKey>,
+    above: &BTreeMap<ShapeKey, BTreeSet<String>>,
     modes: &BTreeMap<ShapeKey, Mode>,
 ) -> Round {
     // A carried union's variant edges are wire positions where the tag property is genuinely in
@@ -212,6 +215,21 @@ fn evaluate(
             continue;
         }
 
+        // A struct this union is flattened into reads its own fields first.
+        if above
+            .get(union_key)
+            .is_some_and(|names| names.contains(property))
+        {
+            round.modes.insert(union_key.clone(), Mode::Demoted);
+            round.demoted.push((
+                union_key.clone(),
+                format!(
+                    "a struct it is flattened into reads `{property}` as a member of its own, \
+                     before this union could"
+                ),
+            ));
+            continue;
+        }
         let shared = union.tag.as_ref().is_some_and(|tag| tag.shared);
         if let Some(reason) = refuse_outright(shapes, &named, property, shared) {
             round.modes.insert(union_key.clone(), Mode::Demoted);
@@ -334,6 +352,14 @@ fn refuse_outright(
                     .to_owned(),
             );
         };
+        // The union reads its tag before the variant does, so a union flattened into the variant
+        // would never see it.
+        if flattened_reads(shapes, variant, property, &mut BTreeSet::new()) {
+            return Some(format!(
+                "one of its variants reads `{property}` in a union flattened into it, which would \
+                 never see the tag once this union had read it"
+            ));
+        }
         // A variant that declares the property under a type the tag cannot take is a defect worth
         // refusing over: a discriminator is always a string on the wire, whoever writes it.
         if let Some(field) = structure.fields.iter().find(|field| field.wire == property)
@@ -432,6 +458,96 @@ fn carried_shortfall(
         }
     }
     None
+}
+
+/// For each union flattened into a struct, the members the structs above it read first: that
+/// struct's fields, and those of every struct it sits in at the same level of the object.
+fn read_above(shapes: &Shapes) -> BTreeMap<ShapeKey, BTreeSet<String>> {
+    let mut above = BTreeMap::new();
+    for key in shapes.keys() {
+        if let Some(structure) = shapes.get(key).and_then(struct_of) {
+            read_below(shapes, structure, &BTreeSet::new(), &mut above, 0);
+        }
+    }
+    above
+}
+
+/// The struct a shape is, nullable or not.
+fn struct_of(shape: &Shape) -> Option<&Struct> {
+    match shape {
+        Shape::Struct(structure) => Some(structure),
+        Shape::Optional(ShapeRef::Inline(inner)) => struct_of(inner),
+        _ => None,
+    }
+}
+
+/// [`read_above`] for the union flattened into `structure`, beneath structs that read `outer`, and
+/// for the unions flattened into its variants, unless that union already holds every such name.
+fn read_below(
+    shapes: &Shapes,
+    structure: &Struct,
+    outer: &BTreeSet<String>,
+    above: &mut BTreeMap<ShapeKey, BTreeSet<String>>,
+    depth: usize,
+) {
+    let Some(ShapeRef::Key(flattened)) = &structure.flattened else {
+        return;
+    };
+    if depth > FLATTEN_DEPTH {
+        return;
+    }
+    let mut names = outer.clone();
+    names.extend(structure.fields.iter().map(|field| field.wire.clone()));
+    let known = above.entry(flattened.clone()).or_default();
+    if names.is_subset(known) {
+        return;
+    }
+    known.extend(names.iter().cloned());
+    if let Some(Shape::Union(union)) = shapes.get(flattened) {
+        for variant in &union.variants {
+            if let ShapeRef::Key(key) = &variant.shape
+                && let Some(Shape::Struct(inner)) = shapes.get(key)
+            {
+                read_below(shapes, inner, &names, above, depth + 1);
+            }
+        }
+    }
+}
+
+/// Whether a union flattened into a variant, at any depth, reads `property`: a branch declares it,
+/// the union dispatches on it, or a keyed union takes it for a variant's name.
+fn flattened_reads(
+    shapes: &Shapes,
+    variant: &ShapeKey,
+    property: &str,
+    seen: &mut BTreeSet<ShapeKey>,
+) -> bool {
+    let Some(Shape::Struct(structure)) = shapes.get(variant) else {
+        return false;
+    };
+    let Some(ShapeRef::Key(flattened)) = &structure.flattened else {
+        return false;
+    };
+    if !seen.insert(flattened.clone()) {
+        return false;
+    }
+    match shapes.get(flattened) {
+        Some(Shape::Union(union)) => {
+            union
+                .tag
+                .as_ref()
+                .is_some_and(|tag| tag.property == property)
+                || union.variants.iter().any(|branch| match &branch.shape {
+                    ShapeRef::Key(branch) => {
+                        declares(shapes, branch, property)
+                            || flattened_reads(shapes, branch, property, seen)
+                    }
+                    ShapeRef::Inline(_) => false,
+                })
+        }
+        Some(Shape::Keyed(keyed)) => keyed.variants.iter().any(|branch| branch.name == property),
+        _ => false,
+    }
 }
 
 /// Whether a variant type declares the tag property at all.

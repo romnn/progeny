@@ -1180,11 +1180,29 @@ fn flattened(
 /// Whether [`flattened`] reads a view's members and its union `branches` as a struct, by the
 /// rules it lists.
 ///
-/// A branch's own kind is asked only of a branch that declares no union, so two schemas whose
-/// unions name each other never ask each other.
+/// A branch that is itself members beside a union is an object when it flattens by the same
+/// rules, and its union's members count as its own. Each branch is summarized once per call, and a
+/// branch met again while its own summary is still being worked out, which is two unions naming
+/// each other, does not flatten.
 /// A view [`key`] degrades before it reads the union flattens nothing, because it becomes
 /// arbitrary JSON.
 fn flattens(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> bool {
+    flattens_within(resolved, view, branches, &mut BTreeMap::new(), 0)
+}
+
+/// How many unions deep a flatten may nest before it is refused, so a long chain of references
+/// cannot exhaust the stack.
+pub(super) const FLATTEN_DEPTH: usize = 16;
+
+/// [`flattens`], with the names each branch met so far claims at its object level: `None` for a
+/// branch still being worked out or one that is not an object.
+fn flattens_within(
+    resolved: &ResolvedDocument,
+    view: &View,
+    branches: &[ShapeKey],
+    summaries: &mut BTreeMap<ShapeKey, Option<BTreeSet<String>>>,
+    depth: usize,
+) -> bool {
     if view.impossible || view.conflict.is_some() || view.unions_collide {
         return false;
     }
@@ -1216,25 +1234,55 @@ fn flattens(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> 
         return false;
     }
     branches.iter().all(|branch| {
-        let branch_view = merge::view(resolved, branch);
-        let object = branch_view.union.is_none()
-            && !names_its_subtypes(resolved, &branch_view, branch)
-            && !declares_null(&branch_view)
-            && kind_of(resolved, &branch_view) == Some(Kind::Object);
-        // A discriminator a branch inherits names a member as surely as a property does.
-        let shares = branch_view
-            .properties
-            .keys()
-            .chain(&branch_view.required)
-            .chain(
-                branch_view
-                    .discriminator
-                    .iter()
-                    .map(|declared| &declared.property),
-            )
-            .any(|name| own.contains(name.as_str()));
-        object && !shares
+        summarize(resolved, branch, summaries, depth);
+        let Some(Some(claims)) = summaries.get(branch) else {
+            return false;
+        };
+        // The fields would take a member the branch also claims before the branch saw it.
+        !own.iter().any(|name| claims.contains(*name))
     })
+}
+
+/// Record the names a branch claims at its object level: its members, the ones it requires, its
+/// discriminator, and every name a union flattened into it claims. `None` when it is not an object
+/// that can sit beside other members.
+fn summarize(
+    resolved: &ResolvedDocument,
+    branch: &ShapeKey,
+    summaries: &mut BTreeMap<ShapeKey, Option<BTreeSet<String>>>,
+    depth: usize,
+) {
+    if summaries.contains_key(branch) {
+        return;
+    }
+    summaries.insert(branch.clone(), None);
+    let view = merge::view(resolved, branch);
+    let object = !names_its_subtypes(resolved, &view, branch) && !declares_null(&view);
+    // A discriminator a branch inherits names a member as surely as a property does.
+    let mut claims: BTreeSet<String> = view
+        .properties
+        .keys()
+        .chain(&view.required)
+        .chain(view.discriminator.iter().map(|declared| &declared.property))
+        .cloned()
+        .collect();
+    let claims = match &view.union {
+        Some(nested)
+            if object
+                && depth < FLATTEN_DEPTH
+                && flattens_within(resolved, &view, nested, summaries, depth + 1) =>
+        {
+            for inner in nested {
+                if let Some(Some(inner)) = summaries.get(inner) {
+                    claims.extend(inner.iter().cloned());
+                }
+            }
+            Some(claims)
+        }
+        None if object && kind_of(resolved, &view) == Some(Kind::Object) => Some(claims),
+        _ => None,
+    };
+    summaries.insert(branch.clone(), claims);
 }
 
 /// The union's shape, or arbitrary JSON when that shape would drop members declared beside it.
