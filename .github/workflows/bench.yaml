@@ -22,7 +22,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # An exact release rather than `stable`: every compiler release moves every figure, so moving
+      # it is a commit here, and the new release starts a new segment of the history.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -36,18 +40,29 @@ jobs:
             https://raw.githubusercontent.com/oxidecomputer/oxide.rs/ed6b8352db6e1a4c97e13672254fc4646cb47458/oxide.json
           curl -fsSL -o corpus/cache/okta.yaml \
             https://raw.githubusercontent.com/okta/okta-management-openapi-spec/2bc3a3631fef54cab7aaa97fbaf053f2069cb311/dist/current/management-minimal.yaml
+      # valgrind's exact Ubuntu 24.04 package, from the release pocket that keeps it: a new valgrind
+      # may count differently, so moving it is a commit here, and its version is recorded with every
+      # figure it takes.
+      - name: Install valgrind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends valgrind=1:3.22.0-0ubuntu3
       # Three documents from the quick tier, small to large: `petstore-31` is the fixed cost of a
       # generated crate, `oxide` a typical API, and `okta` a discriminator-heavy one.
       # The hand-written serde strategy is measured because it is what the default configuration
       # generates.
-      # CPU time and peak RSS at one compiler job are the figures a shared runner holds steady;
-      # its load gating and discarding of crowded repetitions apply here as they do locally.
+      # CPU time and peak RSS at one compiler job are timed natively, with the same load gating and
+      # discarding of crowded repetitions as locally, and each CPU time records the runner's
+      # processor.
+      # One compile of each is then profiled under valgrind, whose instructions and heap no runner
+      # processor changes.
       - name: Measure
         run: >-
           cargo run -p xtask --release -- bench-compile petstore-31 oxide okta
-          --hand-written --reps 3 --max-wait 5 --json target/bench-compile.json
-      # Runner hardware varies between runs, so only a large move is an alert; the chart shows the
-      # rest.
+          --hand-written --reps 3 --max-wait 5 --valgrind valgrind --json target/bench-compile.json
+      # No threshold alert: github-action-benchmark compares each run with the previous one,
+      # whatever processor each ran on. benchtrail's change detection, which compares a CPU time
+      # only with earlier ones from the same processor model, marks regressions on the dashboard.
       # The history is committed to `bench/data.js` on `gh-pages`, which must exist.
       - name: Record the history
         uses: benchmark-action/github-action-benchmark@v1
@@ -58,8 +73,7 @@ jobs:
           benchmark-data-dir-path: bench
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
-          alert-threshold: "120%"
-          comment-on-alert: true
+          comment-on-alert: false
           fail-on-alert: false
           summary-always: true
 

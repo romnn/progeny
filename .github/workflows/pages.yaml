@@ -51,7 +51,8 @@ jobs:
       # workflow records on `gh-pages` (read through the API, no checkout).
       # Installed after the Hugo build, which may clean docs/public.
       # Before the first benchmark run there is no history yet, and the documentation still deploys.
-      # The settings split each benchmark name into its document, strategy, and metric.
+      # The settings split each benchmark name into its document, strategy, and metric, and each CPU
+      # time into one series per processor model, which its environment records.
       - name: Install the benchmark dashboard
         uses: romnn/benchtrail@v0.5.1
         with:
@@ -63,16 +64,22 @@ jobs:
               "title": "progeny compile cost",
               "links": [{ "label": "Documentation", "url": "../" }],
               "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
-              "label": "{{document}} / {{strategy}}",
+              "label": "{{document}} / {{strategy}} ({{cpu}})",
               "metrics": {
-                "cpu": { "label": "CPU time", "direction": "lower" },
-                "peak rss": { "label": "Peak RSS", "direction": "lower" }
+                "instructions": { "label": "Instructions (cachegrind)", "direction": "lower", "order": 0 },
+                "peak heap": { "label": "Peak heap (massif)", "direction": "lower", "order": 1 },
+                "average heap": { "label": "Average heap (massif)", "direction": "lower", "order": 2 },
+                "cpu": { "label": "CPU time", "direction": "lower", "order": 3 },
+                "peak rss": { "label": "Peak RSS", "direction": "lower", "order": 4 }
               },
               "dimensions": {
                 "document": { "label": "Document" },
-                "strategy": { "label": "Serde strategy" }
+                "strategy": { "label": "Serde strategy" },
+                "cpu": { "label": "CPU" }
               },
-              "colorBy": "document"
+              "splitEnvironment": ["cpu"],
+              "colorBy": "document",
+              "dashBy": "cpu"
             }
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

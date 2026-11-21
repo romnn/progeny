@@ -56,6 +56,15 @@ Nightly, the full corpus is compiled and linted (`task corpus:compile:all`) and 
 
 ## Benchmarks
 
-The compile cost of a generated crate is a measured property. On every commit to `main`, the bench workflow generates three documents from the quick tier — `petstore-31`, `oxide` and `okta`, the vendor ones pinned to fixed upstream commits — and measures the CPU time and peak RSS of compiling each at one compiler job. The [benchmark dashboard]({{< relref "/_index.md" >}}bench/) charts that history.
+The compile cost of a generated crate is a measured property. On every commit to `main`, the bench workflow generates three documents from the quick tier — `petstore-31`, `oxide` and `okta`, the vendor ones pinned to fixed upstream commits — and measures compiling each at one compiler job. The [benchmark dashboard]({{< relref "/_index.md" >}}bench/) charts that history.
+
+The hosted runners are a pool of different processors, whose times differ by up to a factor of two on one commit, so the headline figures come from valgrind, which runs the compiler on a synthetic processor of its own and gives the same figures on every runner:
+
+- the instructions one compile executes, counted by cachegrind;
+- its peak heap and its average heap over the compile, from massif.
+
+Only the compiler that builds the generated crate runs under valgrind; its dependencies are built natively first. The native CPU time and peak RSS are still recorded, but they are not stable enough to judge by alone: each CPU time records the runner's processor, and the dashboard keeps one series per processor model, so a change of runner never reads as a change of performance.
+
+The bench workflow pins both tools that move these figures: the Rust release, in its `dtolnay/rust-toolchain` step, and valgrind, as an exact Ubuntu package version. Moving either is a commit, and the new version starts a new segment of the history. Locally, `task bench:compile -- --valgrind valgrind --json out.json` records the same figures.
 
 Locally, `task bench:compile` A/B-tests the compile cost of two renderings and `task bench:runtime` the serde runtime cost. Both need an idle machine, and both refuse to record a figure taken outside their measurement discipline rather than quietly writing one down. The recorded figures live in `corpus/baseline.toml` and `corpus/runtime.toml`.
