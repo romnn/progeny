@@ -334,6 +334,14 @@ fn refuse_outright(
                     .to_owned(),
             );
         };
+        // The union reads its tag before the variant does, so a union flattened into the variant
+        // would never see it.
+        if flattened_reads(shapes, variant, property, &mut BTreeSet::new()) {
+            return Some(format!(
+                "one of its variants reads `{property}` in a union flattened into it, which would \
+                 never see the tag once this union had read it"
+            ));
+        }
         // A variant that declares the property under a type the tag cannot take is a defect worth
         // refusing over: a discriminator is always a string on the wire, whoever writes it.
         if let Some(field) = structure.fields.iter().find(|field| field.wire == property)
@@ -432,6 +440,42 @@ fn carried_shortfall(
         }
     }
     None
+}
+
+/// Whether a union flattened into a variant, at any depth, reads `property`: a branch declares it,
+/// the union dispatches on it, or a keyed union takes it for a variant's name.
+fn flattened_reads(
+    shapes: &Shapes,
+    variant: &ShapeKey,
+    property: &str,
+    seen: &mut BTreeSet<ShapeKey>,
+) -> bool {
+    let Some(Shape::Struct(structure)) = shapes.get(variant) else {
+        return false;
+    };
+    let Some(ShapeRef::Key(flattened)) = &structure.flattened else {
+        return false;
+    };
+    if !seen.insert(flattened.clone()) {
+        return false;
+    }
+    match shapes.get(flattened) {
+        Some(Shape::Union(union)) => {
+            union
+                .tag
+                .as_ref()
+                .is_some_and(|tag| tag.property == property)
+                || union.variants.iter().any(|branch| match &branch.shape {
+                    ShapeRef::Key(branch) => {
+                        declares(shapes, branch, property)
+                            || flattened_reads(shapes, branch, property, seen)
+                    }
+                    ShapeRef::Inline(_) => false,
+                })
+        }
+        Some(Shape::Keyed(keyed)) => keyed.variants.iter().any(|branch| branch.name == property),
+        _ => false,
+    }
 }
 
 /// Whether a variant type declares the tag property at all.

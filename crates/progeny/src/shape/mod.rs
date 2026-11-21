@@ -2123,9 +2123,8 @@ mod tests {
         })
     }
 
-    /// A nested branch that claims a member of the outer struct, or a tag the outer union would
-    /// read before it, keeps the outer schema degraded, and a cycle through nested unions ends and
-    /// degrades both schemas.
+    /// A nested branch that claims a member of the outer struct keeps the outer schema degraded,
+    /// and a cycle through nested unions ends and degrades both schemas.
     #[test_util::test]
     fn a_nested_union_that_cannot_keep_the_outer_members_still_degrades() {
         let image = |inner: Value| {
@@ -2145,26 +2144,25 @@ mod tests {
             "`startedAtMs`"
         )?);
 
-        // The outer union's tag declared only inside the image branch's own union.
-        let mut tagged = nested_item(&json!({"type": "object",
-        "properties": {"size": {"type": "integer"}},
-        "anyOf": [
-            {"type": "object", "required": ["type", "fileId"], "properties": {
-                "type": {"type": "string", "enum": ["image"]}, "fileId": {"type": "string"}}},
-            {"type": "object", "required": ["result"],
-             "properties": {"result": {"type": "string"}}},
-        ]}));
-        tagged["discriminator"] = json!({"propertyName": "type"});
-        assert!(degrades_for_members_beside(
-            json!({"Item": tagged}),
-            "Item",
-            "`startedAtMs`"
-        )?);
+        // Two schemas whose unions name each other.
+        let schemas = json!({
+            "A": {"type": "object", "properties": {"a": {"type": "string"}},
+                  "oneOf": [{"$ref": "#/components/schemas/B"},
+                            {"type": "object", "required": ["c"], "properties": {"c": {"type": "string"}}}]},
+            "B": {"type": "object", "properties": {"b": {"type": "string"}},
+                  "anyOf": [{"$ref": "#/components/schemas/A"},
+                            {"type": "object", "required": ["d"], "properties": {"d": {"type": "string"}}}]},
+        });
+        let (shapes, _) = shapes_of(with_schemas(schemas))?;
+        assert_eq!(shape_of(&shapes, "A")?, &Shape::Any);
+        assert_eq!(shape_of(&shapes, "B")?, &Shape::Any);
+    }
 
-        // The same, with the tag inherited from a base both branches include.
-        let inherited = json!({
-            "Base": {"type": "object", "discriminator": {"propertyName": "type", "mapping": {
-                "text": "#/components/schemas/Text", "image": "#/components/schemas/Image"}}},
+    /// `Text` and `Image` of issue #167 as components, where `Image` declares no `type` of its own
+    /// and its own union's `FileId` branch reads it, and `Item` with both beside `startedAtMs`.
+    fn tag_read_inside(base: &Value) -> Value {
+        json!({
+            "Base": base,
             "Text": {"allOf": [{"$ref": "#/components/schemas/Base"},
                 {"type": "object", "required": ["type", "text"], "properties": {
                     "type": {"type": "string", "enum": ["text"]}, "text": {"type": "string"}}}]},
@@ -2181,25 +2179,76 @@ mod tests {
                      "properties": {"startedAtMs": {"type": "integer"}},
                      "oneOf": [{"$ref": "#/components/schemas/Text"},
                                {"$ref": "#/components/schemas/Image"}]},
-        });
-        assert!(degrades_for_members_beside(
-            inherited,
-            "Item",
-            "`startedAtMs`"
-        )?);
+        })
+    }
 
-        // Two schemas whose unions name each other.
-        let schemas = json!({
-            "A": {"type": "object", "properties": {"a": {"type": "string"}},
-                  "oneOf": [{"$ref": "#/components/schemas/B"},
-                            {"type": "object", "required": ["c"], "properties": {"c": {"type": "string"}}}]},
-            "B": {"type": "object", "properties": {"b": {"type": "string"}},
-                  "anyOf": [{"$ref": "#/components/schemas/A"},
-                            {"type": "object", "required": ["d"], "properties": {"d": {"type": "string"}}}]},
+    /// A union that dispatches on a tag only a union flattened into one of its variants reads
+    /// would take the tag first, so that union is arbitrary JSON, and the members beside it stay a
+    /// struct.
+    #[test_util::test]
+    fn a_tag_only_a_flattened_union_reads_degrades_the_union_around_it() {
+        let mapping = json!({"propertyName": "type", "mapping": {
+            "text": "#/components/schemas/Text", "image": "#/components/schemas/Image"}});
+        let family = json!([{"$ref": "#/components/schemas/Text"},
+                            {"$ref": "#/components/schemas/Image"}]);
+        let bases = [
+            (
+                "a base",
+                json!({"type": "object", "discriminator": mapping}),
+            ),
+            (
+                "a base naming its subtypes",
+                json!({"type": "object", "discriminator": mapping, "oneOf": family}),
+            ),
+        ];
+        for (case, base) in bases {
+            let (shapes, diagnostics) = shapes_of(with_schemas(tag_read_inside(&base)))?;
+            let Shape::Struct(structure) = shape_of(&shapes, "Item")? else {
+                eyre::bail!("{case}: `Item` is not a struct: {diagnostics:?}");
+            };
+            let Some(ShapeRef::Key(union)) = &structure.flattened else {
+                eyre::bail!("{case}: no flattened union");
+            };
+            assert_eq!(shapes.get(union), Some(&Shape::Any), "{case}");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.class() == BreakageClass::DiscriminatorEdgeCase
+                        && d.detail().contains("flattened into it")),
+                "{case}: {diagnostics:?}"
+            );
+        }
+    }
+
+    /// Each level of a nested flatten may dispatch on a tag of its own: the outer union reads
+    /// `type`, which the image declares itself, and the image's union reads `format`.
+    #[test_util::test]
+    fn each_level_of_a_nested_flatten_keeps_its_own_tag() {
+        let image = json!({
+            "type": "object", "required": ["type"],
+            "properties": {"type": {"type": "string", "enum": ["image"]}},
+            "discriminator": {"propertyName": "format"},
+            "anyOf": [
+                {"title": "FileId", "type": "object", "required": ["format", "fileId"],
+                 "properties": {"format": {"type": "string", "enum": ["file"]},
+                                "fileId": {"type": "string"}}},
+                {"title": "Inline", "type": "object", "required": ["format", "result"],
+                 "properties": {"format": {"type": "string", "enum": ["inline"]},
+                                "result": {"type": "string"}}},
+            ],
         });
-        let (shapes, _) = shapes_of(with_schemas(schemas))?;
-        assert_eq!(shape_of(&shapes, "A")?, &Shape::Any);
-        assert_eq!(shape_of(&shapes, "B")?, &Shape::Any);
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({"Item": nested_item(&image)})))?;
+        let Shape::Struct(structure) = shape_of(&shapes, "Item")? else {
+            eyre::bail!("`Item` is not a struct: {diagnostics:?}");
+        };
+        let Some(ShapeRef::Key(union)) = &structure.flattened else {
+            eyre::bail!("no flattened union");
+        };
+        assert!(
+            matches!(shapes.get(union), Some(Shape::Union(_))),
+            "{:?}: {diagnostics:?}",
+            shapes.get(union)
+        );
     }
 
     /// A member both the struct and a branch could read, or one a closed struct would refuse,

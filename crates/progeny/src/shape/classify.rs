@@ -1194,39 +1194,13 @@ fn flattens(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> 
 /// cannot exhaust the stack.
 const FLATTEN_DEPTH: usize = 16;
 
-/// The wire names a branch claims at its object level, when it is an object that can sit beside
-/// another schema's members.
-#[derive(Debug, Clone)]
-struct Claims {
-    /// Its own members and required names.
-    members: BTreeSet<String>,
-    /// The tag its discriminator, its own or inherited, reads.
-    tag: Option<String>,
-    /// Every name the branches of a union flattened into it claim.
-    nested: BTreeSet<String>,
-}
-
-impl Claims {
-    fn contains(&self, name: &str) -> bool {
-        self.members.contains(name)
-            || self.tag.as_deref() == Some(name)
-            || self.nested.contains(name)
-    }
-
-    /// A tag only a union inside the branch declares, which a union around it would take before
-    /// the inner one read it.
-    fn hides(&self, tag: &str) -> bool {
-        self.nested.contains(tag) && !self.members.contains(tag)
-    }
-}
-
-/// [`flattens`], with the branch summaries of this call: `None` for a branch still being worked
-/// out or one that is not an object.
+/// [`flattens`], with the names each branch met so far claims at its object level: `None` for a
+/// branch still being worked out or one that is not an object.
 fn flattens_within(
     resolved: &ResolvedDocument,
     view: &View,
     branches: &[ShapeKey],
-    summaries: &mut BTreeMap<ShapeKey, Option<Claims>>,
+    summaries: &mut BTreeMap<ShapeKey, Option<BTreeSet<String>>>,
     depth: usize,
 ) -> bool {
     if view.impossible || view.conflict.is_some() || view.unions_collide {
@@ -1246,11 +1220,10 @@ fn flattens_within(
         || view.additional.is_some()
         || view.uniform_pattern.is_some()
         || view.uninterpreted.contains(&"patternProperties");
-    let tag = view
+    let own_tag = view
         .discriminator
         .as_ref()
-        .map(|declared| declared.property.as_str());
-    let own_tag = tag.is_some_and(|tag| own.contains(tag));
+        .is_some_and(|declared| own.contains(declared.property.as_str()));
     let distinct: BTreeSet<&ShapeKey> = branches.iter().collect();
     if distinct.len() < 2
         || view.properties.is_empty()
@@ -1261,47 +1234,38 @@ fn flattens_within(
         return false;
     }
     branches.iter().all(|branch| {
-        let Some(claims) = claims_of(resolved, branch, summaries, depth) else {
+        summarize(resolved, branch, summaries, depth);
+        let Some(Some(claims)) = summaries.get(branch) else {
             return false;
         };
         // The fields would take a member the branch also claims before the branch saw it.
-        let shares = own.iter().any(|name| claims.contains(name));
-        // This union's tag, or the one the branch inherits, read before a union inside it could.
-        let hidden = tag
-            .into_iter()
-            .chain(claims.tag.as_deref())
-            .any(|tag| claims.hides(tag));
-        !shares && !hidden
+        !own.iter().any(|name| claims.contains(*name))
     })
 }
 
-/// What a branch claims, or `None` when it is not an object that can sit beside other members.
-fn claims_of(
+/// Record the names a branch claims at its object level: its members, the ones it requires, its
+/// discriminator, and every name a union flattened into it claims. `None` when it is not an object
+/// that can sit beside other members.
+fn summarize(
     resolved: &ResolvedDocument,
     branch: &ShapeKey,
-    summaries: &mut BTreeMap<ShapeKey, Option<Claims>>,
+    summaries: &mut BTreeMap<ShapeKey, Option<BTreeSet<String>>>,
     depth: usize,
-) -> Option<Claims> {
-    if let Some(summary) = summaries.get(branch) {
-        return summary.clone();
+) {
+    if summaries.contains_key(branch) {
+        return;
     }
     summaries.insert(branch.clone(), None);
     let view = merge::view(resolved, branch);
     let object = !names_its_subtypes(resolved, &view, branch) && !declares_null(&view);
-    let mut claims = Claims {
-        members: view
-            .properties
-            .keys()
-            .chain(&view.required)
-            .cloned()
-            .collect(),
-        // A discriminator a branch inherits names a member as surely as a property does.
-        tag: view
-            .discriminator
-            .as_ref()
-            .map(|declared| declared.property.clone()),
-        nested: BTreeSet::new(),
-    };
+    // A discriminator a branch inherits names a member as surely as a property does.
+    let mut claims: BTreeSet<String> = view
+        .properties
+        .keys()
+        .chain(&view.required)
+        .chain(view.discriminator.iter().map(|declared| &declared.property))
+        .cloned()
+        .collect();
     let claims = match &view.union {
         Some(nested)
             if object
@@ -1310,9 +1274,7 @@ fn claims_of(
         {
             for inner in nested {
                 if let Some(Some(inner)) = summaries.get(inner) {
-                    claims.nested.extend(inner.members.iter().cloned());
-                    claims.nested.extend(inner.tag.iter().cloned());
-                    claims.nested.extend(inner.nested.iter().cloned());
+                    claims.extend(inner.iter().cloned());
                 }
             }
             Some(claims)
@@ -1320,8 +1282,7 @@ fn claims_of(
         None if object && kind_of(resolved, &view) == Some(Kind::Object) => Some(claims),
         _ => None,
     };
-    summaries.insert(branch.clone(), claims.clone());
-    claims
+    summaries.insert(branch.clone(), claims);
 }
 
 /// The union's shape, or arbitrary JSON when that shape would drop members declared beside it.
