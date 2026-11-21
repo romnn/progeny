@@ -117,7 +117,7 @@ pub(crate) fn run(
             for (name, tokens) in modules {
                 files.insert(Utf8PathBuf::from(format!("src/{name}.rs")), source(&tokens));
             }
-            let baseline = BaselineUse::scan(&files, Utf8Path::new("src"), &config.extra_derives);
+            let baseline = BaselineUse::scan(&files, Utf8Path::new("src"));
             files.insert(
                 Utf8PathBuf::from("Cargo.toml"),
                 manifest::render(contracts, api, config, http, serves, streams, &baseline),
@@ -431,7 +431,7 @@ fn insert_types_crate(
         }
         files.insert(directory.join("src/support.rs"), source(&support));
     }
-    let baseline = BaselineUse::scan(files, &directory.join("src"), &config.extra_derives);
+    let baseline = BaselineUse::scan(files, &directory.join("src"));
     files.insert(
         directory.join("Cargo.toml"),
         manifest::types_crate(contracts, config, supported, &baseline),
@@ -480,7 +480,7 @@ fn insert_client_crate(
         directory.join("src/support.rs"),
         source(&crate::support::client_tokens(client_use(api), decoding)),
     );
-    let baseline = BaselineUse::scan(files, &directory.join("src"), &config.extra_derives);
+    let baseline = BaselineUse::scan(files, &directory.join("src"));
     files.insert(
         directory.join("Cargo.toml"),
         manifest::client_crate(api, config, streams, &baseline),
@@ -512,7 +512,7 @@ fn insert_server_crate(files: &mut BTreeMap<Utf8PathBuf, String>, edge: &EdgeCra
         directory.join("src/support.rs"),
         source(&crate::support::server_tokens(config.body_limit)),
     );
-    let baseline = BaselineUse::scan(files, &directory.join("src"), &config.extra_derives);
+    let baseline = BaselineUse::scan(files, &directory.join("src"));
     files.insert(
         directory.join("Cargo.toml"),
         manifest::server_crate(api, config, &baseline),
@@ -4952,78 +4952,6 @@ mod tests {
                 r#"serde_json = { version = "1", optional = true }"#,
             ]
         );
-    }
-
-    /// The caller supplies the crates of its own derives, so a derive path that merely mentions
-    /// a baseline crate, or is one, declares nothing, gated or not.
-    #[test_util::test]
-    fn the_callers_derives_declare_no_baseline_crate() {
-        let rule = |derive: &str, feature: Option<&str>| crate::config::ExtraDerives {
-            derives: vec![derive.to_owned()],
-            types: crate::config::TypeSelection::All,
-            nested: true,
-            feature: feature.map(ToOwned::to_owned),
-            serde_attributes: crate::config::SerdeAttributes::Ignored,
-        };
-        let config = Config {
-            extra_derives: vec![
-                rule("::fixtures::serde_json::Fixture", None),
-                rule("::thiserror::Error", Some("fixtures")),
-            ],
-            ..Config::default()
-        };
-        let rendered = files(pair_document(), &config)?;
-        // The premise: both derives are on the tuple.
-        let types = squeezed(&rendered[camino::Utf8Path::new("src/types.rs")]);
-        assert!(
-            types.contains("#[derive(::fixtures::serde_json::Fixture)]"),
-            "{types}"
-        );
-        assert!(
-            types.contains(r#"#[cfg_attr(feature="fixtures",derive(::thiserror::Error))]"#),
-            "{types}"
-        );
-
-        let manifest = &rendered[camino::Utf8Path::new("Cargo.toml")];
-        assert_eq!(
-            baseline_dependencies(manifest),
-            [r#"serde = { version = "1.0.164", features = ["derive"] }"#]
-        );
-        assert!(manifest.contains("fixtures = []\n"), "{manifest}");
-    }
-
-    /// A caller's derive spelled like a path the shipped support also names takes nothing away
-    /// from the support's own use: `thiserror` stays a plain dependency.
-    #[test_util::test]
-    fn a_callers_derive_does_not_hide_the_supports_own_use_of_its_crate() {
-        let mut document = pair_document();
-        document["paths"] = ping_document()["paths"].clone();
-        let config = Config {
-            extra_derives: vec![crate::config::ExtraDerives {
-                derives: vec!["thiserror::Error".to_owned()],
-                types: crate::config::TypeSelection::All,
-                nested: true,
-                feature: Some("fixtures".to_owned()),
-                serde_attributes: crate::config::SerdeAttributes::Ignored,
-            }],
-            ..Config::default()
-        };
-        let rendered = files(document, &config)?;
-        // The premise: the derive is on the tuple, and the support module names the crate too.
-        let types = squeezed(&rendered[camino::Utf8Path::new("src/types.rs")]);
-        assert!(
-            types.contains(r#"#[cfg_attr(feature="fixtures",derive(thiserror::Error))]"#),
-            "{types}"
-        );
-        let support = &rendered[camino::Utf8Path::new("src/support.rs")];
-        assert!(support.contains("thiserror::Error"), "{support}");
-
-        let manifest = &rendered[camino::Utf8Path::new("Cargo.toml")];
-        assert!(
-            baseline_dependencies(manifest).contains(&r#"thiserror = "2""#),
-            "{manifest}"
-        );
-        assert!(manifest.contains("fixtures = []\n"), "{manifest}");
     }
 
     #[test_util::test]

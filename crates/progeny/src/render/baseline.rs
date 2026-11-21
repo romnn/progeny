@@ -18,9 +18,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use camino::{Utf8Path, Utf8PathBuf};
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use quote::ToTokens as _;
-use syn::parse::Parser as _;
-
-use crate::config::ExtraDerives;
 
 /// A crate generated code may name, which the manifest declares only where it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,20 +82,7 @@ impl BaselineUse {
     ///
     /// An out-of-line module the crate root declares behind `#[cfg(feature = "…")]` is gated by
     /// that feature throughout its file.
-    /// In the types module, a derive that one of `extra_derives` configures is left out: the
-    /// caller supplies the crate it comes from.
-    pub(super) fn scan(
-        files: &BTreeMap<Utf8PathBuf, String>,
-        src: &Utf8Path,
-        extra_derives: &[ExtraDerives],
-    ) -> Self {
-        let caller_derives: BTreeSet<String> = extra_derives
-            .iter()
-            .flat_map(|rule| &rule.derives)
-            .filter_map(|path| syn::parse_str::<syn::Path>(path).ok())
-            .map(|path| path.to_token_stream().to_string())
-            .collect();
-        let none = BTreeSet::new();
+    pub(super) fn scan(files: &BTreeMap<Utf8PathBuf, String>, src: &Utf8Path) -> Self {
         let module_gates = files
             .get(&src.join("lib.rs"))
             .map(|root| module_gates(root))
@@ -114,23 +98,9 @@ impl BaselineUse {
                 .and_then(Utf8Path::file_stem)
                 .unwrap_or_default();
             let gate = module_gates.get(module).map(String::as_str);
-            let skipped = if module == "types" {
-                &caller_derives
-            } else {
-                &none
-            };
-            let mut scanner = Scanner {
-                usage: &mut usage,
-                skipped,
-            };
-            match syn::parse_file(text) {
-                Ok(file) => scanner.file(&file, gate),
-                // Unformatted fallback text the scan cannot read: every crate counts as named.
-                Err(_) => {
-                    for krate in Baseline::ALL {
-                        scanner.record(krate, None);
-                    }
-                }
+            // A file that does not parse does not compile either, so it needs no dependency.
+            if let Ok(file) = syn::parse_file(text) {
+                usage.file(&file, gate);
             }
         }
         usage
@@ -211,102 +181,43 @@ fn simple_feature(predicate: TokenStream) -> Option<String> {
     }
 }
 
-/// One file's walk, recording into the crate's usage.
-struct Scanner<'a> {
-    usage: &'a mut BaselineUse,
-    /// The caller's derive paths, as token text, which this file's derives do not count.
-    skipped: &'a BTreeSet<String>,
-}
-
-impl Scanner<'_> {
+impl BaselineUse {
     fn file(&mut self, file: &syn::File, gate: Option<&str>) {
         for attribute in &file.attrs {
             self.tokens(attribute.to_token_stream(), gate);
         }
         for item in &file.items {
-            let tokens: Vec<TokenTree> = item.to_token_stream().into_iter().collect();
+            let tokens = item.to_token_stream();
             let own = item_gate(&tokens);
-            self.trees(&tokens, own.as_deref().or(gate));
+            self.tokens(tokens, own.as_deref().or(gate));
         }
     }
 
+    /// Records every crate followed by `::`, at any depth. String literals and doc comments are
+    /// single literal tokens, so prose names nothing.
     fn tokens(&mut self, stream: TokenStream, gate: Option<&str>) {
         let tokens: Vec<TokenTree> = stream.into_iter().collect();
-        self.trees(&tokens, gate);
-    }
-
-    fn trees(&mut self, tokens: &[TokenTree], gate: Option<&str>) {
-        let mut rest = tokens;
-        let mut index = 0;
-        while let Some((token, after)) = rest.split_first() {
-            if let Some((attribute, after)) = attribute(rest) {
-                self.attribute(attribute.stream(), gate);
-                index += rest.len() - after.len();
-                rest = after;
-                continue;
-            }
+        for (index, token) in tokens.iter().enumerate() {
             match token {
                 TokenTree::Group(group) => self.tokens(group.stream(), gate),
                 TokenTree::Ident(ident) => {
+                    let followed = matches!(
+                        tokens.get(index + 1..index + 3),
+                        Some([first, second]) if is_path_separator(first, second)
+                    );
                     if let Some(krate) = Baseline::named(ident)
-                        && begins_path(tokens, index)
+                        && followed
                     {
                         self.record(krate, gate);
                     }
                 }
                 TokenTree::Punct(_) | TokenTree::Literal(_) => {}
             }
-            index += 1;
-            rest = after;
-        }
-    }
-
-    /// The inside of one `#[…]`.
-    ///
-    /// A `cfg_attr` on a simple feature gates what it applies by that feature, and a derive list
-    /// is read path by path so the caller's own derives can be left out.
-    fn attribute(&mut self, stream: TokenStream, gate: Option<&str>) {
-        let tokens: Vec<TokenTree> = stream.into_iter().collect();
-        if let [TokenTree::Ident(name), TokenTree::Group(arguments)] = tokens.as_slice()
-            && arguments.delimiter() == Delimiter::Parenthesis
-        {
-            if name == "derive" {
-                self.derives(arguments.stream(), gate);
-                return;
-            }
-            if name == "cfg_attr" {
-                self.cfg_attr(arguments.stream(), gate);
-                return;
-            }
-        }
-        self.trees(&tokens, gate);
-    }
-
-    fn cfg_attr(&mut self, arguments: TokenStream, gate: Option<&str>) {
-        let mut pieces = split_commas(arguments).into_iter();
-        let feature = pieces.next().and_then(simple_feature);
-        let gate = feature.as_deref().or(gate);
-        for attribute in pieces {
-            self.attribute(attribute, gate);
-        }
-    }
-
-    fn derives(&mut self, list: TokenStream, gate: Option<&str>) {
-        let parser = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated;
-        let Ok(paths) = parser.parse2(list.clone()) else {
-            self.tokens(list, gate);
-            return;
-        };
-        for path in paths {
-            let path = path.to_token_stream();
-            if !self.skipped.contains(&path.to_string()) {
-                self.tokens(path, gate);
-            }
         }
     }
 
     fn record(&mut self, krate: Baseline, gate: Option<&str>) {
-        let usage = self.usage.crates.entry(krate).or_default();
+        let usage = self.crates.entry(krate).or_default();
         match gate {
             None => usage.ungated = true,
             Some(feature) => {
@@ -316,59 +227,19 @@ impl Scanner<'_> {
     }
 }
 
-/// The `[…]` group of an attribute that starts `tokens`, `#[…]` or `#![…]`, with what follows it.
-fn attribute(tokens: &[TokenTree]) -> Option<(&proc_macro2::Group, &[TokenTree])> {
-    let [TokenTree::Punct(pound), rest @ ..] = tokens else {
-        return None;
-    };
-    if pound.as_char() != '#' {
-        return None;
-    }
-    let rest = match rest {
-        [TokenTree::Punct(bang), rest @ ..] if bang.as_char() == '!' => rest,
-        _ => rest,
-    };
-    match rest {
-        [TokenTree::Group(group), rest @ ..] if group.delimiter() == Delimiter::Bracket => {
-            Some((group, rest))
+/// The feature an item's own outer `#[cfg(feature = "…")]` names.
+fn item_gate(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<TokenTree> = tokens.clone().into_iter().collect();
+    tokens.windows(2).find_map(|pair| match pair {
+        [TokenTree::Punct(pound), TokenTree::Group(group)]
+            if pound.as_char() == '#' && group.delimiter() == Delimiter::Bracket =>
+        {
+            syn::parse2::<syn::Meta>(group.stream())
+                .ok()
+                .and_then(|meta| cfg_feature(&meta))
         }
         _ => None,
-    }
-}
-
-/// The feature an item's own outer `#[cfg(feature = "…")]` names.
-fn item_gate(tokens: &[TokenTree]) -> Option<String> {
-    let mut rest = tokens;
-    while let Some((group, after)) = attribute(rest) {
-        if let Ok(meta) = syn::parse2::<syn::Meta>(group.stream())
-            && let Some(feature) = cfg_feature(&meta)
-        {
-            return Some(feature);
-        }
-        rest = after;
-    }
-    None
-}
-
-/// Whether the identifier at `index` begins a path: followed by `::` and not itself following
-/// `<segment>::`.
-///
-/// A leading `::serde::x` begins one as much as a bare `serde::x` does.
-fn begins_path(tokens: &[TokenTree], index: usize) -> bool {
-    let Some((_, after)) = tokens
-        .split_at_checked(index)
-        .and_then(|(_, at)| at.split_first())
-    else {
-        return false;
-    };
-    let followed = matches!(after, [first, second, ..] if is_path_separator(first, second));
-    let before = tokens.get(..index).unwrap_or_default();
-    let continues = matches!(
-        before,
-        [.., TokenTree::Ident(segment), first, second]
-            if is_path_separator(first, second) && is_segment(segment)
-    );
-    followed && !continues
+    })
 }
 
 fn is_path_separator(first: &TokenTree, second: &TokenTree) -> bool {
@@ -381,36 +252,6 @@ fn is_path_separator(first: &TokenTree, second: &TokenTree) -> bool {
     )
 }
 
-/// Whether an identifier before `::` is a path segment rather than a keyword that can precede a
-/// path, such as `use ::serde::Serialize` or `impl ::serde::Serialize for`.
-fn is_segment(ident: &proc_macro2::Ident) -> bool {
-    /// Rust's keywords, less the four that are path segments themselves.
-    const KEYWORDS: &[&str] = &[
-        "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "do",
-        "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in",
-        "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
-        "return", "static", "struct", "trait", "true", "try", "type", "typeof", "unsafe",
-        "unsized", "use", "virtual", "where", "while", "yield",
-    ];
-    !KEYWORDS.contains(&ident.to_string().as_str())
-}
-
-/// An argument list split at its top-level commas.
-fn split_commas(stream: TokenStream) -> Vec<TokenStream> {
-    let mut pieces = vec![TokenStream::new()];
-    for token in stream {
-        match (&token, pieces.last_mut()) {
-            (TokenTree::Punct(comma), _) if comma.as_char() == ',' => {
-                pieces.push(TokenStream::new());
-            }
-            (_, Some(piece)) => piece.extend([token]),
-            (_, None) => {}
-        }
-    }
-    pieces.retain(|piece| !piece.is_empty());
-    pieces
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -419,15 +260,14 @@ mod tests {
     use color_eyre::eyre;
 
     use super::{Baseline, BaselineUse, Usage};
-    use crate::config::{ExtraDerives, SerdeAttributes, TypeSelection};
 
     /// Scans one crate whose `src` holds the given files.
-    fn scan(files: &[(&str, &str)], extra_derives: &[ExtraDerives]) -> BaselineUse {
+    fn scan(files: &[(&str, &str)]) -> BaselineUse {
         let files: BTreeMap<Utf8PathBuf, String> = files
             .iter()
             .map(|&(path, text)| (Utf8Path::new("src").join(path), text.to_owned()))
             .collect();
-        BaselineUse::scan(&files, Utf8Path::new("src"), extra_derives)
+        BaselineUse::scan(&files, Utf8Path::new("src"))
     }
 
     fn ungated() -> Usage {
@@ -444,35 +284,20 @@ mod tests {
         }
     }
 
-    fn derives(paths: &[&str]) -> ExtraDerives {
-        ExtraDerives {
-            derives: paths.iter().map(|&it| it.to_owned()).collect(),
-            types: TypeSelection::All,
-            nested: true,
-            feature: None,
-            serde_attributes: SerdeAttributes::Ignored,
-        }
-    }
-
-    /// A crate counts where it begins a path, bare or with a leading `::`, and not where it is
-    /// a later segment of another crate's path or is not followed by `::` at all.
+    /// A crate counts wherever its name is followed by `::`, and not where it is a plain
+    /// identifier.
     #[test_util::test]
-    fn a_crate_is_named_where_it_begins_a_path() {
-        let usage = scan(
-            &[(
-                "lib.rs",
-                indoc::indoc! {"
-                    use serde::Serialize;
-                    pub fn value() -> ::serde_json::Value {
-                        ::fixtures::indoc::Fixture::default();
-                        other::thiserror::Error::new();
-                        let thiserror = 1;
-                        ::serde_json::Value::Null
-                    }
-                "},
-            )],
-            &[],
-        );
+    fn a_crate_is_named_where_a_path_continues_after_it() {
+        let usage = scan(&[(
+            "lib.rs",
+            indoc::indoc! {"
+                use serde::Serialize;
+                pub fn value() -> ::serde_json::Value {
+                    let thiserror = 1;
+                    ::serde_json::Value::Null
+                }
+            "},
+        )]);
         assert_eq!(
             usage.crates,
             BTreeMap::from([
@@ -482,39 +307,13 @@ mod tests {
         );
     }
 
-    /// A keyword before `::` is no path segment, so the path after it still begins with the crate.
-    #[test_util::test]
-    fn a_path_after_a_keyword_begins_with_its_crate() {
-        let usage = scan(
-            &[(
-                "lib.rs",
-                indoc::indoc! {"
-                    impl ::serde::Serialize for Pet {}
-                    pub fn value(value: &mut ::serde_json::Value) -> bool {
-                        matches!(value, x if x == &::indoc::indoc!(\"a\"))
-                    }
-                "},
-            )],
-            &[],
-        );
-        assert_eq!(
-            usage.crates,
-            BTreeMap::from([
-                (Baseline::Serde, ungated()),
-                (Baseline::SerdeJson, ungated()),
-                (Baseline::Indoc, ungated()),
-            ]),
-        );
-    }
-
     /// A crate's name inside a string literal or a doc comment, including an example that would
     /// compile, is prose and names nothing.
     #[test_util::test]
     fn literals_and_doc_comments_name_nothing() {
-        let usage = scan(
-            &[(
-                "types.rs",
-                indoc::indoc! {r#"
+        let usage = scan(&[(
+            "types.rs",
+            indoc::indoc! {r#"
                     /// ```
                     /// let value = serde_json::json!({});
                     /// ```
@@ -522,48 +321,41 @@ mod tests {
                     pub struct Pet;
                     pub const NAME: &str = "indoc::indoc";
                 "#},
-            )],
-            &[],
-        );
+        )]);
         assert_eq!(usage.crates, BTreeMap::new());
     }
 
-    /// An item's own `cfg(feature)` gates it, a module the crate root declares behind a feature
-    /// is gated throughout its file, and a `cfg_attr` on a feature gates what it applies.
+    /// An item's own `cfg(feature)` gates it, and a module the crate root declares behind a
+    /// feature is gated throughout its file.
     #[test_util::test]
     fn a_simple_feature_gate_is_tracked() {
-        let usage = scan(
-            &[
-                (
-                    "lib.rs",
-                    indoc::indoc! {r#"
+        let usage = scan(&[
+            (
+                "lib.rs",
+                indoc::indoc! {r#"
                         #[cfg(feature = "client")]
                         pub mod client;
                         pub mod types;
                     "#},
-                ),
-                (
-                    "client.rs",
-                    "pub fn text() -> &'static str { indoc::indoc!(\"a\") }",
-                ),
-                (
-                    "types.rs",
-                    indoc::indoc! {r#"
+            ),
+            (
+                "client.rs",
+                "pub fn text() -> &'static str { indoc::indoc!(\"a\") }",
+            ),
+            (
+                "types.rs",
+                indoc::indoc! {r#"
                         #[cfg(feature = "schema")]
                         impl Pet { fn schema() -> serde_json::Value { serde_json::Value::Null } }
-                        #[cfg_attr(feature = "errors", derive(thiserror::Error))]
                         pub struct Pet;
                     "#},
-                ),
-            ],
-            &[],
-        );
+            ),
+        ]);
         assert_eq!(
             usage.crates,
             BTreeMap::from([
                 (Baseline::SerdeJson, gated(&["schema"])),
                 (Baseline::Indoc, gated(&["client"])),
-                (Baseline::Thiserror, gated(&["errors"])),
             ]),
         );
         // Each optional crate is turned on by the feature that gates its uses.
@@ -571,7 +363,6 @@ mod tests {
             usage.features(),
             BTreeMap::from([
                 ("client".to_owned(), vec!["dep:indoc".to_owned()]),
-                ("errors".to_owned(), vec!["dep:thiserror".to_owned()]),
                 ("schema".to_owned(), vec!["dep:serde_json".to_owned()]),
             ]),
         );
@@ -580,7 +371,6 @@ mod tests {
             [
                 r#"serde_json = { version = "1", optional = true }"#,
                 r#"indoc = { version = "2", optional = true }"#,
-                r#"thiserror = { version = "2", optional = true }"#,
             ],
         );
     }
@@ -589,10 +379,9 @@ mod tests {
     /// makes the crate a plain dependency however many gated uses it also has.
     #[test_util::test]
     fn any_other_predicate_counts_as_ungated() {
-        let usage = scan(
-            &[(
-                "lib.rs",
-                indoc::indoc! {r#"
+        let usage = scan(&[(
+            "lib.rs",
+            indoc::indoc! {r#"
                     #[cfg(any(feature = "a", feature = "b"))]
                     pub fn one() -> serde_json::Value { serde_json::Value::Null }
                     #[cfg_attr(all(feature = "a"), derive(thiserror::Error))]
@@ -601,9 +390,7 @@ mod tests {
                     pub fn three() -> &'static str { indoc::indoc!("a") }
                     pub fn four() -> &'static str { indoc::indoc!("b") }
                 "#},
-            )],
-            &[],
-        );
+        )]);
         assert_eq!(
             usage.crates,
             BTreeMap::from([
@@ -627,55 +414,5 @@ mod tests {
             ],
         );
         assert_eq!(usage.features(), BTreeMap::new());
-    }
-
-    /// The caller's configured derives are skipped in the types module, matched as parsed paths,
-    /// and still count everywhere else.
-    #[test_util::test]
-    fn the_callers_derives_count_only_outside_the_types_module() {
-        let source = indoc::indoc! {r#"
-            #[derive(Debug, ::thiserror::Error)]
-            #[cfg_attr(feature = "fixtures", derive(serde :: Serialize))]
-            pub struct Pet;
-        "#};
-        let configured = [derives(&["thiserror::Error", "::serde::Serialize"])];
-        let configured_bare = [derives(&["::thiserror::Error", "serde::Serialize"])];
-
-        let types = scan(&[("types.rs", source)], &configured_bare);
-        assert_eq!(types.crates, BTreeMap::new());
-
-        // A path that differs from the configured one only by its leading `::` is another path.
-        let types = scan(&[("types.rs", source)], &configured);
-        assert_eq!(
-            types.crates,
-            BTreeMap::from([
-                (Baseline::Serde, gated(&["fixtures"])),
-                (Baseline::Thiserror, ungated()),
-            ]),
-        );
-
-        let support = scan(&[("support.rs", source)], &configured_bare);
-        assert_eq!(
-            support.crates,
-            BTreeMap::from([
-                (Baseline::Serde, gated(&["fixtures"])),
-                (Baseline::Thiserror, ungated()),
-            ]),
-        );
-    }
-
-    /// A file the scan cannot parse names every crate, so its manifest declares them all.
-    #[test_util::test]
-    fn an_unreadable_file_names_every_crate() {
-        let usage = scan(&[("lib.rs", "pub fn (")], &[]);
-        assert_eq!(
-            usage.dependencies(),
-            [
-                r#"serde = { version = "1.0.164", features = ["derive"] }"#,
-                r#"serde_json = "1""#,
-                r#"indoc = "2""#,
-                r#"thiserror = "2""#,
-            ],
-        );
     }
 }
