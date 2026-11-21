@@ -107,7 +107,7 @@ pub fn front_end(input: &[u8]) -> Result<Vec<Diagnostic>, RejectError> {
 mod tests {
     use color_eyre::eyre;
 
-    const PETSTORE: &[u8] = include_bytes!("../../../corpus/specs/petstore-31.yaml");
+    const PETSTORE: &[u8] = include_bytes!("../../../../corpus/specs/petstore-31.yaml");
 
     #[test_util::test]
     fn every_reference_is_accounted_for() {
