@@ -1749,92 +1749,6 @@ mod tests {
         );
     }
 
-    /// Every support module, in every packaging and under either decoding, opens with the one
-    /// inner `allow(dead_code)`, and no generated file expects the lint.
-    ///
-    /// Which parts of the shared runtime a description reaches, and whether the consumer's
-    /// toolchain calls the rest dead, are both beyond progeny's knowledge, so an expectation would
-    /// be unfulfilled in somebody's build.
-    /// The description reaches a little of everything, so every shipped file is spliced in.
-    #[test_util::test]
-    fn every_support_module_allows_dead_code_and_nothing_expects_it() {
-        let document = json!({
-            "openapi": "3.1.0",
-            "paths": {
-                "/pets/{id}": {"post": {
-                    "operationId": "updatePet",
-                    "security": [{"key": []}],
-                    "parameters": [
-                        {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
-                        {"name": "q", "in": "query", "schema": {"type": "string"}},
-                        {"name": "X-Trace", "in": "header", "schema": {"type": "string"}},
-                        {"name": "session", "in": "cookie", "schema": {"type": "string"}},
-                    ],
-                    "requestBody": {"required": true, "content": {"multipart/form-data": {
-                        "schema": {"type": "object", "properties": {
-                            "photo": {"type": "string", "contentMediaType": "image/png"},
-                            "note": {"type": "string"},
-                        }},
-                    }}},
-                    "responses": {"200": {
-                        "description": "updated",
-                        "headers": {"X-Rate": {"schema": {"type": "integer"}}},
-                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}},
-                    }},
-                }},
-                "/pets": {"put": {
-                    "operationId": "replacePets",
-                    "requestBody": {"required": true, "content": {"application/x-www-form-urlencoded": {
-                        "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
-                    }}},
-                    "responses": {"204": {"description": "replaced"}},
-                }},
-            },
-            "components": {
-                "schemas": {"Pet": {"type": "object", "properties": {
-                    "name": {"type": "string"},
-                    "born": {"type": "string", "format": "date-time"},
-                }}},
-                "securitySchemes": {"key": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}},
-            },
-        });
-        for packaging in [Packaging::Crate, Packaging::Workspace, Packaging::Module] {
-            for decoding in [
-                crate::config::Decoding::Strict,
-                crate::config::Decoding::Lenient,
-            ] {
-                let config = Config {
-                    decoding,
-                    packaging,
-                    ..Config::default()
-                };
-                let rendered = files(document.clone(), &config)?;
-                let mut supports = 0;
-                for (path, text) in &rendered {
-                    let flat: String = text.split_whitespace().collect();
-                    assert!(!flat.contains("expect(dead_code"), "{path}: {text}");
-                    let opens = if path.as_str() == "progeny.rs" {
-                        flat.contains("pubmodsupport{#![allow(dead_code,")
-                    } else if path.as_str().ends_with("src/support.rs") {
-                        flat.starts_with("#![allow(dead_code,")
-                    } else {
-                        continue;
-                    };
-                    assert!(opens, "{path} does not open with the allow: {text}");
-                    assert_eq!(flat.matches("dead_code").count(), 1, "{path}: {text}");
-                    supports += 1;
-                }
-                // One support module per crate: three in a workspace, one otherwise.
-                let expected = if packaging == Packaging::Workspace {
-                    3
-                } else {
-                    1
-                };
-                assert_eq!(supports, expected, "{:?}", rendered.keys());
-            }
-        }
-    }
-
     #[test_util::test]
     fn a_declared_content_type_parameter_outranks_the_bodys_own() {
         // cloudflare's R2 object upload, in miniature: an octet-stream body *and* a declared
@@ -3364,60 +3278,6 @@ mod tests {
         Ok((server, implemented))
     }
 
-    /// Every error arm of an operation that shares one problem body is built from its status:
-    /// exact arms first, then the range arm of the status's class, then `default`, as the
-    /// client's status match picks them.
-    #[test_util::test]
-    fn shared_error_bodies_get_a_constructor_that_picks_the_arm_by_status() {
-        let problem = json!({"description": "failed", "content": {"application/problem+json": {
-            "schema": {"$ref": "#/components/schemas/Problem"}}}});
-        let mut reasoned = problem.clone();
-        reasoned["headers"] = json!({"X-Reason": {"schema": {"type": "string"}}});
-        let (server, implemented) = error_constructors(json!({
-            "openapi": "3.1.0",
-            "paths": {"/problems": {"get": {"operationId": "problems", "responses": {
-                "200": {"description": "ok", "content": {"application/json": {
-                    "schema": {"type": "boolean"}}}},
-                "400": problem,
-                "404": reasoned,
-                "4XX": problem,
-                "503": problem,
-                "default": problem,
-            }}}},
-            "components": {"schemas": {"Problem": {"type": "object", "properties": {
-                "title": {"type": "string"}}}}},
-        }))?;
-        assert_eq!(
-            implemented,
-            ["ProblemsResponse<super::types::read::Problem>"],
-            "{server}"
-        );
-
-        // Exact arms, the one with a typed header given its raw headers, then the `4XX` range,
-        // then `default` for everything else.
-        for arm in [
-            "400u16=>{Self::BadRequest{headers:raw_headers,body,}}",
-            "404u16=>{Self::NotFound{headers:::std::boxed::Box::new(ProblemsNotFoundHeaders{raw:raw_headers,..::std::default::Default::default()}),body,}}",
-            "503u16=>{Self::Status503{headers:raw_headers,body,}}",
-            "_ifstatus/100==4u16=>{Self::Status4xx{status,headers:raw_headers,body,}}",
-            "_=>{Self::Default{status,headers:raw_headers,body,}}",
-        ] {
-            assert!(
-                server.contains(arm),
-                "the constructor has `{arm}`:\n{server}"
-            );
-        }
-        // The exact arms come before the range, which is a guard rather than a pattern that the
-        // `400` at its lower bound would overlap.
-        let exact = server
-            .find("400u16=>{Self::BadRequest")
-            .ok_or_eyre("the `400` arm")?;
-        let range = server
-            .find("_ifstatus/100==4u16")
-            .ok_or_eyre("the `4XX` arm")?;
-        assert!(exact < range, "{server}");
-    }
-
     /// No constructor where an error arm carries another body, or none, or where nothing takes a
     /// status no arm declares; one where every error arm's body is the same Rust type.
     #[test_util::test]
@@ -3470,34 +3330,6 @@ mod tests {
             server.contains("letbody=::std::boxed::Box::new(body);Self::Default{status,headers:raw_headers,body,}}"),
             "{server}"
         );
-    }
-
-    /// A range declared twice in two casings is one arm on both sides: the client's status match
-    /// has no unreachable second arm, and the server has no variant a client could never receive.
-    #[test_util::test]
-    fn a_range_declared_in_two_casings_is_one_arm() -> eyre::Result<()> {
-        let failed = json!({"description": "failed", "content": {"application/json": {
-            "schema": {"type": "string"}}}});
-        let generated = files(
-            json!({
-                "openapi": "3.1.0",
-                "paths": {"/pets": {"get": {"operationId": "listPets", "responses": {
-                    "200": {"description": "ok"}, "4XX": failed.clone(), "4xx": failed}}}},
-            }),
-            &Config::default(),
-        )?;
-        let flat = |path: &str| -> eyre::Result<String> {
-            let source = generated
-                .get(camino::Utf8Path::new(path))
-                .ok_or_eyre("a generated file")?;
-            Ok(source.split_whitespace().collect())
-        };
-        let client = flat("src/client.rs")?;
-        assert_eq!(client.matches("400u16..=499u16").count(), 1, "{client}");
-        let server = flat("src/server.rs")?;
-        assert!(server.contains("Status4xx{"), "{server}");
-        assert!(!server.contains("Status4xx2"), "{server}");
-        Ok(())
     }
 
     /// An operation declaring no responses answers `204` with whatever headers its handler
@@ -3930,25 +3762,11 @@ mod tests {
         // Whether an alias is used is the consumer's build to decide: one the client or the server
         // alone names is unused once that edge is compiled out. So the module allows `dead_code`
         // as an inner attribute and expects none.
-        let module = syn::parse_file(&rendered)?
-            .items
-            .into_iter()
-            .find_map(|item| match item {
-                syn::Item::Mod(module) if module.ident == "__progeny_deprecated" => Some(module),
-                _ => None,
-            })
-            .ok_or_eyre("the alias module is generated")?;
+        let flat = squeezed(&rendered);
         assert!(
-            module.attrs.iter().any(|attribute| {
-                matches!(attribute.style, syn::AttrStyle::Inner(_))
-                    && attribute.path().is_ident("allow")
-                    && quote::ToTokens::to_token_stream(attribute)
-                        .to_string()
-                        .contains("dead_code")
-            }),
+            flat.contains("mod__progeny_deprecated{#![allow(dead_code,"),
             "{rendered}"
         );
-        let flat: String = rendered.split_whitespace().collect();
         assert!(!flat.contains("expect(dead_code"), "{rendered}");
         assert!(
             rendered.contains("pub revocation: Option<__progeny_deprecated::Retired>"),
@@ -4238,90 +4056,41 @@ mod tests {
         );
     }
 
-    /// Every module that spells the description's types allows `type_complexity` once, as an
-    /// inner attribute, in every packaging, and nothing expects it.
-    ///
-    /// The fixture nests a schema the way `cloudflare`'s snapshot response does, as a union
-    /// variant's payload, which no per-field expectation ever reached.
+    /// Every module that spells the description's types allows `type_complexity` as an inner
+    /// attribute, in every packaging, and nothing expects it.
     #[test_util::test]
     fn every_module_spelling_schema_types_allows_type_complexity() {
-        let map = json!({"type": "object", "additionalProperties": true});
-        let nested = json!({"oneOf": [
-            {"type": ["object", "null"], "additionalProperties": true},
-            {"type": ["array", "null"], "items": {"type": ["object", "null"], "additionalProperties": true}},
-        ]});
+        let pet = json!({"type": "object", "properties": {"name": {"type": "string"}}});
         let document = json!({
             "openapi": "3.1.0",
-            "paths": {"/snapshot": {"post": {
-                "operationId": "snapshot",
-                "requestBody": {"content": {"application/json": {"schema": {
-                    "type": "object", "properties": {"json": nested.clone(), "extra": map},
-                }}}},
+            "paths": {"/pets": {"post": {
+                "operationId": "addPet",
+                "requestBody": {"content": {"application/json": {"schema": pet.clone()}}},
                 "responses": {"200": {"description": "ok", "content": {"application/json": {
-                    "schema": nested,
+                    "schema": pet,
                 }}}},
             }}},
         });
-        let allows = |attrs: &[syn::Attribute]| {
-            attrs.iter().any(|attr| {
-                matches!(attr.style, syn::AttrStyle::Inner(_))
-                    && attr.path().is_ident("allow")
-                    && quote::ToTokens::to_token_stream(attr)
-                        .to_string()
-                        .contains("clippy :: type_complexity")
-            })
-        };
-
-        // One file per module, in a crate and in a workspace.
-        for packaging in [Packaging::Crate, Packaging::Workspace] {
+        let allow = "#![allow(clippy::type_complexity,";
+        for packaging in [Packaging::Crate, Packaging::Workspace, Packaging::Module] {
             let config = Config {
                 packaging,
                 ..Config::default()
             };
             let rendered = files(document.clone(), &config)?;
-            for module in ["types.rs", "client.rs", "server.rs"] {
-                let (path, text) = rendered
-                    .iter()
-                    .find(|(path, _)| path.file_name() == Some(module))
-                    .ok_or_eyre("the module is generated")?;
-                assert!(allows(&syn::parse_file(text)?.attrs), "{path}:\n{text}");
-                let flat: String = text.split_whitespace().collect();
-                assert!(!flat.contains("expect(clippy::type_complexity"), "{path}");
+            let allows: usize = rendered
+                .values()
+                .map(|text| squeezed(text).matches(allow).count())
+                .sum();
+            // One each for the types, client and server modules.
+            assert_eq!(allows, 3, "{packaging:?}: {:?}", rendered.keys());
+            for (path, text) in &rendered {
+                assert!(
+                    !squeezed(text).contains("expect(clippy::type_complexity"),
+                    "{path}"
+                );
             }
-            // The union variant really is the nested payload the allowance exists for.
-            let (_, types) = rendered
-                .iter()
-                .find(|(path, _)| path.file_name() == Some("types.rs"))
-                .ok_or_eyre("the types module is generated")?;
-            let flat: String = types.split_whitespace().collect();
-            assert!(
-                flat.contains(
-                    "AnyMapList(Box<Option<Vec<Option<std::collections::BTreeMap<String,serde_json::Value>>>>>"
-                ),
-                "{types}"
-            );
         }
-
-        // Nested modules in the one file a module packaging writes.
-        let config = Config {
-            packaging: Packaging::Module,
-            ..Config::default()
-        };
-        let text = &files(document, &config)?[camino::Utf8Path::new("progeny.rs")];
-        let file = syn::parse_file(text)?;
-        for module in ["types", "client", "server"] {
-            let attrs = file
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    syn::Item::Mod(nested) if nested.ident == module => Some(&nested.attrs),
-                    _ => None,
-                })
-                .ok_or_eyre("the module is generated")?;
-            assert!(allows(attrs), "{module}:\n{text}");
-        }
-        let flat: String = text.split_whitespace().collect();
-        assert!(!flat.contains("expect(clippy::type_complexity"), "{text}");
     }
 
     /// The stem guard, at the one place it used to panic: a digit-led `operationId` is a

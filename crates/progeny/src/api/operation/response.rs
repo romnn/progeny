@@ -55,12 +55,6 @@ impl Build<'_> {
                         "`{status}` names the same status as `{first}`, whose arm is generated"
                     ),
                 ));
-                if !self.config.media_types.is_empty() {
-                    self.repeated_positions.insert(
-                        at.child(status.clone()).child("content").to_string(),
-                        (*first).clone(),
-                    );
-                }
                 continue;
             }
             claimed.insert(pattern, status);
@@ -532,40 +526,6 @@ mod tests {
                     "`4xx` names the same status as `4XX`, whose arm is generated".to_owned()
                 ),
             ]
-        );
-        Ok(())
-    }
-
-    /// A media type picked at a response dropped for repeating another's status cannot be
-    /// honoured, and the rejection names the key whose arm is generated, since generation stops
-    /// before the `repeated-status` diagnostic would say so.
-    #[test_util::test]
-    fn a_pick_at_a_repeated_status_names_the_arm_that_is_generated() -> eyre::Result<()> {
-        let content = json!({"application/json": {"schema": {"type": "integer"}}});
-        let config = crate::config::Config {
-            media_types: [(
-                "/paths/~1pets/get/responses/200/content".to_owned(),
-                "application/json".to_owned(),
-            )]
-            .into_iter()
-            .collect(),
-            ..crate::config::Config::default()
-        };
-        let Err(error) = crate::api::tests::model_with(
-            with_paths(json!({
-                "/pets": {"get": {"operationId": "listPets", "responses": {
-                    "0200": {"description": "padded", "content": content.clone()},
-                    "200": {"description": "plain", "content": content},
-                }}},
-            })),
-            &config,
-        ) else {
-            eyre::bail!("a pick at a dropped response must stop generation");
-        };
-        let message = error.to_string();
-        assert!(
-            message.contains("names the same status as `0200`"),
-            "{message}"
         );
         Ok(())
     }

@@ -1212,7 +1212,10 @@ mod tests {
             panic!("a pointer no position matches must stop generation");
         };
         let message = error.to_string();
-        assert!(message.contains("declares no content there"), "{message}");
+        assert!(
+            message.contains("no generated body or response has content there"),
+            "{message}"
+        );
     }
 
     #[test_util::test]
