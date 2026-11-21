@@ -1192,7 +1192,7 @@ fn flattens(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) -> 
 
 /// How many unions deep a flatten may nest before it is refused, so a long chain of references
 /// cannot exhaust the stack.
-const FLATTEN_DEPTH: usize = 16;
+pub(super) const FLATTEN_DEPTH: usize = 16;
 
 /// [`flattens`], with the names each branch met so far claims at its object level: `None` for a
 /// branch still being worked out or one that is not an object.

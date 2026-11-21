@@ -2220,6 +2220,88 @@ mod tests {
         }
     }
 
+    /// A family whose base maps `format` to `Wide` and `Tall`, `Item` declaring `format` beside a
+    /// union of them, and `Image` flattening them inside `Nested`'s union. When `overlapping`,
+    /// `Tall`'s payloads fit `Wide`, so only the mapping tells the two apart.
+    fn format_family(overlapping: bool) -> Value {
+        let (tall, tall_members) = if overlapping {
+            (
+                json!(["width", "height"]),
+                json!({"width": {"type": "integer"}, "height": {"type": "integer"}}),
+            )
+        } else {
+            (json!(["height"]), json!({"height": {"type": "integer"}}))
+        };
+        let family = json!([{"$ref": "#/components/schemas/Wide"},
+                            {"$ref": "#/components/schemas/Tall"}]);
+        json!({
+            "Shape": {"type": "object",
+                      "discriminator": {"propertyName": "format", "mapping": {
+                          "wide": "#/components/schemas/Wide", "tall": "#/components/schemas/Tall"}},
+                      "oneOf": family},
+            "Wide": {"allOf": [{"$ref": "#/components/schemas/Shape"},
+                {"type": "object", "required": ["width"], "properties": {"width": {"type": "integer"}}}]},
+            "Tall": {"allOf": [{"$ref": "#/components/schemas/Shape"},
+                {"type": "object", "required": tall, "properties": tall_members}]},
+            "Item": {"type": "object", "properties": {"format": {"type": "string"}}, "oneOf": family},
+            "Image": {"type": "object", "required": ["type"],
+                      "properties": {"type": {"type": "string", "enum": ["image"]}},
+                      "anyOf": family},
+            "Nested": {"type": "object", "properties": {"format": {"type": "string"}}, "oneOf": [
+                {"type": "object", "required": ["type", "text"], "properties": {
+                    "type": {"type": "string", "enum": ["text"]}, "text": {"type": "string"}}},
+                {"$ref": "#/components/schemas/Image"},
+            ]},
+        })
+    }
+
+    /// The shape of the union flattened into the struct `name`.
+    fn flattened_of<'a>(shapes: &'a Shapes, name: &str) -> eyre::Result<&'a Shape> {
+        let Shape::Struct(structure) = shape_of(shapes, name)? else {
+            eyre::bail!("`{name}` is not a struct");
+        };
+        let Some(ShapeRef::Key(union)) = &structure.flattened else {
+            eyre::bail!("`{name}` flattens no union");
+        };
+        shapes
+            .get(union)
+            .ok_or_eyre("the flattened union has no shape")
+    }
+
+    /// A member beside a union takes a tag the union inherits only where the union dispatches on
+    /// it: the union is then arbitrary JSON beside the member, directly or one union down, and
+    /// stays typed where its branches tell themselves apart without it.
+    #[test_util::test]
+    fn a_member_beside_a_union_takes_an_inherited_tag_only_where_it_is_read() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(format_family(false)))?;
+        for name in ["Item", "Image"] {
+            assert_ne!(
+                flattened_of(&shapes, name)?,
+                &Shape::Any,
+                "{name}: {diagnostics:?}"
+            );
+        }
+        assert!(matches!(flattened_of(&shapes, "Nested")?, Shape::Union(_)));
+
+        let (shapes, diagnostics) = shapes_of(with_schemas(format_family(true)))?;
+        for name in ["Item", "Image"] {
+            assert_eq!(
+                flattened_of(&shapes, name)?,
+                &Shape::Any,
+                "{name}: {diagnostics:?}"
+            );
+        }
+        assert!(matches!(flattened_of(&shapes, "Nested")?, Shape::Union(_)));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.class() == BreakageClass::DiscriminatorEdgeCase
+                    && d.detail()
+                        .contains("a struct it is flattened into reads `format`")),
+            "{diagnostics:?}"
+        );
+    }
+
     /// Each level of a nested flatten may dispatch on a tag of its own: the outer union reads
     /// `type`, which the image declares itself, and the image's union reads `format`.
     #[test_util::test]
