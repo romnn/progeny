@@ -6,17 +6,18 @@
 # over the whole corpus nightly and before a release. Nothing is sampled silently: the
 # corpus runner prints what the tier skipped.
 #
-# Chosen from `notes` in manifest.toml so the eight cover both dialects, both serialization
-# formats, and the constructs that break generators:
+# Every member is pinned, committed or fetched at a recorded commit, so a publisher cannot change
+# a pull request's result; live documents run in the nightly full corpus. Chosen from `notes` in
+# manifest.toml so the eight cover both dialects, both serialization formats, and the constructs
+# that break generators:
 #
 #   petstore-31   hermetic and committed — the one spec that needs no network
 #   github-31     3.1, ~4 MB, the size ceiling
-#   posthog       3.1, 925 patternProperties / 3743 anyOf / 198 const / prefixItems, and
-#                 served as YAML from an extensionless URL cached as `.json`
+#   airflow       3.1, 639 anyOf, prefixItems, 626 null-type lines
 #   cloudflare    3.0, very large, 29 self-contradicting example payloads
 #   okta          3.0 YAML, 56 discriminators
-#   orb           3.1, 2955 oneOf lines, 19 discriminators, null-heavy
-#   jellyfin      3.0, 77 `format: binary` + octet-stream bodies
+#   lithic        3.1, 99 oneOf, 86 const, patternProperties
+#   influxdb      3.0 YAML, binary bodies
 #   oxide         3.0, the predecessor's flagship consumer spec — regression protection
 #
 # Deliberately absent: `zendesk`, whose bare `=` scalar (a YAML 1.1 `!!value` tag) is
@@ -30,10 +31,10 @@
 quick = [
   "petstore-31",
   "github-31",
-  "posthog",
+  "airflow",
   "cloudflare",
   "okta",
-  "orb",
-  "jellyfin",
+  "lithic",
+  "influxdb",
   "oxide",
 ]

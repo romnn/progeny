@@ -79,17 +79,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      # Vendor specs are not committed (~117 MB, redistribution rights vary), so the
-      # corpus is fetched from corpus/manifest.toml. `launchdarkly` has no cached copy
-      # and comes from a live vendor endpoint; the runner treats a fetch failure there as
-      # infrastructure rather than a gate.
+      # Vendor specs are not committed (~117 MB, redistribution rights vary), so the pinned
+      # documents are fetched at their recorded commits and checked against their snapshots.
+      # Live documents, which a publisher can change at any time, run only nightly.
       - name: Fetch corpus
         uses: ./.github/actions/fetch-corpus
       # Round-trip, reference resolution, dialect convergence, generation, determinism and the
       # diagnostics snapshots, for every document.
       - name: Run the corpus
         if: matrix.part == 'hand-written'
-        run: task corpus
+        run: task corpus -- --pinned
       # Compiling every generated crate is minutes-to-hours, so pull requests compile the reviewed
       # 8-document tier and the full matrix is a deliberate, on-demand run.
       # This lints them too, with warnings denied: a warning in generated code is a defect its
@@ -169,6 +168,8 @@ jobs:
           cache-on-failure: true
       - name: Fetch corpus
         uses: ./.github/actions/fetch-corpus
+        with:
+          pinned: "false"
       - name: Compile and lint every generated crate
         run: task corpus:compile:all -- --jobs 1
       - name: The wire differential over the whole tier

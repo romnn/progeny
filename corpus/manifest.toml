@@ -6,9 +6,14 @@
 # `cargo xtask corpus --fetch` downloads each `url` into `corpus/cache/`
 # (gitignored); only this manifest and specs marked `local = true` live in git.
 # A committed spec that cannot be read fails every corpus run, selected or not.
+# Pull requests and `main` run only pinned specs, committed or fetched at a `rev`, so a
+# publisher cannot change their result; the others run nightly. Moving a pin is editing
+# `rev` and re-recording the spec's snapshot with `task corpus:snapshots`.
 #
 # Fields:
 #   url          upstream source; absent for local specs
+#   rev          the commit a raw.githubusercontent.com spec is fetched at, in place of
+#                the branch its url names; must match the digest in its snapshot
 #   file         filename in corpus/cache/ (or corpus/specs/ when local)
 #   local        committed in-tree, hermetic, safe for PR-time CI
 #   mock         spec exercises the mock/test-double path
