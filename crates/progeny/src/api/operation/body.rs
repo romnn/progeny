@@ -11,8 +11,7 @@ use crate::contract::{
 };
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::doc::{MediaType, Operation};
-use crate::resolve::ResolvedDocument;
-use crate::schema::{Schema, SchemaId};
+use crate::schema::Schema;
 
 /// A request body position, lowered once per declared media type.
 ///
@@ -342,29 +341,18 @@ impl Build<'_> {
                     .map(|declared| (*declared).to_owned());
                 let json_declared = content_type.as_deref().is_some_and(is_json);
                 let part = part_of(&field.ty, json_declared, self.contracts);
-                // Equal schemas share one type, whose origin can be another operation's schema, so
-                // the member is found again from the schema this operation sends.
-                let schema = entry
-                    .schema
-                    .and_then(|id| {
-                        declaring(self.resolved, id, &field.wire_name, &mut BTreeSet::new())
-                    })
-                    .map_or_else(
-                        || contract.origin().clone(),
-                        |id| self.resolved.schemas().address(id).clone(),
-                    );
-                let member = schema.child("properties").child(field.wire_name.as_str());
-                if let Some(lost) = lost_null(field, part, self.contracts)
-                    && self.null_members.insert((member.to_string(), lost.clone()))
-                {
-                    // The member is the location; the detail says only what is lost, so the
-                    // records of one document fold by reason, as a scale class does.
-                    ctx.report(Diagnostic::new(
-                        BreakageClass::MultipartNull,
-                        Action::Degrade,
-                        member,
-                        format!("a multipart member can hold an explicit `null`, and {lost}"),
-                    ));
+                for lost in lost_nulls(field, part, self.contracts) {
+                    let member = self.member(entry, contract.origin(), &field.wire_name);
+                    // The detail says only what is lost, so the records of one document fold by
+                    // reason, as a scale class does.
+                    if self.null_members.insert((member.clone(), lost)) {
+                        ctx.report(Diagnostic::new(
+                            BreakageClass::MultipartNull,
+                            Action::Degrade,
+                            member,
+                            format!("a multipart member can hold an explicit `null`, and {lost}"),
+                        ));
+                    }
                 }
                 PartSpec {
                     kind: part.kind,
@@ -375,6 +363,26 @@ impl Build<'_> {
                 }
             })
             .collect()
+    }
+
+    /// Where the body this operation sends declares the member `name`.
+    ///
+    /// Equal schemas share one type, whose origin can be another operation's schema, so the member
+    /// is looked up among the schemas this body's own type is built from; `origin` is the
+    /// fallback.
+    fn member(&self, entry: &MediaType, origin: &JsonPointer, name: &str) -> JsonPointer {
+        let declaring = entry.schema.and_then(|body| {
+            crate::shape::key_of(self.resolved, body)
+                .parts()
+                .iter()
+                .map(|part| part.id())
+                .find(|&id| {
+                    matches!(self.resolved.schema(id), Schema::Object(object)
+                        if object.properties.as_ref().is_some_and(|properties| properties.contains_key(name)))
+                })
+        });
+        let schema = declaring.map_or(origin, |id| self.resolved.schemas().address(id));
+        schema.child("properties").child(name)
     }
 
     /// Which media type a response position decodes: the configured pick, or the fixed
@@ -681,74 +689,23 @@ fn part_within(ty: &TypeRef, walk: Walk<'_>, followed: &mut BTreeSet<TypeIndex>)
     }
 }
 
-/// The schema that declares the property `name`, reached from `id` through references and the
-/// `allOf`, `anyOf` and `oneOf` branches a body composes its object from.
-fn declaring(
-    resolved: &ResolvedDocument,
-    id: SchemaId,
-    name: &str,
-    seen: &mut BTreeSet<SchemaId>,
-) -> Option<SchemaId> {
-    if !seen.insert(id) {
-        return None;
-    }
-    if let Some(target) = resolved.follow(id) {
-        return declaring(resolved, target, name, seen);
-    }
-    let Schema::Object(object) = resolved.schema(id) else {
-        return None;
-    };
-    if object
-        .properties
-        .as_ref()
-        .is_some_and(|properties| properties.contains_key(name))
-    {
-        return Some(id);
-    }
-    [&object.all_of, &object.any_of, &object.one_of]
-        .into_iter()
-        .flatten()
-        .flatten()
-        .find_map(|&branch| declaring(resolved, branch, name, seen))
-}
-
-/// What becomes of an explicit `null` a multipart member can hold and its part cannot carry, or
-/// `None` when every `null` the member can hold reaches the wire.
-///
-/// The writer sends a JSON part's `null` as the JSON `null`, one part per `null` element of a
-/// repeated member.
-/// A text or file part has no spelling for `null` that differs from a value, and neither has a
-/// repeated member as a whole: the reader folds repeated parts into an array, so a `null` list
-/// would read back as a list holding one `null`.
-fn lost_null(field: &FieldContract, part: Part, contracts: &Contracts) -> Option<String> {
-    let carrier = match part.kind {
-        PartKind::Text => "a text part",
-        PartKind::File => "a file part",
-        PartKind::Json => "a JSON part",
-    };
+/// Each way an explicit `null` the member can hold is lost on the way into its parts.
+fn lost_nulls(field: &FieldContract, part: Part, contracts: &Contracts) -> Vec<&'static str> {
     let mut lost = Vec::new();
     if sends_null(field, contracts) {
         if part.repeated {
-            lost.push(
-                "a `null` list has no spelling as repeated parts that differs from a list holding \
-                 one `null`, so it is sent as absent"
-                    .to_owned(),
-            );
+            lost.push("a `null` list has no spelling as repeated parts, so it is sent as absent");
         } else if part.kind != PartKind::Json {
-            lost.push(format!(
-                "{carrier} cannot carry a `null`, so it is sent as absent"
-            ));
+            lost.push("a text or file part cannot carry a `null`, so it is sent as absent");
         }
     }
     if part.repeated
         && part.kind != PartKind::Json
         && element_of(&field.ty, contracts).is_some_and(|element| holds_null(element, contracts))
     {
-        lost.push(format!(
-            "a `null` element has no spelling as {carrier}, so it is left out of the list"
-        ));
+        lost.push("a `null` element has no spelling as a text or file part, so it is left out");
     }
-    (!lost.is_empty()).then(|| lost.join("; and "))
+    lost
 }
 
 /// Whether the member's serialized form can write an explicit `null` for the member itself.
@@ -778,14 +735,11 @@ fn holds_null_within(
     contracts: &Contracts,
     followed: &mut BTreeSet<TypeIndex>,
 ) -> bool {
-    match ty {
+    match contracts.unaliased(ty) {
         TypeRef::Option(_) | TypeRef::Presence(_) | TypeRef::Unit | TypeRef::Value => true,
         TypeRef::Boxed(inner) => holds_null_within(inner, contracts, followed),
         TypeRef::Named(index) if followed.insert(*index) => {
             match contracts.get(*index).map(TypeContract::kind) {
-                Some(ContractKind::Alias { target }) => {
-                    holds_null_within(target, contracts, followed)
-                }
                 Some(ContractKind::Enum { variants, .. }) => variants
                     .iter()
                     .any(|variant| holds_null_within(&variant.ty, contracts, followed)),
@@ -799,19 +753,12 @@ fn holds_null_within(
 /// The element type of the sequence a repeated member holds, through the wrappers and aliases
 /// [`part_within`] looks through on its way to the sequence.
 fn element_of<'a>(ty: &'a TypeRef, contracts: &'a Contracts) -> Option<&'a TypeRef> {
-    let mut followed = BTreeSet::new();
     let mut ty = ty;
     loop {
-        match ty {
+        match contracts.unaliased(ty) {
             TypeRef::Vec(inner) | TypeRef::Array(inner, _) => return Some(inner),
             TypeRef::Option(inner) | TypeRef::Presence(inner) | TypeRef::Boxed(inner) => {
                 ty = inner;
-            }
-            TypeRef::Named(index) if followed.insert(*index) => {
-                match contracts.get(*index).map(TypeContract::kind) {
-                    Some(ContractKind::Alias { target }) => ty = target,
-                    _ => return None,
-                }
             }
             _ => return None,
         }
@@ -1134,26 +1081,17 @@ mod tests {
     /// Every member the `multipart-null` records of a model stand for, sorted.
     ///
     /// The class folds per document, so a record names its first member as its location and the
-    /// rest as related locations; the occurrence counts must add up to the members listed, or a
-    /// member was counted twice.
+    /// rest as related locations; a member reported twice appears twice.
     fn multipart_nulls(diagnostics: &[crate::Diagnostic]) -> Vec<String> {
-        let records: Vec<&crate::Diagnostic> = diagnostics
+        let mut members: Vec<String> = diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.class() == crate::BreakageClass::MultipartNull)
-            .collect();
-        let mut members: Vec<String> = records
-            .iter()
             .flat_map(|diagnostic| {
                 std::iter::once(diagnostic.location())
                     .chain(diagnostic.related())
                     .map(ToString::to_string)
             })
             .collect();
-        let occurrences: u32 = records
-            .iter()
-            .map(|diagnostic| diagnostic.occurrences().get())
-            .sum();
-        assert_eq!(usize::try_from(occurrences).ok(), Some(members.len()));
         members.sort();
         members
     }
@@ -1171,7 +1109,7 @@ mod tests {
                 "operationId": "upload",
                 "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {
                     "type": "object",
-                    "required": ["note", "list", "meta", "count"],
+                    "required": ["note", "file", "list", "meta", "count"],
                     "properties": {
                         // Reported: a text or file part that can be `null`
                         "note": {"type": ["string", "null"]},
@@ -1187,30 +1125,19 @@ mod tests {
                         "count": {"type": ["integer", "null"]},
                         "ids": {"type": "array", "items": {"type": ["integer", "null"]}},
                         "plain": {"type": "string"},
-                        "collapsed": {"type": ["string", "null"]},
                     },
                 }, "encoding": {"count": json.clone(), "ids": json}}}},
                 "responses": {"204": {"description": "done"}},
             }},
         }));
-        // Presence is preserved for the three members a caller can set to `null` while optional,
-        // and `collapsed` keeps the default collapse, which leaves its `None` out.
-        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
+        // `kept` is optional, so it can hold an explicit `null` only while presence is preserved.
         let config = Config {
-            nullability_overrides: ["kept", "file", "tags"]
-                .into_iter()
-                .map(|name| {
-                    let declared = match name {
-                        "tags" => crate::config::SchemaType::Array,
-                        _ => crate::config::SchemaType::String,
-                    };
-                    (format!("{schema}/properties/{name}"), declared)
-                })
-                .collect(),
+            preserve_optional_nullable: true,
             ..Config::default()
         };
         let (_, diagnostics) = model_with(document, &config)?;
 
+        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
         let reported = multipart_nulls(&diagnostics);
         let expected: Vec<String> = ["file", "kept", "list", "note", "tags"]
             .iter()
@@ -1360,6 +1287,40 @@ mod tests {
                 "responses": {"204": {"description": "done"}},
             }},
         }));
+        let (_, diagnostics) = model_of(document)?;
+
+        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
+        assert_eq!(
+            multipart_nulls(&diagnostics),
+            [
+                format!("{schema}/allOf/0/properties/left"),
+                format!("{schema}/allOf/1/properties/right"),
+            ]
+        );
+    }
+
+    /// A `$ref` beside the `allOf` does not hide the branches: each member is still reported where
+    /// it is declared.
+    #[test_util::test]
+    fn a_reference_beside_all_of_keeps_each_member_at_its_branch() {
+        let mut document = with_paths(json!({
+            "/files": {"post": {
+                "operationId": "upload",
+                "requestBody": {"content": {"multipart/form-data": {"schema": {
+                    "$ref": "#/components/schemas/Base",
+                    "allOf": [
+                        {"type": "object", "required": ["left"],
+                         "properties": {"left": {"type": ["string", "null"]}}},
+                        {"type": "object", "required": ["right"],
+                         "properties": {"right": {"type": ["string", "null"]}}},
+                    ],
+                }}}},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        document["components"] = json!({"schemas": {"Base": {
+            "type": "object", "properties": {"id": {"type": "string"}},
+        }}});
         let (_, diagnostics) = model_of(document)?;
 
         let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";

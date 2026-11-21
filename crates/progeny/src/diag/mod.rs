@@ -173,13 +173,8 @@ pub enum BreakageClass {
     /// caller-chosen one.
     EncodingCollapse,
     /// A `multipart/form-data` member that can hold an explicit `null` its part cannot carry,
-    /// which the generated client sends as absent.
-    ///
-    /// A JSON part carries `null` as the JSON `null`, and so does each part of a repeated JSON
-    /// member.
-    /// A text or file part has no spelling for it that differs from a value, and neither has a
-    /// repeated member as a whole, because the parts of a `null` list would read back as a list
-    /// holding one `null`.
+    /// which the generated client sends as absent: a text or file part, a `null` element of a
+    /// repeated text or file member, or a `null` repeated member as a whole.
     MultipartNull,
     /// Two shapes whose names sanitize to the same Rust identifier.
     CollidingTypeName,
@@ -364,9 +359,9 @@ impl BreakageClass {
             // no key, and the sentence differs per route. The same split `colliding-operation-id`
             // has.
             | Self::UnregistrableRoute
-            // A scale class like `presence-collapse`, which it follows into multipart bodies:
-            // `posthog` has 345 required nullable text members, so a document's records fold by
-            // what is lost, each member still settled against `deny.accept` on its own.
+            // A scale class like `presence-collapse`, which it follows into multipart bodies: a
+            // document's records fold by what is lost, each member still settled against
+            // `deny.accept` on its own.
             | Self::MultipartNull
             | Self::UnsatisfiableDerive => Aggregation::PerDocument,
             // The first can occur at most once per document by construction; each of the rest names

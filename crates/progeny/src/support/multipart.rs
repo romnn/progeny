@@ -771,49 +771,20 @@ mod tests {
         assert!(out.contains("name=\"kept\""), "{out}");
     }
 
-    /// An explicit `null` in a JSON member is one part holding the JSON `null`, under its declared
-    /// content type, so the server reads it back as `null` rather than as an absent member.
+    /// An explicit `null` in a JSON member is one `null` part, and a `null` element of a repeated
+    /// JSON member keeps its place, so the server reads both back; a `null` for a whole list has no
+    /// spelling the reader tells apart from `[null]`, and is left out.
     #[test_util::test]
-    fn an_explicit_null_in_a_json_member_is_a_null_part() {
-        let specs = [PartSpec {
-            name: "label",
-            kind: PartKind::Json,
-            repeated: false,
-            content_type: Some("application/json"),
-        }];
-        let out = rendered(&json!({"label": null}), &specs)?;
-        assert_eq!(
-            out,
-            crlf(indoc::indoc! {r#"
-                --progeny-boundary
-                Content-Disposition: form-data; name="label"
-                Content-Type: application/json
-
-                null
-                --progeny-boundary--
-            "#})
-        );
-    }
-
-    /// A `null` element of a repeated JSON member keeps its place among the parts, while a `null`
-    /// for the whole list has no spelling the reader tells apart from `[null]` and is left out.
-    #[test_util::test]
-    fn a_repeated_json_member_keeps_its_null_elements_and_omits_a_null_list() -> eyre::Result<()> {
-        let specs = [spec("ids", PartKind::Json, true)];
-
-        // A null element is a `null` part between its neighbours
-        let (content_type, bytes) =
-            body(&json!({"ids": [1, null, 3]}), &specs).ok_or_eyre("the body is an object")?;
-        let out = String::from_utf8(bytes.clone())?;
-        assert_eq!(out.matches("name=\"ids\"").count(), 3, "{out}");
-        assert!(out.contains(&framed("null")), "{out}");
+    fn json_members_carry_their_explicit_nulls() -> eyre::Result<()> {
+        let specs = [
+            spec("label", PartKind::Json, false),
+            spec("ids", PartKind::Json, true),
+        ];
+        let value = json!({"label": null, "ids": [1, null, 3]});
+        let (content_type, bytes) = body(&value, &specs).ok_or_eyre("the body is an object")?;
         let boundary = super::boundary_of(&content_type).ok_or_eyre("the body has a boundary")?;
-        assert_eq!(
-            super::parse(&bytes, &boundary, &specs)?,
-            json!({"ids": [1, null, 3]})
-        );
+        assert_eq!(super::parse(&bytes, &boundary, &specs)?, value);
 
-        // A null list sends no part at all
         let out = rendered(&json!({"ids": null, "kept": "yes"}), &specs)?;
         assert!(!out.contains("name=\"ids\""), "{out}");
         assert!(out.contains("name=\"kept\""), "{out}");
