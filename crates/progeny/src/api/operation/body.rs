@@ -158,7 +158,8 @@ impl Build<'_> {
                 required,
             },
             "multipart/form-data" => {
-                let parts = self.part_specs(&ty, entry, ctx);
+                let parts =
+                    self.part_specs(&ty, entry, &at.child("content").child(media_type), ctx);
                 BodyContract::Multipart {
                     reading: reading::multipart(&ty, &parts, self.contracts),
                     parts,
@@ -303,7 +304,13 @@ impl Build<'_> {
     ///
     /// A member whose explicit `null` the writer sends as absent is reported here, beside the part
     /// it becomes, as [`BreakageClass::MultipartNull`].
-    fn part_specs(&mut self, ty: &TypeRef, entry: &MediaType, ctx: &mut Ctx) -> Vec<PartSpec> {
+    fn part_specs(
+        &mut self,
+        ty: &TypeRef,
+        entry: &MediaType,
+        body: &JsonPointer,
+        ctx: &mut Ctx,
+    ) -> Vec<PartSpec> {
         let declared: BTreeMap<&str, &str> = entry
             .encoding
             .iter()
@@ -341,17 +348,27 @@ impl Build<'_> {
                     .map(|declared| (*declared).to_owned());
                 let json_declared = content_type.as_deref().is_some_and(is_json);
                 let part = part_of(&field.ty, json_declared, self.contracts);
-                for lost in lost_nulls(field, part, self.contracts) {
-                    let member = self.member(entry, contract.origin(), &field.wire_name);
-                    // The detail says only what is lost, so the records of one document fold by
-                    // reason, as a scale class does.
-                    if self.null_members.insert((member.clone(), lost)) {
-                        ctx.report(Diagnostic::new(
-                            BreakageClass::MultipartNull,
-                            Action::Degrade,
-                            member,
-                            format!("a multipart member can hold an explicit `null`, and {lost}"),
-                        ));
+                let lost = lost_nulls(field, part, self.contracts);
+                if !lost.is_empty() {
+                    // Where the member is declared, so the records of one document fold by what is
+                    // lost. Without a declaration among this body's own schemas, the body itself,
+                    // naming the member: never another operation's schema.
+                    let (location, detail) = match self.member(entry, &field.wire_name) {
+                        Some(member) => (member, "a multipart member".to_owned()),
+                        None => (
+                            body.child("schema"),
+                            format!("the multipart member `{}`", field.wire_name),
+                        ),
+                    };
+                    for lost in lost {
+                        if self.null_members.insert((location.clone(), lost)) {
+                            ctx.report(Diagnostic::new(
+                                BreakageClass::MultipartNull,
+                                Action::Degrade,
+                                location.clone(),
+                                format!("{detail} can hold an explicit `null`, and {lost}"),
+                            ));
+                        }
                     }
                 }
                 PartSpec {
@@ -365,12 +382,12 @@ impl Build<'_> {
             .collect()
     }
 
-    /// Where the body this operation sends declares the member `name`.
+    /// Where the body this operation sends declares the member `name`, among the schemas its own
+    /// type is built from.
     ///
-    /// Equal schemas share one type, whose origin can be another operation's schema, so the member
-    /// is looked up among the schemas this body's own type is built from; `origin` is the
-    /// fallback.
-    fn member(&self, entry: &MediaType, origin: &JsonPointer, name: &str) -> JsonPointer {
+    /// Equal schemas share one type, whose origin can be another operation's schema, so the type's
+    /// origin is never used.
+    fn member(&self, entry: &MediaType, name: &str) -> Option<JsonPointer> {
         let declaring = entry.schema.and_then(|body| {
             crate::shape::key_of(self.resolved, body)
                 .parts()
@@ -381,8 +398,13 @@ impl Build<'_> {
                         if object.properties.as_ref().is_some_and(|properties| properties.contains_key(name)))
                 })
         });
-        let schema = declaring.map_or(origin, |id| self.resolved.schemas().address(id));
-        schema.child("properties").child(name)
+        declaring.map(|id| {
+            self.resolved
+                .schemas()
+                .address(id)
+                .child("properties")
+                .child(name)
+        })
     }
 
     /// Which media type a response position decodes: the configured pick, or the fixed
@@ -1272,31 +1294,43 @@ mod tests {
         );
     }
 
-    /// A body composed with `allOf` reports each member at the branch that declares it.
+    /// A member no schema of this body declares directly, here behind an `anyOf` two operations
+    /// share one type for, is reported at this operation's own body, naming the member.
     #[test_util::test]
-    fn a_member_of_an_all_of_body_is_reported_at_its_own_branch() {
-        let document = with_paths(json!({
-            "/files": {"post": {
-                "operationId": "upload",
-                "requestBody": {"content": {"multipart/form-data": {"schema": {"allOf": [
-                    {"type": "object", "required": ["left"],
-                     "properties": {"left": {"type": ["string", "null"]}}},
-                    {"type": "object", "required": ["right"],
-                     "properties": {"right": {"type": ["string", "null"]}}},
-                ]}}}},
+    fn a_member_without_a_declaration_of_its_own_is_reported_at_its_body() {
+        let operation = |id: &str, encoding: Value| {
+            json!({"post": {
+                "operationId": id,
+                "requestBody": {"content": {"multipart/form-data": {
+                    "schema": {"anyOf": [
+                        {"type": "object", "required": ["note"],
+                         "properties": {"note": {"type": ["string", "null"]}}},
+                        {"type": "null"},
+                    ]},
+                    "encoding": encoding,
+                }}},
                 "responses": {"204": {"description": "done"}},
-            }},
+            }})
+        };
+        let document = with_paths(json!({
+            "/a": operation("first", json!({"note": {"contentType": "application/json"}})),
+            "/b": operation("second", json!({})),
         }));
         let (_, diagnostics) = model_of(document)?;
 
-        let schema = "/paths/~1files/post/requestBody/content/multipart~1form-data/schema";
+        let records: Vec<(String, &str)> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.class() == crate::BreakageClass::MultipartNull)
+            .map(|diagnostic| (diagnostic.location().to_string(), diagnostic.detail()))
+            .collect();
+        let [(location, detail)] = records.as_slice() else {
+            eyre::bail!("one record for `/b` alone: {records:?}");
+        };
         assert_eq!(
-            multipart_nulls(&diagnostics),
-            [
-                format!("{schema}/allOf/0/properties/left"),
-                format!("{schema}/allOf/1/properties/right"),
-            ]
+            location,
+            "/paths/~1b/post/requestBody/content/multipart~1form-data/schema"
         );
+        assert!(detail.contains("`note`"), "{detail}");
     }
 
     /// A `$ref` beside the `allOf` does not hide the branches: each member is still reported where
