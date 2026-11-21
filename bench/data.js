@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795218853534,
+  "lastUpdate": 1795223094062,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3825,6 +3825,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 235.2239580154419,
+            "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2031a5d2ff6094c6c58489a803e257efb4499df8",
+          "message": "ci: sync with the house template and upgrade dependencies (#165)\n\nUpgrades Cargo and mise dependencies within the 14-day cooldown (cargo-fc 0.10, whose pedantic lint run also fails on Cargo's own warnings), adds the mise:upgrade task and a clean task that removes every build output, denies self-named module files, keeps cooldown out of the Hugo docs' go.mod, refreshes fuzz/Cargo.lock on every version bump, and bumps benchtrail to v0.5.1.",
+          "timestamp": "2026-11-21T01:59:06+01:00",
+          "tree_id": "a7b4883669a30c8ce337c78903911ece53a6cb11",
+          "url": "https://github.com/romnn/progeny/commit/2031a5d2ff6094c6c58489a803e257efb4499df8"
+        },
+        "date": 1795223093764,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.469554,
+            "range": "± 0.25",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2817.205728530884,
+            "range": "± 1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.124920666666666,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1128.6002597808838,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6720016666666666,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 235.5260410308838,
             "range": "± 0.1",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
