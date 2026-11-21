@@ -111,7 +111,7 @@ struct Build<'a> {
     /// A member is a schema property, which every operation sending that schema shares, so it is
     /// reported once per loss rather than once per operation; another operation's encoding can
     /// lose its `null` another way, which is reported too.
-    null_members: BTreeSet<(JsonPointer, &'static str)>,
+    null_members: BTreeSet<(JsonPointer, String, &'static str)>,
     /// Method names, kept unique across the whole client.
     namer: Namer,
     /// The camel stems the renderers build per-operation type names from (`X1Params`,

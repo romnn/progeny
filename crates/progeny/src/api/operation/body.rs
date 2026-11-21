@@ -158,8 +158,7 @@ impl Build<'_> {
                 required,
             },
             "multipart/form-data" => {
-                let parts =
-                    self.part_specs(&ty, entry, &at.child("content").child(media_type), ctx);
+                let parts = self.part_specs(&ty, entry, ctx);
                 BodyContract::Multipart {
                     reading: reading::multipart(&ty, &parts, self.contracts),
                     parts,
@@ -304,13 +303,7 @@ impl Build<'_> {
     ///
     /// A member whose explicit `null` the writer sends as absent is reported here, beside the part
     /// it becomes, as [`BreakageClass::MultipartNull`].
-    fn part_specs(
-        &mut self,
-        ty: &TypeRef,
-        entry: &MediaType,
-        body: &JsonPointer,
-        ctx: &mut Ctx,
-    ) -> Vec<PartSpec> {
+    fn part_specs(&mut self, ty: &TypeRef, entry: &MediaType, ctx: &mut Ctx) -> Vec<PartSpec> {
         let declared: BTreeMap<&str, &str> = entry
             .encoding
             .iter()
@@ -349,19 +342,27 @@ impl Build<'_> {
                 let json_declared = content_type.as_deref().is_some_and(is_json);
                 let part = part_of(&field.ty, json_declared, self.contracts);
                 let lost = lost_nulls(field, part, self.contracts);
-                if !lost.is_empty() {
+                if let Some(body) = entry.schema
+                    && !lost.is_empty()
+                {
                     // Where the member is declared, so the records of one document fold by what is
                     // lost. Without a declaration among this body's own schemas, the body itself,
                     // naming the member: never another operation's schema.
                     let (location, detail) = match self.member(entry, &field.wire_name) {
                         Some(member) => (member, "a multipart member".to_owned()),
+                        // Where the body's schema was written, which a referenced request body
+                        // has too.
                         None => (
-                            body.child("schema"),
+                            self.resolved.schemas().address(body).clone(),
                             format!("the multipart member `{}`", field.wire_name),
                         ),
                     };
                     for lost in lost {
-                        if self.null_members.insert((location.clone(), lost)) {
+                        if self.null_members.insert((
+                            location.clone(),
+                            field.wire_name.clone(),
+                            lost,
+                        )) {
                             ctx.report(Diagnostic::new(
                                 BreakageClass::MultipartNull,
                                 Action::Degrade,
@@ -1295,7 +1296,8 @@ mod tests {
     }
 
     /// A member no schema of this body declares directly, here behind an `anyOf` two operations
-    /// share one type for, is reported at this operation's own body, naming the member.
+    /// share one type for, is reported at this operation's own body, naming the member: each such
+    /// member on its own.
     #[test_util::test]
     fn a_member_without_a_declaration_of_its_own_is_reported_at_its_body() {
         let operation = |id: &str, encoding: Value| {
@@ -1303,8 +1305,10 @@ mod tests {
                 "operationId": id,
                 "requestBody": {"content": {"multipart/form-data": {
                     "schema": {"anyOf": [
-                        {"type": "object", "required": ["note"],
-                         "properties": {"note": {"type": ["string", "null"]}}},
+                        {"type": "object", "required": ["note", "title"], "properties": {
+                            "note": {"type": ["string", "null"]},
+                            "title": {"type": ["string", "null"]},
+                        }},
                         {"type": "null"},
                     ]},
                     "encoding": encoding,
@@ -1313,24 +1317,53 @@ mod tests {
             }})
         };
         let document = with_paths(json!({
-            "/a": operation("first", json!({"note": {"contentType": "application/json"}})),
+            "/a": operation("first", json!({
+                "note": {"contentType": "application/json"},
+                "title": {"contentType": "application/json"},
+            })),
             "/b": operation("second", json!({})),
         }));
         let (_, diagnostics) = model_of(document)?;
 
-        let records: Vec<(String, &str)> = diagnostics
+        let mut records: Vec<(String, &str)> = diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.class() == crate::BreakageClass::MultipartNull)
             .map(|diagnostic| (diagnostic.location().to_string(), diagnostic.detail()))
             .collect();
-        let [(location, detail)] = records.as_slice() else {
-            eyre::bail!("one record for `/b` alone: {records:?}");
+        records.sort();
+        let body = "/paths/~1b/post/requestBody/content/multipart~1form-data/schema";
+        let [(first, note), (second, title)] = records.as_slice() else {
+            eyre::bail!("one record per member of `/b` alone: {records:?}");
         };
+        assert_eq!((first.as_str(), second.as_str()), (body, body));
+        assert!(note.contains("`note`"), "{note}");
+        assert!(title.contains("`title`"), "{title}");
+    }
+
+    /// A referenced request body reports at the schema where it is written, a pointer that exists.
+    #[test_util::test]
+    fn a_referenced_request_body_reports_where_its_schema_is_written() {
+        let mut document = with_paths(json!({
+            "/upload": {"post": {
+                "operationId": "upload",
+                "requestBody": {"$ref": "#/components/requestBodies/Upload"},
+                "responses": {"204": {"description": "done"}},
+            }},
+        }));
+        document["components"] = json!({"requestBodies": {"Upload": {"content": {
+            "multipart/form-data": {"schema": {"anyOf": [
+                {"type": "object", "required": ["note"],
+                 "properties": {"note": {"type": ["string", "null"]}}},
+                {"type": "null"},
+            ]}},
+        }}}});
+        let (_, diagnostics) = model_of(document)?;
+
+        let reported = multipart_nulls(&diagnostics);
         assert_eq!(
-            location,
-            "/paths/~1b/post/requestBody/content/multipart~1form-data/schema"
+            reported,
+            ["/components/requestBodies/Upload/content/multipart~1form-data/schema"]
         );
-        assert!(detail.contains("`note`"), "{detail}");
     }
 
     /// A `$ref` beside the `allOf` does not hide the branches: each member is still reported where
