@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795274591864,
+  "lastUpdate": 1795283099674,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -4090,6 +4090,72 @@ window.BENCHMARK_DATA = {
             "name": "petstore-31.hand-written peak rss",
             "value": 234.9283847808838,
             "range": "± 0.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "481fb75bf804f63dccd69666a5c6c7d516a1b106",
+          "message": "fix(generate): send an explicit null in a multipart JSON part (#171)\n\nA JSON part carries null as the JSON null, and a repeated JSON member keeps each null element in place; numbers and booleans whose encoding declares JSON become JSON parts. A text or file part, a null element of a repeated text or file member, and a null list as a whole stay omitted and are reported by the new multipart-null class.\n\nCloses #162",
+          "timestamp": "2026-11-21T18:39:25+01:00",
+          "tree_id": "69dcc4dc89d4624d00261dff46d52e892c59ecd2",
+          "url": "https://github.com/romnn/progeny/commit/481fb75bf804f63dccd69666a5c6c7d516a1b106"
+        },
+        "date": 1795283099398,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written cpu",
+            "value": 25.835590666666672,
+            "range": "± 0.31",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2817.341145515442,
+            "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.099613,
+            "range": "± 0.06",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1128.1471347808838,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6593753333333333,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 234.9192705154419,
+            "range": "± 0.2",
             "unit": "MiB",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           }
