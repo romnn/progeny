@@ -2244,6 +2244,8 @@ mod tests {
             "Tall": {"allOf": [{"$ref": "#/components/schemas/Shape"},
                 {"type": "object", "required": tall, "properties": tall_members}]},
             "Item": {"type": "object", "properties": {"format": {"type": "string"}}, "oneOf": family},
+            "Nullable": {"type": ["object", "null"], "properties": {"format": {"type": "string"}},
+                         "oneOf": family},
             "Image": {"type": "object", "required": ["type"],
                       "properties": {"type": {"type": "string", "enum": ["image"]}},
                       "anyOf": family},
@@ -2255,10 +2257,15 @@ mod tests {
         })
     }
 
-    /// The shape of the union flattened into the struct `name`.
+    /// The shape of the union flattened into the struct `name`, nullable or not.
     fn flattened_of<'a>(shapes: &'a Shapes, name: &str) -> eyre::Result<&'a Shape> {
-        let Shape::Struct(structure) = shape_of(shapes, name)? else {
-            eyre::bail!("`{name}` is not a struct");
+        let structure = match shape_of(shapes, name)? {
+            Shape::Struct(structure) => structure,
+            Shape::Optional(ShapeRef::Inline(inner)) => match inner.as_ref() {
+                Shape::Struct(structure) => structure,
+                other => eyre::bail!("`{name}` is not a struct: {other:?}"),
+            },
+            other => eyre::bail!("`{name}` is not a struct: {other:?}"),
         };
         let Some(ShapeRef::Key(union)) = &structure.flattened else {
             eyre::bail!("`{name}` flattens no union");
@@ -2274,7 +2281,7 @@ mod tests {
     #[test_util::test]
     fn a_member_beside_a_union_takes_an_inherited_tag_only_where_it_is_read() {
         let (shapes, diagnostics) = shapes_of(with_schemas(format_family(false)))?;
-        for name in ["Item", "Image"] {
+        for name in ["Item", "Nullable", "Image"] {
             assert_ne!(
                 flattened_of(&shapes, name)?,
                 &Shape::Any,
@@ -2284,7 +2291,7 @@ mod tests {
         assert!(matches!(flattened_of(&shapes, "Nested")?, Shape::Union(_)));
 
         let (shapes, diagnostics) = shapes_of(with_schemas(format_family(true)))?;
-        for name in ["Item", "Image"] {
+        for name in ["Item", "Nullable", "Image"] {
             assert_eq!(
                 flattened_of(&shapes, name)?,
                 &Shape::Any,
@@ -2326,11 +2333,29 @@ mod tests {
         let Some(ShapeRef::Key(union)) = &structure.flattened else {
             eyre::bail!("no flattened union");
         };
-        assert!(
-            matches!(shapes.get(union), Some(Shape::Union(_))),
-            "{:?}: {diagnostics:?}",
-            shapes.get(union)
-        );
+        let tag_of = |key: &super::ShapeKey| match shapes.get(key) {
+            Some(Shape::Union(union)) => union.tag.as_ref().map(|tag| tag.property.clone()),
+            _ => None,
+        };
+        assert_eq!(tag_of(union).as_deref(), Some("type"), "{diagnostics:?}");
+        let Some(Shape::Union(outer)) = shapes.get(union) else {
+            eyre::bail!("the outer union is not a union");
+        };
+        let inner = outer
+            .variants
+            .iter()
+            .find_map(|variant| match &variant.shape {
+                ShapeRef::Key(key) => match shapes.get(key) {
+                    Some(Shape::Struct(image)) => match &image.flattened {
+                        Some(ShapeRef::Key(inner)) => Some(inner),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                ShapeRef::Inline(_) => None,
+            });
+        let inner = inner.ok_or_eyre("the image flattens no union")?;
+        assert_eq!(tag_of(inner).as_deref(), Some("format"), "{diagnostics:?}");
     }
 
     /// A member both the struct and a branch could read, or one a closed struct would refuse,

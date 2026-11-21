@@ -465,15 +465,24 @@ fn carried_shortfall(
 fn read_above(shapes: &Shapes) -> BTreeMap<ShapeKey, BTreeSet<String>> {
     let mut above = BTreeMap::new();
     for key in shapes.keys() {
-        if let Some(Shape::Struct(structure)) = shapes.get(key) {
+        if let Some(structure) = shapes.get(key).and_then(struct_of) {
             read_below(shapes, structure, &BTreeSet::new(), &mut above, 0);
         }
     }
     above
 }
 
+/// The struct a shape is, nullable or not.
+fn struct_of(shape: &Shape) -> Option<&Struct> {
+    match shape {
+        Shape::Struct(structure) => Some(structure),
+        Shape::Optional(ShapeRef::Inline(inner)) => struct_of(inner),
+        _ => None,
+    }
+}
+
 /// [`read_above`] for the union flattened into `structure`, beneath structs that read `outer`, and
-/// for the unions flattened into its variants.
+/// for the unions flattened into its variants, unless that union already holds every such name.
 fn read_below(
     shapes: &Shapes,
     structure: &Struct,
@@ -489,6 +498,11 @@ fn read_below(
     }
     let mut names = outer.clone();
     names.extend(structure.fields.iter().map(|field| field.wire.clone()));
+    let known = above.entry(flattened.clone()).or_default();
+    if names.is_subset(known) {
+        return;
+    }
+    known.extend(names.iter().cloned());
     if let Some(Shape::Union(union)) = shapes.get(flattened) {
         for variant in &union.variants {
             if let ShapeRef::Key(key) = &variant.shape
@@ -498,7 +512,6 @@ fn read_below(
             }
         }
     }
-    above.entry(flattened.clone()).or_default().extend(names);
 }
 
 /// Whether a union flattened into a variant, at any depth, reads `property`: a branch declares it,
