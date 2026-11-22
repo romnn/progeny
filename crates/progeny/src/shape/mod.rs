@@ -4694,7 +4694,11 @@ mod tests {
     fn a_numeric_enum_split_across_branches_reads_as_that_enum() -> eyre::Result<()> {
         let number = |value: f64| json!({"type": "number", "enum": [value]});
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
-            "Feedback": {"anyOf": [number(-1.0), number(0.0), number(1.0)]},
+            // An OpenAPI extension, as cloudflare marks this union with, is no restriction.
+            "Feedback": {
+                "x-auditable": true,
+                "anyOf": [number(-1.0), number(0.0), number(1.0)],
+            },
             "Code": {"oneOf": [{"const": 1}, {"const": 2}]},
             "Nullable": {"anyOf": [number(1.5), number(2.5), {"type": "null"}]},
         })))?;
@@ -4748,11 +4752,7 @@ mod tests {
     #[test_util::test]
     fn a_union_the_fold_cannot_read_exactly_stays_a_union() -> eyre::Result<()> {
         let integer = |value: i64| json!({"type": "integer", "enum": [value]});
-        #[cfg_attr(
-            not(feature = "exact-numbers"),
-            expect(unused_mut, reason = "one more case")
-        )]
-        let mut unfolded = vec![
+        let unfolded = [
             json!({"maximum": 1, "anyOf": [integer(1), integer(2)]}),
             json!({"not": {"const": 1}, "anyOf": [{"const": 1}, {"const": 2}]}),
             json!({"type": "number", "anyOf": [{"const": 1}, {"const": 2}]}),
@@ -4770,12 +4770,19 @@ mod tests {
                 {"type": "number", "enum": [9_007_199_254_740_993_u64]},
                 {"type": "number", "enum": [1]},
             ]}),
+            // A keyword progeny does not know may be one a validator acts on.
+            json!({"oneOf": [{"const": 300}, {"const": 300, "range": [0, 255]}, {"const": 1}]}),
+            // Only exact numbers keep a decimal spelling an `f64` would round, or one the default
+            // decoder reads as another number.
+            #[cfg(feature = "exact-numbers")]
+            serde_json::from_str(
+                r#"{"anyOf": [{"type": "number", "enum": [9007199254740993.0]}, {"type": "number", "enum": [1]}]}"#,
+            )?,
+            #[cfg(feature = "exact-numbers")]
+            serde_json::from_str(
+                r#"{"anyOf": [{"type": "number", "enum": [0.9999999999999999]}, {"type": "number", "enum": [2]}]}"#,
+            )?,
         ];
-        // Only exact numbers keep a decimal spelling an `f64` would round.
-        #[cfg(feature = "exact-numbers")]
-        unfolded.push(serde_json::from_str(
-            r#"{"anyOf": [{"type": "number", "enum": [9007199254740993.0]}, {"type": "number", "enum": [1]}]}"#,
-        )?);
         for schema in unfolded {
             assert!(
                 degrades_as_wild_union(json!({"Code": schema.clone()}), "Code")?,

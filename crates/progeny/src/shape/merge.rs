@@ -323,9 +323,10 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
             .collect(),
         (Some(values), None) => values,
         (None, Some(constant)) => vec![constant.clone()],
-        // A union that lists nothing beside it may still be a list split across its branches.
         (None, None) => {
-            fold_split_enum(resolved, key, view);
+            if let Some((values, types)) = numbers_admitted(resolved, key, view, branches) {
+                (view.union, view.types, view.enumeration) = (None, Some(types), Some(values));
+            }
             return;
         }
     };
@@ -384,18 +385,6 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
                 view.uninterpreted.push(keyword);
             }
         }
-    }
-}
-
-/// Read a union whose branches split one numeric enum as that enum ([`numbers_admitted`]).
-fn fold_split_enum(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
-    let Some(branches) = view.union.as_deref() else {
-        return;
-    };
-    if let Some((values, types)) = numbers_admitted(resolved, key, view, branches) {
-        view.union = None;
-        view.types = Some(types);
-        view.enumeration = Some(values);
     }
 }
 
@@ -508,10 +497,16 @@ fn listed_numbers(
         if plain != **object {
             return None;
         }
-        let types: Vec<&TypeName> = object.types.iter().flat_map(|types| types.iter()).collect();
-        let own = match (&object.enumeration, &object.constant) {
-            (Some(listed), None) if !listed.is_empty() => listed.clone(),
-            (None, Some(constant)) => vec![constant.clone()],
+        let SchemaObject {
+            enumeration,
+            constant,
+            types,
+            ..
+        } = plain;
+        let types: Vec<&TypeName> = types.iter().flat_map(|types| types.iter()).collect();
+        let own = match (enumeration, constant) {
+            (Some(listed), None) if !listed.is_empty() => listed,
+            (None, Some(constant)) => vec![constant],
             (None, None) if matches!(types.as_slice(), [TypeName::Null]) => {
                 values.push(Value::Null);
                 continue;
@@ -539,7 +534,9 @@ fn listed_numbers(
 
 /// A schema with only the annotations of another, which say nothing about the values it admits.
 ///
-/// Keywords progeny does not know are among them, because a validator ignores those too.
+/// OpenAPI's `x-` extensions are among them, which carry tooling metadata.
+/// Other keywords progeny does not know are not, because some validators act on keywords of their
+/// own.
 fn annotations(object: &SchemaObject) -> SchemaObject {
     SchemaObject {
         title: object.title.clone(),
@@ -551,16 +548,40 @@ fn annotations(object: &SchemaObject) -> SchemaObject {
         read_only: object.read_only,
         write_only: object.write_only,
         external_docs: object.external_docs.clone(),
-        unknown: object.unknown.clone(),
+        unknown: object
+            .unknown
+            .iter()
+            .filter(|(keyword, _)| keyword.starts_with("x-"))
+            .map(|(keyword, value)| (keyword.clone(), value.clone()))
+            .collect(),
         ..SchemaObject::default()
     }
 }
 
-/// Whether an `f64` holds a number exactly.
+/// Whether an `f64` holds a number exactly as written: every JSON decoder reads it as the same
+/// `f64`, which writes it back as the same number.
+///
+/// A decimal significand up to 2^53 with at most 22 fractional digits is read exactly even by a
+/// decoder that scales the significand by a power of ten rather than rounding correctly, as
+/// `serde_json` does by default.
+/// Any other spelling, one with an exponent among them, is not taken on trust.
 fn survives_f64(value: &Value) -> bool {
-    value
-        .as_f64()
-        .is_some_and(|float| super::listed::same(value, &Value::from(float)) == Some(true))
+    let Value::Number(number) = value else {
+        return false;
+    };
+    let Some(text) = super::listed::decimal(number) else {
+        return false;
+    };
+    let digits = text.trim_start_matches('-');
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let scaled_exactly = fraction.len() <= 22
+        && format!("{whole}{fraction}")
+            .parse::<u64>()
+            .is_ok_and(|significand| significand <= 1 << 53);
+    scaled_exactly
+        && value
+            .as_f64()
+            .is_some_and(|float| super::listed::same(value, &Value::from(float)) == Some(true))
 }
 
 /// The union a view declares, apart from the members declared beside it.
