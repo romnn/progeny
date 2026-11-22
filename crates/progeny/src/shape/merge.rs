@@ -323,7 +323,16 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
             .collect(),
         (Some(values), None) => values,
         (None, Some(constant)) => vec![constant.clone()],
-        (None, None) => return,
+        // A union that lists nothing beside it may still be a list split across its branches.
+        (None, None) => {
+            if let Some((values, types)) = numbers_admitted(resolved, key, view, branches) {
+                view.union = None;
+                view.discriminator = None;
+                view.types = Some(types);
+                view.enumeration = Some(values);
+            }
+            return;
+        }
     };
     // A list that the parts or the constant narrow to nothing admits nothing.
     if listed.is_empty() {
@@ -332,16 +341,12 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
         view.impossible = true;
         return;
     }
-    let exactly_one = key.parts().iter().any(|&part| {
-        part.dispatches()
-            && matches!(resolved.schema(part.id()), Schema::Object(object) if object.one_of.is_some())
-    });
     match super::listed::narrow(
         resolved,
         &listed,
         view.types.as_ref(),
         branches,
-        exactly_one,
+        exactly_one(resolved, key),
     ) {
         Narrowed::Values { values, checked } => {
             view.union = None;
@@ -381,6 +386,161 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
             }
         }
     }
+}
+
+/// Whether the union a key declares is a `oneOf`, under which a value two branches admit is
+/// refused.
+fn exactly_one(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
+    key.parts().iter().any(|&part| {
+        part.dispatches()
+            && matches!(resolved.schema(part.id()), Schema::Object(object) if object.one_of.is_some())
+    })
+}
+
+/// The numbers a union admits, and their type, where its branches each list only numbers of one
+/// kind, as `anyOf: [{type: number, enum: [-1]}, {type: number, enum: [0]}]` splits one numeric
+/// enum across branches.
+///
+/// As separate branches, each would be the same scalar, so the first would read every number and
+/// the rest would go unread.
+/// The union is read as the list only where every value is shown admitted, and is left as it is
+/// otherwise.
+/// Admission does not evaluate bounds, so a union with bounds of its own is left too, and so is
+/// one that declares a discriminator, which no number can be dispatched by.
+fn numbers_admitted(
+    resolved: &ResolvedDocument,
+    key: &ShapeKey,
+    view: &View,
+    branches: &[ShapeKey],
+) -> Option<(Vec<Value>, BTreeSet<TypeName>)> {
+    let bounded = key.parts().iter().any(|&part| {
+        matches!(resolved.schema(part.id()), Schema::Object(object) if bounds_numbers(object))
+    });
+    if bounded || view.discriminator.is_some() {
+        return None;
+    }
+    let (listed, kind) = listed_numbers(resolved, branches, view.unsigned)?;
+    let narrowed = super::listed::narrow(
+        resolved,
+        &listed,
+        view.types.as_ref(),
+        branches,
+        exactly_one(resolved, key),
+    );
+    let Narrowed::Values {
+        values,
+        checked: true,
+    } = narrowed
+    else {
+        return None;
+    };
+    let types = super::listed::types_of(&values, Some(&kind), view.unsigned);
+    Some((values, types))
+}
+
+/// The values a union's branches list, and the type they share, where every branch lists only
+/// numbers of one kind or is the `null` type.
+///
+/// A branch's kind is the type its own list has ([`super::listed::types_of`]), `integer` or
+/// `number`.
+/// Branches of different kinds are told apart by their scalars already, so they are left alone.
+/// So is a branch with bounds, which admission does not evaluate, with a `format`, which sizes an
+/// integer by its own values, or with a discriminator.
+/// A `number` is an `f64`, which might round an integer above 2^53, so a list of numbers that
+/// holds one is left alone too.
+/// Any one part of a branch that lists values bounds what the branch admits, and
+/// [`super::listed::narrow`] then checks each value against the whole branch.
+/// The parts are read as written, as [`super::listed`] reads them, so a branch that refers back
+/// to the schema cannot recurse.
+fn listed_numbers(
+    resolved: &ResolvedDocument,
+    branches: &[ShapeKey],
+    unsigned: bool,
+) -> Option<(Vec<Value>, BTreeSet<TypeName>)> {
+    let mut values: Vec<Value> = Vec::new();
+    let mut shared: Option<BTreeSet<TypeName>> = None;
+    let mut nullable = false;
+    for branch in branches {
+        let mut own = None;
+        let mut declared: Option<BTreeSet<TypeName>> = None;
+        for &part in branch.parts() {
+            let Schema::Object(object) = resolved.schema(part.id()) else {
+                continue;
+            };
+            if bounds_numbers(object) || object.format.is_some() || object.discriminator.is_some() {
+                return None;
+            }
+            if let Some(types) = &object.types {
+                declared
+                    .get_or_insert_default()
+                    .extend(types.iter().cloned());
+            }
+            let null = object
+                .types
+                .as_ref()
+                .is_some_and(|types| types.iter().all(|name| *name == TypeName::Null));
+            // An empty list is no list, as the merged view reads one.
+            let listed = match (&object.enumeration, &object.constant) {
+                (Some(listed), _) if !listed.is_empty() => Some(listed.clone()),
+                (_, Some(constant)) => Some(vec![constant.clone()]),
+                _ if null => Some(vec![Value::Null]),
+                _ => None,
+            };
+            own = own.or(listed);
+        }
+        let own = own?;
+        if own
+            .iter()
+            .any(|value| !value.is_number() && !value.is_null())
+        {
+            return None;
+        }
+        let mut kind = super::listed::types_of(&own, declared.as_ref(), unsigned);
+        nullable |= kind.remove(&TypeName::Null);
+        if !kind.is_empty() {
+            match &shared {
+                Some(first) if *first != kind => return None,
+                Some(_) => {}
+                None => shared = Some(kind),
+            }
+        }
+        for value in own {
+            if !values
+                .iter()
+                .any(|kept| super::listed::same(kept, &value) == Some(true))
+            {
+                values.push(value);
+            }
+        }
+    }
+    let mut kind = shared?;
+    let exact = |value: &Value| {
+        const EXACT: u64 = 1 << 53;
+        value.as_u64().map_or_else(
+            || {
+                value
+                    .as_i64()
+                    .is_none_or(|whole| whole.unsigned_abs() <= EXACT)
+            },
+            |whole| whole <= EXACT,
+        )
+    };
+    if kind.contains(&TypeName::Number) && !values.iter().all(exact) {
+        return None;
+    }
+    if nullable {
+        kind.insert(TypeName::Null);
+    }
+    Some((values, kind))
+}
+
+/// Whether a schema bounds the numbers it admits.
+fn bounds_numbers(object: &SchemaObject) -> bool {
+    object.minimum.is_some()
+        || object.maximum.is_some()
+        || object.exclusive_minimum.is_some()
+        || object.exclusive_maximum.is_some()
+        || object.multiple_of.is_some()
 }
 
 /// The union a view declares, apart from the members declared beside it.
