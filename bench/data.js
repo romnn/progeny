@@ -26,13 +26,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.266756333333333,
-            "range": "± 0.10",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3011.97265625,
             "range": "± 2.2",
@@ -40,24 +33,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.00385,
-            "range": "± 0.03",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.4296875,
             "range": "± 2.0",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6800196666666666,
-            "range": "± 0.00",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -92,13 +71,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 16.833516333333336,
-            "range": "± 0.06",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3010.485676765442,
             "range": "± 1.7",
@@ -106,24 +78,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 5.7376553333333336,
-            "range": "± 0.02",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1256.778645515442,
             "range": "± 0.9",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.44289933333333337,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -158,13 +116,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 27.345729000000002,
-            "range": "± 0.54",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3011.171875,
             "range": "± 4.2",
@@ -172,24 +123,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.232153666666667,
-            "range": "± 0.12",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1250.6119785308838,
             "range": "± 1.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7443779999999999,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -224,13 +161,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 29.847318666666666,
-            "range": "± 0.26",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3010.950520515442,
             "range": "± 3.9",
@@ -238,24 +168,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.062881666666668,
-            "range": "± 0.13",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.727864265442,
             "range": "± 2.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.745753,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -290,13 +206,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.883588000000003,
-            "range": "± 0.38",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3011.591145515442,
             "range": "± 1.9",
@@ -304,24 +213,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.674301333333332,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1252.2877597808838,
             "range": "± 1.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6636719999999999,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -356,13 +251,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 27.061282333333335,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2998.037759780884,
             "range": "± 0.8",
@@ -370,24 +258,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.272484666666665,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1252.1484375,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7117786666666667,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -422,13 +296,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.921170333333336,
-            "range": "± 0.52",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3000.9921875,
             "range": "± 2.5",
@@ -436,24 +303,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.265079,
-            "range": "± 0.1",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.609375,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6989490000000002,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -488,13 +341,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 19.089367666666668,
-            "range": "± 0.42",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3000.576822280884,
             "range": "± 6.3",
@@ -502,24 +348,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 6.610619,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1255.294270515442,
             "range": "± 2.8",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.5021243333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -554,13 +386,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.70028566666667,
-            "range": "± 0.22",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3000.513020515442,
             "range": "± 3.6",
@@ -568,24 +393,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.180933666666666,
-            "range": "± 0.11",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1249.9401035308838,
             "range": "± 0.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6823653333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -620,13 +431,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.601564666666665,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3002.423176765442,
             "range": "± 3.2",
@@ -634,24 +438,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.816478666666667,
-            "range": "± 0.03",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.8046875,
             "range": "± 1.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6657633333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -686,13 +476,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 27.453357999999998,
-            "range": "± 0.45",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3003.46484375,
             "range": "± 2.7",
@@ -700,24 +483,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.367625666666667,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.3307285308838,
             "range": "± 2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7171810000000001,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -752,13 +521,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 29.466335333333333,
-            "range": "± 0.25",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3007.76171875,
             "range": "± 5.3",
@@ -766,24 +528,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.883784,
-            "range": "± 0.17",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.69921875,
             "range": "± 1",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7195766666666666,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -818,13 +566,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 18.871669666666666,
-            "range": "± 0.1",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3002.450520515442,
             "range": "± 3.4",
@@ -832,24 +573,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 6.552150999999999,
-            "range": "± 0.15",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1253.872395515442,
             "range": "± 1.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.5116236666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -884,13 +611,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.246838,
-            "range": "± 0.14",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3002.96875,
             "range": "± 1.9",
@@ -898,24 +618,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.865947,
-            "range": "± 0.03",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1247.91015625,
             "range": "± 1.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6755546666666667,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -950,13 +656,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 30.853643333333334,
-            "range": "± 0.22",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2688.899739265442,
             "range": "± 2.1",
@@ -964,24 +663,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.382864,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1051.454426765442,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.807689,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1016,13 +701,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 23.21041633333333,
-            "range": "± 0.15",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2689.483072280884,
             "range": "± 1.6",
@@ -1030,24 +708,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 7.839091333333333,
-            "range": "± 0.14",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1052.516926765442,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6066473333333333,
-            "range": "± 0.04",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1082,13 +746,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 22.499561666666665,
-            "range": "± 0.09",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2998.052083015442,
             "range": "± 0.8",
@@ -1096,24 +753,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 7.576909000000001,
-            "range": "± 0.02",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1253.0390625,
             "range": "± 3.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.571017,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1148,13 +791,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 24.084392666666663,
-            "range": "± 0.06",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3000.798176765442,
             "range": "± 1.3",
@@ -1162,24 +798,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.218766,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1249.8671875,
             "range": "± 1",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6236303333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1214,13 +836,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 27.910074666666663,
-            "range": "± 0.11",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3005.7421875,
             "range": "± 1.2",
@@ -1228,24 +843,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.468901,
-            "range": "± 0.03",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1249.84765625,
             "range": "± 1.9",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.722626,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1280,13 +881,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.427820333333333,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3001.733072280884,
             "range": "± 1.3",
@@ -1294,24 +888,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.976648666666668,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.8893222808838,
             "range": "± 1.9",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6931993333333333,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1346,13 +926,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.415250333333333,
-            "range": "± 0.13",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3002.24609375,
             "range": "± 1.9",
@@ -1360,24 +933,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.090874999999999,
-            "range": "± 0.01",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1249.984375,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6804083333333333,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1412,13 +971,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 31.759681,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2689.622395515442,
             "range": "± 0.6",
@@ -1426,24 +978,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.771272000000002,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1051.8580722808838,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.820668,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1478,13 +1016,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 31.580191666666664,
-            "range": "± 0.11",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2689.212239265442,
             "range": "± 1.5",
@@ -1492,24 +1023,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.929611,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1052.55859375,
             "range": "± 0.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8335876666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1544,13 +1061,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 31.378478666666666,
-            "range": "± 0.55",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2690.979166030884,
             "range": "± 0.2",
@@ -1558,24 +1068,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.522296666666668,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1052.177083015442,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8269890000000001,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1610,13 +1106,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.222522666666666,
-            "range": "± 0.12",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3001.4609375,
             "range": "± 1.8",
@@ -1624,24 +1113,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.627163,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1251.298176765442,
             "range": "± 1.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6697156666666667,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1676,13 +1151,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 33.57158733333333,
-            "range": "± 0.52",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2690.9296875,
             "range": "± 1.5",
@@ -1690,24 +1158,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 11.421783333333332,
-            "range": "± 0.13",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1053.8515625,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8573256666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1742,13 +1196,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 29.199237,
-            "range": "± 0.06",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3002.720051765442,
             "range": "± 2",
@@ -1756,24 +1203,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.625048666666666,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1250.618489265442,
             "range": "± 1.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.74153,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1808,13 +1241,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 23.979299,
-            "range": "± 0.34",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3001.833333015442,
             "range": "± 1",
@@ -1822,24 +1248,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.230089,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1254.39453125,
             "range": "± 1.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6656663333333334,
-            "range": "± 0.03",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1874,13 +1286,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 29.312254333333332,
-            "range": "± 0.14",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3003.3046875,
             "range": "± 2.3",
@@ -1888,24 +1293,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.107815666666667,
-            "range": "± 0.13",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1250.481770515442,
             "range": "± 1.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7828716666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -1940,13 +1331,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 29.134907666666667,
-            "range": "± 0.54",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3012.17578125,
             "range": "± 1.4",
@@ -1954,24 +1338,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.050063333333334,
-            "range": "± 0.02",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1257.78515625,
             "range": "± 1.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.703879,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2006,13 +1376,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 19.935353666666668,
-            "range": "± 0.09",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2699.708333015442,
             "range": "± 1.7",
@@ -2020,24 +1383,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 7.030565666666667,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1082.50390625,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.5393946666666666,
-            "range": "± 0.03",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2072,13 +1421,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.19150833333333,
-            "range": "± 0.39",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2698.35546875,
             "range": "± 2.1",
@@ -2086,24 +1428,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.573102,
-            "range": "± 0",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.505208015442,
             "range": "± 1.1",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6221933333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2138,13 +1466,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 22.213230333333332,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 3010.184895515442,
             "range": "± 1.8",
@@ -2152,24 +1473,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 7.690798333333333,
-            "range": "± 0.01",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1281.7526035308838,
             "range": "± 1.1",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.5691986666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2204,13 +1511,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 28.182939666666666,
-            "range": "± 0.22",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2701.057291030884,
             "range": "± 2.1",
@@ -2218,24 +1518,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.541653666666667,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1081.125,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7315699999999999,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2270,13 +1556,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.711416,
-            "range": "± 0.5",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2700.78515625,
             "range": "± 1",
@@ -2284,24 +1563,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.240391666666667,
-            "range": "± 0.28",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1081.528645515442,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6870783333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2336,13 +1601,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 31.424217000000002,
-            "range": "± 0.32",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2700.061197280884,
             "range": "± 1.5",
@@ -2350,24 +1608,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.945187666666667,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.001301765442,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8166096666666668,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2402,13 +1646,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 30.483456,
-            "range": "± 0.09",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2700.123697280884,
             "range": "± 0.8",
@@ -2416,24 +1653,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.651652,
-            "range": "± 0.06",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1079.653645515442,
             "range": "± 0.1",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.810806,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2468,13 +1691,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 30.61917733333333,
-            "range": "± 0.46",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2701.26953125,
             "range": "± 0.1",
@@ -2482,24 +1698,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.705865666666668,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.364583015442,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7983943333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2534,13 +1736,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 23.81311033333333,
-            "range": "± 2.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2700.90625,
             "range": "± 1",
@@ -2548,24 +1743,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.503795333333333,
-            "range": "± 0.6",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.7291660308838,
             "range": "± 1.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6991826666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2600,13 +1781,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 32.106313,
-            "range": "± 0.29",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2701.033853530884,
             "range": "± 1.1",
@@ -2614,24 +1788,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 11.151696000000001,
-            "range": "± 0.02",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.473958015442,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8473700000000001,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2666,13 +1826,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 31.322843000000002,
-            "range": "± 0.19",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2699.591145515442,
             "range": "± 0.7",
@@ -2680,24 +1833,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.935462666666666,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.5221347808838,
             "range": "± 0.9",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8169226666666667,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2732,13 +1871,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 32.67809233333333,
-            "range": "± 0.16",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2701.546875,
             "range": "± 2.4",
@@ -2746,24 +1878,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 11.373808666666667,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.302083015442,
             "range": "± 0.1",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8601773333333332,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2798,13 +1916,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 32.00155933333333,
-            "range": "± 0.43",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2704.110676765442,
             "range": "± 2.1",
@@ -2812,24 +1923,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 11.106723666666667,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1080.4765625,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8512066666666667,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2864,13 +1961,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 24.80145966666667,
-            "range": "± 1.4",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2811.923176765442,
             "range": "± 1.3",
@@ -2878,24 +1968,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.951589,
-            "range": "± 0.14",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1131.4296875,
             "range": "± 0.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6936086666666667,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2930,13 +2006,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 28.285307,
-            "range": "± 0.09",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2809.127603530884,
             "range": "± 0.6",
@@ -2944,24 +2013,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.004974666666667,
-            "range": "± 0.04",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1130.8424472808838,
             "range": "± 0.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.734584,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -2996,13 +2051,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 35.774053333333335,
-            "range": "± 0.86",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2810.17578125,
             "range": "± 1.3",
@@ -3010,24 +2058,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 12.454467666666666,
-            "range": "± 0.21",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1130.489583015442,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.9605853333333334,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -3062,13 +2096,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 21.076382999999996,
-            "range": "± 0.34",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2810.649739265442,
             "range": "± 1.6",
@@ -3076,24 +2103,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 7.2889773333333325,
-            "range": "± 0.02",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1132.0455722808838,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.5316893333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           {
@@ -3128,13 +2141,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 26.186728666666667,
-            "range": "± 0.13",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2903.3359375,
             "range": "± 1.1",
@@ -3142,24 +2148,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.92718,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1217.65625,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6662296666666666,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3194,13 +2186,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.081592999999998,
-            "range": "± 0.16",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2815.649739265442,
             "range": "± 0.6",
@@ -3208,24 +2193,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.686491,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1130.079426765442,
             "range": "± 0.7",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6378523333333334,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3260,13 +2231,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 34.469568333333335,
-            "range": "± 1.39",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2813.64453125,
             "range": "± 1",
@@ -3274,24 +2238,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 12.243613000000002,
-            "range": "± 0.07",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1127.704426765442,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.9721266666666667,
-            "range": "± 0.02",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3326,13 +2276,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 32.37140366666667,
-            "range": "± 1.11",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2901.51171875,
             "range": "± 0.7",
@@ -3340,24 +2283,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 10.255983666666665,
-            "range": "± 0.46",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1217.009114265442,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7836636666666665,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3392,13 +2321,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 27.01701266666667,
-            "range": "± 0.18",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2902.41015625,
             "range": "± 0.8",
@@ -3406,24 +2328,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.444013333333332,
-            "range": "± 0.16",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1216.9869785308838,
             "range": "± 0.6",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6878706666666666,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3458,13 +2366,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.284777333333334,
-            "range": "± 0.21",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2901.811197280884,
             "range": "± 1.5",
@@ -3472,24 +2373,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.810319333333334,
-            "range": "± 0.03",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1216.96875,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6501113333333334,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3524,13 +2411,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.927859333333334,
-            "range": "± 0.1",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2903.18359375,
             "range": "± 0.3",
@@ -3538,24 +2418,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.000405333333335,
-            "range": "± 0.02",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1216.7994785308838,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6576443333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3590,13 +2456,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 24.944680666666667,
-            "range": "± 0.09",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2818.197916030884,
             "range": "± 1.2",
@@ -3604,24 +2463,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.792599333333335,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1129.09765625,
             "range": "± 0.5",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6508006666666667,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3656,13 +2501,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.866744999999998,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2817.734375,
             "range": "± 1.1",
@@ -3670,24 +2508,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.878231,
-            "range": "± 0",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1128.4609375,
             "range": "± 0.2",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6481913333333332,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3722,13 +2546,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 27.44010333333333,
-            "range": "± 0.29",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2817,
             "range": "± 0.1",
@@ -3736,24 +2553,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.551525,
-            "range": "± 0.16",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1128.852864265442,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.7151176666666667,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3788,13 +2591,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.322605999999997,
-            "range": "± 0.19",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2818.341145515442,
             "range": "± 0.6",
@@ -3802,24 +2598,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.738137000000002,
-            "range": "± 0.1",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1128.419270515442,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6418663333333333,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3854,13 +2636,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.469554,
-            "range": "± 0.25",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2817.205728530884,
             "range": "± 1",
@@ -3868,24 +2643,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.124920666666666,
-            "range": "± 0.01",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1128.6002597808838,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6720016666666666,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3920,13 +2681,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 33.44678566666667,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2814.596353530884,
             "range": "± 0.9",
@@ -3934,24 +2688,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 11.939828666666665,
-            "range": "± 0.16",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1127.071614265442,
             "range": "± 0.3",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8828453333333334,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -3986,13 +2726,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.948628333333332,
-            "range": "± 0.18",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2817.4453125,
             "range": "± 0.9",
@@ -4000,24 +2733,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 8.872589,
-            "range": "± 0.08",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1127.91796875,
             "range": "± 0",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6459753333333333,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -4052,13 +2771,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.870497999999998,
-            "range": "± 0.18",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2817.26953125,
             "range": "± 1.2",
@@ -4066,24 +2778,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.015442,
-            "range": "± 0.05",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1128.1484375,
             "range": "± 0.9",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.654742,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -4118,13 +2816,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 25.835590666666672,
-            "range": "± 0.31",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2817.341145515442,
             "range": "± 1.1",
@@ -4132,24 +2823,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 9.099613,
-            "range": "± 0.06",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1128.1471347808838,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.6593753333333333,
-            "range": "± 0.01",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
@@ -4184,13 +2861,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "okta.hand-written cpu",
-            "value": 31.889940666666664,
-            "range": "± 0.3",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "okta.hand-written peak rss",
             "value": 2815.565103530884,
             "range": "± 1.7",
@@ -4198,24 +2868,10 @@ window.BENCHMARK_DATA = {
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
-            "name": "oxide.hand-written cpu",
-            "value": 11.571599,
-            "range": "± 0.13",
-            "unit": "s",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
             "name": "oxide.hand-written peak rss",
             "value": 1127.1640625,
             "range": "± 0.4",
             "unit": "MiB",
-            "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
-          },
-          {
-            "name": "petstore-31.hand-written cpu",
-            "value": 0.8312689999999999,
-            "range": "± 0",
-            "unit": "s",
             "extra": "3 kept, 0 discarded, rustc 1.100.0 (0ef1bc386 2026-11-09)"
           },
           {
