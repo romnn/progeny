@@ -51,7 +51,10 @@ jobs:
       # workflow records on `gh-pages` (read through the API, no checkout).
       # Installed after the Hugo build, which may clean docs/public.
       # Before the first benchmark run there is no history yet, and the documentation still deploys.
-      # The settings split each benchmark name into its document, strategy, and metric.
+      # The settings split each benchmark name into its document, strategy, and metric, and each CPU
+      # time into one series per processor model, which its environment records.
+      # Lines are colored by processor, because there are more models than dash styles.
+      # Each typed point names its metric's label and direction; the settings only order the charts.
       - name: Install the benchmark dashboard
         uses: romnn/benchtrail@v0.5.1
         with:
@@ -63,16 +66,22 @@ jobs:
               "title": "progeny compile cost",
               "links": [{ "label": "Documentation", "url": "../" }],
               "names": "^(?<document>[^.]+)\\.(?<strategy>\\S+) (?<metric>.+)$",
-              "label": "{{document}} / {{strategy}}",
+              "label": "{{document}} / {{strategy}} ({{cpu}})",
               "metrics": {
-                "cpu": { "label": "CPU time", "direction": "lower" },
-                "peak rss": { "label": "Peak RSS", "direction": "lower" }
+                "instructions": { "order": 0 },
+                "peak heap": { "order": 1 },
+                "average heap": { "order": 2 },
+                "cpu": { "order": 3 },
+                "peak rss": { "order": 4 }
               },
               "dimensions": {
                 "document": { "label": "Document" },
-                "strategy": { "label": "Serde strategy" }
+                "strategy": { "label": "Serde strategy" },
+                "cpu": { "label": "CPU" }
               },
-              "colorBy": "document"
+              "splitEnvironment": ["cpu"],
+              "colorBy": "cpu",
+              "dashBy": "document"
             }
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
