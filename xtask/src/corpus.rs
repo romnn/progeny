@@ -23,7 +23,8 @@ pub struct Args {
     #[arg(long)]
     fetch: bool,
 
-    /// Re-download even documents that are already cached.
+    /// Re-download even live documents that are already cached; a pinned one is downloaded only
+    /// when its cached copy does not verify.
     ///
     /// A download that fails keeps the cached copy, which is what lets CI fall back to its last
     /// good corpus when a publisher is down or has moved.
@@ -33,6 +34,11 @@ pub struct Args {
     /// Run only the quick tier from `corpus/tier.toml`.
     #[arg(long)]
     quick: bool,
+
+    /// Run only documents whose bytes cannot change: committed ones, and ones fetched at a
+    /// recorded commit. What pull requests and `main` run, so a publisher cannot change a result.
+    #[arg(long)]
+    pinned: bool,
 
     /// Run only these documents, by name. Repeatable.
     #[arg(long = "only", value_name = "NAME")]
@@ -172,6 +178,9 @@ pub struct Spec {
     version: Option<String>,
     /// Upstream source. Absent for committed documents.
     url: Option<String>,
+    /// The commit a `raw.githubusercontent.com` document is fetched at, in place of the branch
+    /// its `url` names. Moving it is a reviewed change, with the re-recorded snapshot beside it.
+    rev: Option<String>,
     /// Filename within the cache, or within `corpus/specs` when committed.
     file: Option<String>,
     /// Committed in-tree, hermetic, safe for pull-request CI without a network.
@@ -190,6 +199,33 @@ pub struct Spec {
     /// What this document stresses, and why it is in the corpus.
     notes: Option<String>,
 }
+
+impl Spec {
+    /// Whether the document's bytes cannot change under us: committed, or fetched at a commit.
+    pub fn pinned(&self) -> bool {
+        self.local || self.rev.is_some()
+    }
+
+    /// Where to download the document: its `url`, with the branch replaced by `rev` when pinned.
+    fn download_url(&self) -> Option<String> {
+        let url = self.url.as_deref()?;
+        let Some(rev) = &self.rev else {
+            return Some(url.to_owned());
+        };
+        // `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`
+        let rest = url.strip_prefix(GITHUB_RAW)?;
+        let mut segments = rest.splitn(4, '/');
+        let (owner, repo, _branch, path) = (
+            segments.next()?,
+            segments.next()?,
+            segments.next()?,
+            segments.next()?,
+        );
+        Some(format!("{GITHUB_RAW}{owner}/{repo}/{rev}/{path}"))
+    }
+}
+
+const GITHUB_RAW: &str = "https://raw.githubusercontent.com/";
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -417,6 +453,15 @@ fn lint_manifest(specs: &[Spec]) -> eyre::Result<()> {
         if !spec.local && spec.url.is_none() {
             bail!("`{}` is neither committed nor fetchable", spec.name);
         }
+        if let Some(rev) = &spec.rev {
+            let commit = rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit());
+            if !commit || spec.download_url().is_none() {
+                bail!(
+                    "`{}` pins `{rev}`, but a rev is a full commit sha on a {GITHUB_RAW} url",
+                    spec.name
+                );
+            }
+        }
         let mut names = spec.bad_examples.clone();
         names.sort();
         names.dedup();
@@ -456,6 +501,11 @@ fn select(specs: &[Spec], args: &Args) -> eyre::Result<Vec<Spec>> {
     } else {
         specs.to_vec()
     };
+    let selected = if args.pinned {
+        selected.into_iter().filter(Spec::pinned).collect()
+    } else {
+        selected
+    };
     // A document named twice is checked once: two workers writing one generated directory would
     // race, and a repeat checks nothing new.
     let mut seen = std::collections::BTreeSet::new();
@@ -493,24 +543,61 @@ pub fn document_path(spec: &Spec) -> Utf8PathBuf {
 fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
     let mut fetched = 0usize;
     let mut failed = Vec::new();
+    let mut pinned_failed = Vec::new();
     for spec in specs {
-        if spec.local {
-            continue;
-        }
         let path = document_path(spec);
-        if path.exists() && !refresh {
+        // A pinned document must be the one its snapshot was taken from, so a cached copy that is
+        // not is fetched again, and a download that is not either fails the run. A pinned document
+        // without a snapshot has nothing to be checked against, and fails too.
+        let recorded = if spec.pinned() {
+            let Some(recorded) = snapshot::read(&spec.name) else {
+                pinned_failed.push(format!("{}: no snapshot to check it against", spec.name));
+                continue;
+            };
+            Some(recorded)
+        } else {
+            None
+        };
+        let current = |bytes: &[u8]| {
+            recorded
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.is_of(bytes))
+        };
+        let cached = std::fs::read(&path).is_ok_and(|bytes| current(&bytes));
+        if spec.local {
+            // Committed, so there is nothing to download: an edit without a re-recorded snapshot.
+            if !cached {
+                pinned_failed.push(format!(
+                    "{}: not the document its snapshot was taken from",
+                    spec.name
+                ));
+            }
             continue;
         }
-        let Some(url) = spec.url.as_deref() else {
+        // A pinned copy that verifies is the document, so only live ones are refreshed.
+        if cached && (spec.pinned() || !refresh) {
+            continue;
+        }
+        let Some(url) = spec.download_url() else {
             failed.push(format!("{}: no url in the manifest", spec.name));
             continue;
         };
+        let url = url.as_str();
         print!("fetching {} … ", spec.name);
         // A download replaces the cached copy only once it reads as a description, so a refresh
         // that gets an error page with a 200 keeps the last good copy, as a failed request does.
         let readable = download(url).and_then(|body| match harness::stats(&body) {
             Ok(_) => Ok(body),
             Err(error) => Err(eyre::eyre!("{url} served no readable description: {error}")),
+        });
+        let readable = readable.and_then(|body| {
+            if current(&body) {
+                Ok(body)
+            } else {
+                Err(eyre::eyre!(
+                    "{url} is not the document its snapshot was taken from"
+                ))
+            }
         });
         match readable {
             Ok(body) => {
@@ -524,7 +611,11 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
             }
             Err(error) => {
                 println!("failed");
-                failed.push(format!("{}: {error}", spec.name));
+                if spec.pinned() {
+                    pinned_failed.push(format!("{}: {error}", spec.name));
+                } else {
+                    failed.push(format!("{}: {error}", spec.name));
+                }
             }
         }
     }
@@ -540,6 +631,14 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
                 println!("::warning title=corpus fetch::{line}");
             }
         }
+    }
+    // A pinned document can always be fetched again, so one that could not be is a broken pin,
+    // and the gates must not run without it.
+    if !pinned_failed.is_empty() {
+        bail!(
+            "could not fetch pinned documents:\n  {}",
+            pinned_failed.join("\n  ")
+        );
     }
     Ok(())
 }
@@ -839,6 +938,14 @@ pub fn quick_tier() -> eyre::Result<Vec<String>> {
     let path = paths::corpus_root().join("tier.toml");
     let text = std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {path}"))?;
     let tier: Tier = toml::from_str(&text).wrap_err_with(|| format!("parsing {path}"))?;
+    // Pull requests compile the tier, so a document a publisher can change would change their
+    // result.
+    let specs = load_manifest()?;
+    for name in &tier.quick {
+        if !specs.iter().any(|spec| &spec.name == name && spec.pinned()) {
+            bail!("the quick tier names `{name}`, which is not a pinned document in the manifest");
+        }
+    }
     Ok(tier.quick)
 }
 
@@ -1203,7 +1310,7 @@ fn verdict(
         .map(|(name, _, _)| name.as_str())
         .partition(|name| {
             only.iter().any(|named| named == name)
-                || specs.iter().any(|spec| spec.name == *name && spec.local)
+                || specs.iter().any(|spec| spec.name == *name && spec.pinned())
         });
     let unavailable = unavailable.len();
 
@@ -1212,8 +1319,8 @@ fn verdict(
     }
     if !required.is_empty() {
         bail!(
-            "{} could not be read, and a committed document or one named with `--only` may not \
-             be missing; run `cargo xtask corpus --fetch`",
+            "{} could not be read, and a pinned document or one named with `--only` may not be \
+             missing; run `cargo xtask corpus --fetch`",
             required.join(", ")
         );
     }
@@ -1233,7 +1340,9 @@ mod tests {
     use clap::Parser as _;
     use color_eyre::eyre::{self, OptionExt as _};
 
-    use super::{Args, Outcome, Spec, require_committed, require_crate_packaging, select, verdict};
+    use super::{
+        Args, Outcome, Spec, fetch_all, require_committed, require_crate_packaging, select, verdict,
+    };
 
     /// `Args` is a subcommand's argument group, so parsing it needs something to hang it on.
     #[derive(Debug, clap::Parser)]
@@ -1286,6 +1395,90 @@ mod tests {
             .err()
             .ok_or_eyre("a name no document carries cannot be excluded")?;
         assert!(error.to_string().contains("petstore-30"), "{error}");
+    }
+
+    fn pinned(name: &str, url: &str, rev: &str) -> eyre::Result<Spec> {
+        toml::from_str(&indoc::formatdoc! {r#"
+            name = "{name}"
+            url = "{url}"
+            rev = "{rev}"
+        "#})
+        .map_err(Into::into)
+    }
+
+    const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A pinned document downloads from its commit, in place of the branch its url names.
+    #[test_util::test]
+    fn a_pinned_document_downloads_from_its_commit() {
+        let spec = pinned(
+            "oxide",
+            "https://raw.githubusercontent.com/oxidecomputer/oxide.rs/main/oxide.json",
+            REV,
+        )?;
+        assert_eq!(
+            spec.download_url().ok_or_eyre("a pinned url")?,
+            format!("https://raw.githubusercontent.com/oxidecomputer/oxide.rs/{REV}/oxide.json")
+        );
+    }
+
+    /// A rev is a full commit on a GitHub raw url; anything else could not pin the bytes.
+    #[test_util::test]
+    fn a_rev_that_cannot_pin_its_document_is_refused() {
+        let short = pinned(
+            "a",
+            "https://raw.githubusercontent.com/o/r/main/a.json",
+            "0123abc",
+        )?;
+        assert!(super::lint_manifest(&[short]).is_err());
+        let elsewhere = pinned("b", "https://example.invalid/b.json", REV)?;
+        assert!(super::lint_manifest(&[elsewhere]).is_err());
+    }
+
+    /// `--pinned` keeps committed and pinned documents and leaves out live ones.
+    #[test_util::test]
+    fn pinned_runs_leave_out_live_documents() {
+        let specs = vec![
+            manifest(&["petstore-31"])?.remove(0),
+            pinned(
+                "oxide",
+                "https://raw.githubusercontent.com/o/r/main/oxide.json",
+                REV,
+            )?,
+            fetched("posthog")?,
+        ];
+        let selected = select(&specs, &parse(&["--pinned"]))?;
+        let names: Vec<&str> = selected.iter().map(|spec| spec.name.as_str()).collect();
+        assert_eq!(names, ["petstore-31", "oxide"]);
+    }
+
+    /// A committed document is checked against its snapshot without any download, and a pinned
+    /// document with no snapshot to check against fails the fetch.
+    #[test_util::test]
+    fn pinned_documents_are_checked_against_their_snapshots() {
+        let petstore: Spec = toml::from_str(indoc::indoc! {r#"
+            name = "petstore-31"
+            file = "petstore-31.yaml"
+            local = true
+        "#})?;
+        fetch_all(&[petstore], false)?;
+
+        let unrecorded = manifest(&["no-snapshot-records-this"])?;
+        let error = fetch_all(&unrecorded, false)
+            .err()
+            .ok_or_eyre("a pinned document without a snapshot cannot be verified")?;
+        assert!(error.to_string().contains("no snapshot"), "{error}");
+    }
+
+    /// A pinned document can always be fetched again, so it may never be the one missing.
+    #[test_util::test]
+    fn an_unreadable_pinned_document_fails_the_run() {
+        let specs = vec![pinned(
+            "oxide",
+            "https://raw.githubusercontent.com/o/r/main/oxide.json",
+            REV,
+        )?];
+        assert!(verdict(&specs, &[], &[unavailable("oxide")]).is_err());
     }
 
     fn unavailable(name: &str) -> (String, Outcome, Duration) {

@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value};
 
 use super::{ApiModel, BodyContract};
-use crate::contract::{ContractKind, Contracts, FieldContract, SkipRule, TypeRef};
+use crate::contract::{Capture, ContractKind, Contracts, FieldContract, SkipRule, TypeRef};
 use crate::diag::JsonPointer;
 use crate::doc::{MaybeRef, MediaType};
 use crate::resolve::ResolvedDocument;
@@ -558,8 +558,17 @@ impl Collect<'_> {
             out.extend(kept);
             return Some(Value::Object(out));
         }
-        if lenient {
-            // The read form keeps every member the description did not declare, verbatim.
+        // The read form keeps every member the description did not declare, verbatim, in its
+        // capture map.
+        // A type both directions share has no such map: it reports those members and drops them,
+        // so they are not expected back.
+        // Without the struct's contract, a lenient read is taken to keep them.
+        let keeps_undeclared = fields.map_or(lenient, |fields| {
+            fields
+                .iter()
+                .any(|field| field.capture == Some(Capture::Undeclared))
+        });
+        if keeps_undeclared {
             for (key, member) in members {
                 if !structure.fields.iter().any(|field| field.wire == *key) {
                     out.insert(key.clone(), member.clone());
@@ -996,6 +1005,39 @@ mod tests {
             &json!({"name": null}),
         ))?;
         assert_eq!(found[0].expected, json!({"name": null}));
+    }
+
+    /// A response keeps the undeclared members of a type twinned for it, in the twin's capture
+    /// map, but a type both directions share reports its undeclared members and drops them, so
+    /// only the first come back, as influxdb's `links.logs` showed.
+    #[test_util::test]
+    fn a_shared_type_in_a_response_drops_its_undeclared_members() {
+        let owner = json!({"$ref": "#/components/schemas/Owner"});
+        let found = payloads_of(json!({
+            "openapi": "3.1.0",
+            "paths": {"/owners": {"post": {
+                "operationId": "addOwner",
+                "requestBody": {"content": {"application/json": {"schema": owner}}},
+                "responses": {"201": {"description": "created", "content": {"application/json": {
+                    "schema": owner,
+                    "example": {"name": "n", "links": {"self": "s", "logs": "l"}, "other": 1},
+                }}}},
+            }}},
+            "components": {"schemas": {
+                "Owner": {"type": "object", "required": ["name"], "properties": {
+                    "name": {"type": "string"},
+                    "links": {"$ref": "#/components/schemas/Links"},
+                }},
+                "Links": {"type": "object", "properties": {"self": {"type": "string"}}},
+            }},
+        }))?;
+        let [payload] = found.as_slice() else {
+            eyre::bail!("one payload: {found:?}");
+        };
+        assert_eq!(
+            payload.expected,
+            json!({"name": "n", "links": {"self": "s"}, "other": 1})
+        );
     }
 
     #[test_util::test]
