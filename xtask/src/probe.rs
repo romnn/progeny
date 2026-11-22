@@ -133,7 +133,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             );
         }
         // A probe binary is built in debug with full debug information, the largest at about 2 GB.
-        crate::generated::clean(&directory, 0)?;
+        crate::generated::clean(&directory, 0, None)?;
     }
 
     if failures > 0 {

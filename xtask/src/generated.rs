@@ -76,8 +76,17 @@ pub fn cargo_in(directory: &Utf8Path, slot: usize) -> Command {
 /// Kept, every document's build stays in the one target directory a gate shares, so a gate over
 /// the whole corpus fills a hosted runner's disk before it is through, and so does the next gate
 /// to build there.
-pub fn clean(directory: &Utf8Path, slot: usize) -> eyre::Result<()> {
-    let metadata = cargo_in(directory, slot)
+/// The toolchain has to be the one that built it, because cargo releases lay a target directory
+/// out differently.
+pub fn clean(directory: &Utf8Path, slot: usize, toolchain: Option<&str>) -> eyre::Result<()> {
+    let cargo = || {
+        let mut command = cargo_in(directory, slot);
+        if let Some(toolchain) = toolchain {
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
+        command
+    };
+    let metadata = cargo()
         .args(["metadata", "--quiet", "--no-deps", "--format-version", "1"])
         .output()
         .wrap_err_with(|| format!("reading the packages in {directory}"))?;
@@ -89,13 +98,18 @@ pub fn clean(directory: &Utf8Path, slot: usize) -> eyre::Result<()> {
     }
     let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
         .wrap_err_with(|| format!("parsing the packages in {directory}"))?;
-    let packages = metadata
+    let packages: Vec<&str> = metadata
         .get("packages")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|package| package.get("name").and_then(serde_json::Value::as_str));
-    let mut command = cargo_in(directory, slot);
+        .filter_map(|package| package.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    // Without a package, `cargo clean` would remove the shared dependencies as well.
+    if packages.is_empty() {
+        bail!("cargo metadata names no package in {directory}");
+    }
+    let mut command = cargo();
     command.args(["clean", "--quiet"]);
     for package in packages {
         command.args(["-p", package]);

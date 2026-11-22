@@ -759,7 +759,7 @@ fn check(spec: &Spec, args: &Args, slot: usize) -> eyre::Result<(Outcome, Option
                 args.toolchain.as_deref(),
             )?
         };
-        generated::clean(&directory, slot)?;
+        generated::clean(&directory, slot, args.toolchain.as_deref())?;
         Some(compiled)
     } else {
         None
