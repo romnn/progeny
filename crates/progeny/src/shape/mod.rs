@@ -4782,6 +4782,12 @@ mod tests {
             serde_json::from_str(
                 r#"{"anyOf": [{"type": "number", "enum": [0.9999999999999999]}, {"type": "number", "enum": [2]}]}"#,
             )?,
+            // The trailing zero is a digit the default decoder scales, and the two would read
+            // as one `f64`.
+            #[cfg(feature = "exact-numbers")]
+            serde_json::from_str(
+                r#"{"oneOf": [{"type": "number", "enum": [900719925474099.10]}, {"type": "number", "enum": [900719925474099]}]}"#,
+            )?,
         ];
         for schema in unfolded {
             assert!(

@@ -561,20 +561,19 @@ fn annotations(object: &SchemaObject) -> SchemaObject {
 /// Whether an `f64` holds a number exactly as written: every JSON decoder reads it as the same
 /// `f64`, which writes it back as the same number.
 ///
-/// A decimal significand up to 2^53 with at most 22 fractional digits is read exactly even by a
-/// decoder that scales the significand by a power of ten rather than rounding correctly, as
-/// `serde_json` does by default.
+/// A literal whose digits, trailing zeros included, make a significand up to 2^53 with at most 22
+/// of them after the point is read exactly even by a decoder that scales the significand by a
+/// power of ten rather than rounding correctly, as `serde_json` does by default.
 /// Any other spelling, one with an exponent among them, is not taken on trust.
 fn survives_f64(value: &Value) -> bool {
     let Value::Number(number) = value else {
         return false;
     };
-    let Some(text) = super::listed::decimal(number) else {
-        return false;
-    };
+    let text = number.to_string();
     let digits = text.trim_start_matches('-');
     let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
-    let scaled_exactly = fraction.len() <= 22
+    let scaled_exactly = !digits.contains(['e', 'E'])
+        && fraction.len() <= 22
         && format!("{whole}{fraction}")
             .parse::<u64>()
             .is_ok_and(|significand| significand <= 1 << 53);

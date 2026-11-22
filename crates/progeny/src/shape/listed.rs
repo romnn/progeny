@@ -348,7 +348,7 @@ pub(super) fn same(left: &Value, right: &Value) -> Option<bool> {
 
 /// A number's value as decimal text, with no sign on zero and no trailing fractional zeros, or
 /// `None` for one written with an exponent.
-pub(super) fn decimal(number: &serde_json::Number) -> Option<String> {
+fn decimal(number: &serde_json::Number) -> Option<String> {
     let text = number.to_string();
     if text.contains(['e', 'E']) {
         return None;
