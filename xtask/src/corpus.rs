@@ -748,7 +748,7 @@ fn check(spec: &Spec, args: &Args, slot: usize) -> eyre::Result<(Outcome, Option
         .sum();
     let compiled = if args.compile {
         let directory = generated::write(&spec.name, &output)?;
-        Some(if args.feature_matrix {
+        let compiled = if args.feature_matrix {
             generated::check_matrix(&directory, args.clippy, slot, args.toolchain.as_deref())?
         } else {
             generated::check(
@@ -758,7 +758,9 @@ fn check(spec: &Spec, args: &Args, slot: usize) -> eyre::Result<(Outcome, Option
                 generated::Features::All,
                 args.toolchain.as_deref(),
             )?
-        })
+        };
+        generated::clean(&directory, slot)?;
+        Some(compiled)
     } else {
         None
     };

@@ -132,17 +132,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
                 }
             );
         }
-        // A document's probe binary and library are built in debug with full debug information,
-        // and the largest run to gigabytes, so each is removed once it has run: kept, they fill a
-        // hosted runner's disk before the tier is through.
-        // The dependencies the documents share stay built.
-        let cleaned = crate::generated::cargo(&directory)
-            .args(["clean", "--quiet", "-p", &config.package.name])
-            .status()
-            .wrap_err_with(|| format!("cleaning up after the probe of {name}"))?;
-        if !cleaned.success() {
-            bail!("cargo clean failed after the probe of {name}");
-        }
+        // A probe binary is built in debug with full debug information, the largest at about 2 GB.
+        crate::generated::clean(&directory, 0)?;
     }
 
     if failures > 0 {
