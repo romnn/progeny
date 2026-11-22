@@ -4696,12 +4696,11 @@ mod tests {
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "Feedback": {"anyOf": [number(-1.0), number(0.0), number(1.0)]},
             "Code": {"oneOf": [{"const": 1}, {"const": 2}]},
-            "Declared": {"type": "number", "anyOf": [{"const": 1}, {"const": 2}]},
             "Nullable": {"anyOf": [number(1.5), number(2.5), {"type": "null"}]},
         })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         // Each reads as the single enum that says the same: a declared `number` is an `f64`
-        // whatever its values, and bare constants are the integer a bare `enum` is.
+        // whatever its values, and bare whole constants are the integer a bare `enum` is.
         assert_eq!(
             shape_of(&shapes, "Feedback")?,
             &Shape::Scalar(Scalar::Number)
@@ -4709,10 +4708,6 @@ mod tests {
         assert_eq!(
             shape_of(&shapes, "Code")?,
             &Shape::Scalar(Scalar::Integer(IntType::I64))
-        );
-        assert_eq!(
-            shape_of(&shapes, "Declared")?,
-            &Shape::Scalar(Scalar::Number)
         );
         assert!(
             matches!(
@@ -4745,10 +4740,11 @@ mod tests {
         Ok(())
     }
 
-    /// A union is folded only where the fold is exact.
-    /// Admission does not evaluate the union's own bounds or `not`, a branch `format` sizes by the
-    /// branch's own values, and an `f64` might round an integer above 2^53, so each of those keeps
-    /// the union as it is.
+    /// A union is folded only where it is written as a plain numeric enum split across branches,
+    /// and the fold is exact.
+    /// Bounds and `not` are no part of that, a branch `format` sizes by the branch's own values, a
+    /// `type` beside the union has to be the branches' scalar, and the scalar has to hold every
+    /// value, which an `f64` does not for an integer above 2^53, nor an `i64` above its range.
     #[test_util::test]
     fn a_union_the_fold_cannot_read_exactly_stays_a_union() -> eyre::Result<()> {
         let integer = |value: i64| json!({"type": "integer", "enum": [value]});
@@ -4759,7 +4755,12 @@ mod tests {
         let mut unfolded = vec![
             json!({"maximum": 1, "anyOf": [integer(1), integer(2)]}),
             json!({"not": {"const": 1}, "anyOf": [{"const": 1}, {"const": 2}]}),
-            // Admission cannot tell whether the bounded branch admits `7`.
+            json!({"type": "number", "anyOf": [{"const": 1}, {"const": 2}]}),
+            json!({"anyOf": [
+                {"type": "integer", "enum": [9_223_372_036_854_775_808_u64]},
+                integer(1),
+            ]}),
+            // A bound is no part of a plain list, and the bounded branch may refuse `7`.
             json!({"anyOf": [
                 {"type": "integer", "enum": [1]},
                 {"type": "integer", "maximum": 5, "enum": [1, 7]},
@@ -4841,6 +4842,11 @@ mod tests {
             ]}),
             json!({"oneOf": [
                 {"type": "integer", "enum": [1.0]},
+                {"type": "number", "enum": [1.5]},
+            ]}),
+            // The first branch is an integer once its parts are merged.
+            json!({"oneOf": [
+                {"type": "number", "enum": [1], "allOf": [{"type": "integer"}]},
                 {"type": "number", "enum": [1.5]},
             ]}),
             json!({"oneOf": [{"enum": [1]}, {"enum": [2.5, 3.5]}]}),

@@ -325,11 +325,7 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
         (None, Some(constant)) => vec![constant.clone()],
         // A union that lists nothing beside it may still be a list split across its branches.
         (None, None) => {
-            if let Some((values, types)) = numbers_admitted(resolved, key, view, branches) {
-                view.union = None;
-                view.types = types;
-                view.enumeration = Some(values);
-            }
+            fold_split_enum(resolved, key, view);
             return;
         }
     };
@@ -340,12 +336,16 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
         view.impossible = true;
         return;
     }
+    let exactly_one = key.parts().iter().any(|&part| {
+        part.dispatches()
+            && matches!(resolved.schema(part.id()), Schema::Object(object) if object.one_of.is_some())
+    });
     match super::listed::narrow(
         resolved,
         &listed,
         view.types.as_ref(),
         branches,
-        exactly_one(resolved, key),
+        exactly_one,
     ) {
         Narrowed::Values { values, checked } => {
             view.union = None;
@@ -387,65 +387,76 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
     }
 }
 
-/// Whether the union a key declares is a `oneOf`, under which a value two branches admit is
-/// refused.
-fn exactly_one(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
-    key.parts().iter().any(|&part| {
-        part.dispatches()
-            && matches!(resolved.schema(part.id()), Schema::Object(object) if object.one_of.is_some())
-    })
+/// Read a union whose branches split one numeric enum as that enum ([`numbers_admitted`]).
+fn fold_split_enum(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
+    let Some(branches) = view.union.as_deref() else {
+        return;
+    };
+    if let Some((values, types)) = numbers_admitted(resolved, key, view, branches) {
+        view.union = None;
+        view.types = Some(types);
+        view.enumeration = Some(values);
+    }
 }
 
-/// The numbers a union admits, and the type they have, where its branches are written as one
-/// numeric enum split across them, as `anyOf: [{type: number, enum: [-1]}, {type: number, enum:
-/// [0]}]` writes one.
+/// The numbers a union admits, and the type they have, where the union is one numeric enum split
+/// across its branches, as `anyOf: [{type: number, enum: [-1]}, {type: number, enum: [0]}]` splits
+/// `{type: number, enum: [-1, 0]}`.
 ///
-/// The view becomes the single schema that says the same, `{type: number, enum: [-1, 0]}`, which
-/// the classifier reads as it reads any numeric enum.
+/// The view then becomes that single schema, which the classifier, a `format` beside the union and
+/// an enclosing union all read as one list.
 /// As separate branches, each would be the same scalar, so the first would read every number and
 /// the rest would go unread.
 ///
-/// The union is read as the list only where that is exact, and is left as it is otherwise:
-///
-/// - Every value has to be shown admitted, and admission does not evaluate bounds, `not` or
-///   conditionals, so a union with any of those of its own is left.
-/// - So is one that declares a discriminator, which no number can be dispatched by.
-/// - The union's own `type` and its branches' have to name one type, so the fold never chooses
-///   between them.
-/// - A type that is not `integer` alone may be an `f64`, which has to hold every value exactly.
+/// Only a union written in just that way is read so, which is what keeps the fold exact.
+/// Its own schema holds the union, a `type`, a `format` and annotations alone, and each branch is
+/// a numeric list ([`listed_numbers`]).
+/// Anything else, such as a bound, `not` or a part merged in, leaves the union as it is.
+/// The scalar the branches read as has to agree with the union's own `type` and hold every value
+/// the union admits.
 fn numbers_admitted(
     resolved: &ResolvedDocument,
     key: &ShapeKey,
     view: &View,
     branches: &[ShapeKey],
-) -> Option<(Vec<Value>, Option<BTreeSet<TypeName>>)> {
-    let constrained = key.parts().iter().any(|&part| {
-        matches!(resolved.schema(part.id()), Schema::Object(object) if constrains_numbers(object))
-    });
-    if constrained || view.discriminator.is_some() {
+) -> Option<(Vec<Value>, BTreeSet<TypeName>)> {
+    let [part] = key.parts() else {
+        return None;
+    };
+    let Schema::Object(object) = resolved.schema(part.id()) else {
+        return None;
+    };
+    let plain = SchemaObject {
+        any_of: object.any_of.clone(),
+        one_of: object.one_of.clone(),
+        types: object.types.clone(),
+        format: object.format.clone(),
+        ..annotations(object)
+    };
+    if !part.dispatches() || plain != **object {
         return None;
     }
-    let written = key
-        .parts()
-        .iter()
-        .find_map(|&part| match resolved.schema(part.id()) {
-            Schema::Object(object) if part.dispatches() => {
-                object.any_of.as_ref().or(object.one_of.as_ref())
-            }
-            _ => None,
-        })?;
-    let (listed, declared) = listed_numbers(resolved, written)?;
-    let own = view.types.as_ref().map(without_null);
-    let declared = match (own, declared) {
-        (Some(own), Some(declared)) if own != declared => return None,
-        (own, declared) => own.or(declared),
+    let (written, exactly_one) = match (&object.any_of, &object.one_of) {
+        (Some(written), None) => (written, false),
+        (None, Some(written)) => (written, true),
+        _ => return None,
     };
+    let (listed, kind) = listed_numbers(resolved, written)?;
+    if let Some(types) = &object.types {
+        let declared: BTreeSet<&TypeName> = types
+            .iter()
+            .filter(|name| **name != TypeName::Null)
+            .collect();
+        if declared != BTreeSet::from([&kind]) {
+            return None;
+        }
+    }
     let narrowed = super::listed::narrow(
         resolved,
         &listed,
         view.types.as_ref(),
         branches,
-        exactly_one(resolved, key),
+        exactly_one,
     );
     let Narrowed::Values {
         values,
@@ -454,124 +465,102 @@ fn numbers_admitted(
     else {
         return None;
     };
-    let integer = declared
-        .as_ref()
-        .is_some_and(|types| types.len() == 1 && types.contains(&TypeName::Integer));
-    if !integer && !values.iter().all(survives_f64) {
+    let numbers = || values.iter().filter(|value| value.is_number());
+    let fits = |value: &Value| match kind {
+        TypeName::Integer => value.as_i64().is_some(),
+        _ => survives_f64(value),
+    };
+    if numbers().next().is_none() || !numbers().all(fits) {
         return None;
     }
-    let null = values.iter().any(Value::is_null);
-    let types = declared.map(|mut types| {
-        if null {
-            types.insert(TypeName::Null);
-        }
-        types
-    });
+    let mut types = BTreeSet::from([kind]);
+    if values.iter().any(Value::is_null) {
+        types.insert(TypeName::Null);
+    }
     Some((values, types))
 }
 
-/// The values a union's written branches list, and the numeric type they declare, if any, where
-/// every branch is a plain list of numbers of one kind or the `null` type.
+/// The values a union's written branches list, and the one scalar they read as, where each branch
+/// is a numeric `enum` or `const` with a `type` and annotations alone, or is the `null` type, and
+/// at least two list numbers.
 ///
-/// A branch's kind is the scalar it reads as: its declared type, or for a bare list `integer`
-/// where every value is whole and `number` otherwise.
-/// Branches of different kinds are told apart by their scalars already, so they leave the union
-/// as it is.
-/// So does a branch that lists nothing itself, such as a reference to a named enum, whose type a
-/// fold would erase, and one with a `format`, which sizes an integer by the branch's own values,
-/// or a discriminator.
-/// Anything else a branch says is for [`super::listed::narrow`] to admit each value by.
+/// A branch's scalar is the classifier's: its declared type, or for a bare list `integer` where
+/// every value is whole and `number` otherwise.
+/// Branches of different scalars are told apart by them already, and a branch that refers to
+/// another schema names a type a fold would erase, so either leaves the union as it is.
 fn listed_numbers(
     resolved: &ResolvedDocument,
     written: &[SchemaId],
-) -> Option<(Vec<Value>, Option<BTreeSet<TypeName>>)> {
+) -> Option<(Vec<Value>, TypeName)> {
     let mut values = Vec::new();
-    let mut shared: Option<BTreeSet<TypeName>> = None;
-    let mut typed = false;
+    let mut shared: Option<TypeName> = None;
+    let mut lists = 0_usize;
     for &id in written {
         let Schema::Object(object) = resolved.schema(id) else {
             return None;
         };
-        if object.format.is_some() || object.discriminator.is_some() {
+        let plain = SchemaObject {
+            enumeration: object.enumeration.clone(),
+            constant: object.constant.clone(),
+            types: object.types.clone(),
+            ..annotations(object)
+        };
+        if plain != **object {
             return None;
         }
-        let declared = object
-            .types
-            .as_ref()
-            .map(|types| without_null(&types.iter().cloned().collect()));
-        // An empty list is no list, as the merged view reads one.
+        let types: Vec<&TypeName> = object.types.iter().flat_map(|types| types.iter()).collect();
         let own = match (&object.enumeration, &object.constant) {
-            (Some(listed), _) if !listed.is_empty() => listed.clone(),
-            (_, Some(constant)) => vec![constant.clone()],
-            _ if declared.as_ref().is_some_and(BTreeSet::is_empty) => vec![Value::Null],
+            (Some(listed), None) if !listed.is_empty() => listed.clone(),
+            (None, Some(constant)) => vec![constant.clone()],
+            (None, None) if matches!(types.as_slice(), [TypeName::Null]) => {
+                values.push(Value::Null);
+                continue;
+            }
             _ => return None,
         };
-        if own
-            .iter()
-            .any(|value| !value.is_number() && !value.is_null())
-        {
+        if !own.iter().all(Value::is_number) {
             return None;
         }
-        let numbers: Vec<&Value> = own.iter().filter(|value| value.is_number()).collect();
-        let kind = match declared.filter(|declared| !declared.is_empty()) {
-            Some(declared) => {
-                typed = true;
-                declared
-            }
-            None if numbers.is_empty() => BTreeSet::new(),
-            None if numbers
-                .iter()
-                .all(|value| value.as_i64().is_some() || value.as_u64().is_some()) =>
-            {
-                BTreeSet::from([TypeName::Integer])
-            }
-            None => BTreeSet::from([TypeName::Number]),
+        let kind = match types.as_slice() {
+            [TypeName::Integer] => TypeName::Integer,
+            [] if super::listed::whole(&own) => TypeName::Integer,
+            [TypeName::Number] | [] => TypeName::Number,
+            _ => return None,
         };
-        let numeric = kind
-            .iter()
-            .all(|name| matches!(name, TypeName::Number | TypeName::Integer));
-        match &shared {
-            _ if !numeric => return None,
-            _ if kind.is_empty() => {}
-            Some(first) if *first != kind => return None,
-            Some(_) => {}
-            None => shared = Some(kind),
+        if *shared.get_or_insert_with(|| kind.clone()) != kind {
+            return None;
         }
+        lists += 1;
         values.extend(own);
     }
-    let shared = shared?;
-    Some((values, typed.then_some(shared)))
+    let kind = shared.filter(|_| lists >= 2)?;
+    Some((values, kind))
 }
 
-/// A set of types without `null`, which the values a list holds decide.
-fn without_null(types: &BTreeSet<TypeName>) -> BTreeSet<TypeName> {
-    types
-        .iter()
-        .filter(|name| **name != TypeName::Null)
-        .cloned()
-        .collect()
+/// A schema with only the annotations of another, which say nothing about the values it admits.
+///
+/// Keywords progeny does not know are among them, because a validator ignores those too.
+fn annotations(object: &SchemaObject) -> SchemaObject {
+    SchemaObject {
+        title: object.title.clone(),
+        description: object.description.clone(),
+        comment: object.comment.clone(),
+        deprecated: object.deprecated,
+        examples: object.examples.clone(),
+        default: object.default.clone(),
+        read_only: object.read_only,
+        write_only: object.write_only,
+        external_docs: object.external_docs.clone(),
+        unknown: object.unknown.clone(),
+        ..SchemaObject::default()
+    }
 }
 
 /// Whether an `f64` holds a number exactly.
 fn survives_f64(value: &Value) -> bool {
-    !value.is_number()
-        || value
-            .as_f64()
-            .is_some_and(|float| super::listed::same(value, &Value::from(float)) == Some(true))
-}
-
-/// Whether a schema says something about the numbers it admits that admission does not evaluate:
-/// a bound, `multipleOf`, `not` or a conditional.
-fn constrains_numbers(object: &SchemaObject) -> bool {
-    object.minimum.is_some()
-        || object.maximum.is_some()
-        || object.exclusive_minimum.is_some()
-        || object.exclusive_maximum.is_some()
-        || object.multiple_of.is_some()
-        || object.not.is_some()
-        || object.if_schema.is_some()
-        || object.then_schema.is_some()
-        || object.else_schema.is_some()
+    value
+        .as_f64()
+        .is_some_and(|float| super::listed::same(value, &Value::from(float)) == Some(true))
 }
 
 /// The union a view declares, apart from the members declared beside it.

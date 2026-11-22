@@ -429,10 +429,7 @@ fn integral(view: &View) -> bool {
         (None, Some(value)) => std::slice::from_ref(value),
         (None, None) => return false,
     };
-    declared
-        .iter()
-        .filter(|value| !value.is_null())
-        .all(|value| value.as_i64().is_some() || value.as_u64().is_some())
+    super::listed::whole(declared)
 }
 
 fn object(view: &View) -> Shape {
