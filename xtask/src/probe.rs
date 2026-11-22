@@ -161,8 +161,6 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// The probe test file: the double implementing every servable operation, then one driver test per
-/// driven one.
 /// Make the generated workspace's root the package the probe test belongs to.
 ///
 /// The test drives the client against the server, so it depends on both crates, and on the
@@ -185,13 +183,15 @@ fn add_probe_package(directory: &Utf8Path, package: &str) -> eyre::Result<()> {
             {package}-client = {{ path = "{package}-client" }}
             {package}-server = {{ path = "{package}-server" }}
             axum = "0.8"
-            serde = {{ version = "1.0.164", features = ["derive"] }}
+            serde = "1.0.164"
             serde_json = "1"
         "#},
     )
     .wrap_err_with(|| format!("writing {manifest}"))
 }
 
+/// The probe test file: the double implementing every servable operation, then one driver test per
+/// driven one.
 fn render(package: &str, plan: &Probe) -> String {
     let client = crate::corpus::lib_name(&format!("{package}-client"));
     let server = crate::corpus::lib_name(&format!("{package}-server"));
