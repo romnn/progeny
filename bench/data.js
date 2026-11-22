@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795356296586,
+  "lastUpdate": 1795383858070,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -3120,6 +3120,126 @@ window.BENCHMARK_DATA = {
             "range": "± 0.4",
             "unit": "MiB",
             "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c042aef08f59cc672deb076192d9fa034fe2f69e",
+          "message": "fix(probe): drive arbitrary JSON in a parameter as a string, and clean up builds per document (#176)\n\nTwo of the nightly full-corpus job's failures:\n\n- **A false failure on cloudflare.** Its `feedback` query parameter is arbitrary JSON, and the probe drove `{\"probe\":true}` into it. A form-exploded query sends an object as its members alone, so nothing arrived under the parameter's name, and the schema never allowed an object there anyway. Style-encoded parameters of arbitrary JSON are now driven as a string. A parameter declared with JSON `content`, which does carry an object under its name, keeps the object. Typing the parameter as the number its schema describes is #175.\n- **Build leftovers.** Every document's probe build, cloudflare's about 2 GB, and every document's compile build stayed in the target directory the gates share. Both gates now remove a document's own packages, read from `cargo metadata`, once they are done with it. They use the toolchain that built them, and keep the shared dependencies.\n\nThe runner loss itself is an OOM: building cloudflare's probe library peaks at 13.7 GiB in one rustc (see #170). This PR does not fix that, so #170 stays open.\n\nValidation: `cargo nextest run -p progeny -p xtask --all-features`; new tests fail without each probe change; `task corpus` (80/80); a local `task probe -- cloudflare` passes every driven operation; a local compile of okta now leaves the shared target unchanged (it grew 1.2 GiB before).\n\nRefs #170",
+          "timestamp": "2026-11-22T22:10:14+01:00",
+          "tree_id": "9fb63126129c817208640015f8f96feb5cbdd54c",
+          "url": "https://github.com/romnn/progeny/commit/c042aef08f59cc672deb076192d9fa034fe2f69e"
+        },
+        "date": 1795383857104,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written instructions",
+            "value": 121619867061,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written peak heap",
+            "value": 2935.239959716797,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written average heap",
+            "value": 1624.3682327270508,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written cpu",
+            "value": 31.619334,
+            "range": "± 0.06",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"Xeon Platinum 8370C\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 2904.440103530884,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written instructions",
+            "value": 42491687303,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written peak heap",
+            "value": 1090.7519836425781,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written average heap",
+            "value": 614.144889831543,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 11.00096,
+            "range": "± 0.11",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"Xeon Platinum 8370C\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1216.005208015442,
+            "range": "± 0.8",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written instructions",
+            "value": 2620932990,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written peak heap",
+            "value": 93.06449890136719,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written average heap",
+            "value": 53.39317035675049,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.813761,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"Xeon Platinum 8370C\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 323.2981767654419,
+            "range": "± 0",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
           }
         ]
       }
