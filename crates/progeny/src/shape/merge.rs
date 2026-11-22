@@ -323,7 +323,12 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
             .collect(),
         (Some(values), None) => values,
         (None, Some(constant)) => vec![constant.clone()],
-        (None, None) => return,
+        (None, None) => {
+            if let Some((values, types)) = numbers_admitted(resolved, key, view, branches) {
+                (view.union, view.types, view.enumeration) = (None, Some(types), Some(values));
+            }
+            return;
+        }
     };
     // A list that the parts or the constant narrow to nothing admits nothing.
     if listed.is_empty() {
@@ -381,6 +386,201 @@ fn narrow_listed(resolved: &ResolvedDocument, key: &ShapeKey, view: &mut View) {
             }
         }
     }
+}
+
+/// The numbers a union admits, and the type they have, where the union is one numeric enum split
+/// across its branches, as `anyOf: [{type: number, enum: [-1]}, {type: number, enum: [0]}]` splits
+/// `{type: number, enum: [-1, 0]}`.
+///
+/// The view then becomes that single schema, which the classifier, a `format` beside the union and
+/// an enclosing union all read as one list.
+/// As separate branches, each would be the same scalar, so the first would read every number and
+/// the rest would go unread.
+///
+/// Only a union written in just that way is read so, which is what keeps the fold exact.
+/// Its own schema holds the union, a `type`, a `format` and annotations alone, and each branch is
+/// a numeric list ([`listed_numbers`]).
+/// Anything else, such as a bound, `not` or a part merged in, leaves the union as it is.
+/// The scalar the branches read as has to agree with the union's own `type` and hold every value
+/// the union admits.
+fn numbers_admitted(
+    resolved: &ResolvedDocument,
+    key: &ShapeKey,
+    view: &View,
+    branches: &[ShapeKey],
+) -> Option<(Vec<Value>, BTreeSet<TypeName>)> {
+    let [part] = key.parts() else {
+        return None;
+    };
+    let Schema::Object(object) = resolved.schema(part.id()) else {
+        return None;
+    };
+    let plain = SchemaObject {
+        any_of: object.any_of.clone(),
+        one_of: object.one_of.clone(),
+        types: object.types.clone(),
+        format: object.format.clone(),
+        ..annotations(object)
+    };
+    if !part.dispatches() || plain != **object {
+        return None;
+    }
+    let (written, exactly_one) = match (&object.any_of, &object.one_of) {
+        (Some(written), None) => (written, false),
+        (None, Some(written)) => (written, true),
+        _ => return None,
+    };
+    let (listed, kind) = listed_numbers(resolved, written)?;
+    if let Some(types) = &object.types {
+        let declared: BTreeSet<&TypeName> = types
+            .iter()
+            .filter(|name| **name != TypeName::Null)
+            .collect();
+        if declared != BTreeSet::from([&kind]) {
+            return None;
+        }
+    }
+    let narrowed = super::listed::narrow(
+        resolved,
+        &listed,
+        view.types.as_ref(),
+        branches,
+        exactly_one,
+    );
+    let Narrowed::Values {
+        values,
+        checked: true,
+    } = narrowed
+    else {
+        return None;
+    };
+    let numbers = || values.iter().filter(|value| value.is_number());
+    let fits = |value: &Value| match kind {
+        TypeName::Integer => value.as_i64().is_some(),
+        _ => survives_f64(value),
+    };
+    if numbers().next().is_none() || !numbers().all(fits) {
+        return None;
+    }
+    let mut types = BTreeSet::from([kind]);
+    if values.iter().any(Value::is_null) {
+        types.insert(TypeName::Null);
+    }
+    Some((values, types))
+}
+
+/// The values a union's written branches list, and the one scalar they read as, where each branch
+/// is a numeric `enum` or `const` with a `type` and annotations alone, or is the `null` type, and
+/// at least two list numbers.
+///
+/// A branch's scalar is the classifier's: its declared type, or for a bare list `integer` where
+/// every value is whole and `number` otherwise.
+/// Branches of different scalars are told apart by them already, and a branch that refers to
+/// another schema names a type a fold would erase, so either leaves the union as it is.
+fn listed_numbers(
+    resolved: &ResolvedDocument,
+    written: &[SchemaId],
+) -> Option<(Vec<Value>, TypeName)> {
+    let mut values = Vec::new();
+    let mut shared: Option<TypeName> = None;
+    let mut lists = 0_usize;
+    for &id in written {
+        let Schema::Object(object) = resolved.schema(id) else {
+            return None;
+        };
+        let plain = SchemaObject {
+            enumeration: object.enumeration.clone(),
+            constant: object.constant.clone(),
+            types: object.types.clone(),
+            ..annotations(object)
+        };
+        if plain != **object {
+            return None;
+        }
+        let SchemaObject {
+            enumeration,
+            constant,
+            types,
+            ..
+        } = plain;
+        let types: Vec<&TypeName> = types.iter().flat_map(|types| types.iter()).collect();
+        let own = match (enumeration, constant) {
+            (Some(listed), None) if !listed.is_empty() => listed,
+            (None, Some(constant)) => vec![constant],
+            (None, None) if matches!(types.as_slice(), [TypeName::Null]) => {
+                values.push(Value::Null);
+                continue;
+            }
+            _ => return None,
+        };
+        if !own.iter().all(Value::is_number) {
+            return None;
+        }
+        let kind = match types.as_slice() {
+            [TypeName::Integer] => TypeName::Integer,
+            [] if super::listed::whole(&own) => TypeName::Integer,
+            [TypeName::Number] | [] => TypeName::Number,
+            _ => return None,
+        };
+        if *shared.get_or_insert_with(|| kind.clone()) != kind {
+            return None;
+        }
+        lists += 1;
+        values.extend(own);
+    }
+    let kind = shared.filter(|_| lists >= 2)?;
+    Some((values, kind))
+}
+
+/// A schema with only the annotations of another, which say nothing about the values it admits.
+///
+/// OpenAPI's `x-` extensions are among them, which carry tooling metadata.
+/// Other keywords progeny does not know are not, because some validators act on keywords of their
+/// own.
+fn annotations(object: &SchemaObject) -> SchemaObject {
+    SchemaObject {
+        title: object.title.clone(),
+        description: object.description.clone(),
+        comment: object.comment.clone(),
+        deprecated: object.deprecated,
+        examples: object.examples.clone(),
+        default: object.default.clone(),
+        read_only: object.read_only,
+        write_only: object.write_only,
+        external_docs: object.external_docs.clone(),
+        unknown: object
+            .unknown
+            .iter()
+            .filter(|(keyword, _)| keyword.starts_with("x-"))
+            .map(|(keyword, value)| (keyword.clone(), value.clone()))
+            .collect(),
+        ..SchemaObject::default()
+    }
+}
+
+/// Whether an `f64` holds a number exactly as written: every JSON decoder reads it as the same
+/// `f64`, which writes it back as the same number.
+///
+/// A literal whose digits, trailing zeros included, make a significand up to 2^53 with at most 22
+/// of them after the point is read exactly even by a decoder that scales the significand by a
+/// power of ten rather than rounding correctly, as `serde_json` does by default.
+/// Any other spelling, one with an exponent among them, is not taken on trust.
+fn survives_f64(value: &Value) -> bool {
+    let Value::Number(number) = value else {
+        return false;
+    };
+    let text = number.to_string();
+    let digits = text.trim_start_matches('-');
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let scaled_exactly = !digits.contains(['e', 'E'])
+        && fraction.len() <= 22
+        && format!("{whole}{fraction}")
+            .parse::<u64>()
+            .is_ok_and(|significand| significand <= 1 << 53);
+    scaled_exactly
+        && value
+            .as_f64()
+            .is_some_and(|float| super::listed::same(value, &Value::from(float)) == Some(true))
 }
 
 /// The union a view declares, apart from the members declared beside it.

@@ -387,6 +387,15 @@ fn among(listed: &[Value], value: &Value) -> Admission {
     admission
 }
 
+/// Whether every number among some values is written as a whole number, which is what separates
+/// the two numeric scalars a list reads as.
+pub(super) fn whole(values: &[Value]) -> bool {
+    values
+        .iter()
+        .filter(|value| !value.is_null())
+        .all(|value| value.as_i64().is_some() || value.as_u64().is_some())
+}
+
 /// The `type` a list of scalars has: the kind of each value, with `integer` for the numbers only
 /// where each is written as one the generated integer holds and the schema's own `type` allows
 /// it.

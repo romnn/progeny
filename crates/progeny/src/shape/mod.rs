@@ -4687,13 +4687,160 @@ mod tests {
         assert!(matches!(shape_of(&shapes, "Either")?, Shape::Union(_)));
     }
 
+    /// A union whose branches each list numbers under one type, one numeric enum split across
+    /// branches as cloudflare writes its `feedback` parameter, reads as the enum it splits.
+    /// As branches, each would be the same scalar, and the first would read every number.
     #[test_util::test]
-    fn a_listed_number_does_not_swallow_a_later_number() {
-        // A numeric enumeration is the plain integer, so the first branch reads `2` as well.
-        assert!(degrades_as_wild_union(
-            json!({"Code": {"oneOf": [{"const": 1}, {"const": 2}]}}),
-            "Code",
-        )?);
+    fn a_numeric_enum_split_across_branches_reads_as_that_enum() -> eyre::Result<()> {
+        let number = |value: f64| json!({"type": "number", "enum": [value]});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            // An OpenAPI extension, as cloudflare marks this union with, is no restriction.
+            "Feedback": {
+                "x-auditable": true,
+                "anyOf": [number(-1.0), number(0.0), number(1.0)],
+            },
+            "Code": {"oneOf": [{"const": 1}, {"const": 2}]},
+            "Nullable": {"anyOf": [number(1.5), number(2.5), {"type": "null"}]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // Each reads as the single enum that says the same: a declared `number` is an `f64`
+        // whatever its values, and bare whole constants are the integer a bare `enum` is.
+        assert_eq!(
+            shape_of(&shapes, "Feedback")?,
+            &Shape::Scalar(Scalar::Number)
+        );
+        assert_eq!(
+            shape_of(&shapes, "Code")?,
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
+        );
+        assert!(
+            matches!(
+                shape_of(&shapes, "Nullable")?,
+                Shape::Optional(ShapeRef::Inline(inner)) if **inner == Shape::Scalar(Scalar::Number)
+            ),
+            "{:?}",
+            shape_of(&shapes, "Nullable")?
+        );
+        Ok(())
+    }
+
+    /// Named enums keep the union they are branches of, which a fold would erase.
+    #[test_util::test]
+    fn a_union_of_named_enums_is_not_folded() -> eyre::Result<()> {
+        let to = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, _) = shapes_of(with_schemas(json!({
+            "Legacy": {"type": "integer", "enum": [1, 2], "deprecated": true},
+            "Current": {"type": "integer", "enum": [2]},
+            "Level": {"type": "integer", "enum": [1, 2]},
+            "Either": {"anyOf": [to("Legacy"), to("Current")]},
+            "Maybe": {"anyOf": [to("Level"), to("Level"), {"type": "null"}]},
+        })))?;
+        for name in ["Either", "Maybe"] {
+            let shape = shape_of(&shapes, name)?;
+            let folded = matches!(shape, Shape::Scalar(_))
+                || matches!(shape, Shape::Optional(ShapeRef::Inline(inner)) if matches!(**inner, Shape::Scalar(_)));
+            assert!(!folded, "{name}: {shape:?}");
+        }
+        Ok(())
+    }
+
+    /// A union is folded only where it is written as a plain numeric enum split across branches,
+    /// and the fold is exact.
+    /// Bounds and `not` are no part of that, a branch `format` sizes by the branch's own values, a
+    /// `type` beside the union has to be the branches' scalar, and the scalar has to hold every
+    /// value, which an `f64` does not for an integer above 2^53, nor an `i64` above its range.
+    #[test_util::test]
+    fn a_union_the_fold_cannot_read_exactly_stays_a_union() -> eyre::Result<()> {
+        let integer = |value: i64| json!({"type": "integer", "enum": [value]});
+        let unfolded = [
+            json!({"maximum": 1, "anyOf": [integer(1), integer(2)]}),
+            json!({"not": {"const": 1}, "anyOf": [{"const": 1}, {"const": 2}]}),
+            json!({"type": "number", "anyOf": [{"const": 1}, {"const": 2}]}),
+            json!({"anyOf": [
+                {"type": "integer", "enum": [9_223_372_036_854_775_808_u64]},
+                integer(1),
+            ]}),
+            // A bound is no part of a plain list, and the bounded branch may refuse `7`.
+            json!({"anyOf": [
+                {"type": "integer", "enum": [1]},
+                {"type": "integer", "maximum": 5, "enum": [1, 7]},
+            ]}),
+            json!({"anyOf": [{"type": "integer", "format": "uint8", "enum": [1]}, integer(300)]}),
+            json!({"anyOf": [
+                {"type": "number", "enum": [9_007_199_254_740_993_u64]},
+                {"type": "number", "enum": [1]},
+            ]}),
+            // A keyword progeny does not know may be one a validator acts on.
+            json!({"oneOf": [{"const": 300}, {"const": 300, "range": [0, 255]}, {"const": 1}]}),
+            // Only exact numbers keep a decimal spelling an `f64` would round, or one the default
+            // decoder reads as another number.
+            #[cfg(feature = "exact-numbers")]
+            serde_json::from_str(
+                r#"{"anyOf": [{"type": "number", "enum": [9007199254740993.0]}, {"type": "number", "enum": [1]}]}"#,
+            )?,
+            #[cfg(feature = "exact-numbers")]
+            serde_json::from_str(
+                r#"{"anyOf": [{"type": "number", "enum": [0.9999999999999999]}, {"type": "number", "enum": [2]}]}"#,
+            )?,
+            // The trailing zero is a digit the default decoder scales, and the two would read
+            // as one `f64`.
+            #[cfg(feature = "exact-numbers")]
+            serde_json::from_str(
+                r#"{"oneOf": [{"type": "number", "enum": [900719925474099.10]}, {"type": "number", "enum": [900719925474099]}]}"#,
+            )?,
+        ];
+        for schema in unfolded {
+            assert!(
+                degrades_as_wild_union(json!({"Code": schema.clone()}), "Code")?,
+                "{schema} should stay a union"
+            );
+        }
+        Ok(())
+    }
+
+    /// The fold reads the values the union admits, and an enclosing union compares the folded
+    /// branch by all of them.
+    #[test_util::test]
+    fn a_folded_union_admits_what_the_union_does() -> eyre::Result<()> {
+        let inner = json!({"anyOf": [
+            {"type": "number", "enum": [1.5]},
+            {"type": "number", "enum": [1]},
+        ]});
+        let number = |values: &[f64]| json!({"type": "number", "enum": values});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            // `oneOf` refuses `1`, which two branches list, so an integer branch before the
+            // union reads none of the numbers it admits, and the two are told apart.
+            "Exclusive": {"oneOf": [number(&[1.0, 2.5]), number(&[1.0]), number(&[3.5])]},
+            "Distinct": {"oneOf": [
+                {"type": "integer", "enum": [1]},
+                {"$ref": "#/components/schemas/Exclusive"},
+            ]},
+            "Inner": inner,
+            // The integer branch reads `1`, which the inner union admits after `1.5`.
+            "Code": {"oneOf": [
+                {"type": "integer", "enum": [0]},
+                {"$ref": "#/components/schemas/Inner"},
+            ]},
+        })))?;
+        assert_eq!(
+            shape_of(&shapes, "Exclusive")?,
+            &Shape::Scalar(Scalar::Number)
+        );
+        assert!(
+            matches!(shape_of(&shapes, "Distinct")?, Shape::Union(_)),
+            "{:?}",
+            shape_of(&shapes, "Distinct")?
+        );
+        assert_eq!(shape_of(&shapes, "Inner")?, &Shape::Scalar(Scalar::Number));
+        assert_eq!(shape_of(&shapes, "Code")?, &Shape::Any);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.class() == BreakageClass::WildUnion
+                    && d.location().to_string() == "/components/schemas/Code"),
+            "{diagnostics:#?}"
+        );
+        Ok(())
     }
 
     /// A listed integer branch is the plain integer, which refuses a number that is not whole, so
@@ -4705,6 +4852,15 @@ mod tests {
             json!({"oneOf": [
                 {"type": "integer", "enum": [1]},
                 {"type": "number", "enum": [2.5]},
+            ]}),
+            json!({"oneOf": [
+                {"type": "integer", "enum": [1.0]},
+                {"type": "number", "enum": [1.5]},
+            ]}),
+            // The first branch is an integer once its parts are merged.
+            json!({"oneOf": [
+                {"type": "number", "enum": [1], "allOf": [{"type": "integer"}]},
+                {"type": "number", "enum": [1.5]},
             ]}),
             json!({"oneOf": [{"enum": [1]}, {"enum": [2.5, 3.5]}]}),
             json!({"oneOf": [
@@ -4721,8 +4877,7 @@ mod tests {
             );
         }
 
-        // The integer reads `2` as well, which `2.0` admits by the same value, and a number
-        // branch reads every number.
+        // The integer reads `2` as well, which `2.0` admits by the same value.
         let degraded = [
             json!({"oneOf": [
                 {"type": "integer", "enum": [1]},
@@ -4731,10 +4886,6 @@ mod tests {
             json!({"oneOf": [
                 {"type": "integer", "enum": [1]},
                 {"type": "number", "enum": [2.0]},
-            ]}),
-            json!({"oneOf": [
-                {"type": "number", "enum": [1.5]},
-                {"type": "number", "enum": [2.5]},
             ]}),
         ];
         for schema in degraded {
@@ -5609,6 +5760,39 @@ mod tests {
                 None => assert!(diagnostics.is_empty(), "{schema}: {diagnostics:#?}"),
             }
         }
+    }
+
+    /// Integers listed across a union's branches are the integer they list, so a format beside
+    /// the union sizes it by every listed value, as it sizes a single `enum`.
+    #[test_util::test]
+    fn a_format_beside_a_folded_union_sizes_it_by_every_listed_value() {
+        use crate::config::IntegerWidth;
+
+        let union = |values: [i64; 2]| {
+            json!({"format": "uint8", "anyOf": [
+                {"type": "integer", "enum": [values[0]]},
+                {"type": "integer", "enum": [values[1]]},
+            ]})
+        };
+        let (shapes, diagnostics) = shapes_sized(
+            with_schemas(json!({"Small": union([1, 2]), "Large": union([1, 300])})),
+            IntegerWidth::ByFormat,
+        )?;
+        assert_eq!(
+            shape_of(&shapes, "Small")?,
+            &Shape::Scalar(Scalar::Integer(IntType::U8))
+        );
+        // `300` does not fit, so the integer stays wide and the format is reported.
+        assert_eq!(
+            shape_of(&shapes, "Large")?,
+            &Shape::Scalar(Scalar::Integer(IntType::I64))
+        );
+        assert!(
+            diagnostics.iter().any(|d| d
+                .detail()
+                .contains("a value the schema lists does not fit it")),
+            "{diagnostics:#?}"
+        );
     }
 
     /// A format sizes an integer of its schema's own only, and only where the configuration says
