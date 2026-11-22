@@ -530,6 +530,12 @@ fn probe_inputs(
                 Some(BodyContract::Text { .. } | BodyContract::Bytes { .. })
             ) {
             Ok(serde_json::json!(5))
+        } else if matches!(param.ty, TypeRef::Value) && !param.style.content() {
+            // A style-encoded parameter is text on the wire, and an object would be exploded into
+            // members that no name ties back to it, so arbitrary JSON in one is driven as a string.
+            // A parameter declared with JSON `content` carries an object under its name, so it
+            // keeps the object, which is what would catch it losing that.
+            Ok(serde_json::json!("probe"))
         } else {
             synthesize(&param.ty, contracts, &mut Vec::new())
         };
@@ -820,6 +826,38 @@ mod tests {
             },
         }))?;
         assert!(alone.head.is_none());
+    }
+
+    /// A parameter of arbitrary JSON is driven as a string, which a query carries under the
+    /// parameter's name, where an object would arrive as its members alone and never reach the
+    /// handler as the parameter.
+    /// One declared with JSON `content` carries an object under its name, so it is driven one.
+    #[test_util::test]
+    fn arbitrary_json_in_a_parameter_is_driven_as_a_string() {
+        let probe = plan(&json!({
+            "/logs": {"get": {
+                "operationId": "listLogs",
+                "parameters": [
+                    {"name": "feedback", "in": "query", "schema": {}},
+                    {"name": "filter", "in": "query",
+                     "content": {"application/json": {"schema": {}}}},
+                ],
+                "responses": {"200": {"description": "ok"}},
+            }},
+        }))?;
+        let inputs: Vec<(&str, Option<&str>)> = probe
+            .operations
+            .iter()
+            .flat_map(|operation| &operation.inputs)
+            .map(|input| (input.field.as_str(), input.json.as_deref()))
+            .collect();
+        assert_eq!(
+            inputs,
+            [
+                ("feedback", Some("\"probe\"")),
+                ("filter", Some("{\"probe\":true}"))
+            ]
+        );
     }
 
     /// A `GET` that takes any parameter is not the target either: a hand-built `HEAD` carries

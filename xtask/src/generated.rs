@@ -69,6 +69,60 @@ pub fn cargo_in(directory: &Utf8Path, slot: usize) -> Command {
     command
 }
 
+/// Remove a generated crate's own build from its slot's target directory, keeping the
+/// dependencies the documents share.
+///
+/// A document's build is used once, and the largest run to gigabytes.
+/// Kept, every document's build stays in the one target directory a gate shares, so a gate over
+/// the whole corpus fills a hosted runner's disk before it is through, and so does the next gate
+/// to build there.
+/// The toolchain has to be the one that built it, because cargo releases lay a target directory
+/// out differently.
+pub fn clean(directory: &Utf8Path, slot: usize, toolchain: Option<&str>) -> eyre::Result<()> {
+    let cargo = || {
+        let mut command = cargo_in(directory, slot);
+        if let Some(toolchain) = toolchain {
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
+        command
+    };
+    let metadata = cargo()
+        .args(["metadata", "--quiet", "--no-deps", "--format-version", "1"])
+        .output()
+        .wrap_err_with(|| format!("reading the packages in {directory}"))?;
+    if !metadata.status.success() {
+        bail!(
+            "cargo metadata failed in {directory}: {}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .wrap_err_with(|| format!("parsing the packages in {directory}"))?;
+    let packages: Vec<&str> = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|package| package.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    // Without a package, `cargo clean` would remove the shared dependencies as well.
+    if packages.is_empty() {
+        bail!("cargo metadata names no package in {directory}");
+    }
+    let mut command = cargo();
+    command.args(["clean", "--quiet"]);
+    for package in packages {
+        command.args(["-p", package]);
+    }
+    let status = command
+        .status()
+        .wrap_err_with(|| format!("cleaning the build of {directory}"))?;
+    if !status.success() {
+        bail!("cargo clean failed in {directory}");
+    }
+    Ok(())
+}
+
 /// Write a generated crate into the scratch area and return its directory.
 pub fn write(name: &str, output: &Output) -> eyre::Result<Utf8PathBuf> {
     let directory = scratch_root().join(name);
