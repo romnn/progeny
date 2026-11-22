@@ -1,0 +1,3 @@
+# The committed corpus documents are checked against the digests their snapshots record, so their
+# bytes must be the same on every platform: no line-ending conversion.
+corpus/specs/** -text
