@@ -530,9 +530,10 @@ fn probe_inputs(
                 Some(BodyContract::Text { .. } | BodyContract::Bytes { .. })
             ) {
             Ok(serde_json::json!(5))
-        } else if matches!(param.ty, TypeRef::Value) && !param.style.content() {
+        } else if arbitrary_json(&param.ty) && !param.style.content() {
             // A style-encoded parameter is text on the wire, and an object would be exploded into
-            // members that no name ties back to it, so arbitrary JSON in one is driven as a string.
+            // members that no name ties back to it, so arbitrary JSON in one, nullable or not, is
+            // driven as a string.
             // A parameter declared with JSON `content` carries an object under its name, so it
             // keeps the object, which is what would catch it losing that.
             Ok(serde_json::json!("probe"))
@@ -593,6 +594,15 @@ fn argument_of(location: Location) -> &'static str {
         Location::Query => "query",
         Location::Header => "header",
         Location::Cookie => "cookie",
+    }
+}
+
+/// Whether a type is arbitrary JSON, through any `Option` a nullable schema wraps it in.
+fn arbitrary_json(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Value => true,
+        TypeRef::Option(inner) => arbitrary_json(inner),
+        _ => false,
     }
 }
 
@@ -839,6 +849,9 @@ mod tests {
                 "operationId": "listLogs",
                 "parameters": [
                     {"name": "feedback", "in": "query", "schema": {}},
+                    // Nullable, as airflow's `warning_type` parameter is.
+                    {"name": "kind", "in": "query",
+                     "schema": {"anyOf": [{}, {"type": "null"}]}},
                     {"name": "filter", "in": "query",
                      "content": {"application/json": {"schema": {}}}},
                 ],
@@ -855,7 +868,8 @@ mod tests {
             inputs,
             [
                 ("feedback", Some("\"probe\"")),
-                ("filter", Some("{\"probe\":true}"))
+                ("filter", Some("{\"probe\":true}")),
+                ("kind", Some("\"probe\""))
             ]
         );
     }
