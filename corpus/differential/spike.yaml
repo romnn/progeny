@@ -130,6 +130,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PetOrName"
+  /signals:
+    post:
+      operationId: postSignal
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalHolder"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalHolder"
 components:
   schemas:
     Spike:
@@ -584,3 +599,37 @@ components:
           enum: [dog]
         name:
           type: string
+    # Objects that hold only the tag a union of them consumes, written inline so they become unit
+    # variants, beside a list of strings. serde reads a consumed tag from a list as its first
+    # element, which would make `["ping", "x"]` the ping, so the union beside the list stays
+    # arbitrary JSON; it is held by a member, so the hand-written path reads it through a buffered
+    # replay.
+    Signal:
+      oneOf:
+        - type: object
+          required: [kind]
+          properties:
+            kind:
+              type: string
+              enum: [ping]
+        - type: object
+          required: [kind]
+          properties:
+            kind:
+              type: string
+              enum: [pong]
+    SignalOrList:
+      oneOf:
+        - $ref: "#/components/schemas/Signal/oneOf/0"
+        - $ref: "#/components/schemas/Signal/oneOf/1"
+        - type: array
+          items:
+            type: string
+    SignalHolder:
+      type: object
+      required: [signal, either]
+      properties:
+        signal:
+          $ref: "#/components/schemas/Signal"
+        either:
+          $ref: "#/components/schemas/SignalOrList"

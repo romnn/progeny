@@ -692,7 +692,9 @@ impl Contracts {
     /// `support::Upload`.
     pub(crate) fn uses_upload(&self) -> bool {
         self.types.iter().any(|contract| {
-            finalize::references(contract.kind())
+            contract
+                .kind()
+                .references()
                 .iter()
                 .any(|ty| ty.holds_upload())
         })
@@ -701,7 +703,9 @@ impl Contracts {
     /// Whether any field names the generated three-state presence support type.
     pub(crate) fn uses_presence(&self) -> bool {
         self.types.iter().any(|contract| {
-            finalize::references(contract.kind())
+            contract
+                .kind()
+                .references()
                 .iter()
                 .any(|ty| ty.holds_presence())
         })

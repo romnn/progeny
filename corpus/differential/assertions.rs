@@ -860,3 +860,36 @@ fn a_string_beside_objects_whose_tag_another_union_consumes_consumes_it_too() {
         Pet::Dog(_)
     ));
 }
+
+/// A list beside objects whose consumed tag is all they hold reads as the list it is, directly and
+/// through the buffered replay of the member holding it, under both strategies and in the read
+/// form, where serde's reading of a consumed tag would take its first element for the tag.
+#[test_util::test]
+fn a_list_beside_objects_whose_tag_another_union_consumes_stays_a_list() {
+    for payload in [r#"["ping","x"]"#, r#"["ping"]"#] {
+        let (left, right) =
+            round_trip::<derived::types::SignalOrList, hand::types::SignalOrList>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+    }
+    for payload in [
+        r#"{"either":["ping","x"],"signal":{"kind":"ping"}}"#,
+        r#"{"either":["ping"],"signal":{"kind":"ping"}}"#,
+        r#"{"either":{"kind":"pong"},"signal":{"kind":"pong"}}"#,
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::SignalHolder, hand::types::SignalHolder>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        let (left, right, clean) = read_back!(
+            derived::types::read::SignalHolder,
+            hand::types::read::SignalHolder,
+            payload
+        );
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        assert!(clean, "{payload}");
+    }
+    // The union of the objects alone still reads an object holding only its tag as that branch.
+    let read = serde_json::from_str::<hand::types::SignalHolder>(
+        r#"{"either":["ping"],"signal":{"kind":"ping"}}"#,
+    )?;
+    assert!(matches!(read.signal, hand::types::Signal::Ping));
+}

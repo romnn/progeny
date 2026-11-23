@@ -6734,4 +6734,126 @@ mod tests {
             "{diagnostics:?}"
         );
     }
+
+    /// An object that requires `kind` with one value and declares nothing else.
+    fn tag_only(kind: &str) -> Value {
+        json!({
+            "type": "object",
+            "required": ["kind"],
+            "properties": {"kind": {"type": "string", "enum": [kind]}},
+        })
+    }
+
+    /// A list beside objects whose tag another union consumes degrades, because serde reads a
+    /// consumed tag from a list as its first element, so `["cat", "tail"]` would be the cat.
+    #[test_util::test]
+    fn a_list_beside_objects_whose_tag_another_union_consumes_still_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Cat": tag_only("cat"),
+            "Dog": tag_only("dog"),
+            "Pet": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "PetOrList": {"oneOf": [
+                reference("Cat"),
+                reference("Dog"),
+                {"type": "array", "items": {"type": "string"}},
+            ]},
+        })))?;
+        let Shape::Union(pet) = shape_of(&shapes, "Pet")? else {
+            eyre::bail!("`Pet` is a union");
+        };
+        assert_eq!(
+            pet.tag.as_ref().map(|tag| tag.style),
+            Some(TagStyle::Consumed)
+        );
+        assert_eq!(shape_of(&shapes, "PetOrList")?, &Shape::Any);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::DiscriminatorEdgeCase),
+            ["/components/schemas/PetOrList"],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// What a union beside a string or list newly reaches cannot move another union's tag: a list
+    /// of cats beside the cats is a place the cat keeps `kind`, which the unions over the cats
+    /// already take off it.
+    /// So those unions keep consuming the tag, and still say they both do, and each union that
+    /// would have put the tag back on the wire degrades as it did, whoever owns its own objects'
+    /// tags.
+    #[test_util::test]
+    fn what_a_union_beside_other_kinds_reaches_leaves_other_tags_alone() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let named = |kind: &str| named_object("kind", &[kind]);
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Cat": named("cat"),
+            "Dog": named("dog"),
+            "Pet": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "Animal": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "PetOrList": {"oneOf": [
+                reference("Cat"),
+                reference("Dog"),
+                {"type": "array", "items": reference("Cat")},
+            ]},
+            // Objects nothing else tags, beside the same list of cats
+            "Bird": named("bird"),
+            "Fish": named("fish"),
+            "BirdOrCats": {"oneOf": [
+                reference("Bird"),
+                reference("Fish"),
+                {"type": "array", "items": reference("Cat")},
+            ]},
+            // A union of its own in the list, which would settle a tag nothing settled before
+            "Hen": named("hen"),
+            "Duck": named("duck"),
+            "BirdOrFlock": {"oneOf": [
+                reference("Bird"),
+                reference("Fish"),
+                {"type": "array", "items": {"oneOf": [reference("Hen"), reference("Duck")]}},
+            ]},
+        })))?;
+        for name in ["Pet", "Animal"] {
+            let Shape::Union(union) = shape_of(&shapes, name)? else {
+                eyre::bail!("`{name}` is a union");
+            };
+            assert_eq!(
+                union.tag.as_ref().map(|tag| tag.style),
+                Some(TagStyle::Consumed),
+                "{name}"
+            );
+        }
+        let Shape::Struct(cat) = shape_of(&shapes, "Cat")? else {
+            eyre::bail!("`Cat` is a struct");
+        };
+        assert!(cat.fields.iter().all(|field| field.wire != "kind"));
+        assert!(
+            !reported_at(&diagnostics, BreakageClass::MultiParentDiscriminator).is_empty(),
+            "{diagnostics:?}"
+        );
+        // The hen keeps the tag nothing took off it before.
+        let Shape::Struct(hen) = shape_of(&shapes, "Hen")? else {
+            eyre::bail!("`Hen` is a struct");
+        };
+        assert!(hen.fields.iter().any(|field| field.wire == "kind"));
+        for name in ["PetOrList", "BirdOrCats", "BirdOrFlock"] {
+            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
+        }
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::DiscriminatorEdgeCase),
+            [
+                "/components/schemas/BirdOrCats",
+                "/components/schemas/BirdOrFlock",
+                "/components/schemas/PetOrList"
+            ],
+            "{diagnostics:?}"
+        );
+    }
 }

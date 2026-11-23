@@ -42,15 +42,26 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
         return;
     }
     // A union that also reads values of other kinds takes the ownership the rest settle on, so it
-    // sits out the fixpoint.
-    let (mixed, proposed): (Vec<_>, Vec<_>) = all.iter().cloned().partition(|(key, _)| {
-        shapes
-            .get(key)
-            .and_then(tagged_union)
-            .and_then(|union| union.tag.as_ref())
-            .is_some_and(|tag| !tag.kinds.is_empty())
-    });
-    let base_borrowed = borrowed_outside_tagged_unions(shapes);
+    // sits out the fixpoint, and so does whatever only such a union reaches, which classification
+    // reached only because that union is typed.
+    let mixed_keys: BTreeSet<ShapeKey> = all
+        .iter()
+        .filter(|(key, _)| {
+            shapes
+                .get(key)
+                .and_then(tagged_union)
+                .and_then(|union| union.tag.as_ref())
+                .is_some_and(|tag| !tag.kinds.is_empty())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let fresh = reached_only_through(shapes, &mixed_keys);
+    let (mixed, proposed): (Vec<_>, Vec<_>) = all
+        .iter()
+        .filter(|(key, _)| !fresh.contains(key))
+        .cloned()
+        .partition(|(key, _)| mixed_keys.contains(key));
+    let base_borrowed = borrowed_outside_tagged_unions(shapes, &fresh);
     let above = read_above(shapes);
 
     let mut modes: BTreeMap<ShapeKey, Mode> = proposed
@@ -77,10 +88,12 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
         let Some(union) = shapes.get(union_key).and_then(tagged_union) else {
             continue;
         };
-        let mode = taken_over(shapes, &outcome.strip, union, property).unwrap_or_else(|reason| {
-            reasons.insert(union_key.clone(), reason);
-            Mode::Demoted
-        });
+        let mode = leaves_others_alone(shapes, &fresh, &outcome.strip, union)
+            .and_then(|()| taken_over(shapes, &outcome.strip, union, property))
+            .unwrap_or_else(|reason| {
+                reasons.insert(union_key.clone(), reason);
+                Mode::Demoted
+            });
         outcome.modes.insert(union_key.clone(), mode);
     }
 
@@ -358,17 +371,119 @@ fn taken_over(
                 .to_owned(),
         );
     }
-    if union
-        .tag
-        .as_ref()
-        .is_some_and(|tag| tag.reads_more_than_it_writes(union))
-    {
+    let Some(tag) = union.tag.as_ref() else {
+        return Err("it reads no tag".to_owned());
+    };
+    if tag.reads_more_than_it_writes(union) {
         return Err(format!(
             "another union takes `{property}` off its variants, and some payloads name their \
              variant by a spelling the union would not write back, or by leaving the tag out"
         ));
     }
+    // serde reads a consumed tag from a list too, as its first element, so a list meant for the
+    // list branch would be read as an object.
+    if tag.kinds.iter().any(|kind| lists(shapes, kind)) {
+        return Err(format!(
+            "another union takes `{property}` off its variants, and a union that takes the tag \
+             off reads a list as an object named by its first element, so a list meant for one \
+             of its branches would be read as another"
+        ));
+    }
     Ok(Mode::Consumed)
+}
+
+/// Why typing a union whose objects name themselves beside branches of other kinds would change
+/// what another union reads, if it would.
+///
+/// Only what such a union reaches is new to the document's types, so only that can.
+/// A type it reaches that holds a variant another union takes a member off would put that member
+/// back on the wire, and a union it reaches would ask for a tag of its own, which the unions
+/// already settled never saw.
+fn leaves_others_alone(
+    shapes: &Shapes,
+    fresh: &BTreeSet<ShapeKey>,
+    strip: &[(ShapeKey, String)],
+    union: &Union,
+) -> Result<(), String> {
+    let mut queue: Vec<ShapeKey> = union
+        .tag
+        .iter()
+        .flat_map(|tag| &tag.kinds)
+        .chain(union.variants.iter().map(|variant| &variant.shape))
+        .filter_map(|reference| match reference {
+            ShapeRef::Key(key) => Some(key.clone()),
+            ShapeRef::Inline(_) => None,
+        })
+        .filter(|key| fresh.contains(key))
+        .collect();
+    let mut seen = BTreeSet::new();
+    while let Some(key) = queue.pop() {
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let Some(shape) = shapes.get(&key) else {
+            continue;
+        };
+        if tagged_union(shape).is_some() {
+            return Err(
+                "one of its branches reaches a union that reads a tag of its own".to_owned(),
+            );
+        }
+        for child in super::child_keys(shape) {
+            if let Some((_, taken)) = strip.iter().find(|(stripped, _)| *stripped == child) {
+                return Err(format!(
+                    "one of its branches holds a type another union takes `{taken}` off, which \
+                     that branch's payloads still carry"
+                ));
+            }
+            if fresh.contains(&child) {
+                queue.push(child);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every key nothing reaches but through one of the unions in `through`.
+///
+/// Such a union degraded before its branches could be read by kind, and nothing classified what
+/// only it reaches, so none of that may move what the other unions settle on.
+fn reached_only_through(shapes: &Shapes, through: &BTreeSet<ShapeKey>) -> BTreeSet<ShapeKey> {
+    let mut reached = BTreeSet::new();
+    let mut queue: Vec<ShapeKey> = shapes.roots().iter().map(|root| root.key.clone()).collect();
+    while let Some(key) = queue.pop() {
+        if !reached.insert(key.clone()) || through.contains(&key) {
+            continue;
+        }
+        if let Some(shape) = shapes.get(&key) {
+            queue.extend(super::child_keys(shape));
+        }
+    }
+    shapes
+        .keys()
+        .filter(|key| !reached.contains(*key))
+        .cloned()
+        .collect()
+}
+
+/// Whether a branch is generated as a list.
+fn lists(shapes: &Shapes, reference: &ShapeRef) -> bool {
+    let mut reference = reference;
+    let mut followed = BTreeSet::new();
+    loop {
+        let shape = match reference {
+            ShapeRef::Key(key) if !followed.insert(key) => return false,
+            ShapeRef::Key(key) => shapes.get(key),
+            ShapeRef::Inline(shape) => Some(&**shape),
+        };
+        match shape {
+            Some(Shape::Array { .. } | Shape::FixedArray { .. } | Shape::Tuple { .. }) => {
+                return true;
+            }
+            Some(Shape::Alias(inner) | Shape::Optional(inner)) => reference = inner,
+            _ => return false,
+        }
+    }
 }
 
 /// Every union that asked for a tag, in a deterministic order.
@@ -698,12 +813,16 @@ fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
 /// union whose variants the document bothered to declare under `components`. Anything an operation
 /// really does reference is reached through that operation and carries a `Position` root there, so
 /// nothing on the wire is lost by ignoring the declaration.
-fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
+fn borrowed_outside_tagged_unions(
+    shapes: &Shapes,
+    fresh: &BTreeSet<ShapeKey>,
+) -> BTreeSet<ShapeKey> {
     let mut borrowed = BTreeSet::new();
-    for (_, shape) in shapes.entries() {
-        // A tagged union has no children but its variant edges, so exempting the shape exempts
-        // exactly those.
-        if tagged_union(shape).is_some() {
+    for (key, shape) in shapes.entries() {
+        // A tagged union has no children but its variant edges and its branches of other kinds,
+        // which hold no object, so exempting the shape exempts exactly the variant edges.
+        // What only a union reading other kinds reaches is settled after the rest.
+        if tagged_union(shape).is_some() || fresh.contains(key) {
             continue;
         }
         for key in super::child_keys(shape) {
