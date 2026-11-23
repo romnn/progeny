@@ -579,11 +579,9 @@ fn union(
         Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::String(restricted) => {
             let string = Shape::Scalar(Scalar::String);
-            let omitted = View {
-                uninterpreted: restricted,
-                ..View::default()
-            };
-            report_uninterpreted(&omitted, &string, ctx, at);
+            for branch in &restricted {
+                report_uninterpreted(&merge::view(resolved, branch), &string, ctx, at);
+            }
             string
         }
         Reading::Variants(rest) => match told_apart(resolved, view, rest) {
@@ -1511,8 +1509,8 @@ enum Reading {
     /// ([`string_union`]).
     Strings(StringEnum),
     /// An `anyOf` written as known strings or others it restricts, which reads as one plain
-    /// string ([`string_union`]), with the keywords it does not hold.
-    String(Vec<&'static str>),
+    /// string ([`string_union`]), with the restricted branches, whose keywords it does not hold.
+    String(Vec<ShapeKey>),
     /// Two or more branches a payload has to be told apart between.
     Variants(Vec<ShapeKey>),
 }
@@ -2213,7 +2211,7 @@ fn reads_every_string(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
 ///
 /// A branch that also admits `null` is meant for a payload no string branch reads.
 fn reads_strings_only(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
-    let Branch::Leaf(view) = Branch::of(resolved, key) else {
+    let (Branch::Leaf(view) | Branch::Restricted(view)) = Branch::of(resolved, key) else {
         return false;
     };
     kind_of(resolved, &view) == Some(Kind::String) && !declares_null(&view)
@@ -2257,7 +2255,8 @@ fn swallows_payloads_of(
                 .to_owned(),
         );
     }
-    let (first, first_flattened) = match Branch::of(resolved, earlier) {
+    // A flattened or restricted earlier branch reads payloads its view does not show it refusing.
+    let (first, first_overreaches) = match Branch::of(resolved, earlier) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, &inner, later, depth),
         Branch::Union(_) => {
             return Some(
@@ -2268,7 +2267,7 @@ fn swallows_payloads_of(
             );
         }
         Branch::Leaf(view) => (view, false),
-        Branch::Flattened(view) => (view, true),
+        Branch::Flattened(view) | Branch::Restricted(view) => (view, true),
     };
     let (second, flattened) = match Branch::of(resolved, later) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, earlier, &inner, depth),
@@ -2277,7 +2276,7 @@ fn swallows_payloads_of(
                 .iter()
                 .find_map(|branch| swallows_payloads_of(resolved, earlier, branch, depth));
         }
-        Branch::Leaf(view) => (view, false),
+        Branch::Leaf(view) | Branch::Restricted(view) => (view, false),
         Branch::Flattened(view) => (view, true),
     };
 
@@ -2301,7 +2300,7 @@ fn swallows_payloads_of(
     // catch-all's, such as an unlisted value of an enum it lists.
     let right = kind_of(resolved, &second);
     if right.is_none_or(|right| right == left && !flattened && admits_its_kind(resolved, &second)) {
-        let overreaches = first_flattened || view_overreaches(resolved, &first, 0);
+        let overreaches = first_overreaches || view_overreaches(resolved, &first, 0);
         return overreaches.then(|| {
             "one of its branches reads values its schema does not admit, such as an unlisted \
              value of an enum, so it accepts payloads meant for a later branch that admits every \
@@ -2351,6 +2350,12 @@ fn swallows_payloads_of(
             }
             swallows_payloads_of(resolved, left, right, depth)
         }
+        Kind::String if first_overreaches => Some(
+            "one of its branches is generated as a plain string for known strings or restricted \
+             ones, which reads strings it does not admit, so it may accept the payloads of a \
+             later string branch"
+                .to_owned(),
+        ),
         Kind::String | Kind::Number | Kind::Boolean => scalar_swallows(&first, &second),
         Kind::Null => None,
     }
@@ -2390,6 +2395,13 @@ enum Branch {
     Union(Vec<ShapeKey>),
     /// Anything else, including a union of strings, which is one string enum.
     Leaf(Box<View>),
+    /// A union of known strings and restricted ones, as the view of the plain string it is
+    /// generated as ([`Reading::String`]).
+    ///
+    /// As the earlier branch it reads strings the union refuses, which a later string branch may
+    /// be meant for.
+    /// As the later branch it is that plain string.
+    Restricted(Box<View>),
     /// A struct with a union flattened beside its members, as the view of those members alone.
     ///
     /// As the earlier branch it reads a payload as the open struct of its members does, because
@@ -2440,7 +2452,7 @@ impl Branch {
                     .then(|| listed.values.into_iter().map(Value::String).collect()),
                 ..View::default()
             })),
-            Reading::String(_) => Self::Leaf(Box::new(View {
+            Reading::String(_) => Self::Restricted(Box::new(View {
                 types: Some(strings()),
                 ..View::default()
             })),
@@ -2800,7 +2812,7 @@ fn overreaches(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> boo
     }
     match Branch::of(resolved, key) {
         Branch::Through(inner) => overreaches(resolved, &inner, depth.saturating_add(1)),
-        Branch::Union(_) | Branch::Flattened(_) => true,
+        Branch::Union(_) | Branch::Flattened(_) | Branch::Restricted(_) => true,
         Branch::Leaf(view) => view_overreaches(resolved, &view, depth),
     }
 }
@@ -2905,7 +2917,9 @@ fn admits_its_kind(resolved: &ResolvedDocument, view: &View) -> bool {
         Branch::Leaf(view) => {
             kind_of(resolved, &view).is_none() && admitted_values(&view).is_none()
         }
-        Branch::Through(_) | Branch::Union(_) | Branch::Flattened(_) => false,
+        Branch::Through(_) | Branch::Union(_) | Branch::Flattened(_) | Branch::Restricted(_) => {
+            false
+        }
     };
     if admitted_values(view).is_some() {
         return false;
@@ -3171,7 +3185,7 @@ fn string_union(
             any_other: true,
         })
     } else {
-        Reading::String(written.omitted)
+        Reading::String(written.restricted)
     };
     Some((reading, written.null))
 }
@@ -3183,16 +3197,18 @@ struct WrittenStrings {
     listed: Vec<String>,
     /// Whether a branch reads every string.
     open: bool,
-    /// The restrictions of the branches that read unlisted strings, which no string type holds.
-    omitted: Vec<&'static str>,
+    /// The string branches whose length or pattern restrictions no string type holds.
+    restricted: Vec<ShapeKey>,
     /// Whether the union admits `null`.
     null: bool,
 }
 
 /// What an `anyOf` admits, where it is written as strings alone.
 ///
-/// The union holds its branches, annotations, and perhaps a `type` of `string`, alone or with
-/// `null`.
+/// The union holds its branches, annotations, and perhaps a `type` of `string`, which refuses a
+/// `null` branch.
+/// A `type` that admits `null` leaves the union as it is, because [`nullable`] would make the
+/// string optional whatever its branches admit.
 /// Each branch is one of these:
 ///
 /// - a string `enum` or `const`, with annotations and perhaps a `type` of `string`;
@@ -3219,12 +3235,7 @@ fn written_strings(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Writte
         types: union.types.clone(),
         ..merge::annotations(union)
     };
-    let declared = type_names(union);
-    let compatible = declared.is_empty()
-        || (declared.contains(&&TypeName::String)
-            && declared
-                .iter()
-                .all(|name| matches!(name, TypeName::String | TypeName::Null)));
+    let compatible = matches!(type_names(union).as_slice(), [] | [TypeName::String]);
     if !part.dispatches() || plain != **union || !compatible {
         return None;
     }
@@ -3271,25 +3282,19 @@ fn written_strings(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Writte
             [TypeName::String]
                 if restricted == **branch && string(&format) == Shape::Scalar(Scalar::String) =>
             {
-                let omitted: Vec<&'static str> = [
-                    ("maxLength", branch.max_length.is_some()),
-                    ("minLength", branch.min_length.is_some()),
-                    ("pattern", branch.pattern.is_some()),
-                ]
-                .into_iter()
-                .filter_map(|(keyword, present)| present.then_some(keyword))
-                .collect();
-                written.open |= omitted.is_empty() && branch.format.is_none();
-                for keyword in omitted {
-                    if !written.omitted.contains(&keyword) {
-                        written.omitted.push(keyword);
-                    }
+                // Its length and pattern are what its view reports, and a branch without them
+                // reads every string, whatever `format` it names.
+                let key = merge::key_of(resolved, id);
+                if merge::view(resolved, &key).uninterpreted.is_empty() {
+                    written.open = true;
+                } else {
+                    written.restricted.push(key);
                 }
             }
             _ => return None,
         }
     }
-    // A `type` beside the union decides `null` instead, and [`nullable`] reads it there.
+    // A `type` of `string` beside the union refuses its `null` branch.
     written.null &= union.types.is_none();
     Some(written)
 }

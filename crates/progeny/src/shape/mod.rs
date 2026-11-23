@@ -4932,6 +4932,9 @@ mod tests {
                 {"type": "string", "enum": ["duplicate dag id", "unknown"]},
                 {"type": "string", "description": "Any other warning."},
             ]},
+            // A `format` progeny gives no type of its own restricts nothing it enforces, so the
+            // branch reads every string beside the restricted one.
+            "Formatted": {"anyOf": [to, {"type": "string", "format": "email"}, custom_warning()]},
         })))?;
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
         let open = |values: &[&str]| {
@@ -4947,6 +4950,10 @@ mod tests {
         assert_eq!(
             shape_of(&shapes, "Combined")?,
             &open(&["custom", "asset conflict", "duplicate dag id", "unknown"])
+        );
+        assert_eq!(
+            shape_of(&shapes, "Formatted")?,
+            &open(&["asset conflict", "duplicate dag id"])
         );
         Ok(())
     }
@@ -4997,13 +5004,46 @@ mod tests {
                 "{schema} should stay a union"
             );
         }
+
+        // A `type` that admits `null` would make the string optional whatever its branches
+        // admit, so the union is left to degrade as it does without the fold.
+        let (_, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            "Nullable": {
+                "type": ["string", "null"],
+                "anyOf": [to, custom_warning(), {"type": "null"}],
+            },
+        })))?;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.class() == BreakageClass::WildUnion),
+            "{diagnostics:#?}"
+        );
         Ok(())
     }
 
     /// An enclosing union compares a folded union as the string it is generated as, which a later
     /// integer branch is told apart from.
+    /// That string reads strings the folded union refuses, so a later string branch is not.
     #[test_util::test]
     fn an_enclosing_union_compares_a_string_union_as_one_string() -> eyre::Result<()> {
+        // `"reserved"` is neither `known` nor custom, so it is meant for the later branch.
+        let code = json!({"anyOf": [
+            {"const": "known"},
+            {"type": "string", "pattern": "^custom:"},
+        ]});
+        assert!(degrades_as_wild_union(
+            json!({
+                "Code": code,
+                "Outer": {"oneOf": [
+                    {"$ref": "#/components/schemas/Code"},
+                    {"const": "reserved"},
+                ]},
+            }),
+            "Outer",
+        )?);
+
         let (shapes, diagnostics) = shapes_of(with_schemas(json!({
             "DagWarningType": warning_type(),
             "WarningType": {"anyOf": [
