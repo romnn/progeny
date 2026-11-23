@@ -10,8 +10,11 @@ use crate::{api, contract, doc, load, normalize, resolve, shape};
 pub struct Payload {
     /// Where the example was written, as a JSON Pointer into the document.
     pub location: String,
-    /// The generated type the payload deserializes into, by its name in the `types` module.
+    /// The generated type the payload deserializes into, by its name in the `types` module or,
+    /// with [`Payload::read`], in `types::read`.
     pub type_name: String,
+    /// Whether the type lives in `types::read`, where a response's read forms are.
+    pub read: bool,
     /// The payload exactly as the document wrote it.
     pub original: Value,
     /// The payload restricted to what the document declares.
@@ -69,6 +72,7 @@ pub fn payloads(input: &[u8], config: &crate::Config) -> Result<Payloads, Reject
             .map(|payload| Payload {
                 location: payload.location,
                 type_name: payload.type_name,
+                read: payload.read,
                 original: payload.original,
                 expected: payload.expected,
                 vendor_defect: payload.vendor_defect,

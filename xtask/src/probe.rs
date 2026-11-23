@@ -22,12 +22,12 @@
 //! Skipped operations are counted and named — a probe that silently narrows its corpus reads as
 //! "covered" when it is not.
 
-use std::fmt::Write as _;
-
 use camino::Utf8Path;
 use clap::Args as ClapArgs;
 use color_eyre::eyre::{self, WrapErr, bail};
+use proc_macro2::{Ident, Literal, TokenStream};
 use progeny::harness::{Probe, ProbeOp};
+use quote::{format_ident, quote};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -77,11 +77,12 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         let directory = crate::generated::write(&format!("probe-{name}"), &output)?;
 
         add_probe_package(&directory, &config.package.name)?;
-        crate::generated::write_wire_test(
-            &directory,
-            "probe.rs",
-            &render(&config.package.name, &plan),
+        let source = crate::generated::rust_source(
+            render(&config.package.name, &plan),
+            "tests/probe.rs",
+            name,
         )?;
+        crate::generated::write_wire_test(&directory, "probe.rs", &source)?;
 
         let driven = plan
             .operations
@@ -165,6 +166,8 @@ pub fn run(args: &Args) -> eyre::Result<()> {
 ///
 /// The test drives the client against the server, so it depends on both crates, and on the
 /// libraries its double names itself.
+/// It names the types crate `generated`, which is where the harness roots the body types the
+/// double's signatures spell.
 fn add_probe_package(directory: &Utf8Path, package: &str) -> eyre::Result<()> {
     let manifest = directory.join("Cargo.toml");
     let workspace =
@@ -182,6 +185,7 @@ fn add_probe_package(directory: &Utf8Path, package: &str) -> eyre::Result<()> {
             [dependencies]
             {package}-client = {{ path = "{package}-client" }}
             {package}-server = {{ path = "{package}-server" }}
+            generated = {{ package = "{package}-types", path = "{package}-types" }}
             axum = "0.8"
             serde = "1.0.164"
             serde_json = "1"
@@ -192,24 +196,9 @@ fn add_probe_package(directory: &Utf8Path, package: &str) -> eyre::Result<()> {
 
 /// The probe test file: the double implementing every servable operation, then one driver test per
 /// driven one.
-fn render(package: &str, plan: &Probe) -> String {
-    let client = crate::corpus::lib_name(&format!("{package}-client"));
-    let server = crate::corpus::lib_name(&format!("{package}-server"));
-    let uses_types = plan.operations.iter().any(|operation| {
-        operation
-            .body
-            .as_ref()
-            .is_some_and(|body| body.ty.contains("types::"))
-            || operation
-                .inputs
-                .iter()
-                .any(|input| input.json.is_some() && input.ty.contains("types::"))
-    });
-    let types_import = if uses_types {
-        format!("use {client}::types;")
-    } else {
-        String::new()
-    };
+fn render(package: &str, plan: &Probe) -> TokenStream {
+    let client = format_ident!("{}", crate::corpus::lib_name(&format!("{package}-client")));
+    let server = format_ident!("{}", crate::corpus::lib_name(&format!("{package}-server")));
     let compares_headers = plan.operations.iter().any(|operation| {
         operation.skip.is_none()
             && operation
@@ -219,392 +208,377 @@ fn render(package: &str, plan: &Probe) -> String {
                 .and_then(|answer| answer.headers.as_ref())
                 .is_some_and(|headers| !headers.fields.is_empty())
     });
-    let mut out = preamble(&client, &server, &types_import, compares_headers);
-    for operation in &plan.operations {
-        out.push_str(&handler(operation));
-    }
-    out.push_str("}\n");
-    for operation in &plan.operations {
-        if operation.skip.is_none()
-            && let Some(answer) = &operation.response.answer
-        {
-            out.push_str(&driver(operation, answer));
+    let preamble = preamble(&client, &server, compares_headers);
+    let handlers = plan.operations.iter().map(handler);
+    let drivers = plan.operations.iter().filter_map(|operation| {
+        let answer = operation.response.answer.as_ref()?;
+        operation.skip.is_none().then(|| driver(operation, answer))
+    });
+    let head = plan.head.as_ref().map(head_driver);
+    quote! {
+        #preamble
+
+        impl server::Api for Double {
+            type Context = ();
+
+            #(#handlers)*
         }
+
+        #(#drivers)*
+        #head
     }
-    if let Some(head) = &plan.head {
-        out.push_str(&head_driver(head));
-    }
-    out
 }
 
 /// The `HEAD` case: axum serves it with the `GET` handler and reports the `GET` template, and
 /// the reflection has to say which route that was.
-fn head_driver(head: &progeny::harness::ProbeHead) -> String {
-    indoc::formatdoc! {r#"
-
+fn head_driver(head: &progeny::harness::ProbeHead) -> TokenStream {
+    let route = &head.route;
+    quote! {
         #[test_util::test]
-        async fn probe_head_resolves_to_the_get_route() {{
+        async fn probe_head_resolves_to_the_get_route() {
             let (client, matched) = serving().await?;
-            let url = format!("{{}}{{}}", client.base_url(), operations::Route::{route}.path());
+            let url = format!("{}{}", client.base_url(), operations::Route::#route.path());
             let _ = client.client().head(url).send().await?;
             let recorded = recorded(&matched);
             assert_eq!(
                 recorded.last().map(|(method, _)| method.as_str()),
                 Some("HEAD"),
-                "{{recorded:?}}"
+                "{recorded:?}"
             );
-            assert_eq!(operations::Route::{route}.method(), operations::Method::Get);
-            assert_matched(&matched, operations::Route::{route})?;
-        }}
-        "#,
-        route = head.route,
+            assert_eq!(operations::Route::#route.method(), operations::Method::Get);
+            assert_matched(&matched, operations::Route::#route)?;
+        }
     }
 }
 
 /// Everything above the double: imports, the value reader, the recording router and the
 /// reflection cross-check.
-fn preamble(client: &str, server: &str, types_import: &str, compares_headers: bool) -> String {
+fn preamble(client: &Ident, server: &Ident, compares_headers: bool) -> TokenStream {
     // Only a driver that compares a header names it, and an unused helper is a warning.
-    let like = if compares_headers {
-        indoc::indoc! {"
-
+    let like = compares_headers.then(|| {
+        quote! {
             /// A synthesized value read as the type of the field it is compared with.
             fn like<T: serde::de::DeserializeOwned>(_field: &T, json: &str) -> T {
                 value(json)
             }
-        "}
-    } else {
-        ""
-    };
-    indoc::formatdoc! {r#"
-            //! Generated by `cargo xtask probe`. Every servable operation of this description,
-            //! sent by the generated client to the generated server over a socket.
+        }
+    });
+    quote! {
+        //! Generated by `cargo xtask probe`. Every servable operation of this description,
+        //! sent by the generated client to the generated server over a socket.
 
-            use std::sync::{{Arc, Mutex}};
+        use std::sync::{Arc, Mutex};
 
-            use color_eyre::eyre::{{self, OptionExt as _}};
-            use {client}::{{client, operations}};
-            use {server}::server;
-            {types_import}
+        use color_eyre::eyre::{self, OptionExt as _};
+        use #client::{client, operations};
+        use #server::server;
 
-            /// Read a synthesized value out of its JSON spelling.
-            fn value<T: serde::de::DeserializeOwned>(json: &str) -> T {{
-                #[expect(
-                    clippy::expect_used,
-                    reason = "the probe serializes this value from the same generated contract"
-                )]
-                serde_json::from_str(json)
-                    .expect("a synthesized value matches its own contract")
-            }}
-{like}
-            #[derive(Debug, Clone)]
-            struct Double;
+        /// Read a synthesized value out of its JSON spelling.
+        fn value<T: serde::de::DeserializeOwned>(json: &str) -> T {
+            #[expect(
+                clippy::expect_used,
+                reason = "the probe serializes this value from the same generated contract"
+            )]
+            serde_json::from_str(json)
+                .expect("a synthesized value matches its own contract")
+        }
 
-            /// What the router matched, per request: the request-line method and the template
-            /// axum's `MatchedPath` reports, recorded by a layer behind the routing step.
-            type Matched = Arc<Mutex<Vec<(String, String)>>>;
+        #like
 
-            fn recorded(matched: &Matched) -> Vec<(String, String)> {{
-                match matched.lock() {{
-                    Ok(seen) => seen.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                }}
-            }}
+        #[derive(Debug, Clone)]
+        struct Double;
 
-            async fn serving() -> eyre::Result<(client::Client, Matched)> {{
-                let matched: Matched = Matched::default();
-                let recorder = matched.clone();
-                let router = server::router(Double).layer(axum::middleware::from_fn(
-                    move |request: axum::extract::Request, next: axum::middleware::Next| {{
-                        let recorder = recorder.clone();
-                        async move {{
-                            let method = request.method().as_str().to_owned();
-                            let path = request
-                                .extensions()
-                                .get::<axum::extract::MatchedPath>()
-                                .map(|matched| matched.as_str().to_owned());
-                            if let Some(path) = path {{
-                                let mut seen = match recorder.lock() {{
-                                    Ok(seen) => seen,
-                                    Err(poisoned) => poisoned.into_inner(),
-                                }};
-                                seen.push((method, path));
-                            }}
-                            next.run(request).await
-                        }}
-                    }},
-                ));
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await?;
-                let address = listener.local_addr()?;
-                tokio::spawn(async move {{
-                    let _ = axum::serve(listener, router).await;
-                }});
-                Ok((client::Client::new(format!("http://{{address}}")), matched))
-            }}
+        /// What the router matched, per request: the request-line method and the template
+        /// axum's `MatchedPath` reports, recorded by a layer behind the routing step.
+        type Matched = Arc<Mutex<Vec<(String, String)>>>;
 
-            /// The one request this server saw resolves, through the reflection, to the route
-            /// the driver meant to hit.
-            fn assert_matched(matched: &Matched, expected: operations::Route) -> eyre::Result<()> {{
-                let recorded = recorded(matched);
-                let (method, path) = recorded
-                    .last()
-                    .ok_or_eyre("the router matched nothing")?;
-                let token = operations::Method::from_token(method)
-                    .ok_or_eyre(format!("`{{method}}` is not a method the reflection knows"))?;
-                assert_eq!(
-                    operations::Route::from_matched(token, path),
-                    Some(expected),
-                    "`{{method}} {{path}}` was matched, and the reflection does not resolve it to `{{expected:?}}`"
-                );
-                Ok(())
-            }}
+        fn recorded(matched: &Matched) -> Vec<(String, String)> {
+            match matched.lock() {
+                Ok(seen) => seen.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
 
-            impl server::Api for Double {{
-                type Context = ();
-            "#
+        async fn serving() -> eyre::Result<(client::Client, Matched)> {
+            let matched: Matched = Matched::default();
+            let recorder = matched.clone();
+            let router = server::router(Double).layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let recorder = recorder.clone();
+                    async move {
+                        let method = request.method().as_str().to_owned();
+                        let path = request
+                            .extensions()
+                            .get::<axum::extract::MatchedPath>()
+                            .map(|matched| matched.as_str().to_owned());
+                        if let Some(path) = path {
+                            let mut seen = match recorder.lock() {
+                                Ok(seen) => seen,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            seen.push((method, path));
+                        }
+                        next.run(request).await
+                    }
+                },
+            ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await?;
+            let address = listener.local_addr()?;
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            });
+            Ok((client::Client::new(format!("http://{address}")), matched))
+        }
+
+        /// The one request this server saw resolves, through the reflection, to the route
+        /// the driver meant to hit.
+        fn assert_matched(matched: &Matched, expected: operations::Route) -> eyre::Result<()> {
+            let recorded = recorded(matched);
+            let (method, path) = recorded
+                .last()
+                .ok_or_eyre("the router matched nothing")?;
+            let token = operations::Method::from_token(method)
+                .ok_or_eyre(format!("`{method}` is not a method the reflection knows"))?;
+            assert_eq!(
+                operations::Route::from_matched(token, path),
+                Some(expected),
+                "`{method} {path}` was matched, and the reflection does not resolve it to `{expected:?}`"
+            );
+            Ok(())
+        }
     }
 }
 
 /// One trait method on the double: presence assertions, then the synthesized response.
-fn handler(operation: &ProbeOp) -> String {
-    let mut out = String::new();
+fn handler(operation: &ProbeOp) -> TokenStream {
+    let method = &operation.method;
+    let enum_name = &operation.response.enum_name;
     let arguments = handler_arguments(operation);
-    out.push('\n');
-    if operation.body.as_ref().is_some_and(|body| body.deprecated) {
-        let _ = writeln!(
-            out,
-            "    #[expect(deprecated, reason = \"the probe deliberately implements an operation \
-             whose body type is deprecated\")]"
-        );
-    }
-    let _ = writeln!(
-        out,
-        "    async fn {}(&self{arguments}) -> server::{} {{",
-        operation.method, operation.response.enum_name
-    );
-    if operation.skip.is_some() {
-        let _ = writeln!(out, "        unimplemented!(\"skipped by the probe plan\")");
-        out.push_str("    }\n");
-        return out;
-    }
-    // A plan with no skip carries an answer; the type makes reading a sentinel impossible, and
-    // this keeps an answerless method honest if that invariant ever moves.
-    let Some(answer) = &operation.response.answer else {
-        let _ = writeln!(
-            out,
-            "        unimplemented!(\"the plan carries no answer\")"
-        );
-        out.push_str("    }\n");
-        return out;
+    let deprecated = operation
+        .body
+        .as_ref()
+        .is_some_and(|body| body.deprecated)
+        .then(|| {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the probe deliberately implements an operation whose body type is deprecated"
+                )]
+            }
+        });
+    let body = match (&operation.skip, &operation.response.answer) {
+        (Some(_), _) => quote! { unimplemented!("skipped by the probe plan") },
+        // A plan with no skip carries an answer; the type makes reading a sentinel impossible, and
+        // this keeps an answerless method honest if that invariant ever moves.
+        (None, None) => quote! { unimplemented!("the plan carries no answer") },
+        (None, Some(answer)) => answer_body(operation, answer),
     };
-    write_arrival_assertions(&mut out, operation);
+    quote! {
+        #deprecated
+        async fn #method(&self, #(#arguments),*) -> server::#enum_name {
+            #body
+        }
+    }
+}
+
+/// What a driven method does: assert every optional input arrived, then answer.
+fn answer_body(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> TokenStream {
+    let arrivals = arrival_assertions(operation);
     // Every variant is a struct variant: the status a range answers with, the headers, which the
     // double fills where the arm types them, and the body where the arm declares content.
-    let status = if answer.ranged {
-        format!("status: {}, ", answer.status)
-    } else {
-        String::new()
+    let status = answer.ranged.then(|| {
+        let status = Literal::u16_unsuffixed(answer.status);
+        quote! { status: #status, }
+    });
+    let (header_group, headers) = match &answer.headers {
+        Some(headers) => (Some(header_group(headers)), quote! { Box::new(headers) }),
+        None => (None, quote! { ::std::default::Default::default() }),
     };
-    let headers = answer.headers.as_ref().map_or_else(
-        || "headers: ::std::default::Default::default()".to_owned(),
-        |headers| {
-            write_header_group(&mut out, headers);
-            "headers: Box::new(headers)".to_owned()
-        },
-    );
     let body = match &answer.value {
-        progeny::harness::ProbeValue::Empty => String::new(),
-        _ if answer.boxed => format!(", body: Box::new({})", answer_value(answer)),
-        _ => format!(", body: {}", answer_value(answer)),
+        progeny::harness::ProbeValue::Empty => None,
+        _ if answer.boxed => {
+            let value = answer_value(answer);
+            Some(quote! { , body: Box::new(#value) })
+        }
+        _ => {
+            let value = answer_value(answer);
+            Some(quote! { , body: #value })
+        }
     };
     let (enum_name, variant) = (&operation.response.enum_name, &answer.variant);
-    let _ = writeln!(
-        out,
-        "        server::{enum_name}::{variant} {{ {status}{headers}{body} }}"
-    );
-    out.push_str("    }\n");
-    out
+    quote! {
+        #(#arrivals)*
+        #header_group
+        server::#enum_name::#variant { #status headers: #headers #body }
+    }
 }
 
 /// The `headers` the double answers with: every typed header, and no raw ones.
-fn write_header_group(out: &mut String, headers: &progeny::harness::ProbeHeaders) {
-    if headers.fields.iter().any(|field| field.deprecated) {
-        let _ = writeln!(
-            out,
-            "        #[expect(deprecated, reason = \"the probe deliberately answers with a header \
-             the description deprecates\")]"
-        );
+fn header_group(headers: &progeny::harness::ProbeHeaders) -> TokenStream {
+    let deprecated = headers
+        .fields
+        .iter()
+        .any(|field| field.deprecated)
+        .then(|| {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the probe deliberately answers with a header the description deprecates"
+                )]
+            }
+        });
+    let group = &headers.group;
+    let fields = headers.fields.iter().map(|header| {
+        let (field, json) = (&header.field, header.json.as_str());
+        quote! { #field: Some(value(#json)), }
+    });
+    quote! {
+        #deprecated
+        let headers = server::#group {
+            #(#fields)*
+            ..::std::default::Default::default()
+        };
     }
-    let _ = writeln!(out, "        let headers = {} {{", headers.group);
-    for field in &headers.fields {
-        let _ = writeln!(
-            out,
-            "            {}: Some(value({})),",
-            field.field,
-            json_literal(&field.json)
-        );
-    }
-    let _ = writeln!(out, "            ..::std::default::Default::default()");
-    let _ = writeln!(out, "        }};");
 }
 
-fn handler_arguments(operation: &ProbeOp) -> String {
+fn handler_arguments(operation: &ProbeOp) -> Vec<TokenStream> {
     // The double asks nothing of the request beyond what the description declares.
-    let mut arguments = ", _context: ()".to_owned();
+    let mut arguments = vec![quote! { _context: () }];
     for group in &operation.groups {
         let arg = if operation.skip.is_some() || group.optional_fields.is_empty() {
-            format!("_{}", group.arg)
+            format_ident!("_{}", group.arg)
         } else {
-            group.arg.to_owned()
+            group.arg.clone()
         };
-        let _ = write!(arguments, ", {arg}: server::{}", group.ty);
+        let ty = &group.ty;
+        arguments.push(quote! { #arg: server::#ty });
     }
     if let Some(body) = &operation.body {
         // An optional body reaches the trait as an `Option`, exactly like an optional parameter
         // reaches its group struct.
         let arg = if operation.skip.is_some() || body.required {
-            "_body"
+            format_ident!("_body")
         } else {
-            "body"
+            format_ident!("body")
         };
+        let ty = &body.ty;
         if body.required {
-            let _ = write!(arguments, ", {arg}: {}", body.ty);
+            arguments.push(quote! { #arg: #ty });
         } else {
-            let _ = write!(arguments, ", {arg}: ::std::option::Option<{}>", body.ty);
+            arguments.push(quote! { #arg: ::std::option::Option<#ty> });
         }
     }
     arguments
 }
 
-fn write_arrival_assertions(out: &mut String, operation: &ProbeOp) {
+fn arrival_assertions(operation: &ProbeOp) -> Vec<TokenStream> {
+    let mut assertions = Vec::new();
     for group in &operation.groups {
+        let arg = &group.arg;
         for field in &group.optional_fields {
+            let name = &field.name;
+            let message =
+                format!("`{name}` was set by the driver and dropped on the way to the handler");
             if field.deprecated {
-                let arrived = format!("{}_{}_arrived", group.arg, field.name);
-                let _ = write!(
-                    out,
-                    "{}",
-                    indoc::formatdoc! {r#"
-                            {indent}#[expect(
-                            {indent}    deprecated,
-                            {indent}    reason = "the probe deliberately reads this deprecated parameter"
-                            {indent})]
-                            {indent}let {arrived} = {arg}.{field}.is_some();
-                            {indent}assert!(
-                            {indent}    {arrived},
-                            {indent}    "`{field}` was set by the driver and dropped on the way to the handler"
-                            {indent});
-                        "#,
-                        indent = "        ",
-                        arg = group.arg,
-                        field = field.name,
-                    }
-                );
+                let arrived = format_ident!("{}_{}_arrived", arg, name);
+                assertions.push(quote! {
+                    #[expect(
+                        deprecated,
+                        reason = "the probe deliberately reads this deprecated parameter"
+                    )]
+                    let #arrived = #arg.#name.is_some();
+                    assert!(#arrived, #message);
+                });
             } else {
-                let _ = writeln!(
-                    out,
-                    "        assert!({}.{}.is_some(), \"`{}` was set by the driver and \
-                     dropped on the way to the handler\");",
-                    group.arg, field.name, field.name
-                );
+                assertions.push(quote! { assert!(#arg.#name.is_some(), #message); });
             }
         }
     }
     if operation.body.as_ref().is_some_and(|body| !body.required) {
-        let _ = writeln!(
-            out,
-            "        assert!(body.is_some(), \"the body was set by the driver and dropped on \
-             the way to the handler\");"
-        );
+        assertions.push(quote! {
+            assert!(
+                body.is_some(),
+                "the body was set by the driver and dropped on the way to the handler"
+            );
+        });
     }
+    assertions
 }
 
-fn answer_value(answer: &progeny::harness::ProbeAnswer) -> String {
+fn answer_value(answer: &progeny::harness::ProbeAnswer) -> TokenStream {
     match &answer.value {
         progeny::harness::ProbeValue::Json { json } => {
-            format!("value({})", json_literal(json))
+            let json = json.as_str();
+            quote! { value(#json) }
         }
         progeny::harness::ProbeValue::Text(text) => {
-            format!("{}.to_owned()", json_literal(text))
+            let text = text.as_str();
+            quote! { #text.to_owned() }
         }
         progeny::harness::ProbeValue::Bytes(bytes) => {
-            format!(
-                "::axum::body::Body::from(::std::vec!{:?})",
-                bytes.as_slice()
-            )
+            let bytes = bytes.iter().map(|byte| Literal::u8_unsuffixed(*byte));
+            quote! { ::axum::body::Body::from(::std::vec![#(#bytes),*]) }
         }
-        progeny::harness::ProbeValue::Empty => "()".to_owned(),
+        progeny::harness::ProbeValue::Empty => quote! { () },
     }
 }
 
 /// One driver test: build the params literal, send, and expect the declared status back.
-fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String {
-    let mut out = String::new();
-    out.push('\n');
-    let _ = writeln!(out, "#[test_util::test]");
-    let _ = writeln!(out, "async fn probe_{}() {{", operation.method);
-    let _ = writeln!(out, "    let (client, matched) = serving().await?;");
-    if operation.deprecated
-        || operation.inputs.iter().any(|input| input.deprecated)
-        || operation.body.as_ref().is_some_and(|body| body.deprecated)
-    {
-        let _ = writeln!(
-            out,
-            "    #[expect(deprecated, reason = \"the probe deliberately calls this deprecated \
-             generated API\")]"
-        );
-    }
-    if let Some(params) = &operation.params {
-        let _ = writeln!(
-            out,
-            "    let response = client.{}({params} {{",
-            operation.method
-        );
-        for input in &operation.inputs {
-            let value = match &input.json {
+///
+/// The literal names no type: each value takes its type from the params struct's field.
+fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> TokenStream {
+    let method = &operation.method;
+    let test = format_ident!("probe_{}", method);
+    let deprecated = operation.deprecated.then(|| {
+        quote! {
+            #[expect(
+                deprecated,
+                reason = "the probe deliberately calls this deprecated generated API"
+            )]
+        }
+    });
+    let call = if let Some(params) = &operation.params {
+        let inputs = operation.inputs.iter().map(|input| {
+            let field = &input.field;
+            let value = match input.json.as_deref() {
                 // An optional parameter whose name the wire erases: the literal must still name
                 // the field, and `None` is the only value the server could ever tell apart.
-                None => "None".to_owned(),
-                Some(json) if input.required => {
-                    format!("value::<{}>({})", input.ty, json_literal(json))
-                }
-                Some(json) => {
-                    format!("Some(value::<{}>({}))", input.ty, json_literal(json))
-                }
+                None => quote! { None },
+                Some(json) if input.required => quote! { value(#json) },
+                Some(json) => quote! { Some(value(#json)) },
             };
-            let _ = writeln!(out, "        {}: {value},", input.field);
-        }
-        if let Some(body) = &operation.body {
-            let value = format!("value::<{}>({})", body.ty, json_literal(&body.json));
+            quote! { #field: #value, }
+        });
+        let body = operation.body.as_ref().map(|body| {
+            let json = body.json.as_str();
             if body.required {
-                let _ = writeln!(out, "        body: {value},");
+                quote! { body: value(#json), }
             } else {
-                let _ = writeln!(out, "        body: Some({value}),");
+                quote! { body: Some(value(#json)), }
             }
-        }
-        let _ = writeln!(out, "    }})");
+        });
+        quote! { client.#method(client::#params { #(#inputs)* #body }) }
     } else {
-        let _ = writeln!(out, "    let response = client.{}()", operation.method);
+        quote! { client.#method() }
+    };
+    let status = Literal::u16_unsuffixed(answer.status);
+    let route = &operation.route;
+    let headers = answer
+        .headers
+        .as_ref()
+        .map(|headers| header_assertions(headers, &answer.variant));
+    quote! {
+        #[test_util::test]
+        async fn #test() {
+            let (client, matched) = serving().await?;
+            #deprecated
+            let response = #call.send().await?;
+            assert_eq!(response.status().as_u16(), #status);
+            assert_matched(&matched, operations::Route::#route)?;
+            #headers
+        }
     }
-    let _ = writeln!(out, "        .send()");
-    let _ = writeln!(out, "        .await");
-    let _ = writeln!(out, "        ?;");
-    let _ = writeln!(
-        out,
-        "    assert_eq!(response.status().as_u16(), {});",
-        answer.status
-    );
-    let _ = writeln!(
-        out,
-        "    assert_matched(&matched, operations::Route::{})?;",
-        operation.route
-    );
-    if let Some(headers) = &answer.headers {
-        write_header_assertions(&mut out, headers);
-    }
-    let _ = writeln!(out, "}}");
-    out
 }
 
 /// The driver's half of the header differential: every header the double set reads back in the
@@ -612,42 +586,44 @@ fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> String
 ///
 /// Compared through JSON, because a generated type carries only the derives its configuration
 /// asked for, and on the client field's own type, whichever decoding made it an `Option`.
-fn write_header_assertions(out: &mut String, headers: &progeny::harness::ProbeHeaders) {
-    match &headers.success_variant {
-        Some(variant) => {
-            let _ = writeln!(
-                out,
-                "    let {variant}(payload) = response.value() else {{\n        \
-                 eyre::bail!(\"the response decoded as another success arm\");\n    }};"
-            );
+fn header_assertions(headers: &progeny::harness::ProbeHeaders, variant: &Ident) -> TokenStream {
+    let payload = if let Some(success) = &headers.success {
+        quote! {
+            let client::#success::#variant(payload) = response.value() else {
+                eyre::bail!("the response decoded as another success arm");
+            };
         }
-        None => {
-            let _ = writeln!(out, "    let payload = response.value();");
-        }
-    }
-    for field in &headers.fields {
-        out.push_str("    {\n");
-        if field.deprecated {
-            let _ = writeln!(
-                out,
-                "        #[expect(deprecated, reason = \"the probe deliberately reads a header the \
-                 description deprecates\")]"
-            );
-        }
-        let _ = writeln!(out, "        let field = &payload.headers.{};", field.field);
-        let _ = writeln!(
-            out,
-            "        assert_eq!(\n            serde_json::to_value(field)?,\n            \
-             serde_json::to_value(like(field, {}))?,\n            \"the `{}` header the server \
-             wrote did not decode back to the same value\",\n        );",
-            json_literal(&field.json),
-            field.wire_name
+    } else {
+        quote! { let payload = response.value(); }
+    };
+    let fields = headers.fields.iter().map(|header| {
+        let deprecated = header.deprecated.then(|| {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the probe deliberately reads a header the description deprecates"
+                )]
+            }
+        });
+        let (field, json) = (&header.field, header.json.as_str());
+        let message = format!(
+            "the `{}` header the server wrote did not decode back to the same value",
+            header.wire_name
         );
-        out.push_str("    }\n");
+        quote! {
+            {
+                #deprecated
+                let field = &payload.headers.#field;
+                assert_eq!(
+                    serde_json::to_value(field)?,
+                    serde_json::to_value(like(field, #json))?,
+                    #message,
+                );
+            }
+        }
+    });
+    quote! {
+        #payload
+        #(#fields)*
     }
-}
-
-/// A JSON value as a Rust string literal, whatever it contains.
-fn json_literal(json: &str) -> String {
-    format!("{json:?}")
 }

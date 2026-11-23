@@ -36,6 +36,8 @@ pub(crate) struct Payload {
     pub(crate) location: String,
     /// The generated type the payload deserializes into.
     pub(crate) type_name: String,
+    /// Whether the type lives in `types::read` rather than at the root of `types`.
+    pub(crate) read: bool,
     /// The payload exactly as the document wrote it.
     pub(crate) original: Value,
     /// The payload restricted to what the document declares — what serializing back must produce.
@@ -166,7 +168,7 @@ struct Collect<'a> {
     contracts: &'a Contracts,
 }
 
-/// The type a position decodes into, as a test spells it.
+/// The type a position decodes into.
 struct Named {
     type_name: String,
     /// The shape the position classified as, which the payload is pruned under.
@@ -226,6 +228,7 @@ impl Collect<'_> {
                     .is_some(),
                     location,
                     type_name: type_name.clone(),
+                    read: lenient,
                     original,
                     expected,
                 });
@@ -235,8 +238,8 @@ impl Collect<'_> {
 
     /// The generated type a schema became, when it is one a test can name.
     ///
-    /// At a response position that is the type's read form, spelled through `read` when it
-    /// lives there.
+    /// At a response position that is the type's read form, which lives in `read` when it is
+    /// lenient.
     fn named(&self, id: SchemaId, response: bool) -> Result<Named, Skipped> {
         let key = crate::shape::key_of(self.resolved, id);
         if self.shapes.get(&key).is_none() {
@@ -251,16 +254,10 @@ impl Collect<'_> {
         match ty {
             TypeRef::Named(index) => {
                 let contract = self.contracts.get(index).ok_or(Skipped::Unnamed)?;
-                let lenient = contract.form().is_lenient();
-                let name = contract.rust_name().as_str();
                 Ok(Named {
-                    type_name: if lenient {
-                        format!("read::{name}")
-                    } else {
-                        name.to_owned()
-                    },
+                    type_name: contract.rust_name().as_str().to_owned(),
                     key,
-                    lenient,
+                    lenient: contract.form().is_lenient(),
                 })
             }
             TypeRef::Value => Err(Skipped::Opaque),
@@ -945,7 +942,10 @@ mod tests {
             &json!({"name": "Rex"}),
         ))?;
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].type_name, "read::ListPetsResponse200");
+        assert_eq!(
+            (found[0].type_name.as_str(), found[0].read),
+            ("ListPetsResponse200", true)
+        );
         assert_eq!(
             found[0].location,
             "/paths/~1pets/get/responses/200/content/application~1json/example"
@@ -961,7 +961,10 @@ mod tests {
             &json!({"type": "object", "properties": {"name": {"type": "string"}}}),
             &json!({"name": "Rex", "undeclared": 7}),
         ))?;
-        assert_eq!(found[0].type_name, "CreatePetBody");
+        assert_eq!(
+            (found[0].type_name.as_str(), found[0].read),
+            ("CreatePetBody", false)
+        );
         assert_eq!(found[0].original, json!({"name": "Rex", "undeclared": 7}));
         assert_eq!(found[0].expected, json!({"name": "Rex"}));
     }
@@ -978,7 +981,10 @@ mod tests {
                                   "tag": {"type": "string"}}}),
             &json!({"name": null, "owner": null, "undeclared": 7, "tag": null}),
         ))?;
-        assert_eq!(found[0].type_name, "read::ListPetsResponse200");
+        assert_eq!(
+            (found[0].type_name.as_str(), found[0].read),
+            ("ListPetsResponse200", true)
+        );
         // `name` is required and not nullable, so its `null` is a tolerated deviation that comes
         // back absent; `owner` may be `null` and stays; `tag` is optional and collapses; the
         // undeclared member is kept.
@@ -1058,7 +1064,10 @@ mod tests {
             }},
         }))?;
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].type_name, "Page");
+        assert_eq!(
+            (found[0].type_name.as_str(), found[0].read),
+            ("Page", false)
+        );
         assert_eq!(found[0].expected, json!({"items": [{"name": "Rex"}]}));
     }
 

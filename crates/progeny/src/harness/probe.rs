@@ -20,6 +20,9 @@
 //! reads in another simply arrives as something else. So the double answers with a value for every
 //! typed header of its arm, and the driver asserts that the client reads back the same value.
 
+use proc_macro2::{Ident, TokenStream};
+use quote::format_ident;
+
 use crate::api::{
     BodyContract, Location, OperationContract, ResponseArm, ResponseBody, StatusPattern,
 };
@@ -30,6 +33,9 @@ use crate::shape::Format;
 use crate::{api, contract, doc, load, normalize, render, resolve, shape};
 
 /// Everything `xtask probe` needs to write the double and the driver for one document.
+///
+/// Names are identifiers and the one spelled type is tokens, so the test is composed with `quote!`
+/// rather than from text.
 #[derive(Debug, Clone)]
 pub struct Probe {
     /// One entry per operation the router accepted, probed or skipped.
@@ -46,7 +52,7 @@ pub struct Probe {
 #[derive(Debug, Clone)]
 pub struct ProbeHead {
     /// The `operations::Route` variant of the `GET` operation.
-    pub route: String,
+    pub route: Ident,
     /// The template, which is the request path as well: the operation takes no parameter, so
     /// it names no variable.
     pub path: String,
@@ -56,20 +62,20 @@ pub struct ProbeHead {
 #[derive(Debug, Clone)]
 pub struct ProbeOp {
     /// The generated client method, which is also the trait method's name.
-    pub method: String,
+    pub method: Ident,
     /// The `operations::Route` variant naming this operation's route: what the reflection has to
     /// resolve from the method and matched template a layer records when the driver's request
     /// goes through the generated router.
-    pub route: String,
+    pub route: Ident,
     /// Whether exercising the operation deliberately calls deprecated API.
     pub deprecated: bool,
     /// The grouped parameter arguments, in trait-signature order.
     pub groups: Vec<ProbeGroup>,
     /// The body argument, when the operation takes one.
     pub body: Option<ProbeBody>,
-    /// The params struct's name, spelled from the test file (`client::FooParams`), when the
-    /// operation takes any input.
-    pub params: Option<String>,
+    /// The params struct's name inside the generated `client` module, when the operation takes
+    /// any input.
+    pub params: Option<Ident>,
     /// One field of the params literal per parameter; `body` follows when there is one.
     pub inputs: Vec<ProbeInput>,
     /// What the double answers, and what the driver expects back.
@@ -82,9 +88,9 @@ pub struct ProbeOp {
 #[derive(Debug, Clone)]
 pub struct ProbeGroup {
     /// The argument name: `path`, `query`, `header` or `cookie`.
-    pub arg: &'static str,
+    pub arg: Ident,
     /// The struct's name inside the generated `server` module.
-    pub ty: String,
+    pub ty: Ident,
     /// The fields the document made optional, which the driver always sets — so the double
     /// asserts each arrived `Some`, which is what catches a parameter dropped in transit.
     pub optional_fields: Vec<ProbeField>,
@@ -94,7 +100,7 @@ pub struct ProbeGroup {
 #[derive(Debug, Clone)]
 pub struct ProbeField {
     /// The field's Rust name.
-    pub name: String,
+    pub name: Ident,
     /// Whether reading the field deliberately exercises deprecated API.
     pub deprecated: bool,
 }
@@ -102,9 +108,12 @@ pub struct ProbeField {
 /// The request body the driver sets.
 #[derive(Debug, Clone)]
 pub struct ProbeBody {
-    /// The Rust path of the body type, spelled from inside the generated crate.
-    pub ty: String,
-    /// Whether naming the body type deliberately exercises deprecated API.
+    /// The body type, spelled from a crate that names the generated types crate `generated`.
+    ///
+    /// The handler's signature is the one place the test names it: the driver's params literal
+    /// takes its type from the params struct's field.
+    pub ty: TokenStream,
+    /// Whether that spelling names a deprecated type.
     pub deprecated: bool,
     /// A JSON value of that type, synthesized from its contract.
     pub json: String,
@@ -114,16 +123,16 @@ pub struct ProbeBody {
 }
 
 /// One field the driver writes in the params literal.
+///
+/// It carries no type: the params struct's field gives the value its type, and a field name
+/// never warns, because a params field carries its deprecation in prose.
 #[derive(Debug, Clone)]
 pub struct ProbeInput {
     /// The field's name, which is the parameter's Rust name.
-    pub field: String,
-    /// Whether writing the field deliberately exercises deprecated API.
-    pub deprecated: bool,
-    /// The Rust path of the parameter's type.
-    pub ty: String,
-    /// A JSON value of that type, or `None` for a field the driver deliberately leaves unset —
-    /// an optional parameter whose name the wire erases, which no request can usefully carry.
+    pub field: Ident,
+    /// A JSON value of the field's type, or `None` for a field the driver deliberately leaves
+    /// unset — an optional parameter whose name the wire erases, which no request can usefully
+    /// carry.
     pub json: Option<String>,
     /// Whether the document requires the parameter: a required field takes the value bare, an
     /// optional one wrapped in `Some`.
@@ -137,7 +146,7 @@ pub struct ProbeResponse {
     ///
     /// Needed whether or not the operation is driven: the double has to *implement* a skipped
     /// operation's trait method either way, and the method's return type names this.
-    pub enum_name: String,
+    pub enum_name: Ident,
     /// The arm the double answers with — absent for an operation the driver never calls.
     ///
     /// An `Option` rather than empty-string sentinels: a consumer that read a sentinel's
@@ -149,8 +158,9 @@ pub struct ProbeResponse {
 /// The synthesized reply for one driven operation.
 #[derive(Debug, Clone)]
 pub struct ProbeAnswer {
-    /// The variant for the arm the double answers with.
-    pub variant: String,
+    /// The variant for the arm the double answers with, which is also the arm's variant in the
+    /// client's success enum.
+    pub variant: Ident,
     /// Whether the response enum indirects this non-unit payload.
     pub boxed: bool,
     /// The payload in the native representation its response arm carries.
@@ -166,11 +176,11 @@ pub struct ProbeAnswer {
 /// The typed headers of the arm the double answers with, and where the driver reads them back.
 #[derive(Debug, Clone)]
 pub struct ProbeHeaders {
-    /// The server's header group, spelled from the test file (`server::FooOkHeaders`).
-    pub group: String,
-    /// The variant of the client's success enum the payload arrives in
-    /// (`client::FooSuccess::Ok`), or `None` when the payload is the response's value itself.
-    pub success_variant: Option<String>,
+    /// The header group's name inside the generated `server` module.
+    pub group: Ident,
+    /// The client's success enum, whose [`ProbeAnswer::variant`] the payload arrives in, or
+    /// `None` when the payload is the response's value itself.
+    pub success: Option<Ident>,
     /// One per typed header, in the group's field order.
     pub fields: Vec<ProbeHeader>,
 }
@@ -179,7 +189,7 @@ pub struct ProbeHeaders {
 #[derive(Debug, Clone)]
 pub struct ProbeHeader {
     /// The field's Rust name, which the server's group and the client's share.
-    pub field: String,
+    pub field: Ident,
     /// The header's name on the wire, for a failure that says which header disagreed.
     pub wire_name: String,
     /// Whether naming the field deliberately exercises deprecated API.
@@ -267,23 +277,23 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
                 // narrowing of the operation: everything recoverable is still exercised.
                 .filter(|param| !param.style.erased_by_explosion())
                 .map(|param| ProbeField {
-                    name: param.rust_name.as_str().to_owned(),
+                    name: ident(&param.rust_name),
                     deprecated: param.docs.deprecated,
                 })
                 .collect();
             any.then(|| ProbeGroup {
-                arg: argument_of(location),
-                ty: render::server::group_name(operation, suffix).to_string(),
+                arg: format_ident!("{}", argument_of(location)),
+                ty: render::server::group_name(operation, suffix),
                 optional_fields,
             })
         })
         .collect();
 
     let body = operation.body.as_ref().map(|body| {
-        let (ty, deprecated) = test_type(&render::client::body_type(body, contracts, config));
+        let ty = render::client::body_type(body, contracts, config, render::types::Scope::External);
         ProbeBody {
             ty,
-            deprecated,
+            deprecated: names_deprecated(body, contracts),
             json: String::new(),
             required: body.required(),
         }
@@ -293,7 +303,7 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
     // skipped operation's trait method either way — only the driver test is dropped.
     let mut skip = None;
 
-    let inputs = probe_inputs(operation, contracts, config, &mut skip);
+    let inputs = probe_inputs(operation, contracts, &mut skip);
 
     let body = body.map(|mut planned| {
         let ty = match operation.body.as_ref() {
@@ -330,18 +340,18 @@ fn plan(operation: &OperationContract, contracts: &Contracts, config: &Config) -
         }
     };
     let response = ProbeResponse {
-        enum_name: render::server::response_name(operation).to_string(),
+        enum_name: render::server::response_name(operation),
         answer,
     };
 
     ProbeOp {
-        method: operation.rust_name.as_str().to_owned(),
-        route: render::operations::variant(operation).to_string(),
+        method: ident(&operation.rust_name),
+        route: render::operations::variant(operation),
         deprecated: operation.docs.deprecated,
         groups,
         body,
         params: render::client::takes_params(operation)
-            .then(|| format!("client::{}", render::client::params_name(operation))),
+            .then(|| render::client::params_name(operation)),
         inputs,
         response,
         skip,
@@ -368,7 +378,7 @@ fn probe_answer(
         ResponseBody::Empty => ProbeValue::Empty,
     };
     Ok(ProbeAnswer {
-        variant: arm.rust_name.as_str().to_owned(),
+        variant: ident(&arm.rust_name),
         boxed: crate::render::types::response_body_is_boxed(&arm.body),
         value,
         status,
@@ -397,7 +407,7 @@ fn probe_headers(
                 )
             })?;
             Ok(ProbeHeader {
-                field: header.rust_name.as_str().to_owned(),
+                field: ident(&header.rust_name),
                 wire_name: header.wire_name.clone(),
                 deprecated: header.docs.deprecated,
                 json: value.to_string(),
@@ -406,14 +416,8 @@ fn probe_headers(
         .collect::<Result<Vec<_>, String>>()?;
     let several = render::client::success_arms(operation).len() > 1;
     Ok(Some(ProbeHeaders {
-        group: format!("server::{}", types.group),
-        success_variant: several.then(|| {
-            format!(
-                "client::{}::{}",
-                render::client::success_name(operation),
-                arm.rust_name.as_str()
-            )
-        }),
+        group: ident(&types.group),
+        success: several.then(|| render::client::success_name(operation)),
         fields,
     }))
 }
@@ -463,33 +467,35 @@ fn through_wrappers<'a>(ty: &'a TypeRef, contracts: &'a Contracts) -> &'a TypeRe
     }
 }
 
-/// A rendered type path, as the probe's test file spells it.
+/// Whether the body type's spelling names a deprecated type, which the handler then expects.
 ///
-/// The renderer writes `super::types::X` because `client` and `server` are sibling modules of
-/// `types`; the test file imports `types` at its own root (`use {krate}::{client, server,
-/// types};`), so the same type is `types::X` there. Respelled here, beside the renderer that
-/// owns the original spelling — the consumer once patched it back with its own string
-/// replacement, and a changed qualification would have slipped past that silently.
-/// Also says whether the path names a deprecated type.
-fn test_type(rendered: &proc_macro2::TokenStream) -> (String, bool) {
-    let rendered = rendered.to_string();
-    let deprecated = rendered.contains(":: __progeny_deprecated :: ");
-    let path = rendered
-        .replace(
-            "super :: types :: read :: __progeny_deprecated :: ",
-            "types::read::",
-        )
-        .replace("super :: types :: __progeny_deprecated :: ", "types::")
-        .replace("super :: types :: ", "types::")
-        .replace(' ', "");
-    (path, deprecated)
+/// Only the types the spelling itself reaches count: a deprecated type behind a field of the body
+/// is named by the generated crate, not by the test.
+fn names_deprecated(body: &BodyContract, contracts: &Contracts) -> bool {
+    let (BodyContract::Json { ty, .. }
+    | BodyContract::Form { ty, .. }
+    | BodyContract::Multipart { ty, .. }) = body
+    else {
+        return false;
+    };
+    let mut reached = Vec::new();
+    ty.named(&mut reached);
+    reached.into_iter().any(|index| {
+        contracts
+            .get(index)
+            .is_some_and(|contract| contract.docs().deprecated)
+    })
+}
+
+/// A generated name as the identifier the renderers spell it as.
+fn ident(name: &contract::RustIdent) -> Ident {
+    format_ident!("{}", name.as_str())
 }
 
 /// One synthesized params field per parameter, recording a skip where none can be.
 fn probe_inputs(
     operation: &OperationContract,
     contracts: &Contracts,
-    config: &Config,
     skip: &mut Option<String>,
 ) -> Vec<ProbeInput> {
     let mut inputs = Vec::new();
@@ -508,13 +514,8 @@ fn probe_inputs(
                 ));
                 continue;
             }
-            let (ty, _) = test_type(&render::types::type_path(&param.ty, contracts, config));
             inputs.push(ProbeInput {
-                field: param.rust_name.as_str().to_owned(),
-                // A bare `None` spells neither the type nor anything deprecated — a params
-                // field carries its deprecation in prose — so there is nothing to exempt.
-                deprecated: false,
-                ty,
+                field: ident(&param.rust_name),
                 json: None,
                 required: false,
             });
@@ -542,14 +543,8 @@ fn probe_inputs(
         };
         match value {
             Ok(value) => {
-                let (ty, deprecated_type) =
-                    test_type(&render::types::type_path(&param.ty, contracts, config));
                 inputs.push(ProbeInput {
-                    field: param.rust_name.as_str().to_owned(),
-                    // Only the spelled *type* can lint: a params field carries its deprecation
-                    // in prose, and the field name itself never warns.
-                    deprecated: deprecated_type,
-                    ty,
+                    field: ident(&param.rust_name),
                     json: Some(value.to_string()),
                     required: param.required,
                 });
@@ -818,13 +813,13 @@ mod tests {
             with_alternative
                 .head
                 .as_ref()
-                .map(|head| (head.route.as_str(), head.path.as_str())),
-            Some(("GetB", "/b"))
+                .map(|head| (head.route.to_string(), head.path.as_str())),
+            Some(("GetB".to_owned(), "/b"))
         );
-        let routes: Vec<&str> = with_alternative
+        let routes: Vec<String> = with_alternative
             .operations
             .iter()
-            .map(|operation| operation.route.as_str())
+            .map(|operation| operation.route.to_string())
             .collect();
         assert_eq!(routes, ["GetA", "HeadA", "GetB"]);
 
@@ -858,18 +853,18 @@ mod tests {
                 "responses": {"200": {"description": "ok"}},
             }},
         }))?;
-        let inputs: Vec<(&str, Option<&str>)> = probe
+        let inputs: Vec<(String, Option<&str>)> = probe
             .operations
             .iter()
             .flat_map(|operation| &operation.inputs)
-            .map(|input| (input.field.as_str(), input.json.as_deref()))
+            .map(|input| (input.field.to_string(), input.json.as_deref()))
             .collect();
         assert_eq!(
             inputs,
             [
-                ("feedback", Some("\"probe\"")),
-                ("filter", Some("{\"probe\":true}")),
-                ("kind", Some("\"probe\""))
+                ("feedback".to_owned(), Some("\"probe\"")),
+                ("filter".to_owned(), Some("{\"probe\":true}")),
+                ("kind".to_owned(), Some("\"probe\""))
             ]
         );
     }
@@ -887,8 +882,8 @@ mod tests {
             "/b": {"get": {"operationId": "getB", "responses": {"200": {"description": "ok"}}}},
         }))?;
         assert_eq!(
-            probe.head.as_ref().map(|head| head.route.as_str()),
-            Some("GetB")
+            probe.head.as_ref().map(|head| head.route.to_string()),
+            Some("GetB".to_owned())
         );
     }
 }

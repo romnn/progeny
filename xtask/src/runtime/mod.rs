@@ -67,6 +67,8 @@ pub struct Args {
 struct Case {
     label: String,
     type_name: String,
+    /// Whether the type lives in `types::read`.
+    read: bool,
     json: String,
 }
 
@@ -424,6 +426,7 @@ fn prepare(args: &Args) -> eyre::Result<Workload> {
     let malformed = vec![Case {
         label: "deep:/tail/.../count".to_owned(),
         type_name: payload.type_name.clone(),
+        read: payload.read,
         json: deep.malformed,
     }];
     workload.deep_payload_bytes = deep.payload_bytes;
@@ -459,6 +462,7 @@ fn case_of(subject: &str, payload: &Payload) -> Case {
     Case {
         label: format!("{subject}:{}", payload.location),
         type_name: payload.type_name.clone(),
+        read: payload.read,
         json: payload.original.to_string(),
     }
 }
@@ -487,11 +491,13 @@ fn prepare_subject(
         let binary_dir = directory.join("src/bin");
         std::fs::create_dir_all(&binary_dir).wrap_err_with(|| format!("creating {binary_dir}"))?;
         let binary_source = binary_dir.join(format!("{binary_name}.rs"));
-        std::fs::write(
-            &binary_source,
+        let source = crate::generated::rust_source(
             source::render(&config.package.name, valid, malformed, iterations),
-        )
-        .wrap_err_with(|| format!("writing {binary_source}"))?;
+            &format!("src/bin/{binary_name}.rs"),
+            subject,
+        )?;
+        std::fs::write(&binary_source, source)
+            .wrap_err_with(|| format!("writing {binary_source}"))?;
         let status = crate::generated::cargo(&directory)
             .args(["build", "--release", "--quiet", "--bin", &binary_name])
             .status()

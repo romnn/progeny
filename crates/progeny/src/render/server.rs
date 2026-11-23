@@ -177,7 +177,7 @@ fn argument_list(
         out.push(quote! { #name: #ty });
     }
     if let Some(body) = &operation.body {
-        let ty = super::client::body_type(body, contracts, config);
+        let ty = super::client::body_type(body, contracts, config, super::types::Scope::Edge);
         // A body the document did not mark required arrives as an `Option`, because a request
         // without one is a request the description permits.
         let ty = if body.required() {

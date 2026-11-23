@@ -35,6 +35,11 @@ pub(crate) enum Scope {
     Read,
     /// A sibling module of `types`: the client or the server.
     Edge,
+    /// A crate outside the generated output, which depends on the crate holding the types under
+    /// the name `generated`.
+    ///
+    /// The harness spells types from here for the tests it writes beside a generated crate.
+    External,
 }
 
 impl Scope {
@@ -52,6 +57,7 @@ impl Scope {
         match self {
             Self::Types | Self::Edge => quote! { super::support },
             Self::Read => quote! { super::super::support },
+            Self::External => quote! { ::generated::support },
         }
     }
 }
@@ -1041,8 +1047,16 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope)
                     (Scope::Types, Form::Lenient { .. }) => quote! { read:: },
                     (Scope::Edge, Form::Strict { .. } | Form::Shared) => quote! { super::types:: },
                     (Scope::Edge, Form::Lenient { .. }) => quote! { super::types::read:: },
+                    (Scope::External, Form::Strict { .. } | Form::Shared) => {
+                        quote! { ::generated::types:: }
+                    }
+                    (Scope::External, Form::Lenient { .. }) => {
+                        quote! { ::generated::types::read:: }
+                    }
                 };
-                if contract.docs().deprecated {
+                // An outside crate names the public declaration, and the deprecation warning is
+                // its own to expect.
+                if contract.docs().deprecated && scope != Scope::External {
                     quote! { #module __progeny_deprecated::#name }
                 } else {
                     quote! { #module #name }

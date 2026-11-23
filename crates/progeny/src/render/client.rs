@@ -826,7 +826,7 @@ fn params_struct(
         }
     });
     let body_field = operation.body.as_ref().map(|body| {
-        let ty = body_type(body, contracts, config);
+        let ty = body_type(body, contracts, config, Scope::Edge);
         let (ty, note) = if body.required() {
             (ty, " The request body. Required.")
         } else {
@@ -2282,15 +2282,17 @@ fn header_docs(header: &ResponseHeader, decoding: Decoding, config: &Config) -> 
     }
 }
 
+/// The type a request body has in the params struct and the handler, spelled from `scope`.
 pub(crate) fn body_type(
     body: &BodyContract,
     contracts: &Contracts,
     config: &Config,
+    scope: Scope,
 ) -> TokenStream {
     match body {
         BodyContract::Json { ty, .. }
         | BodyContract::Form { ty, .. }
-        | BodyContract::Multipart { ty, .. } => type_tokens(ty, contracts, config),
+        | BodyContract::Multipart { ty, .. } => type_ref_in(ty, contracts, config, scope),
         // Text rather than bytes, because that is what the caller has. The one place the byte
         // representation is a choice is a body the document said nothing about the shape of.
         BodyContract::Text { .. } => quote! { ::std::string::String },

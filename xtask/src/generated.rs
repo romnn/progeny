@@ -13,6 +13,7 @@ use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use color_eyre::eyre::{self, WrapErr, bail};
+use proc_macro2::TokenStream;
 use progeny::Output;
 
 /// Where generated crates are written for compiling.
@@ -121,6 +122,16 @@ pub fn clean(directory: &Utf8Path, slot: usize, toolchain: Option<&str>) -> eyre
         bail!("cargo clean failed in {directory}");
     }
     Ok(())
+}
+
+/// Format a Rust file xtask writes beside a generated crate.
+///
+/// Parsed as a whole file first, so a malformed rendering fails here and names the file and the
+/// corpus subject, rather than surfacing as a compile error in a crate nobody wrote by hand.
+pub fn rust_source(tokens: TokenStream, file: &str, subject: &str) -> eyre::Result<String> {
+    let parsed = syn::parse2::<syn::File>(tokens)
+        .wrap_err_with(|| format!("rendering {file} for {subject}"))?;
+    Ok(prettyplease::unparse(&parsed))
 }
 
 /// Write a generated crate into the scratch area and return its directory.
