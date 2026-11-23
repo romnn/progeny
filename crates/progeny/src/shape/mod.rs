@@ -4843,6 +4843,258 @@ mod tests {
         Ok(())
     }
 
+    /// airflow's `DagWarningType`, which its warning-type unions name beside a restricted string.
+    fn warning_type() -> Value {
+        json!({"type": "string", "enum": ["asset conflict", "duplicate dag id"]})
+    }
+
+    /// airflow's restricted string branch, which admits strings the enum does not list.
+    fn custom_warning() -> Value {
+        json!({"type": "string", "maxLength": 50, "pattern": "^[a-z][a-z0-9_]*:[a-z0-9_.\\-]+$"})
+    }
+
+    /// Known strings beside strings a branch restricts read as one plain string, as airflow's
+    /// `warning_type` does, and the restrictions it does not hold are reported.
+    #[test_util::test]
+    fn known_strings_beside_restricted_ones_read_as_one_string() -> eyre::Result<()> {
+        let to = json!({"$ref": "#/components/schemas/DagWarningType"});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            // The query parameter's union, marked with an extension, which is no restriction.
+            "Parameter": {
+                "title": "Warning Type",
+                "x-origin": "airflow",
+                "anyOf": [to, custom_warning(), {"type": "null"}],
+            },
+            "Field": {"anyOf": [to, custom_warning()]},
+            "Typed": {"type": "string", "anyOf": [to, custom_warning(), {"type": "null"}]},
+            // The enum alone beside `null` is still that enum, made optional.
+            "Named": {"anyOf": [to, {"type": "null"}]},
+        })))?;
+        let string = Shape::Scalar(Scalar::String);
+
+        // As variants the enum would read every string, so the union is the string it admits,
+        // optional where a branch is `null` and no `type` beside the union refuses it.
+        assert_eq!(
+            shape_of(&shapes, "Parameter")?,
+            &Shape::Optional(ShapeRef::Inline(Box::new(string.clone())))
+        );
+        assert_eq!(shape_of(&shapes, "Field")?, &string);
+        assert_eq!(shape_of(&shapes, "Typed")?, &string);
+        assert!(
+            matches!(
+                shape_of(&shapes, "Named")?,
+                Shape::Optional(ShapeRef::Inline(inner)) if matches!(**inner, Shape::Alias(_))
+            ),
+            "{:?}",
+            shape_of(&shapes, "Named")?
+        );
+
+        // Each folded union reports the length and pattern the string does not hold, and none
+        // degrades.
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.class() != BreakageClass::WildUnion),
+            "{diagnostics:#?}"
+        );
+        let reported: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| {
+                d.class() == BreakageClass::UnsupportedConstruct
+                    && d.detail().starts_with("`maxLength`, `pattern` narrow")
+            })
+            .flat_map(|d| std::iter::once(d.location()).chain(d.related()))
+            .map(ToString::to_string)
+            .collect();
+        for name in ["Parameter", "Field", "Typed"] {
+            assert!(
+                reported.contains(&format!("/components/schemas/{name}")),
+                "{name}: {diagnostics:#?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Restricted branches that share a keyword report it once, at the union.
+    #[test_util::test]
+    fn restricted_branches_report_a_shared_keyword_once() -> eyre::Result<()> {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            "Code": {"anyOf": [
+                {"$ref": "#/components/schemas/DagWarningType"},
+                {"type": "string", "pattern": "^custom:"},
+                {"type": "string", "pattern": "^plugin:"},
+            ]},
+        })))?;
+        assert_eq!(shape_of(&shapes, "Code")?, &Shape::Scalar(Scalar::String));
+        // One diagnostic names `pattern` once, at the union alone.
+        let [reported] = diagnostics.as_slice() else {
+            eyre::bail!("expected one diagnostic: {diagnostics:#?}");
+        };
+        assert_eq!(reported.class(), BreakageClass::UnsupportedConstruct);
+        assert!(
+            reported.detail().starts_with("`pattern` narrows"),
+            "{reported:#?}"
+        );
+        assert_eq!(reported.occurrences().get(), 1, "{reported:#?}");
+        assert_eq!(reported.location().to_string(), "/components/schemas/Code");
+        Ok(())
+    }
+
+    /// A branch that reads every string makes known strings an enum that admits any other, and
+    /// the values every enum branch lists, inline or named, are its values in document order.
+    #[test_util::test]
+    fn known_strings_beside_any_string_read_as_one_open_enum() -> eyre::Result<()> {
+        let to = json!({"$ref": "#/components/schemas/DagWarningType"});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            // The restricted branch is what keeps the existing fold from reading it.
+            "Open": {"anyOf": [to, {"type": "string"}, custom_warning()]},
+            "Combined": {"anyOf": [
+                {"const": "custom"},
+                to,
+                custom_warning(),
+                {"type": "string", "enum": ["duplicate dag id", "unknown"]},
+                {"type": "string", "description": "Any other warning."},
+            ]},
+            // A `format` progeny gives no type of its own restricts nothing it enforces, so the
+            // branch reads every string beside the restricted one.
+            "Formatted": {"anyOf": [to, {"type": "string", "format": "email"}, custom_warning()]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let open = |values: &[&str]| {
+            Shape::StringEnum(StringEnum {
+                values: values.iter().map(|&value| value.to_owned()).collect(),
+                any_other: true,
+            })
+        };
+        assert_eq!(
+            shape_of(&shapes, "Open")?,
+            &open(&["asset conflict", "duplicate dag id"])
+        );
+        assert_eq!(
+            shape_of(&shapes, "Combined")?,
+            &open(&["custom", "asset conflict", "duplicate dag id", "unknown"])
+        );
+        assert_eq!(
+            shape_of(&shapes, "Formatted")?,
+            &open(&["asset conflict", "duplicate dag id"])
+        );
+        Ok(())
+    }
+
+    /// Only an `anyOf` written as strings alone, whose branches cannot be told apart, reads as one
+    /// string.
+    #[test_util::test]
+    fn a_string_union_that_cannot_read_as_one_string_stays_a_union() -> eyre::Result<()> {
+        let to = json!({"$ref": "#/components/schemas/DagWarningType"});
+        // A restricted string before the enum reads the unlisted strings first, so the variants
+        // are told apart and kept.
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            "Reversed": {"anyOf": [custom_warning(), to, {"type": "null"}]},
+        })))?;
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.class() != BreakageClass::WildUnion),
+            "{diagnostics:#?}"
+        );
+        assert!(
+            matches!(
+                shape_of(&shapes, "Reversed")?,
+                Shape::Optional(ShapeRef::Inline(inner)) if matches!(**inner, Shape::Union(_))
+            ),
+            "{:?}",
+            shape_of(&shapes, "Reversed")?
+        );
+
+        let unfolded = [
+            // A `oneOf` refuses a listed value the restricted branch admits too.
+            json!({"oneOf": [to, custom_warning()]}),
+            // A date is a type of its own, which no plain string is.
+            json!({"anyOf": [to, {"type": "string", "format": "date-time"}]}),
+            // A keyword progeny does not know may be one a validator acts on, beside the
+            // reference as well as in a branch.
+            json!({"anyOf": [{"$ref": "#/components/schemas/DagWarningType", "lang": "en"}, custom_warning()]}),
+            json!({"anyOf": [to, {"type": "string", "maxLength": 50, "lang": "en"}]}),
+            json!({"type": "integer", "anyOf": [to, custom_warning()]}),
+        ];
+        for schema in unfolded {
+            assert!(
+                degrades_as_wild_union(
+                    json!({"DagWarningType": warning_type(), "Code": schema.clone()}),
+                    "Code",
+                )?,
+                "{schema} should stay a union"
+            );
+        }
+
+        // A `type` that admits `null` would make the string optional whatever its branches
+        // admit, so the union is left to degrade as it does without the fold.
+        let (_, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            "Nullable": {
+                "type": ["string", "null"],
+                "anyOf": [to, custom_warning(), {"type": "null"}],
+            },
+        })))?;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.class() == BreakageClass::WildUnion),
+            "{diagnostics:#?}"
+        );
+        Ok(())
+    }
+
+    /// An enclosing union compares a folded union as the string it is generated as, which a later
+    /// integer branch is told apart from.
+    /// That string reads strings the folded union refuses, so a later string branch is not.
+    #[test_util::test]
+    fn an_enclosing_union_compares_a_string_union_as_one_string() -> eyre::Result<()> {
+        // `"reserved"` is neither `known` nor custom, so it is meant for the later branch.
+        let code = json!({"anyOf": [
+            {"const": "known"},
+            {"type": "string", "pattern": "^custom:"},
+        ]});
+        assert!(degrades_as_wild_union(
+            json!({
+                "Code": code,
+                "Outer": {"oneOf": [
+                    {"$ref": "#/components/schemas/Code"},
+                    {"const": "reserved"},
+                ]},
+            }),
+            "Outer",
+        )?);
+
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            "WarningType": {"anyOf": [
+                {"$ref": "#/components/schemas/DagWarningType"},
+                custom_warning(),
+            ]},
+            "Code": {"oneOf": [
+                {"$ref": "#/components/schemas/WarningType"},
+                {"type": "integer"},
+            ]},
+        })))?;
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.class() != BreakageClass::WildUnion),
+            "{diagnostics:#?}"
+        );
+        assert!(
+            matches!(shape_of(&shapes, "Code")?, Shape::Union(_)),
+            "{:?}",
+            shape_of(&shapes, "Code")?
+        );
+        Ok(())
+    }
+
     /// A listed integer branch is the plain integer, which refuses a number that is not whole, so
     /// a later branch that lists only such numbers is still reached.
     #[test_util::test]

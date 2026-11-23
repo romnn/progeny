@@ -537,7 +537,7 @@ fn listed_numbers(
 /// OpenAPI's `x-` extensions are among them, which carry tooling metadata.
 /// Other keywords progeny does not know are not, because some validators act on keywords of their
 /// own.
-fn annotations(object: &SchemaObject) -> SchemaObject {
+pub(super) fn annotations(object: &SchemaObject) -> SchemaObject {
     SchemaObject {
         title: object.title.clone(),
         description: object.description.clone(),

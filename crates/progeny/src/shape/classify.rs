@@ -343,7 +343,7 @@ fn core(
             Some(declared) if super::inheritance::heads_family(resolved, key) => {
                 tagged_family(resolved, declared, branches, component_names)
             }
-            _ => union(resolved, view, branches, component_names, ctx, at),
+            _ => union(resolved, view, key, branches, component_names, ctx, at),
         };
         return keep_own_members(resolved, view, shape, ctx, at);
     }
@@ -562,12 +562,13 @@ fn string(view: &View) -> Shape {
 fn union(
     resolved: &ResolvedDocument,
     view: &View,
+    key: &ShapeKey,
     branches: &[ShapeKey],
     component_names: &ComponentNames,
     ctx: &mut Ctx,
     at: &JsonPointer,
 ) -> Shape {
-    let (reading, mut nullable) = Reading::of(resolved, branches);
+    let (reading, mut nullable) = Reading::of_union(resolved, key, branches);
     let inner = match reading {
         Reading::Empty => {
             return if nullable { Shape::Null } else { Shape::Any };
@@ -576,6 +577,15 @@ fn union(
         // the branches at all before treating this as a union.
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(strings) => Shape::StringEnum(strings),
+        Reading::String(restricted) => {
+            let string = Shape::Scalar(Scalar::String);
+            let omitted = View {
+                uninterpreted: restricted,
+                ..View::default()
+            };
+            report_uninterpreted(&omitted, &string, ctx, at);
+            string
+        }
         Reading::Variants(rest) => match told_apart(resolved, view, rest) {
             Ok(shape) => shape,
             Err((rest, reason)) => match spread_union(resolved, view, &rest) {
@@ -1023,7 +1033,9 @@ fn spread_union(
     }
     let (reading, nullable) = Reading::of(resolved, &spread);
     let shape = match reading {
-        Reading::Empty => return None,
+        // Only a union written as one reads as a plain string, and spread branches are no union
+        // the document wrote.
+        Reading::Empty | Reading::String(_) => return None,
         Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
         Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::Variants(spread) => told_apart(resolved, view, spread).ok()?,
@@ -1495,8 +1507,13 @@ enum Reading {
     /// One branch, which the union is an alias or an `Option` of.
     One(ShapeKey),
     /// Branches that only list strings, or read any string, which read as one string enum
-    /// ([`folded_strings`]).
+    /// ([`folded_strings`]), or an `anyOf` written as known strings or any other
+    /// ([`string_union`]).
     Strings(StringEnum),
+    /// An `anyOf` written as known strings or others it restricts, which reads as one plain
+    /// string ([`string_union`]), with the keywords of its restricted branches, which it does not
+    /// hold.
+    String(Vec<&'static str>),
     /// Two or more branches a payload has to be told apart between.
     Variants(Vec<ShapeKey>),
 }
@@ -1526,6 +1543,24 @@ impl Reading {
             },
         };
         (reading, nullable)
+    }
+
+    /// The reading of the union written at `key`, whose branches are `branches`.
+    ///
+    /// It is [`Reading::of`], unless that leaves branches no comparison tells apart and the
+    /// union is written as strings alone, where it is the one string they make up
+    /// ([`string_union`]).
+    fn of_union(
+        resolved: &ResolvedDocument,
+        key: &ShapeKey,
+        branches: &[ShapeKey],
+    ) -> (Self, bool) {
+        match Self::of(resolved, branches) {
+            (Self::Variants(rest), nullable) => {
+                string_union(resolved, key, &rest).unwrap_or((Self::Variants(rest), nullable))
+            }
+            read => read,
+        }
     }
 }
 
@@ -1984,7 +2019,9 @@ fn union_constants(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option
             values: strings.values,
             null: false,
         },
-        Reading::Empty | Reading::Strings(_) | Reading::Variants(_) => return None,
+        Reading::Empty | Reading::Strings(_) | Reading::String(_) | Reading::Variants(_) => {
+            return None;
+        }
     };
     constants.null |= nullable;
     Some(constants)
@@ -2177,7 +2214,7 @@ fn reads_every_string(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
 ///
 /// A branch that also admits `null` is meant for a payload no string branch reads.
 fn reads_strings_only(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
-    let Branch::Leaf(view) = Branch::of(resolved, key) else {
+    let (Branch::Leaf(view) | Branch::Restricted(view)) = Branch::of(resolved, key) else {
         return false;
     };
     kind_of(resolved, &view) == Some(Kind::String) && !declares_null(&view)
@@ -2221,7 +2258,8 @@ fn swallows_payloads_of(
                 .to_owned(),
         );
     }
-    let (first, first_flattened) = match Branch::of(resolved, earlier) {
+    // A flattened or restricted earlier branch reads payloads its view does not show it refusing.
+    let (first, first_overreaches) = match Branch::of(resolved, earlier) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, &inner, later, depth),
         Branch::Union(_) => {
             return Some(
@@ -2232,7 +2270,7 @@ fn swallows_payloads_of(
             );
         }
         Branch::Leaf(view) => (view, false),
-        Branch::Flattened(view) => (view, true),
+        Branch::Flattened(view) | Branch::Restricted(view) => (view, true),
     };
     let (second, flattened) = match Branch::of(resolved, later) {
         Branch::Through(inner) => return swallows_payloads_of(resolved, earlier, &inner, depth),
@@ -2241,7 +2279,7 @@ fn swallows_payloads_of(
                 .iter()
                 .find_map(|branch| swallows_payloads_of(resolved, earlier, branch, depth));
         }
-        Branch::Leaf(view) => (view, false),
+        Branch::Leaf(view) | Branch::Restricted(view) => (view, false),
         Branch::Flattened(view) => (view, true),
     };
 
@@ -2265,7 +2303,7 @@ fn swallows_payloads_of(
     // catch-all's, such as an unlisted value of an enum it lists.
     let right = kind_of(resolved, &second);
     if right.is_none_or(|right| right == left && !flattened && admits_its_kind(resolved, &second)) {
-        let overreaches = first_flattened || view_overreaches(resolved, &first, 0);
+        let overreaches = first_overreaches || view_overreaches(resolved, &first, 0);
         return overreaches.then(|| {
             "one of its branches reads values its schema does not admit, such as an unlisted \
              value of an enum, so it accepts payloads meant for a later branch that admits every \
@@ -2315,6 +2353,12 @@ fn swallows_payloads_of(
             }
             swallows_payloads_of(resolved, left, right, depth)
         }
+        Kind::String if first_overreaches => Some(
+            "one of its branches is generated as a plain string for known strings or restricted \
+             ones, which reads strings it does not admit, so it may accept the payloads of a \
+             later string branch"
+                .to_owned(),
+        ),
         Kind::String | Kind::Number | Kind::Boolean => scalar_swallows(&first, &second),
         Kind::Null => None,
     }
@@ -2354,6 +2398,13 @@ enum Branch {
     Union(Vec<ShapeKey>),
     /// Anything else, including a union of strings, which is one string enum.
     Leaf(Box<View>),
+    /// A union of known strings and restricted ones, as the view of the plain string it is
+    /// generated as ([`Reading::String`]).
+    ///
+    /// As the earlier branch it reads strings the union refuses, which a later string branch may
+    /// be meant for.
+    /// As the later branch it is that plain string.
+    Restricted(Box<View>),
     /// A struct with a union flattened beside its members, as the view of those members alone.
     ///
     /// As the earlier branch it reads a payload as the open struct of its members does, because
@@ -2386,19 +2437,26 @@ impl Branch {
         let Some(branches) = view.union.as_deref().filter(|_| !degraded) else {
             return Self::Leaf(Box::new(view));
         };
-        let (reading, nullable) = Reading::of(resolved, branches);
+        let (reading, nullable) = Reading::of_union(resolved, key, branches);
+        // A `null` among the branches makes the string optional, which reads `null` as well.
+        let strings = || {
+            if nullable {
+                BTreeSet::from([TypeName::String, TypeName::Null])
+            } else {
+                BTreeSet::from([TypeName::String])
+            }
+        };
         match reading {
             Reading::One(key) => Self::Through(key),
             // An enum that admits any other string reads every string, as a bare string does.
-            // A `null` among them makes the enum optional, which reads `null` as well.
-            Reading::Strings(strings) => Self::Leaf(Box::new(View {
-                types: Some(if nullable {
-                    BTreeSet::from([TypeName::String, TypeName::Null])
-                } else {
-                    BTreeSet::from([TypeName::String])
-                }),
-                enumeration: (!strings.any_other)
-                    .then(|| strings.values.into_iter().map(Value::String).collect()),
+            Reading::Strings(listed) => Self::Leaf(Box::new(View {
+                types: Some(strings()),
+                enumeration: (!listed.any_other)
+                    .then(|| listed.values.into_iter().map(Value::String).collect()),
+                ..View::default()
+            })),
+            Reading::String(_) => Self::Restricted(Box::new(View {
+                types: Some(strings()),
                 ..View::default()
             })),
             Reading::Variants(branches) => Self::Union(branches),
@@ -2757,7 +2815,7 @@ fn overreaches(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> boo
     }
     match Branch::of(resolved, key) {
         Branch::Through(inner) => overreaches(resolved, &inner, depth.saturating_add(1)),
-        Branch::Union(_) | Branch::Flattened(_) => true,
+        Branch::Union(_) | Branch::Flattened(_) | Branch::Restricted(_) => true,
         Branch::Leaf(view) => view_overreaches(resolved, &view, depth),
     }
 }
@@ -2862,7 +2920,9 @@ fn admits_its_kind(resolved: &ResolvedDocument, view: &View) -> bool {
         Branch::Leaf(view) => {
             kind_of(resolved, &view).is_none() && admitted_values(&view).is_none()
         }
-        Branch::Through(_) | Branch::Union(_) | Branch::Flattened(_) => false,
+        Branch::Through(_) | Branch::Union(_) | Branch::Flattened(_) | Branch::Restricted(_) => {
+            false
+        }
     };
     if admitted_values(view).is_some() {
         return false;
@@ -2905,7 +2965,10 @@ fn generates_option(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -
     match Reading::of(resolved, &spread) {
         (_, true) => true,
         (Reading::One(inner), false) => generates_option(resolved, &inner, depth.saturating_add(1)),
-        (Reading::Empty | Reading::Strings(_) | Reading::Variants(_), false) => false,
+        (
+            Reading::Empty | Reading::Strings(_) | Reading::String(_) | Reading::Variants(_),
+            false,
+        ) => false,
     }
 }
 
@@ -3093,6 +3156,180 @@ fn reads_any_string(resolved: &ResolvedDocument, view: &View) -> bool {
         && view.format.is_none()
         && view.content_encoding.is_none()
         && view.content_media_type.is_none()
+}
+
+/// The one string an `anyOf` of strings reads as, where its branches `rest` cannot be told
+/// apart, and whether it admits `null`.
+///
+/// airflow's `anyOf: [{$ref: DagWarningType}, {type: string, pattern: …}, {type: null}]` is one.
+/// As variants, the type generated for the enum reads every string, so it takes the strings meant
+/// for the later branch.
+/// [`folded_strings`] leaves it alone, because the later branch restricts its strings.
+///
+/// A branch that reads every string makes the reading an enum that admits any other string.
+/// Where only restricted branches read the unlisted strings, the reading is a plain string, which
+/// keeps those strings rather than call them drift, and the restrictions are reported.
+/// The enum a branch refers to is not reused, because its type calls any other string drift.
+///
+/// Branches the comparison tells apart keep their variants, such as a restricted string before the
+/// enum, which reads the unlisted strings before the enum can.
+/// The written schemas are checked first ([`written_strings`]), so the comparison only ever sees
+/// scalar branches.
+fn string_union(
+    resolved: &ResolvedDocument,
+    key: &ShapeKey,
+    rest: &[ShapeKey],
+) -> Option<(Reading, bool)> {
+    let written = written_strings(resolved, key)?;
+    ambiguity(resolved, rest)?;
+    let reading = if written.open {
+        Reading::Strings(StringEnum {
+            values: unique(written.listed),
+            any_other: true,
+        })
+    } else {
+        Reading::String(written.restricted)
+    };
+    Some((reading, written.null))
+}
+
+/// What the branches of an `anyOf` written as strings alone admit.
+#[derive(Default)]
+struct WrittenStrings {
+    /// The strings the enum branches name, in the order the document wrote them.
+    listed: Vec<String>,
+    /// Whether a branch reads every string.
+    open: bool,
+    /// The distinct length and pattern keywords of the string branches, which no string type
+    /// holds.
+    restricted: Vec<&'static str>,
+    /// Whether the union admits `null`.
+    null: bool,
+}
+
+/// What an `anyOf` admits, where it is written as strings alone.
+///
+/// The union holds its branches, annotations, and perhaps a `type` of `string`, which refuses a
+/// `null` branch.
+/// A `type` that admits `null` leaves the union as it is, because [`nullable`] would make the
+/// string optional whatever its branches admit.
+/// Each branch is one of these:
+///
+/// - a string `enum` or `const`, with annotations and perhaps a `type` of `string`;
+/// - a `$ref` beside annotations alone, to such an enum;
+/// - the `null` type;
+/// - a `string`, with `pattern`, `minLength`, `maxLength`, and a `format` the classifier reads as
+///   a plain string ([`string`]).
+///
+/// Each schema is rebuilt from those fields and compared with what the document wrote, as for a
+/// numeric enum split across branches, so a bound, an applicator, a discriminator or an unknown
+/// keyword leaves the union as it is.
+/// OpenAPI's `x-` extensions are annotations, which carry tooling metadata.
+/// A `oneOf` is no such union, because it refuses a listed value that a restricted branch admits
+/// too, as vapi's `backgroundSound` refuses `office` beside a URI-format string.
+fn written_strings(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<WrittenStrings> {
+    let [part] = key.parts() else {
+        return None;
+    };
+    let Schema::Object(union) = resolved.schema(part.id()) else {
+        return None;
+    };
+    let plain = SchemaObject {
+        any_of: union.any_of.clone(),
+        types: union.types.clone(),
+        ..merge::annotations(union)
+    };
+    let compatible = matches!(type_names(union).as_slice(), [] | [TypeName::String]);
+    if !part.dispatches() || plain != **union || !compatible {
+        return None;
+    }
+    let mut written = WrittenStrings::default();
+    for &id in union.any_of.iter().flatten() {
+        let Schema::Object(branch) = resolved.schema(id) else {
+            return None;
+        };
+        if branch.reference.is_some() {
+            let refers = SchemaObject {
+                reference: branch.reference.clone(),
+                ..merge::annotations(branch)
+            };
+            let Schema::Object(target) = resolved.schema(resolved.follow(id)?) else {
+                return None;
+            };
+            if refers != **branch {
+                return None;
+            }
+            written.listed.extend(written_list(target)?);
+            continue;
+        }
+        if let Some(listed) = written_list(branch) {
+            written.listed.extend(listed);
+            continue;
+        }
+        let typed = SchemaObject {
+            types: branch.types.clone(),
+            ..merge::annotations(branch)
+        };
+        let restricted = SchemaObject {
+            pattern: branch.pattern.clone(),
+            min_length: branch.min_length.clone(),
+            max_length: branch.max_length.clone(),
+            format: branch.format.clone(),
+            ..typed.clone()
+        };
+        let format = View {
+            format: branch.format.clone(),
+            ..View::default()
+        };
+        match type_names(branch).as_slice() {
+            [TypeName::Null] if typed == **branch => written.null = true,
+            [TypeName::String]
+                if restricted == **branch && string(&format) == Shape::Scalar(Scalar::String) =>
+            {
+                // Its length and pattern are what its view reports, and a branch without them
+                // reads every string, whatever `format` it names.
+                let reported = merge::view(resolved, &merge::key_of(resolved, id)).uninterpreted;
+                written.open |= reported.is_empty();
+                for keyword in reported {
+                    if !written.restricted.contains(&keyword) {
+                        written.restricted.push(keyword);
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    // A `type` of `string` beside the union refuses its `null` branch.
+    written.null &= union.types.is_none();
+    Some(written)
+}
+
+/// The strings a schema lists, where it is a string `enum` or `const` with annotations and perhaps
+/// a `type` of `string` alone.
+fn written_list(object: &SchemaObject) -> Option<Vec<String>> {
+    let plain = SchemaObject {
+        enumeration: object.enumeration.clone(),
+        constant: object.constant.clone(),
+        types: object.types.clone(),
+        ..merge::annotations(object)
+    };
+    if plain != *object || !matches!(type_names(object).as_slice(), [] | [TypeName::String]) {
+        return None;
+    }
+    let values = match (&object.enumeration, &object.constant) {
+        (Some(listed), None) if !listed.is_empty() => listed.as_slice(),
+        (None, Some(constant)) => std::slice::from_ref(constant),
+        _ => return None,
+    };
+    values
+        .iter()
+        .map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
+/// The type names a schema writes.
+fn type_names(object: &SchemaObject) -> Vec<&TypeName> {
+    object.types.iter().flat_map(|types| types.iter()).collect()
 }
 
 /// The listed values with repeats dropped, in the order the document wrote them.
