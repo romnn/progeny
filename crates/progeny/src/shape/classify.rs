@@ -2797,8 +2797,9 @@ fn reads_whole(resolved: &ResolvedDocument, view: &View, depth: usize) -> bool {
 /// The over-acceptance that decides this under progeny's types is a listed value: a string enum
 /// keeps an unlisted string as its `Unknown`, and a numeric or boolean list is the plain scalar.
 /// So does a union, which holds what none of its branches fits in its fallback, a branch
-/// generated as arbitrary JSON because progeny cannot express its schema, and a required member
-/// whose field is an `Option`, which reads its absence as `None`.
+/// generated as arbitrary JSON because progeny cannot express its schema, a required member
+/// whose field is an `Option`, which reads its absence as `None`, and a struct read from a union
+/// of `required` lists alone, which reads members absent that the union requires.
 ///
 /// Validation keywords such as `pattern` or `minimum` are never enforced, so they do not count.
 /// Neither does an optional member reading an explicit `null` as absent: a payload that sends
@@ -2829,10 +2830,12 @@ fn view_overreaches(resolved: &ResolvedDocument, view: &View, depth: usize) -> b
     }
     // A list the generated type does not hold, which [`merge::view`] reports, admits more than
     // it lists.
+    // So does a struct whose union said only which members are present, which reads an object
+    // that union refuses, such as `{}`.
     if view
         .uninterpreted
         .iter()
-        .any(|keyword| matches!(*keyword, "enum" | "const"))
+        .any(|keyword| matches!(*keyword, "enum" | "const" | "anyOf" | "oneOf"))
     {
         return true;
     }

@@ -268,8 +268,87 @@ pub(crate) fn view(resolved: &ResolvedDocument, key: &ShapeKey) -> View {
     if key.is_branches() {
         return branches_only(view);
     }
+    if let Some(keyword) = presence_rule(resolved, key) {
+        view.union = None;
+        view.uninterpreted.push(keyword);
+    }
     narrow_listed(resolved, key, &mut view);
     view
+}
+
+/// The keyword of a union that says only which of a schema's own members are present, as
+/// twitter's `CreateUsersBookmarkRequest` writes `anyOf: [{required: [tweet_id]}, {required:
+/// [tweet_ids]}]` beside its members.
+///
+/// The view then drops the union and reads as the struct of those members, with every member the
+/// schema does not require on its own optional, and the dropped rule is reported.
+/// As branches, each would read every object, and the union would be arbitrary JSON.
+///
+/// Only a union written in just that way is read so.
+/// Its own schema is an `object` that declares every member it requires, and it holds its
+/// members, the union, `additionalProperties`, `not` and annotations alone.
+/// Each of at least two branches is written inline and requires some of the schema's members, with
+/// nothing else but annotations.
+/// A `null` the schema admits is admitted by every branch, which an `anyOf` keeps and a `oneOf`
+/// of two or more branches refuses, so only an `anyOf` may admit it.
+/// An `anyOf` branch the schema's own requirements already satisfy makes the union admit every
+/// object, which is no rule of presence, so it leaves the union as it is.
+fn presence_rule(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<&'static str> {
+    let [part] = key.parts() else {
+        return None;
+    };
+    let Schema::Object(object) = resolved.schema(part.id()) else {
+        return None;
+    };
+    if !part.dispatches() {
+        return None;
+    }
+    let (keyword, written) = match (&object.any_of, &object.one_of) {
+        (Some(written), None) => ("anyOf", written),
+        (None, Some(written)) => ("oneOf", written),
+        _ => return None,
+    };
+    let declared = object.properties.as_ref()?;
+    let plain = SchemaObject {
+        types: object.types.clone(),
+        properties: object.properties.clone(),
+        required: object.required.clone(),
+        additional_properties: object.additional_properties,
+        not: object.not,
+        any_of: object.any_of.clone(),
+        one_of: object.one_of.clone(),
+        ..annotations(object)
+    };
+    if plain != **object {
+        return None;
+    }
+    let required: BTreeSet<&String> = object.required.iter().flatten().collect();
+    let types: BTreeSet<&TypeName> = object.types.iter().flat_map(|types| types.iter()).collect();
+    let object_typed = types == BTreeSet::from([&TypeName::Object])
+        || (keyword == "anyOf" && types == BTreeSet::from([&TypeName::Object, &TypeName::Null]));
+    if !object_typed
+        || written.len() < 2
+        || !required.iter().all(|name| declared.contains_key(*name))
+    {
+        return None;
+    }
+    for &id in written {
+        let Schema::Object(branch) = resolved.schema(id) else {
+            return None;
+        };
+        let plain = SchemaObject {
+            required: branch.required.clone(),
+            ..annotations(branch)
+        };
+        let names = branch.required.as_ref().filter(|names| !names.is_empty())?;
+        if plain != **branch || !names.iter().all(|name| declared.contains_key(name)) {
+            return None;
+        }
+        if keyword == "anyOf" && names.iter().all(|name| required.contains(name)) {
+            return None;
+        }
+    }
+    Some(keyword)
 }
 
 /// Read a list of values beside a union as that list, narrowed to what the union admits.

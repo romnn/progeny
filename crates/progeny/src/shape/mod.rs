@@ -5095,6 +5095,248 @@ mod tests {
         Ok(())
     }
 
+    /// twitter's `CreateUsersBookmarkRequest`, whose union says only that a `tweet_id` or
+    /// `tweet_ids` is present, written as `keyword`.
+    fn bookmark(keyword: &str) -> Value {
+        json!({
+            "type": "object",
+            "description": "At least one of `tweet_id`, `tweet_ids` is required.",
+            "properties": {
+                "folder_id": {"type": "string"},
+                "tweet_id": {"type": "string"},
+                "tweet_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            keyword: [{"required": ["tweet_id"]}, {"required": ["tweet_ids"]}],
+        })
+    }
+
+    /// Whether `shape` is the plain struct of its members, optional or not, with no union beside
+    /// them.
+    fn plain_struct(shape: &Shape) -> bool {
+        let structure = match shape {
+            Shape::Struct(structure) => structure,
+            Shape::Optional(ShapeRef::Inline(inner)) => match inner.as_ref() {
+                Shape::Struct(structure) => structure,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        structure.flattened.is_none()
+    }
+
+    /// The wire names of a struct's fields, each with whether it is required.
+    fn fields_of(shape: &Shape) -> eyre::Result<Vec<(&str, bool)>> {
+        let Shape::Struct(structure) = shape else {
+            eyre::bail!("not a struct: {shape:?}");
+        };
+        Ok(structure
+            .fields
+            .iter()
+            .map(|field| (field.wire.as_str(), field.required))
+            .collect())
+    }
+
+    /// A union whose branches only require members the schema declares says which members are
+    /// present, not which type the value is, so the schema reads as the struct of its members.
+    /// As branches, each would read every object, and the union would be arbitrary JSON.
+    #[test_util::test]
+    fn a_union_of_required_lists_reads_as_the_struct_it_constrains() -> eyre::Result<()> {
+        for keyword in ["anyOf", "oneOf"] {
+            let (shapes, diagnostics) =
+                shapes_of(with_schemas(json!({"Bookmark": bookmark(keyword)})))?;
+            // Every member is optional, since no one of them is present in every payload.
+            assert_eq!(
+                fields_of(shape_of(&shapes, "Bookmark")?)?,
+                [
+                    ("folder_id", false),
+                    ("tweet_id", false),
+                    ("tweet_ids", false)
+                ],
+                "{keyword}"
+            );
+            // The rule the struct does not hold is reported once, at the schema.
+            let [reported] = diagnostics.as_slice() else {
+                eyre::bail!("{keyword}: expected one diagnostic: {diagnostics:#?}");
+            };
+            assert_eq!(reported.class(), BreakageClass::UnsupportedConstruct);
+            assert!(
+                reported
+                    .detail()
+                    .starts_with(&format!("`{keyword}` narrows")),
+                "{reported:#?}"
+            );
+            assert_eq!(
+                reported.location().to_string(),
+                "/components/schemas/Bookmark"
+            );
+        }
+        Ok(())
+    }
+
+    /// A schema keeps what it says beside the rule: the members it requires on its own, a `null`
+    /// an `anyOf` admits, `additionalProperties`, and a `not` reported with the union, as openai's
+    /// `ImageRefParam` writes "exactly one of `image_url` or `file_id`".
+    #[test_util::test]
+    fn a_presence_rule_keeps_what_its_schema_says_beside_it() -> eyre::Result<()> {
+        let string = json!({"type": "string"});
+        let members = json!({"id": string, "name": string, "slug": string});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            // A branch may name a member the schema requires already, with annotations.
+            "Required": {
+                "type": "object",
+                "required": ["id"],
+                "properties": members,
+                "anyOf": [
+                    {"required": ["id", "name"], "description": "By name.", "x-origin": "test"},
+                    {"required": ["id", "slug"]},
+                ],
+            },
+            // A `oneOf` branch the schema satisfies on its own still refuses the other branch.
+            "Exclusive": {
+                "type": "object",
+                "required": ["id"],
+                "properties": members,
+                "oneOf": [{"required": ["id"]}, {"required": ["name"]}],
+            },
+            "Nullable": {
+                "type": ["object", "null"],
+                "properties": members,
+                "anyOf": [{"required": ["name"]}, {"required": ["slug"]}],
+            },
+            "ImageRef": {
+                "type": "object",
+                "properties": {"image_url": string, "file_id": string},
+                "anyOf": [{"required": ["image_url"]}, {"required": ["file_id"]}],
+                "not": {"required": ["image_url", "file_id"]},
+                "additionalProperties": false,
+            },
+        })))?;
+
+        // The members required on their own stay required, and the rest are optional.
+        let required = [("id", true), ("name", false), ("slug", false)];
+        assert_eq!(fields_of(shape_of(&shapes, "Required")?)?, required);
+        assert_eq!(fields_of(shape_of(&shapes, "Exclusive")?)?, required);
+        // An `anyOf` beside `null` admits `null`, which every branch does.
+        let Shape::Optional(ShapeRef::Inline(inner)) = shape_of(&shapes, "Nullable")? else {
+            eyre::bail!("not optional: {:?}", shape_of(&shapes, "Nullable")?);
+        };
+        assert_eq!(
+            fields_of(inner)?,
+            [("id", false), ("name", false), ("slug", false)]
+        );
+        // The struct is closed, and both keywords it does not hold are reported together.
+        let Shape::Struct(image) = shape_of(&shapes, "ImageRef")? else {
+            eyre::bail!("not a struct: {:?}", shape_of(&shapes, "ImageRef")?);
+        };
+        assert_eq!(image.extra, Extra::Denied);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.location().to_string() == "/components/schemas/ImageRef"
+                    && d.detail().starts_with("`not`, `anyOf` narrow")
+            }),
+            "{diagnostics:#?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.class() != BreakageClass::WildUnion),
+            "{diagnostics:#?}"
+        );
+        Ok(())
+    }
+
+    /// Only a union written as `required` lists of the schema's own members, beside an object's
+    /// members, reads as a rule of presence.
+    /// Anything else keeps the union, which is told apart, flattened or degraded as before.
+    #[test_util::test]
+    fn a_union_that_is_no_plain_presence_rule_stays_a_union() -> eyre::Result<()> {
+        let string = json!({"type": "string"});
+        let members = json!({"a": string, "b": string});
+        let requires = |names: &[&str]| json!({"required": names});
+        let object = |extra: Value| {
+            let mut schema = json!({
+                "type": "object",
+                "properties": members,
+                "anyOf": [requires(&["a"]), requires(&["b"])],
+            });
+            if let (Value::Object(schema), Value::Object(extra)) = (&mut schema, extra) {
+                schema.extend(extra);
+            }
+            schema
+        };
+        let cases = [
+            // A branch names a member the schema does not declare, as GitHub's Pages `PUT` names
+            // `public`.
+            object(json!({"anyOf": [requires(&["a"]), requires(&["public"])]})),
+            // Without `type: object`, a struct would refuse the non-objects the schema admits.
+            json!({"properties": members, "anyOf": [requires(&["a"]), requires(&["b"])]}),
+            object(json!({"type": "array"})),
+            // A `oneOf` refuses the `null` that every branch admits.
+            json!({
+                "type": ["object", "null"],
+                "properties": members,
+                "oneOf": [requires(&["a"]), requires(&["b"])],
+            }),
+            object(json!({"discriminator": {"propertyName": "a"}})),
+            object(json!({"minProperties": 1})),
+            object(json!({"required": ["id"]})),
+            // The schema's own requirement satisfies a branch, so the `anyOf` admits every object.
+            object(json!({"required": ["a"]})),
+            object(json!({"anyOf": [requires(&["a"])]})),
+            json!({
+                "type": "object",
+                "properties": members,
+                "oneOf": [requires(&["a"]), requires(&[])],
+            }),
+            object(json!({"anyOf": [requires(&["a"]), {"description": "Anything else."}]})),
+            object(json!({"anyOf": [
+                requires(&["a"]),
+                {"required": ["b"], "properties": {}},
+            ]})),
+            object(json!({"anyOf": [
+                requires(&["a"]),
+                {"$ref": "#/components/schemas/RequiresB"},
+            ]})),
+        ];
+        for schema in cases {
+            let schemas = json!({"Code": schema.clone(), "RequiresB": requires(&["b"])});
+            let (shapes, _) = shapes_of(with_schemas(schemas))?;
+            let shape = shape_of(&shapes, "Code")?;
+            assert!(
+                !plain_struct(shape),
+                "{schema} should stay a union, not {shape:?}"
+            );
+        }
+
+        // A branch with members of its own is a variant flattened beside the schema's members.
+        let (shapes, _) = shapes_of(with_schemas(json!({"Code": object(json!({"anyOf": [
+            {"required": ["c"], "properties": {"c": string}},
+            {"required": ["d"], "properties": {"d": string}},
+        ]}))})))?;
+        let Shape::Struct(structure) = shape_of(&shapes, "Code")? else {
+            eyre::bail!("not a struct: {:?}", shape_of(&shapes, "Code")?);
+        };
+        assert!(structure.flattened.is_some(), "{structure:?}");
+        Ok(())
+    }
+
+    /// An enclosing union compares a rule of presence as the struct it reads as, which reads an
+    /// object the rule refuses, such as `{}`, so it does not stand before a catch-all object.
+    #[test_util::test]
+    fn a_presence_rule_does_not_stand_before_a_catch_all_object() -> eyre::Result<()> {
+        assert!(degrades_as_wild_union(
+            json!({
+                "Bookmark": bookmark("anyOf"),
+                "Outer": {"anyOf": [
+                    {"$ref": "#/components/schemas/Bookmark"},
+                    {"type": "object"},
+                ]},
+            }),
+            "Outer",
+        )?);
+        Ok(())
+    }
+
     /// A listed integer branch is the plain integer, which refuses a number that is not whole, so
     /// a later branch that lists only such numbers is still reached.
     #[test_util::test]
