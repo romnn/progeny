@@ -1656,6 +1656,48 @@ repetition could start there until it asked `sysctl` instead; available memory s
 macOS, and a peak taken under pressure there reads low without being flagged, which is what the
 first posthog take showed.
 
+## Wild unions after the numeric fold
+
+A wild union is a union typed as `serde_json::Value` because nothing tells its branches apart.
+After the numeric enum fold (#175), the snapshots hold 893 wild-union occurrences in 88 records
+across 49 documents (the survey of #184; `occurrences` from the snapshots, each record attributed to
+the shape at its first location).
+
+By the reason the classifier gives:
+
+| reason | occurrences |
+|---|---|
+| an object branch accepts the payloads of a later one | 692 |
+| a branch that says nothing about its shape is not the last | 55 |
+| a nested union is not the last | 52 |
+| a listed branch's type reads values it does not list | 51 |
+| an enum branch reads any value of its kind | 42 |
+| two untyped lists | 1 |
+
+`oneOf` accounts for 716 and `anyOf` for 176, and no union declares a discriminator. Most shapes are
+unique to one document, so the classes worth a rule are the few that are large or recur:
+
+- **Object branches with disjoint optional members** (#189, kept as arbitrary JSON). cloudflare's
+  `waitingroom_rule_position` (155, the largest single source) is a `oneOf` of `{index}`,
+  `{before}` and `{after}`, with nothing required and nothing closed, and its intent is "one of
+  these members". A struct of all three, optional, is not its reading: `{"index": "tail",
+  "before": 0}` satisfies the schema through the `after` branch alone, and the struct would refuse
+  it. 37 source locations across the corpus have this shape.
+- **A scalar beside const-tagged objects** (#190). vapi's `voicemailDetection` (75) is the string
+  `off` beside four objects, each requiring `provider` with one value of its own; the tag is not
+  inferred because one branch is not an object.
+- **Branches that only add `required` names** (#188). `{properties: {…}, anyOf: [{required: [a]},
+  {required: [b]}]}` is a presence constraint on one struct, not a union: 26 occurrences in 7
+  documents (clerk, cloudflare, lithic, openai, resend, telnyx, twitter) as `anyOf`, and 15 in 2 as
+  `oneOf`.
+- **A string enum beside a patterned string** (#183). airflow's `warning_type`, and runway's
+  `ratio` and telnyx's `SpendGroupBy` like it.
+
+The rest stay arbitrary JSON as written too: objects that genuinely overlap (discord's recursive
+`ErrorDetails`, 88; klaviyo's message content, 34; pagerduty's `value`, typed differently in each of
+six branches, 24), unions nested in unions, and `oneOf`s over `allOf` compositions (opensearch's
+range queries, 49), where no rule reads the branches apart without a validator.
+
 ## Diagnostics the corpus produces
 
 Every finding, per document, is recorded in `corpus/snapshots/*.jsonl`, keyed by the SHA-256 of the
