@@ -538,30 +538,29 @@ fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> TokenS
             )]
         }
     });
-    let call = match &operation.params {
-        Some(params) => {
-            let inputs = operation.inputs.iter().map(|input| {
-                let field = &input.field;
-                let value = match input.json.as_deref() {
-                    // An optional parameter whose name the wire erases: the literal must still name
-                    // the field, and `None` is the only value the server could ever tell apart.
-                    None => quote! { None },
-                    Some(json) if input.required => quote! { value(#json) },
-                    Some(json) => quote! { Some(value(#json)) },
-                };
-                quote! { #field: #value, }
-            });
-            let body = operation.body.as_ref().map(|body| {
-                let json = body.json.as_str();
-                if body.required {
-                    quote! { body: value(#json), }
-                } else {
-                    quote! { body: Some(value(#json)), }
-                }
-            });
-            quote! { client.#method(client::#params { #(#inputs)* #body }) }
-        }
-        None => quote! { client.#method() },
+    let call = if let Some(params) = &operation.params {
+        let inputs = operation.inputs.iter().map(|input| {
+            let field = &input.field;
+            let value = match input.json.as_deref() {
+                // An optional parameter whose name the wire erases: the literal must still name
+                // the field, and `None` is the only value the server could ever tell apart.
+                None => quote! { None },
+                Some(json) if input.required => quote! { value(#json) },
+                Some(json) => quote! { Some(value(#json)) },
+            };
+            quote! { #field: #value, }
+        });
+        let body = operation.body.as_ref().map(|body| {
+            let json = body.json.as_str();
+            if body.required {
+                quote! { body: value(#json), }
+            } else {
+                quote! { body: Some(value(#json)), }
+            }
+        });
+        quote! { client.#method(client::#params { #(#inputs)* #body }) }
+    } else {
+        quote! { client.#method() }
     };
     let status = Literal::u16_unsuffixed(answer.status);
     let route = &operation.route;
@@ -588,13 +587,14 @@ fn driver(operation: &ProbeOp, answer: &progeny::harness::ProbeAnswer) -> TokenS
 /// Compared through JSON, because a generated type carries only the derives its configuration
 /// asked for, and on the client field's own type, whichever decoding made it an `Option`.
 fn header_assertions(headers: &progeny::harness::ProbeHeaders, variant: &Ident) -> TokenStream {
-    let payload = match &headers.success {
-        Some(success) => quote! {
+    let payload = if let Some(success) = &headers.success {
+        quote! {
             let client::#success::#variant(payload) = response.value() else {
                 eyre::bail!("the response decoded as another success arm");
             };
-        },
-        None => quote! { let payload = response.value(); },
+        }
+    } else {
+        quote! { let payload = response.value(); }
     };
     let fields = headers.fields.iter().map(|header| {
         let deprecated = header.deprecated.then(|| {

@@ -216,7 +216,8 @@ fn case_type(case: &Case) -> TokenStream {
     crate::payloads::type_path(&case.type_name, case.read)
 }
 
-fn runner() -> TokenStream {
+/// The global allocator that counts allocations and tracks live and peak bytes.
+fn counting_allocator() -> TokenStream {
     quote! {
         struct CountingAllocator;
 
@@ -294,6 +295,14 @@ fn runner() -> TokenStream {
                 PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline),
             )
         }
+
+    }
+}
+
+fn runner() -> TokenStream {
+    let allocator = counting_allocator();
+    quote! {
+        #allocator
 
         #[derive(serde::Serialize)]
         struct Phase {

@@ -100,7 +100,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         ])
         .output()
         .wrap_err("running the example test")?;
-    let text = format!(
+    let output = format!(
         "{}{}",
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
@@ -110,11 +110,11 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             "{}",
             indoc::formatdoc! {"
                 the generated client and server did not agree:
-                {text}"
+                {output}"
             }
         );
     }
-    println!("{}", text.trim());
+    println!("{}", output.trim());
     println!();
     println!("example: the generated client and the generated server agree on the request line");
     Ok(())
