@@ -300,6 +300,15 @@ fn presence_rule(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<&'static
     let Schema::Object(object) = resolved.schema(part.id()) else {
         return None;
     };
+    if !part.dispatches() {
+        return None;
+    }
+    let (keyword, written) = match (&object.any_of, &object.one_of) {
+        (Some(written), None) => ("anyOf", written),
+        (None, Some(written)) => ("oneOf", written),
+        _ => return None,
+    };
+    let declared = object.properties.as_ref()?;
     let plain = SchemaObject {
         types: object.types.clone(),
         properties: object.properties.clone(),
@@ -310,15 +319,9 @@ fn presence_rule(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<&'static
         one_of: object.one_of.clone(),
         ..annotations(object)
     };
-    if !part.dispatches() || plain != **object {
+    if plain != **object {
         return None;
     }
-    let (keyword, written) = match (&object.any_of, &object.one_of) {
-        (Some(written), None) => ("anyOf", written),
-        (None, Some(written)) => ("oneOf", written),
-        _ => return None,
-    };
-    let declared = object.properties.as_ref()?;
     let required: BTreeSet<&String> = object.required.iter().flatten().collect();
     let types: BTreeSet<&TypeName> = object.types.iter().flat_map(|types| types.iter()).collect();
     let object_typed = types == BTreeSet::from([&TypeName::Object])

@@ -5110,24 +5110,18 @@ mod tests {
         })
     }
 
-    /// Whether the component `name` reads as the plain struct of its members, optional or not,
-    /// with its `keyword` reported as a rule the struct does not hold.
-    fn reads_as_presence_rule(schemas: Value, name: &str, keyword: &str) -> eyre::Result<bool> {
-        let (shapes, diagnostics) = shapes_of(with_schemas(schemas))?;
-        let structure = match shape_of(&shapes, name)? {
+    /// Whether `shape` is the plain struct of its members, optional or not, with no union beside
+    /// them.
+    fn plain_struct(shape: &Shape) -> bool {
+        let structure = match shape {
             Shape::Struct(structure) => structure,
             Shape::Optional(ShapeRef::Inline(inner)) => match inner.as_ref() {
                 Shape::Struct(structure) => structure,
-                _ => return Ok(false),
+                _ => return false,
             },
-            _ => return Ok(false),
+            _ => return false,
         };
-        let reported = diagnostics.iter().any(|d| {
-            d.class() == BreakageClass::UnsupportedConstruct
-                && d.location().to_string() == format!("/components/schemas/{name}")
-                && d.detail().contains(&format!("`{keyword}`"))
-        });
-        Ok(structure.flattened.is_none() && reported)
+        structure.flattened.is_none()
     }
 
     /// The wire names of a struct's fields, each with whether it is required.
@@ -5306,10 +5300,11 @@ mod tests {
         ];
         for schema in cases {
             let schemas = json!({"Code": schema.clone(), "RequiresB": requires(&["b"])});
+            let (shapes, _) = shapes_of(with_schemas(schemas))?;
+            let shape = shape_of(&shapes, "Code")?;
             assert!(
-                !reads_as_presence_rule(schemas.clone(), "Code", "anyOf")?
-                    && !reads_as_presence_rule(schemas, "Code", "oneOf")?,
-                "{schema} should stay a union"
+                !plain_struct(shape),
+                "{schema} should stay a union, not {shape:?}"
             );
         }
 
