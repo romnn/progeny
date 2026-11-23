@@ -219,13 +219,13 @@ tasks:
   # Arguments are cargo's and reach the workspace alone, but a `--check` among them checks all
   # three, so `task format -- --check` never rewrites a file.
   format:
-    desc: "format cargo workspace, the fuzz targets and the differential harness"
+    desc: "format cargo workspace, the fuzz targets and the hand-written test fixtures"
     vars:
       CHECK: '{{if contains "--check" .CLI_ARGS}}--check{{end}}'
     cmds:
       - cargo fmt --all {{.CLI_ARGS}}
       - cargo fmt --manifest-path fuzz/Cargo.toml {{.CHECK}}
-      - rustfmt --edition 2024 {{.CHECK}} corpus/differential/assertions.rs
+      - rustfmt --edition 2024 {{.CHECK}} corpus/differential/assertions.rs corpus/example/both_halves.rs
 
   format:check:
     desc: "check the formatting `task format` would apply, without writing it"
