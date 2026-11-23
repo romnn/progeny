@@ -749,7 +749,7 @@ impl fmt::Display for RejectLocation<'_> {
 /// Every degradation and repair site takes `&mut Ctx` and pushes its record, so producing the
 /// less-precise value and producing its diagnostic are one operation rather than two that can
 /// drift apart.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Ctx {
     path: JsonPointer,
     diagnostics: Vec<Diagnostic>,
@@ -765,17 +765,20 @@ pub(crate) struct Ctx {
     aggregated: BTreeMap<(BreakageClass, Action, String, bool), usize>,
     /// The findings the caller accepts, in the order the caller listed them.
     accepts: Vec<Acceptance>,
+    /// Whether every occurrence is kept as it was reported, neither folded nor matched against
+    /// acceptances, for a caller that reports them into another context in an order of its own.
+    recording: bool,
 }
 
 /// One accepted finding, and whether any occurrence has matched it yet.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Acceptance {
     finding: Accepted,
     matched: bool,
 }
 
 /// One finding the caller accepts: a class and action at one exact location.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Accepted {
     pub(crate) class: BreakageClass,
     pub(crate) action: Action,
@@ -785,6 +788,15 @@ pub(crate) struct Accepted {
 impl Ctx {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// A context that keeps every occurrence as it was reported ([`Ctx::into_diagnostics`]), to be
+    /// reported into another context later.
+    pub(crate) fn recording() -> Self {
+        Self {
+            recording: true,
+            ..Self::default()
+        }
     }
 
     /// This context, marking each occurrence of one of `accepts` as accepted.
@@ -834,6 +846,10 @@ impl Ctx {
     /// accidentally emit 16,100 lines by reporting at the wrong level: the class decides, and
     /// every report site goes through this one function.
     pub(crate) fn report(&mut self, mut diagnostic: Diagnostic) {
+        if self.recording {
+            self.diagnostics.push(diagnostic);
+            return;
+        }
         // Matched while the diagnostic is still one occurrence, so neither folding nor the cap on
         // related locations decides what the deny policy sees.
         // Every matching entry is marked, so a duplicate entry is not reported as matching nothing.

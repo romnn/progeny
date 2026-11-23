@@ -31,18 +31,36 @@ use super::{RootKind, Shape, ShapeKey, ShapeRef, Shapes, Struct, TagStyle, Union
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 
-/// Settle every proposed tag: strip the variants of the consumed ones, mark the carried ones, and
-/// demote the rest.
-///
-/// Returns the variant types a consumed tag took a property off.
-pub(super) fn run(
-    resolved: &ResolvedDocument,
-    shapes: &mut Shapes,
-    ctx: &mut Ctx,
-) -> BTreeSet<ShapeKey> {
+/// What settling every proposed tag decided, before any of it is applied to the shapes.
+#[derive(Debug, Default)]
+pub(super) struct Settlement {
+    /// Every union that asked for a tag, in a deterministic order.
+    proposed: Vec<(ShapeKey, String)>,
+    /// The fixpoint round, whose modes, strips and warnings are the ones applied.
+    outcome: Round,
+    /// Why each demoted union was, from the round it flipped in.
+    reasons: BTreeMap<ShapeKey, String>,
+    /// Every key settling followed to read how a variant declares its tag, in any round
+    /// ([`tag_shaped`]).
+    pub(super) tag_reads: BTreeSet<ShapeKey>,
+}
+
+impl Settlement {
+    /// Whether a consumed tag takes a property off this variant type.
+    pub(super) fn strips(&self, variant: &ShapeKey) -> bool {
+        self.outcome
+            .strip
+            .iter()
+            .any(|(stripped, _)| stripped == variant)
+    }
+}
+
+/// Settle every proposed tag: which are consumed, which are carried, and which are demoted, without
+/// changing any shape.
+pub(super) fn settle(shapes: &Shapes) -> Settlement {
     let proposed = proposals(shapes);
     if proposed.is_empty() {
-        return BTreeSet::new();
+        return Settlement::default();
     }
     let base_borrowed = borrowed_outside_tagged_unions(shapes);
     let above = read_above(shapes);
@@ -57,8 +75,16 @@ pub(super) fn run(
     // every union still consuming; a demotion's reason is kept from the round it flipped in,
     // which no later round revisits.
     let mut reasons: BTreeMap<ShapeKey, String> = BTreeMap::new();
+    let mut tag_reads = BTreeSet::new();
     let outcome = loop {
-        let round = evaluate(shapes, &proposed, &base_borrowed, &above, &modes);
+        let round = evaluate(
+            shapes,
+            &proposed,
+            &base_borrowed,
+            &above,
+            &modes,
+            &mut tag_reads,
+        );
         for (key, reason) in &round.demoted {
             reasons.entry(key.clone()).or_insert_with(|| reason.clone());
         }
@@ -67,7 +93,28 @@ pub(super) fn run(
         }
         modes = round.modes.clone();
     };
+    Settlement {
+        proposed,
+        outcome,
+        reasons,
+        tag_reads,
+    }
+}
 
+/// Apply a settlement: strip the variants of the consumed unions, mark the carried ones, and
+/// demote the rest, reporting each.
+pub(super) fn apply(
+    resolved: &ResolvedDocument,
+    shapes: &mut Shapes,
+    settlement: Settlement,
+    ctx: &mut Ctx,
+) {
+    let Settlement {
+        proposed,
+        outcome,
+        reasons,
+        ..
+    } = settlement;
     for (variant, property, first, union_key) in outcome.shared {
         // Both parents can have it: the tag is written by whichever enum is doing the
         // serializing, and the child needs it on neither. Worth saying out loud because a reader
@@ -137,12 +184,9 @@ pub(super) fn run(
         let settled = with_union(shape, settled);
         shapes.replace(&union_key, settled);
     }
-    let mut stripped = BTreeSet::new();
     for (variant, property) in outcome.strip {
         shapes.strip_property(&variant, &property);
-        stripped.insert(variant);
     }
-    stripped
 }
 
 /// What one union's proposal settled to, this round.
@@ -169,12 +213,15 @@ struct Round {
 /// `Carried` and `Demoted` are terminal: carried eligibility reads only what the variant types
 /// declare, which no round changes, and a demotion is already the last resort. Only `Consumed`
 /// entries are re-asked, because the borrowed set grows as unions turn carried.
+///
+/// Each key followed to read how a variant declares its tag is added to `tag_reads`.
 fn evaluate(
     shapes: &Shapes,
     proposed: &[(ShapeKey, String)],
     base_borrowed: &BTreeSet<ShapeKey>,
     above: &BTreeMap<ShapeKey, BTreeSet<String>>,
     modes: &BTreeMap<ShapeKey, Mode>,
+    tag_reads: &mut BTreeSet<ShapeKey>,
 ) -> Round {
     // A carried union's variant edges are wire positions where the tag property is genuinely in
     // the payload — that is what carrying means — so for this round they count as borrowed exactly
@@ -240,7 +287,7 @@ fn evaluate(
             continue;
         }
         let shared = union.tag.as_ref().is_some_and(|tag| tag.shared);
-        if let Some(reason) = refuse_outright(shapes, &named, property, shared) {
+        if let Some(reason) = refuse_outright(shapes, &named, property, shared, tag_reads) {
             round.modes.insert(union_key.clone(), Mode::Demoted);
             round.demoted.push((union_key.clone(), reason));
             continue;
@@ -289,17 +336,12 @@ fn evaluate(
 }
 
 /// Every union that asked for a tag, in a deterministic order.
-///
-/// A union that also reads values of other kinds is admitted carrying its tag over variants no
-/// union takes anything off, so it has nothing to settle and is left out.
 fn proposals(shapes: &Shapes) -> Vec<(ShapeKey, String)> {
     shapes
         .entries()
         .filter_map(|(key, shape)| {
             let tag = tagged_union(shape)?.tag.as_ref()?;
-            tag.kinds
-                .is_empty()
-                .then(|| (key.clone(), tag.property.clone()))
+            Some((key.clone(), tag.property.clone()))
         })
         .collect()
 }
@@ -317,8 +359,9 @@ fn tagged_union(shape: &Shape) -> Option<&Union> {
     }
 }
 
-/// `shape` with the union [`tagged_union`] found in it replaced by `union`.
-fn with_union(shape: &Shape, union: Union) -> Shape {
+/// `shape` with what its `Option`s hold replaced by `union`: the union [`tagged_union`] found in
+/// it, or the arbitrary JSON a union [`super::admit`] types was classified as.
+pub(super) fn with_union(shape: &Shape, union: Union) -> Shape {
     match shape {
         Shape::Optional(ShapeRef::Inline(inner)) => {
             Shape::Optional(ShapeRef::Inline(Box::new(with_union(inner, union))))
@@ -336,6 +379,7 @@ fn refuse_outright(
     variants: &[(ShapeKey, Option<String>)],
     property: &str,
     shared: bool,
+    tag_reads: &mut BTreeSet<ShapeKey>,
 ) -> Option<String> {
     let mut names: BTreeSet<&str> = BTreeSet::new();
     for (_, tag) in variants {
@@ -377,7 +421,7 @@ fn refuse_outright(
         // A variant that declares the property under a type the tag cannot take is a defect worth
         // refusing over: a discriminator is always a string on the wire, whoever writes it.
         if let Some(field) = structure.fields.iter().find(|field| field.wire == property)
-            && !tag_shaped(shapes, &field.shape)
+            && !tag_shaped(shapes, &field.shape, tag_reads)
         {
             return Some(format!(
                 "one of its variants declares `{property}` as something other than a string, and \
@@ -578,13 +622,18 @@ fn declares(shapes: &Shapes, variant: &ShapeKey, property: &str) -> bool {
 ///
 /// A declaration that reaches itself through aliases and nullable wrappers before naming any kind
 /// of value constrains the tag no further, so it passes as [`Shape::Any`] does.
-fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
+///
+/// Each key followed is added to `reads`, because the answer turns on what each of them is.
+fn tag_shaped(shapes: &Shapes, reference: &ShapeRef, reads: &mut BTreeSet<ShapeKey>) -> bool {
     let mut reference = reference;
     let mut followed = BTreeSet::new();
     loop {
         let shape = match reference {
             ShapeRef::Key(key) if !followed.insert(key) => return true,
-            ShapeRef::Key(key) => shapes.get(key),
+            ShapeRef::Key(key) => {
+                reads.insert(key.clone());
+                shapes.get(key)
+            }
             ShapeRef::Inline(shape) => Some(&**shape),
         };
         match shape {
@@ -623,9 +672,8 @@ fn tag_shaped(shapes: &Shapes, reference: &ShapeRef) -> bool {
 fn borrowed_outside_tagged_unions(shapes: &Shapes) -> BTreeSet<ShapeKey> {
     let mut borrowed = BTreeSet::new();
     for (_, shape) in shapes.entries() {
-        // A tagged union has no children but its variant edges and the scalar data of branches of
-        // other kinds, which hold no object, so exempting the shape exempts exactly the variant
-        // edges.
+        // A tagged union has no children but its variant edges, so exempting the shape exempts
+        // exactly those.
         if tagged_union(shape).is_some() {
             continue;
         }

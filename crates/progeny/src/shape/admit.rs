@@ -3,67 +3,94 @@
 //! [`super::classify`] finds such a union where it would otherwise be arbitrary JSON, and leaves it
 //! arbitrary JSON, so the document's other shapes and tags are classified and settled exactly as
 //! they would be without it.
-//! A union is then admitted only where reading it so changes none of them: its objects are
-//! structs the settled graph already holds, intact and with their tag, and its other branches
-//! hold scalar data, which no tag decision reads.
+//! A union is then admitted only where reading it so changes none of them: settling never read a
+//! tag's declaration through it, its objects are structs the settled graph already holds, intact
+//! and with their tag, and its other branches hold scalar data, which no tag decision reads.
 //! Every union is judged against the same settled graph, so which are admitted does not depend on
 //! the order they are judged in.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::classify::{self, ComponentNames, Known};
-use super::{Shape, ShapeKey, ShapeRef, Shapes, Union};
+use super::classify::{self, Known};
+use super::discriminate::{Settlement, with_union};
+use super::{Discovered, Shape, ShapeKey, ShapeRef, Shapes, Union};
 use crate::config::IntegerWidth;
-use crate::diag::Ctx;
+use crate::diag::{Ctx, Diagnostic};
 use crate::resolve::ResolvedDocument;
 
 /// How far through aliases and lists a branch of another kind is followed before it counts as
 /// more than scalar data.
 const MAX_DATA_DEPTH: usize = 16;
 
-/// What settling the document's tags decided, which an admitted union must leave as it is.
-pub(super) struct Settled {
-    /// The variant types a consumed tag took a property off.
-    pub(super) stripped: BTreeSet<ShapeKey>,
-    /// The shapes a tagged union's variants declare their tag property as, which settling
-    /// checked are strings ([`tag_fields`]).
-    pub(super) tag_fields: BTreeSet<ShapeKey>,
+/// What admitting unions read by kind and then by tag adds to the settled graph.
+#[derive(Debug)]
+pub(super) struct Admission {
+    /// The shape each admitted union's key takes: the arbitrary JSON it was classified as, typed
+    /// as the union.
+    pub(super) unions: BTreeMap<ShapeKey, Shape>,
+    /// The scalar data only admitted unions reach, each classified once.
+    pub(super) data: BTreeMap<ShapeKey, Classified>,
 }
 
-/// The unions in `found` that reading by kind and then tag changes nothing else for.
+/// A shape classified outside the work list, with what classifying it reported.
+#[derive(Debug)]
+pub(super) struct Classified {
+    pub(super) shape: Shape,
+    pub(super) reports: Vec<Diagnostic>,
+}
+
+/// Admit the unions found readable by kind and then by tag that reading so changes nothing else
+/// for.
 ///
-/// Each object branch has to be a struct the settled graph holds, with no union flattened into it,
-/// still declaring the tag, and with no property taken off by a settled union, so the union
-/// carries its tag over types every other position reads the same way.
-/// Each other branch has to be scalar data ([`scalar_data`]), which no tag is settled by.
-/// And the union must not stand where settling read a tag's declaration, which accepted arbitrary
-/// JSON there and might not accept the union.
-pub(super) fn admitted(
+/// A union is admitted where settling never followed it to read how a variant declares its tag,
+/// each object branch is a struct the settled graph holds intact ([`intact_objects`]), and each
+/// other branch is scalar data ([`Probe::scalar_data`]), which no tag is settled by.
+pub(super) fn admit(
     resolved: &ResolvedDocument,
-    shapes: &Shapes,
-    found: &BTreeMap<ShapeKey, Union>,
-    settled: &Settled,
-    component_names: &ComponentNames,
+    discovered: &Discovered,
+    settlement: &Settlement,
     integers: IntegerWidth,
-) -> BTreeSet<ShapeKey> {
-    found
-        .iter()
-        .filter(|(key, union)| {
-            !settled.tag_fields.contains(*key)
-                && intact_objects(shapes, union, &settled.stripped)
-                && union
-                    .tag
-                    .iter()
-                    .flat_map(|tag| &tag.kinds)
-                    .all(|kind| scalar_data(resolved, shapes, kind, component_names, integers, 0))
-        })
-        .map(|(key, _)| key.clone())
-        .collect()
+) -> Admission {
+    let mut probe = Probe {
+        resolved,
+        shapes: &discovered.shapes,
+        known: Known {
+            component_names: &discovered.component_names,
+            found: BTreeMap::new(),
+        },
+        integers,
+        classified: BTreeMap::new(),
+    };
+    let mut unions = BTreeMap::new();
+    let mut reached = BTreeSet::new();
+    for (key, union) in &discovered.found {
+        if settlement.tag_reads.contains(key) || !intact_objects(probe.shapes, union, settlement) {
+            continue;
+        }
+        let mut data = BTreeSet::new();
+        let scalar = union
+            .tag
+            .iter()
+            .flat_map(|tag| &tag.kinds)
+            .all(|kind| probe.scalar_data(kind, 0, &mut data));
+        if !scalar {
+            continue;
+        }
+        // The union is arbitrary JSON inside every `Option` it was classified in.
+        let Some(fallback) = probe.shapes.get(key) else {
+            continue;
+        };
+        unions.insert(key.clone(), with_union(fallback, union.clone()));
+        reached.append(&mut data);
+    }
+    let mut data = probe.classified;
+    data.retain(|key, _| reached.contains(key));
+    Admission { unions, data }
 }
 
 /// Whether every object branch is a plain struct of the settled graph that kept every property,
 /// the tag among them.
-fn intact_objects(shapes: &Shapes, union: &Union, stripped: &BTreeSet<ShapeKey>) -> bool {
+fn intact_objects(shapes: &Shapes, union: &Union, settlement: &Settlement) -> bool {
     let Some(tag) = &union.tag else {
         return false;
     };
@@ -75,7 +102,7 @@ fn intact_objects(shapes: &Shapes, union: &Union, stripped: &BTreeSet<ShapeKey>)
             return false;
         };
         structure.flattened.is_none()
-            && !stripped.contains(key)
+            && !settlement.strips(key)
             && structure
                 .fields
                 .iter()
@@ -83,105 +110,75 @@ fn intact_objects(shapes: &Shapes, union: &Union, stripped: &BTreeSet<ShapeKey>)
     })
 }
 
-/// Whether a branch is generated as scalar data: a scalar, a string enum, or lists and tuples of
-/// those, through aliases and `Option`s.
-///
-/// A branch nothing else reaches has no shape yet, so it is classified on its own, with its
-/// diagnostics left out: an admitted union reaches it again when it is typed.
-fn scalar_data(
-    resolved: &ResolvedDocument,
-    shapes: &Shapes,
-    reference: &ShapeRef,
-    component_names: &ComponentNames,
+/// The settled graph, and the shapes classified for branches it does not hold.
+struct Probe<'a> {
+    resolved: &'a ResolvedDocument,
+    shapes: &'a Shapes,
+    known: Known<'a>,
     integers: IntegerWidth,
-    depth: usize,
-) -> bool {
-    if depth > MAX_DATA_DEPTH {
-        return false;
-    }
-    let shape = match reference {
-        ShapeRef::Inline(shape) => (**shape).clone(),
-        ShapeRef::Key(key) => shapes.get(key).cloned().unwrap_or_else(|| {
-            let mut known = Known {
-                component_names,
-                admitted: &BTreeSet::new(),
-                found: BTreeMap::new(),
-            };
-            classify::key(resolved, key, &mut known, integers, &mut Ctx::new())
-        }),
-    };
-    let data = |inner: &ShapeRef| {
-        scalar_data(
-            resolved,
-            shapes,
-            inner,
-            component_names,
-            integers,
-            depth.saturating_add(1),
-        )
-    };
-    match &shape {
-        Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => true,
-        Shape::Alias(inner)
-        | Shape::Optional(inner)
-        | Shape::Array { item: Some(inner) }
-        | Shape::FixedArray { item: inner, .. } => data(inner),
-        Shape::Tuple { items } => items.iter().all(data),
-        Shape::Null
-        | Shape::Struct(_)
-        | Shape::Map { .. }
-        | Shape::Array { item: None }
-        | Shape::Union(_)
-        | Shape::Keyed(_)
-        | Shape::Any => false,
-    }
+    /// Each key the settled graph does not hold, classified once whichever union reaches it.
+    classified: BTreeMap<ShapeKey, Classified>,
 }
 
-/// The shapes a tagged union's variant declares its tag property as, followed through aliases and
-/// `Option`s the way settling reads them.
-///
-/// Settling refuses a tag declared as anything but a string, and arbitrary JSON passes, so a union
-/// standing there now would be read as something else once typed.
-pub(super) fn tag_fields(shapes: &Shapes) -> BTreeSet<ShapeKey> {
-    let mut fields = BTreeSet::new();
-    for (_, shape) in shapes.entries() {
-        let union = match shape {
-            Shape::Union(union) => union,
-            Shape::Optional(ShapeRef::Inline(inner)) => match inner.as_ref() {
-                Shape::Union(union) => union,
-                _ => continue,
-            },
-            _ => continue,
-        };
-        let Some(tag) = &union.tag else {
-            continue;
-        };
-        for variant in &union.variants {
-            let ShapeRef::Key(key) = &variant.shape else {
-                continue;
-            };
-            let Some(Shape::Struct(structure)) = shapes.get(key) else {
-                continue;
-            };
-            for field in structure
-                .fields
-                .iter()
-                .filter(|field| field.wire == tag.property)
-            {
-                let mut reference = Some(&field.shape);
-                while let Some(current) = reference {
-                    let shape = match current {
-                        ShapeRef::Key(key) if !fields.insert(key.clone()) => break,
-                        ShapeRef::Key(key) => shapes.get(key),
-                        ShapeRef::Inline(shape) => Some(shape.as_ref()),
-                    };
-                    reference = match shape {
-                        Some(Shape::Alias(inner) | Shape::Optional(inner)) => Some(inner),
-                        _ => None,
-                    };
+impl Probe<'_> {
+    /// Whether a branch is generated as scalar data: a scalar, a string enum, or lists and tuples
+    /// of those, through aliases and `Option`s.
+    ///
+    /// A key the settled graph does not hold is classified on its own and added to `reached`, the
+    /// shapes the union would add to the graph.
+    fn scalar_data(
+        &mut self,
+        reference: &ShapeRef,
+        depth: usize,
+        reached: &mut BTreeSet<ShapeKey>,
+    ) -> bool {
+        if depth > MAX_DATA_DEPTH {
+            return false;
+        }
+        let shape = match reference {
+            ShapeRef::Inline(shape) => (**shape).clone(),
+            ShapeRef::Key(key) => match self.shapes.get(key) {
+                Some(shape) => shape.clone(),
+                None => {
+                    reached.insert(key.clone());
+                    self.classify(key).clone()
                 }
-            }
+            },
+        };
+        let mut data = |inner: &ShapeRef| self.scalar_data(inner, depth.saturating_add(1), reached);
+        match &shape {
+            Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => true,
+            Shape::Alias(inner)
+            | Shape::Optional(inner)
+            | Shape::Array { item: Some(inner) }
+            | Shape::FixedArray { item: inner, .. } => data(inner),
+            Shape::Tuple { items } => items.iter().all(data),
+            Shape::Null
+            | Shape::Struct(_)
+            | Shape::Map { .. }
+            | Shape::Array { item: None }
+            | Shape::Union(_)
+            | Shape::Keyed(_)
+            | Shape::Any => false,
         }
     }
-    fields
+
+    /// What `key` classifies as, classifying it the first time it is asked for.
+    fn classify(&mut self, key: &ShapeKey) -> &Shape {
+        let classified = self.classified.entry(key.clone()).or_insert_with(|| {
+            let mut reports = Ctx::recording();
+            let shape = classify::key(
+                self.resolved,
+                key,
+                &mut self.known,
+                self.integers,
+                &mut reports,
+            );
+            Classified {
+                shape,
+                reports: reports.into_diagnostics(),
+            }
+        });
+        &classified.shape
+    }
 }

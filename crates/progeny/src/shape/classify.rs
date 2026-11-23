@@ -32,11 +32,8 @@ pub(super) type ComponentNames = BTreeMap<ShapeKey, String>;
 pub(super) struct Known<'a> {
     /// The name `components.schemas` gave each shape.
     pub(super) component_names: &'a ComponentNames,
-    /// The unions to read by the kind of each payload and then by tag, which
-    /// [`super::admit::admitted`] chose after a classification that left them arbitrary JSON.
-    pub(super) admitted: &'a BTreeSet<ShapeKey>,
-    /// The unions this classification could have read so and left arbitrary JSON, with the union
-    /// each would be.
+    /// The unions classification could have read by the kind of each payload and then by tag and
+    /// left arbitrary JSON, with the union each would be ([`super::admit`]).
     pub(super) found: BTreeMap<ShapeKey, Union>,
 }
 
@@ -1609,12 +1606,12 @@ fn tagged(
     Some(dispatched(resolved, declared, branches, component_names))
 }
 
-/// A union nothing tells apart, which is arbitrary JSON unless it was admitted to be read by the
-/// kind of each payload and the tag its objects name themselves with ([`kind_tagged`]).
+/// A union nothing tells apart, which is arbitrary JSON.
 ///
-/// Where it could be read so, it is found rather than typed.
-/// The document's other types and tags are settled without it, and [`super::admit::admitted`]
-/// decides from that settled graph whether reading it so changes any of them.
+/// Where it could be read by the kind of each payload and the tag its objects name themselves
+/// with ([`kind_tagged`]), it is found too, and stays arbitrary JSON while the document's other
+/// types and tags are settled without it.
+/// [`super::admit`] decides from that settled graph whether it is typed so.
 fn wild(
     resolved: &ResolvedDocument,
     key: &ShapeKey,
@@ -1625,9 +1622,6 @@ fn wild(
     at: &JsonPointer,
 ) -> Shape {
     if let Some(union) = kind_tagged(resolved, branches) {
-        if known.admitted.contains(key) {
-            return Shape::Union(union);
-        }
         known.found.insert(key.clone(), union);
     }
     // No discriminator and no way to tell the variants apart. An untagged enum here picks
