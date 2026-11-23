@@ -1033,12 +1033,11 @@ fn spread_union(
     }
     let (reading, nullable) = Reading::of(resolved, &spread);
     let shape = match reading {
-        Reading::Empty => return None,
-        Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
-        Reading::Strings(strings) => Shape::StringEnum(strings),
         // Only a union written as one reads as a plain string, and spread branches are no union
         // the document wrote.
-        Reading::String(_) => return None,
+        Reading::Empty | Reading::String(_) => return None,
+        Reading::One(key) => Shape::Alias(ShapeRef::Key(key)),
+        Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::Variants(spread) => told_apart(resolved, view, spread).ok()?,
     };
     Some((shape, nullable))
