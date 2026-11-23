@@ -753,8 +753,14 @@ fn a_string_beside_tagged_objects_reads_each_by_its_kind_and_then_its_tag() {
     // The string is the string branch, and each object the branch its tag names, although the
     // Google branch would read the Vapi payload by shape.
     assert!(matches!(read(r#""off""#)?, Detection::Detection0(_)));
-    assert!(matches!(read(r#"{"provider":"google"}"#)?, Detection::Google(_)));
-    assert!(matches!(read(r#"{"model":"m","provider":"vapi"}"#)?, Detection::Vapi(_)));
+    assert!(matches!(
+        read(r#"{"provider":"google"}"#)?,
+        Detection::Google(_)
+    ));
+    assert!(matches!(
+        read(r#"{"model":"m","provider":"vapi"}"#)?,
+        Detection::Vapi(_)
+    ));
     // An unlisted tag, an object without one and a value of another kind are kept whole.
     for payload in [r#"{"provider":"other"}"#, r#"{"model":"m"}"#, "7", "[]"] {
         assert!(matches!(read(payload)?, Detection::Unknown(_)), "{payload}");
@@ -814,7 +820,10 @@ fn a_string_beside_objects_whose_tag_another_union_consumes_consumes_it_too() {
 
     let read = |payload: &str| serde_json::from_str::<PetOrName>(payload);
     assert!(matches!(read(r#""rex""#)?, PetOrName::Text(_)));
-    assert!(matches!(read(r#"{"kind":"dog","name":"rex"}"#)?, PetOrName::Dog(_)));
+    assert!(matches!(
+        read(r#"{"kind":"dog","name":"rex"}"#)?,
+        PetOrName::Dog(_)
+    ));
     for payload in [r#"{"kind":"bird"}"#, r#"{"name":"rex"}"#, "true"] {
         assert!(matches!(read(payload)?, PetOrName::Unknown(_)), "{payload}");
     }
