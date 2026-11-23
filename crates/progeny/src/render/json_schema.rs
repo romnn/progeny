@@ -204,12 +204,7 @@ impl Writer<'_> {
         Some(match contract.kind() {
             ContractKind::Struct { fields } => self.structure(contract, fields),
             ContractKind::Enum { variants, .. } => self.untagged(variants),
-            ContractKind::TaggedEnum {
-                tag,
-                variants,
-                kinds,
-                ..
-            } => self.tagged(tag, variants, kinds),
+            ContractKind::TaggedEnum { tag, variants, .. } => self.tagged(tag, variants),
             ContractKind::CarriedTagEnum {
                 tag,
                 variants,
@@ -302,13 +297,11 @@ impl Writer<'_> {
 
     /// A union whose tag member is consumed: each variant's payload carries the tag beside its own
     /// members, as the one value naming that variant.
-    /// A value of another kind than an object is one of `kinds`.
-    fn tagged(&self, tag: &str, variants: &[TaggedVariant], kinds: &[VariantContract]) -> Node {
+    fn tagged(&self, tag: &str, variants: &[TaggedVariant]) -> Node {
         let mut arms: Vec<Node> = variants
             .iter()
             .map(|variant| self.tagged_variant(tag, variant))
             .collect();
-        arms.extend(kinds.iter().map(|kind| self.reference(&kind.ty)));
         arms.push(fallback("names no variant in its tag"));
         Node::object([("anyOf", Node::Array(arms))])
     }

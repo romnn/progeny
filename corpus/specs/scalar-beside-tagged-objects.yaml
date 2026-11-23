@@ -19,22 +19,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Detection"
-  /pets:
-    post:
-      operationId: adopt
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PetOrName"
-      responses:
-        "200":
-          description: The pet
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Pet"
   /shapes:
     post:
       operationId: draw
@@ -77,39 +61,6 @@ components:
           type: string
           enum: [vapi]
         model:
-          type: string
-    # A declared union that consumes `kind`, and a string beside the same objects, which reuses it.
-    Pet:
-      oneOf:
-        - $ref: "#/components/schemas/Cat"
-        - $ref: "#/components/schemas/Dog"
-      discriminator:
-        propertyName: kind
-        mapping:
-          cat: "#/components/schemas/Cat"
-          dog: "#/components/schemas/Dog"
-    PetOrName:
-      oneOf:
-        - type: string
-        - $ref: "#/components/schemas/Cat"
-        - $ref: "#/components/schemas/Dog"
-    Cat:
-      type: object
-      required: [kind]
-      properties:
-        kind:
-          type: string
-          enum: [cat]
-        name:
-          type: string
-    Dog:
-      type: object
-      required: [kind]
-      properties:
-        kind:
-          type: string
-          enum: [dog]
-        name:
           type: string
     # A list beside objects tagged by `type`, one of which lists two spellings.
     Shape:

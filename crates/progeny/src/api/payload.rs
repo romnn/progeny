@@ -342,19 +342,10 @@ impl Collect<'_> {
             Shape::Union(union) => {
                 // …unless the union dispatches on a tag, where the first branch that accepts the
                 // payload is not the branch serde takes.
-                match &union.tag {
-                    // A value that is not an object is read by the branches of other kinds alone.
-                    Some(tag) if !tag.kinds.is_empty() && !value.is_object() => {
-                        self.untagged(value, &tag.kinds, lenient, trail)
-                    }
-                    Some(tag) => self.tagged(value, union, tag, lenient, trail),
-                    None => self.untagged(
-                        value,
-                        union.variants.iter().map(|variant| &variant.shape),
-                        lenient,
-                        trail,
-                    ),
+                if let Some(tag) = &union.tag {
+                    return self.tagged(value, union, tag, lenient, trail);
                 }
+                self.untagged(value, union, lenient, trail)
             }
             Shape::Keyed(keyed) => self.keyed(value, keyed, lenient),
             Shape::Null | Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => {
@@ -363,18 +354,18 @@ impl Collect<'_> {
         }
     }
 
-    /// The expectation for an untagged union of `branches`: the payload pruned under the first
-    /// branch that accepts it, which is the branch serde takes.
-    fn untagged<'s>(
+    /// The expectation for an untagged union: the payload pruned under the first branch that
+    /// accepts it, which is the branch serde takes.
+    fn untagged(
         &self,
         value: &Value,
-        branches: impl IntoIterator<Item = &'s ShapeRef>,
+        union: &Union,
         lenient: bool,
         trail: &mut Trail,
     ) -> Option<Value> {
-        for branch in branches {
-            if self.accepts(value, branch) {
-                return self.follow(value, branch, None, lenient, trail);
+        for variant in &union.variants {
+            if self.accepts(value, &variant.shape) {
+                return self.follow(value, &variant.shape, None, lenient, trail);
             }
         }
         // No branch accepts it, so the open arm keeps it whole.
@@ -1159,30 +1150,28 @@ mod tests {
     }
 
     /// A list beside objects that name themselves is read by its kind, so an example list is the
-    /// schema's own payload and is expected back as the list branch writes it, without the
-    /// member its elements do not declare.
+    /// schema's own payload rather than a vendor's defect, and comes back as it went in.
     #[test_util::test]
-    fn a_list_beside_tagged_objects_expects_the_list_as_the_list_branch_reads_it() {
+    fn a_list_beside_tagged_objects_is_the_schemas_own_payload() {
         let object = |kind: &str| {
             json!({
                 "type": "object", "required": ["type"],
                 "properties": {"type": {"type": "string", "enum": [kind]}, "name": {"type": "string"}},
             })
         };
-        let example = json!([{"name": "n", "undeclared": 1}]);
+        let example = json!([1.5, 2]);
         let mut document = requesting(&json!({"$ref": "#/components/schemas/Shape"}), &example);
         document["components"] = json!({"schemas": {
             "Point": object("point"),
             "Line": object("line"),
-            "Item": {"type": "object", "properties": {"name": {"type": "string"}}},
             "Shape": {"oneOf": [
                 {"$ref": "#/components/schemas/Point"},
-                {"type": "array", "items": {"$ref": "#/components/schemas/Item"}},
+                {"type": "array", "items": {"type": "number"}},
                 {"$ref": "#/components/schemas/Line"},
             ]},
         }});
         let found = payloads_of(document)?;
-        assert_eq!(found[0].expected, json!([{"name": "n"}]));
+        assert_eq!(found[0].expected, example);
         assert!(!found[0].vendor_defect);
     }
 

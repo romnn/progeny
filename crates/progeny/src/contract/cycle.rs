@@ -109,18 +109,16 @@ fn replayed(kind: &ContractKind) -> Vec<&TypeRef> {
             .map(|variant| &variant.ty)
             .chain(kinds.iter().map(|kind| &kind.ty))
             .collect(),
-        // A consumed tag is taken off before the variant reads the rest, but a value that is not an
-        // object is handed whole to each variant of its kind.
-        ContractKind::TaggedEnum { kinds, .. } => kinds.iter().map(|kind| &kind.ty).collect(),
         // A flattened union can be handed the whole object, when no declared member is present.
         ContractKind::Struct { fields } => fields
             .iter()
             .filter(|field| field.capture == Some(Capture::Union))
             .map(|field| &field.ty)
             .collect(),
-        // A keyed payload sits under its key, a tuple's items are elements, and a string enum names
-        // no type.
-        ContractKind::KeyedEnum { .. }
+        // A consumed tag is taken off before the variant reads the rest, a keyed payload sits
+        // under its key, a tuple's items are elements, and a string enum names no type.
+        ContractKind::TaggedEnum { .. }
+        | ContractKind::KeyedEnum { .. }
         | ContractKind::Tuple { .. }
         | ContractKind::StringEnum { .. } => Vec::new(),
     }
@@ -774,7 +772,6 @@ mod tests {
                 ContractKind::TaggedEnum {
                     tag: "kind".to_owned(),
                     variants: tagged(boxed(0)),
-                    kinds: Vec::new(),
                     fallback: RustIdent::fallback_variant(),
                 },
             ),

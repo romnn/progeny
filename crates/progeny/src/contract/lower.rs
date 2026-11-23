@@ -1099,7 +1099,10 @@ impl Lower<'_> {
                 ContractKind::Enum { variants, fallback }
             }
             Some(tag) => {
-                if let Some((mut variants, fallback)) = tagged_variants(variants) {
+                // Branches of other kinds are only ever admitted beside a carried tag.
+                let named = tagged_variants(variants)
+                    .filter(|_| tag.style == TagStyle::Carried || tag.kinds.is_empty());
+                if let Some((mut variants, fallback)) = named {
                     if tag.shared {
                         self.name_by_type(&mut variants);
                     }
@@ -1113,7 +1116,6 @@ impl Lower<'_> {
                         TagStyle::Consumed => ContractKind::TaggedEnum {
                             tag: tag.property.clone(),
                             variants,
-                            kinds,
                             fallback,
                         },
                         TagStyle::Carried => ContractKind::CarriedTagEnum {
@@ -1129,7 +1131,8 @@ impl Lower<'_> {
                     }
                 } else {
                     // A tagged union with a variant nothing names is what
-                    // [`crate::shape::discriminate`] demotes before lowering ever runs,
+                    // [`crate::shape::discriminate`] demotes before lowering ever runs, and
+                    // a consumed tag beside branches of other kinds is never admitted,
                     // so this arm is the pipeline contract breaking rather than a
                     // document shape. The same demotion is applied here, because the
                     // alternatives are both the forbidden failure mode: rendering the

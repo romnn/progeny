@@ -749,7 +749,7 @@ impl fmt::Display for RejectLocation<'_> {
 /// Every degradation and repair site takes `&mut Ctx` and pushes its record, so producing the
 /// less-precise value and producing its diagnostic are one operation rather than two that can
 /// drift apart.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Ctx {
     path: JsonPointer,
     diagnostics: Vec<Diagnostic>,
@@ -768,14 +768,14 @@ pub(crate) struct Ctx {
 }
 
 /// One accepted finding, and whether any occurrence has matched it yet.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Acceptance {
     finding: Accepted,
     matched: bool,
 }
 
 /// One finding the caller accepts: a class and action at one exact location.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Accepted {
     pub(crate) class: BreakageClass,
     pub(crate) action: Action,

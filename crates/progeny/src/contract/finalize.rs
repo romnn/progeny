@@ -699,7 +699,6 @@ mod tests {
             ContractKind::TaggedEnum {
                 tag: "kind".to_owned(),
                 variants: Vec::new(),
-                kinds: Vec::new(),
                 fallback: RustIdent::variant("Unknown"),
             },
         ] {

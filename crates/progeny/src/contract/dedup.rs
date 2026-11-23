@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::lower::{Collapse, Provisional};
-use super::{ContractKind, FieldContract, TypeIndex, TypeRef, VariantContract};
+use super::{ContractKind, FieldContract, TypeIndex, TypeRef};
 use crate::shape::ShapeKey;
 
 /// Merge every group of identical contracts, repeatedly until nothing changes.
@@ -153,10 +153,10 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
         ContractKind::Enum { variants, .. } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
-        ContractKind::TaggedEnum {
-            variants, kinds, ..
+        ContractKind::TaggedEnum { variants, .. } => {
+            variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
-        | ContractKind::CarriedTagEnum {
+        ContractKind::CarriedTagEnum {
             variants, kinds, ..
         } => variants
             .iter_mut()
@@ -171,13 +171,6 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
         ContractKind::Newtype { inner } => vec![inner],
         ContractKind::Tuple { items } => items.iter_mut().collect(),
         ContractKind::Alias { target } => vec![target],
-    }
-}
-
-/// The variants a tagged union reads a value of another kind into, as its fingerprint spells them.
-fn kinds_print(out: &mut String, kinds: &[VariantContract]) {
-    for kind in kinds {
-        let _ = write!(out, "|kind {}:{:?}", kind.rust_name, kind.ty);
     }
 }
 
@@ -210,7 +203,6 @@ fn fingerprint(contract: &Provisional) -> String {
         ContractKind::TaggedEnum {
             tag,
             variants,
-            kinds,
             fallback,
         } => {
             let _ = write!(out, "tagged({tag})");
@@ -221,7 +213,6 @@ fn fingerprint(contract: &Provisional) -> String {
                     variant.rust_name, variant.tag_value, variant.ty
                 );
             }
-            kinds_print(&mut out, kinds);
             let _ = write!(out, "|?{fallback}");
         }
         // Distinct from `tagged(…)` on purpose: the two kinds put different bytes on the wire —
@@ -243,7 +234,9 @@ fn fingerprint(contract: &Provisional) -> String {
                     variant.rust_name, variant.tag_value, variant.aliases, variant.ty
                 );
             }
-            kinds_print(&mut out, kinds);
+            for kind in kinds {
+                let _ = write!(out, "|kind {}:{:?}", kind.rust_name, kind.ty);
+            }
             let _ = write!(out, "|absent={:?}|null={:?}", routes.absent, routes.null);
             let _ = write!(out, "|?{fallback}");
         }

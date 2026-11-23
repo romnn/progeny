@@ -135,13 +135,12 @@ fn decoder(
         ContractKind::TaggedEnum {
             tag,
             variants,
-            kinds,
             fallback,
         } => tagged_body(
             contract,
             tag,
             variants,
-            kinds,
+            &[],
             fallback,
             TagMember::Consumed,
             contracts,
@@ -685,23 +684,27 @@ fn from_strict(
         }
         (
             ContractKind::TaggedEnum {
-                variants,
-                kinds,
-                fallback,
+                variants, fallback, ..
+            },
+            ContractKind::TaggedEnum {
+                variants: strict_variants,
                 ..
-            }
-            | ContractKind::CarriedTagEnum {
+            },
+        ) => {
+            let pairs = variants
+                .iter()
+                .zip(strict_variants)
+                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
+            variant_conversions(pairs, fallback, &strict_name, contracts, Units::Variants)
+        }
+        (
+            ContractKind::CarriedTagEnum {
                 variants,
                 kinds,
                 fallback,
                 ..
             },
-            ContractKind::TaggedEnum {
-                variants: strict_variants,
-                kinds: strict_kinds,
-                ..
-            }
-            | ContractKind::CarriedTagEnum {
+            ContractKind::CarriedTagEnum {
                 variants: strict_variants,
                 kinds: strict_kinds,
                 ..

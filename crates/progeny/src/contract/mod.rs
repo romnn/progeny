@@ -351,9 +351,6 @@ pub(crate) enum ContractKind {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
-        /// The variants holding a value that is not an object, each tried in order for such a
-        /// payload, before the tag of an object is read.
-        kinds: Vec<VariantContract>,
         /// The variant holding a payload whose tag names no variant, as `serde_json::Value`.
         fallback: RustIdent,
     },
@@ -373,7 +370,8 @@ pub(crate) enum ContractKind {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
-        /// The variants holding a value that is not an object, as in [`ContractKind::TaggedEnum`].
+        /// The variants holding a value that is not an object, each tried in order for such a
+        /// payload, before the tag of an object is read.
         kinds: Vec<VariantContract>,
         /// The variants a payload is when its tag member is missing or `null`.
         routes: TagRoutes,
@@ -421,10 +419,10 @@ impl ContractKind {
         match self {
             Self::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
             Self::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
-            Self::TaggedEnum {
-                variants, kinds, ..
+            Self::TaggedEnum { variants, .. } => {
+                variants.iter().map(|variant| &variant.ty).collect()
             }
-            | Self::CarriedTagEnum {
+            Self::CarriedTagEnum {
                 variants, kinds, ..
             } => variants
                 .iter()
