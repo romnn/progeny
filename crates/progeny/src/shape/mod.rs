@@ -47,7 +47,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::diag::{BreakageClass, Ctx, Diagnostic, JsonPointer};
+use crate::diag::{Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
 
@@ -703,11 +703,12 @@ pub(crate) fn classify(
     discovered.install(resolved, admission);
     let Discovered {
         mut shapes,
-        seeds,
         reports,
         ..
     } = discovered;
-    report_in_order(&seeds, &shapes, reports, ctx);
+    for diagnostic in reports {
+        ctx.report(diagnostic);
+    }
     inheritance::report(resolved, shapes.by_key.keys(), ctx);
     discriminate::apply(resolved, &mut shapes, settlement, ctx);
     shapes
@@ -716,17 +717,15 @@ pub(crate) fn classify(
 /// What classifying the document's API surface found, before any tag is settled.
 struct Discovered {
     shapes: Shapes,
-    /// Where the work list starts.
-    seeds: Vec<ShapeKey>,
     /// Every position that could name a shape, of which [`Shapes::roots`] holds those reached.
     named: Vec<Root>,
     /// The name `components.schemas` gave each shape.
     component_names: classify::ComponentNames,
     /// The unions found readable by kind and then by tag, each classified as arbitrary JSON.
-    found: BTreeMap<ShapeKey, Union>,
-    /// What classifying each shape reported, kept to be reported in the work list's order once
-    /// every shape is known ([`report_in_order`]).
-    reports: BTreeMap<ShapeKey, Vec<Diagnostic>>,
+    found: BTreeMap<ShapeKey, classify::Found>,
+    /// What classifying the shapes reported, in the order the work list classified them, kept
+    /// until admission decides which unions are not arbitrary JSON after all.
+    reports: Vec<Diagnostic>,
 }
 
 /// Classify every shape the document's API surface reaches.
@@ -748,7 +747,7 @@ fn discover(resolved: &ResolvedDocument, integers: crate::config::IntegerWidth) 
             site: resolved.schemas().address(root.id).clone(),
         })
         .collect();
-    let mut seeds: Vec<ShapeKey> = selected.iter().map(|root| root.key.clone()).collect();
+    let mut queue: Vec<ShapeKey> = selected.iter().map(|root| root.key.clone()).collect();
     let mut named = Vec::new();
     // The name `components.schemas` gave each shape, which is the discriminator's implicit
     // mapping. Collected from the roots because their keys are computed here anyway, and because
@@ -764,7 +763,7 @@ fn discover(resolved: &ResolvedDocument, integers: crate::config::IntegerWidth) 
             component_names.entry(key.clone()).or_insert(name.clone());
         }
         if selected.is_empty() {
-            seeds.push(key.clone());
+            queue.push(key.clone());
         }
         named.push(Root {
             key,
@@ -776,27 +775,23 @@ fn discover(resolved: &ResolvedDocument, integers: crate::config::IntegerWidth) 
     named.extend(selected);
 
     let mut shapes = Shapes::default();
-    let mut reports = BTreeMap::new();
+    let mut reports = Vec::new();
     let mut known = classify::Known {
         component_names: &component_names,
         found: BTreeMap::new(),
     };
-    let mut queue = seeds.clone();
     while let Some(key) = queue.pop() {
         if shapes.by_key.contains_key(&key) {
             continue;
         }
-        let mut found = Ctx::recording();
-        let shape = classify::key(resolved, &key, &mut known, integers, &mut found);
+        let shape = classify::key(resolved, &key, &mut known, integers, &mut reports);
         children(&shape, &mut queue);
-        reports.insert(key.clone(), found.into_diagnostics());
         shapes.insert(resolved, key, shape);
     }
     let found = known.found;
     shapes.roots = reached(&named, &shapes);
     Discovered {
         shapes,
-        seeds,
         named,
         component_names,
         found,
@@ -807,21 +802,26 @@ fn discover(resolved: &ResolvedDocument, integers: crate::config::IntegerWidth) 
 impl Discovered {
     /// Type the admitted unions and add the scalar data they reach, leaving every other shape as
     /// it is.
+    ///
+    /// The diagnostics keep the order they were reported in, without each admitted union's
+    /// saying it is arbitrary JSON, and then what classifying the added scalar data reported.
     fn install(&mut self, resolved: &ResolvedDocument, admission: admit::Admission) {
+        let mut typed = BTreeSet::new();
         for (key, shape) in admission.unions {
-            // The admitted union is not arbitrary JSON after all. [`classify`] reports a union as
-            // arbitrary JSON only where it falls back to it, once per shape.
-            if let Some(found) = self.reports.get_mut(&key)
-                && let Some(index) = found
-                    .iter()
-                    .position(|diagnostic| diagnostic.class() == BreakageClass::WildUnion)
-            {
-                found.remove(index);
+            if let Some(found) = self.found.get(&key) {
+                typed.insert(found.fallback);
             }
             self.shapes.replace(&key, shape);
         }
+        let reports = std::mem::take(&mut self.reports);
+        self.reports = reports
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !typed.contains(index))
+            .map(|(_, diagnostic)| diagnostic)
+            .collect();
         for (key, data) in admission.data {
-            self.reports.insert(key.clone(), data.reports);
+            self.reports.extend(data.reports);
             self.shapes.insert(resolved, key, data.shape);
         }
         // A name the bundle gives scalar data only an admitted union reaches names it now.
@@ -838,32 +838,6 @@ fn reached(named: &[Root], shapes: &Shapes) -> Vec<Root> {
         .filter(|root| shapes.by_key.contains_key(&root.key))
         .cloned()
         .collect()
-}
-
-/// Report what classifying each shape found, in the order the work list classified them.
-///
-/// The order is the work list's over the final shapes, so the report reads as if each shape had
-/// been reported as it was classified, with the admitted unions typed from the start.
-fn report_in_order(
-    seeds: &[ShapeKey],
-    shapes: &Shapes,
-    mut reports: BTreeMap<ShapeKey, Vec<Diagnostic>>,
-    ctx: &mut Ctx,
-) {
-    let mut queue = seeds.to_vec();
-    let mut visited = BTreeSet::new();
-    while let Some(key) = queue.pop() {
-        if !visited.insert(key.clone()) {
-            continue;
-        }
-        let Some(shape) = shapes.get(&key) else {
-            continue;
-        };
-        children(shape, &mut queue);
-        for diagnostic in reports.remove(&key).into_iter().flatten() {
-            ctx.report(diagnostic);
-        }
-    }
 }
 
 /// What a shape's own schemas say about themselves, for the doc comments a renderer writes.
@@ -6655,6 +6629,29 @@ mod tests {
         assert!(matches!(shapes.get(list), Some(Shape::Array { .. })));
     }
 
+    /// A fixed-position list beside objects that name themselves stays arbitrary JSON, because a
+    /// tuple of 17 positions is past what its generated Rust can debug-print or deserialize.
+    #[test_util::test]
+    fn a_tuple_beside_objects_that_name_themselves_still_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let positions = vec![json!({"type": "string"}); 17];
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(json!({
+            "Point": named_object("type", &["point"]),
+            "Line": named_object("type", &["line"]),
+            "Shapes": {"oneOf": [
+                reference("Point"),
+                {"type": "array", "prefixItems": positions, "items": false},
+                reference("Line"),
+            ]},
+        })))?;
+        assert_eq!(shape_of(&shapes, "Shapes")?, &Shape::Any);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            ["/components/schemas/Shapes"],
+            "{diagnostics:?}"
+        );
+    }
+
     /// Beside a string, objects that share a spelling of their tag name no branch by it, an
     /// earlier listed number takes the payloads of a later plain one, and a `null` hidden in a
     /// union of its own is no variant, so each union still degrades.
@@ -7327,6 +7324,63 @@ mod tests {
                     false
                 ),
             ]
+        );
+    }
+
+    /// A typed union reaching objects classification reached before it leaves the order of their
+    /// findings alone: a finding they share with another type keeps the location it was first
+    /// reported at.
+    #[test_util::test]
+    fn a_typed_union_keeps_where_its_objects_findings_were_first_reported() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let counted = |provider: &str| {
+            json!({
+                "type": "object",
+                "required": ["provider"],
+                "properties": {
+                    "provider": {"type": "string", "enum": [provider]},
+                    "count": {"type": "integer", "minimum": 3},
+                },
+            })
+        };
+        let schemas = json!({
+            "Google": counted("google"),
+            "Vapi": counted("vapi"),
+            // Classified first and listing its objects the other way round, so it reaches them in
+            // the other order.
+            "Voicemail": {"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Vapi"),
+                reference("Google"),
+            ]},
+        });
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(schemas.clone()))?;
+        assert!(matches!(shape_of(&shapes, "Voicemail")?, Shape::Union(_)));
+        // The same document with the union left out reports the finding the same way.
+        let mut without = schemas;
+        if let Some(schemas) = without.as_object_mut() {
+            schemas.remove("Voicemail");
+        }
+        let (_, baseline) = shapes_of(with_schemas(without))?;
+        let restricted = |diagnostics: &[Diagnostic]| -> Vec<(String, Vec<String>)> {
+            diagnostics
+                .iter()
+                .filter(|found| found.class() == BreakageClass::UnsupportedConstruct)
+                .map(|found| {
+                    (
+                        found.location().to_string(),
+                        found.related().iter().map(ToString::to_string).collect(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(restricted(&diagnostics), restricted(&baseline));
+        assert_eq!(
+            restricted(&diagnostics),
+            [(
+                "/components/schemas/Vapi/properties/count".to_owned(),
+                vec!["/components/schemas/Google/properties/count".to_owned()]
+            )]
         );
     }
 }

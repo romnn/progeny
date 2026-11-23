@@ -765,9 +765,6 @@ pub(crate) struct Ctx {
     aggregated: BTreeMap<(BreakageClass, Action, String, bool), usize>,
     /// The findings the caller accepts, in the order the caller listed them.
     accepts: Vec<Acceptance>,
-    /// Whether every occurrence is kept as it was reported, neither folded nor matched against
-    /// acceptances, for a caller that reports them into another context in an order of its own.
-    recording: bool,
 }
 
 /// One accepted finding, and whether any occurrence has matched it yet.
@@ -788,15 +785,6 @@ pub(crate) struct Accepted {
 impl Ctx {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    /// A context that keeps every occurrence as it was reported ([`Ctx::into_diagnostics`]), to be
-    /// reported into another context later.
-    pub(crate) fn recording() -> Self {
-        Self {
-            recording: true,
-            ..Self::default()
-        }
     }
 
     /// This context, marking each occurrence of one of `accepts` as accepted.
@@ -846,10 +834,6 @@ impl Ctx {
     /// accidentally emit 16,100 lines by reporting at the wrong level: the class decides, and
     /// every report site goes through this one function.
     pub(crate) fn report(&mut self, mut diagnostic: Diagnostic) {
-        if self.recording {
-            self.diagnostics.push(diagnostic);
-            return;
-        }
         // Matched while the diagnostic is still one occurrence, so neither folding nor the cap on
         // related locations decides what the deny policy sees.
         // Every matching entry is marked, so a duplicate entry is not reported as matching nothing.

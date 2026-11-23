@@ -15,7 +15,7 @@ use super::classify::{self, Known};
 use super::discriminate::{Settlement, with_union};
 use super::{Discovered, Shape, ShapeKey, ShapeRef, Shapes, Union};
 use crate::config::IntegerWidth;
-use crate::diag::{Ctx, Diagnostic};
+use crate::diag::Diagnostic;
 use crate::resolve::ResolvedDocument;
 
 /// How far through aliases and lists a branch of another kind is followed before it counts as
@@ -63,7 +63,8 @@ pub(super) fn admit(
     };
     let mut unions = BTreeMap::new();
     let mut reached = BTreeSet::new();
-    for (key, union) in &discovered.found {
+    for (key, found) in &discovered.found {
+        let union = &found.union;
         if settlement.tag_reads.contains(key) || !intact_objects(probe.shapes, union, settlement) {
             continue;
         }
@@ -121,8 +122,11 @@ struct Probe<'a> {
 }
 
 impl Probe<'_> {
-    /// Whether a branch is generated as scalar data: a scalar, a string enum, or lists and tuples
-    /// of those, through aliases and `Option`s.
+    /// Whether a branch is generated as scalar data: a scalar, a string enum, or lists of those,
+    /// through aliases and `Option`s.
+    ///
+    /// A tuple is not, because its generated Rust stops implementing `Debug` past 12 positions and
+    /// deserializing past 16.
     ///
     /// A key the settled graph does not hold is classified on its own and added to `reached`, the
     /// shapes the union would add to the graph.
@@ -146,15 +150,16 @@ impl Probe<'_> {
                 }
             }
         };
-        let mut data = |inner: &ShapeRef| self.scalar_data(inner, depth.saturating_add(1), reached);
         match &shape {
             Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => true,
             Shape::Alias(inner)
             | Shape::Optional(inner)
             | Shape::Array { item: Some(inner) }
-            | Shape::FixedArray { item: inner, .. } => data(inner),
-            Shape::Tuple { items } => items.iter().all(data),
+            | Shape::FixedArray { item: inner, .. } => {
+                self.scalar_data(inner, depth.saturating_add(1), reached)
+            }
             Shape::Null
+            | Shape::Tuple { .. }
             | Shape::Struct(_)
             | Shape::Map { .. }
             | Shape::Array { item: None }
@@ -167,7 +172,7 @@ impl Probe<'_> {
     /// What `key` classifies as, classifying it the first time it is asked for.
     fn classify(&mut self, key: &ShapeKey) -> &Shape {
         let classified = self.classified.entry(key.clone()).or_insert_with(|| {
-            let mut reports = Ctx::recording();
+            let mut reports = Vec::new();
             let shape = classify::key(
                 self.resolved,
                 key,
@@ -175,10 +180,7 @@ impl Probe<'_> {
                 self.integers,
                 &mut reports,
             );
-            Classified {
-                shape,
-                reports: reports.into_diagnostics(),
-            }
+            Classified { shape, reports }
         });
         &classified.shape
     }
