@@ -137,13 +137,14 @@ impl Probe<'_> {
         }
         let shape = match reference {
             ShapeRef::Inline(shape) => (**shape).clone(),
-            ShapeRef::Key(key) => match self.shapes.get(key) {
-                Some(shape) => shape.clone(),
-                None => {
+            ShapeRef::Key(key) => {
+                if let Some(shape) = self.shapes.get(key) {
+                    shape.clone()
+                } else {
                     reached.insert(key.clone());
                     self.classify(key).clone()
                 }
-            },
+            }
         };
         let mut data = |inner: &ShapeRef| self.scalar_data(inner, depth.saturating_add(1), reached);
         match &shape {
