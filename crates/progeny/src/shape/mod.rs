@@ -4916,6 +4916,32 @@ mod tests {
         Ok(())
     }
 
+    /// Restricted branches that share a keyword report it once, at the union.
+    #[test_util::test]
+    fn restricted_branches_report_a_shared_keyword_once() -> eyre::Result<()> {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "DagWarningType": warning_type(),
+            "Code": {"anyOf": [
+                {"$ref": "#/components/schemas/DagWarningType"},
+                {"type": "string", "pattern": "^custom:"},
+                {"type": "string", "pattern": "^plugin:"},
+            ]},
+        })))?;
+        assert_eq!(shape_of(&shapes, "Code")?, &Shape::Scalar(Scalar::String));
+        // One diagnostic names `pattern` once, at the union alone.
+        let [reported] = diagnostics.as_slice() else {
+            eyre::bail!("expected one diagnostic: {diagnostics:#?}");
+        };
+        assert_eq!(reported.class(), BreakageClass::UnsupportedConstruct);
+        assert!(
+            reported.detail().starts_with("`pattern` narrows"),
+            "{reported:#?}"
+        );
+        assert_eq!(reported.occurrences().get(), 1, "{reported:#?}");
+        assert_eq!(reported.location().to_string(), "/components/schemas/Code");
+        Ok(())
+    }
+
     /// A branch that reads every string makes known strings an enum that admits any other, and
     /// the values every enum branch lists, inline or named, are its values in document order.
     #[test_util::test]

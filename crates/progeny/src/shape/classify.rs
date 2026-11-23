@@ -579,9 +579,11 @@ fn union(
         Reading::Strings(strings) => Shape::StringEnum(strings),
         Reading::String(restricted) => {
             let string = Shape::Scalar(Scalar::String);
-            for branch in &restricted {
-                report_uninterpreted(&merge::view(resolved, branch), &string, ctx, at);
-            }
+            let omitted = View {
+                uninterpreted: restricted,
+                ..View::default()
+            };
+            report_uninterpreted(&omitted, &string, ctx, at);
             string
         }
         Reading::Variants(rest) => match told_apart(resolved, view, rest) {
@@ -1509,8 +1511,9 @@ enum Reading {
     /// ([`string_union`]).
     Strings(StringEnum),
     /// An `anyOf` written as known strings or others it restricts, which reads as one plain
-    /// string ([`string_union`]), with the restricted branches, whose keywords it does not hold.
-    String(Vec<ShapeKey>),
+    /// string ([`string_union`]), with the keywords of its restricted branches, which it does not
+    /// hold.
+    String(Vec<&'static str>),
     /// Two or more branches a payload has to be told apart between.
     Variants(Vec<ShapeKey>),
 }
@@ -3197,8 +3200,9 @@ struct WrittenStrings {
     listed: Vec<String>,
     /// Whether a branch reads every string.
     open: bool,
-    /// The string branches whose length or pattern restrictions no string type holds.
-    restricted: Vec<ShapeKey>,
+    /// The distinct length and pattern keywords of the string branches, which no string type
+    /// holds.
+    restricted: Vec<&'static str>,
     /// Whether the union admits `null`.
     null: bool,
 }
@@ -3284,11 +3288,12 @@ fn written_strings(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<Writte
             {
                 // Its length and pattern are what its view reports, and a branch without them
                 // reads every string, whatever `format` it names.
-                let key = merge::key_of(resolved, id);
-                if merge::view(resolved, &key).uninterpreted.is_empty() {
-                    written.open = true;
-                } else {
-                    written.restricted.push(key);
+                let reported = merge::view(resolved, &merge::key_of(resolved, id)).uninterpreted;
+                written.open |= reported.is_empty();
+                for keyword in reported {
+                    if !written.restricted.contains(&keyword) {
+                        written.restricted.push(keyword);
+                    }
                 }
             }
             _ => return None,
