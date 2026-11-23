@@ -12,9 +12,11 @@ clap.workspace = true
 color-eyre.workspace = true
 flate2.workspace = true
 indoc.workspace = true
+prettyplease.workspace = true
 proc-macro2.workspace = true
-rayon.workspace = true
 progeny = { workspace = true, features = ["harness", "exact-numbers"] }
+quote.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
