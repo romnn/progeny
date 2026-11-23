@@ -204,13 +204,19 @@ impl Writer<'_> {
         Some(match contract.kind() {
             ContractKind::Struct { fields } => self.structure(contract, fields),
             ContractKind::Enum { variants, .. } => self.untagged(variants),
-            ContractKind::TaggedEnum { tag, variants, .. } => self.tagged(tag, variants),
+            ContractKind::TaggedEnum {
+                tag,
+                variants,
+                kinds,
+                ..
+            } => self.tagged(tag, variants, kinds),
             ContractKind::CarriedTagEnum {
                 tag,
                 variants,
+                kinds,
                 routes,
                 ..
-            } => self.carried(tag, variants, *routes),
+            } => self.carried(tag, variants, kinds, *routes),
             ContractKind::KeyedEnum { variants, .. } => self.keyed(variants),
             ContractKind::StringEnum {
                 variants,
@@ -296,11 +302,13 @@ impl Writer<'_> {
 
     /// A union whose tag member is consumed: each variant's payload carries the tag beside its own
     /// members, as the one value naming that variant.
-    fn tagged(&self, tag: &str, variants: &[TaggedVariant]) -> Node {
+    /// A value of another kind than an object is one of `kinds`.
+    fn tagged(&self, tag: &str, variants: &[TaggedVariant], kinds: &[VariantContract]) -> Node {
         let mut arms: Vec<Node> = variants
             .iter()
             .map(|variant| self.tagged_variant(tag, variant))
             .collect();
+        arms.extend(kinds.iter().map(|kind| self.reference(&kind.ty)));
         arms.push(fallback("names no variant in its tag"));
         Node::object([("anyOf", Node::Array(arms))])
     }
@@ -336,7 +344,14 @@ impl Writer<'_> {
     ///
     /// Beside the variant's schema rather than inside it, because the variant declares the tag
     /// member itself, so even one that forbids undeclared members accepts it.
-    fn carried(&self, tag: &str, variants: &[TaggedVariant], routes: TagRoutes) -> Node {
+    /// A value of another kind than an object is one of `kinds`.
+    fn carried(
+        &self,
+        tag: &str,
+        variants: &[TaggedVariant],
+        kinds: &[VariantContract],
+        routes: TagRoutes,
+    ) -> Node {
         let mut arms: Vec<Node> = variants
             .iter()
             .enumerate()
@@ -353,6 +368,7 @@ impl Writer<'_> {
                 )])
             })
             .collect();
+        arms.extend(kinds.iter().map(|kind| self.reference(&kind.ty)));
         arms.push(fallback("names no variant in its tag"));
         Node::object([("anyOf", Node::Array(arms))])
     }

@@ -384,10 +384,16 @@ pub(crate) fn references(kind: &ContractKind) -> Vec<&TypeRef> {
     match kind {
         ContractKind::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
         ContractKind::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
-        ContractKind::TaggedEnum { variants, .. }
-        | ContractKind::CarriedTagEnum { variants, .. } => {
-            variants.iter().map(|variant| &variant.ty).collect()
+        ContractKind::TaggedEnum {
+            variants, kinds, ..
         }
+        | ContractKind::CarriedTagEnum {
+            variants, kinds, ..
+        } => variants
+            .iter()
+            .map(|variant| &variant.ty)
+            .chain(kinds.iter().map(|kind| &kind.ty))
+            .collect(),
         ContractKind::KeyedEnum { variants, .. } => variants
             .iter()
             .filter_map(|variant| variant.payload.as_ref())
@@ -716,6 +722,7 @@ mod tests {
             ContractKind::TaggedEnum {
                 tag: "kind".to_owned(),
                 variants: Vec::new(),
+                kinds: Vec::new(),
                 fallback: RustIdent::variant("Unknown"),
             },
         ] {

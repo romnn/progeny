@@ -556,6 +556,9 @@ fn string(view: &View) -> Shape {
 /// a union that is neither soundly structural nor soundly tagged degrades to arbitrary JSON.
 /// Before it degrades for want of a tag, a union whose branches include unions of their own is
 /// matched by shape once more, with those read as their branches ([`spread_union`]).
+/// Without a declared or inherited discriminator, it is then read by the kind of each payload and
+/// the tag its objects name themselves with, where those tell every branch apart
+/// ([`kind_tagged`]).
 ///
 /// The order is the whole policy in one sentence: **a union is matched by shape when shape decides
 /// it, by its tag when only the tag decides it, and by neither when nothing does.**
@@ -622,7 +625,7 @@ fn told_apart(
         // The branches name themselves: read the tag, the way a declared discriminator is read,
         // rather than match by shape — which would rest on the constants, and a generated string
         // enum reads any string.
-        return Ok(self_named(named));
+        return Ok(self_named(named, Vec::new()));
     }
     match ambiguity(resolved, &rest) {
         // Shape decides it: an untagged enum is exact, and every variant keeps every property the
@@ -745,6 +748,7 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
                 absent: None,
                 null: None,
                 shared: true,
+                kinds: Vec::new(),
             }),
         }));
     }
@@ -1585,6 +1589,9 @@ fn tagged(
         .then(|| shared_base_discriminator(resolved, branches))
         .flatten();
     let Some(declared) = view.discriminator.as_ref().or(inherited.as_ref()) else {
+        if let Some(shape) = kind_tagged(resolved, branches) {
+            return shape;
+        }
         // No discriminator and no way to tell the variants apart. An untagged enum here picks
         // whichever variant happens to deserialize first, which is the predecessor's "wild union
         // semantics" breakage class and the one forbidden failure mode.
@@ -1601,6 +1608,53 @@ fn tagged(
         return Shape::Any;
     };
     dispatched(resolved, declared, branches, component_names)
+}
+
+/// Branches told apart by the kind of value they read, and the objects among them by a tag they
+/// name themselves with.
+///
+/// `"off"` beside four objects that each require `provider` with a value of their own: a string
+/// is the string branch, and an object is the branch its `provider` names.
+/// A tag only has to tell apart the branches that read the same kind of value.
+/// So the branches that are not objects are compared among themselves, in order, as [`ambiguity`]
+/// compares any branches, and the objects are read by the constants [`constant_discriminator`]
+/// finds, which may list several spellings per branch.
+///
+/// Every branch has to show the one kind its generated type reads ([`read_kind`]).
+/// A branch that says nothing about its kind, or a union of its own, whose open arm reads every
+/// kind, leaves the union to degrade.
+fn kind_tagged(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<Shape> {
+    let mut objects = Vec::new();
+    let mut others = Vec::new();
+    for branch in branches {
+        match read_kind(resolved, branch, 0)? {
+            Kind::Object => objects.push(branch.clone()),
+            Kind::Array | Kind::String | Kind::Number | Kind::Boolean => {
+                others.push(branch.clone());
+            }
+            // A `null` among the branches makes the union an `Option` rather than a variant.
+            Kind::Null => return None,
+        }
+    }
+    // A union of objects alone was read by its constants already, in [`told_apart`].
+    if others.is_empty() || ambiguity(resolved, &others).is_some() {
+        return None;
+    }
+    let named = constant_discriminator(resolved, &objects, None)?;
+    Some(self_named(named, others))
+}
+
+/// The one kind of value the type generated for a branch reads, when it reads one.
+fn read_kind(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> Option<Kind> {
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return None;
+    }
+    match Branch::of(resolved, key) {
+        Branch::Through(inner) => read_kind(resolved, &inner, depth.saturating_add(1)),
+        Branch::Union(_) => None,
+        Branch::Flattened(_) => Some(Kind::Object),
+        Branch::Leaf(view) | Branch::Restricted(view) => kind_of(resolved, &view),
+    }
 }
 
 /// The union a family's base declares, read by its declared tag however many subtypes it lists.
@@ -1622,7 +1676,7 @@ fn tagged_family(
         }
     }
     match constant_discriminator(resolved, &subtypes, Some(&declared.property)) {
-        Some(named) => self_named(named),
+        Some(named) => self_named(named, Vec::new()),
         None => dispatched(resolved, declared, &subtypes, component_names),
     }
 }
@@ -1750,8 +1804,9 @@ fn constant_discriminator(
     None
 }
 
-/// A union whose branches name themselves, read by the constants they name themselves with.
-fn self_named(named: SelfNamed) -> Shape {
+/// A union whose branches name themselves, read by the constants they name themselves with, beside
+/// the branches of other kinds in `kinds`.
+fn self_named(named: SelfNamed, kinds: Vec<ShapeKey>) -> Shape {
     Shape::Union(Union {
         variants: named
             .variants
@@ -1772,6 +1827,7 @@ fn self_named(named: SelfNamed) -> Shape {
             absent: named.absent,
             null: named.null,
             shared: false,
+            kinds: kinds.into_iter().map(ShapeRef::Key).collect(),
         }),
     })
 }

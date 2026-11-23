@@ -345,9 +345,12 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
         ContractKind::TaggedEnum {
             tag,
             variants,
+            kinds,
             fallback,
         } => {
-            let body = tagged_enum(tag, variants, fallback, contract, contracts, config, scope);
+            let body = tagged_enum(
+                tag, variants, kinds, fallback, contract, contracts, config, scope,
+            );
             quote! {
                 #docs
                 #derives
@@ -363,9 +366,14 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
             }
         }
         ContractKind::CarriedTagEnum {
-            variants, fallback, ..
+            variants,
+            kinds,
+            fallback,
+            ..
         } => {
-            let body = carried_tag_enum(variants, fallback, contract, contracts, config, scope);
+            let body = carried_tag_enum(
+                variants, kinds, fallback, contract, contracts, config, scope,
+            );
             quote! {
                 #docs
                 #derives
@@ -609,6 +617,7 @@ fn keyed_enum(
 /// else — the tag and the wire names are the impls' business.
 fn carried_tag_enum(
     variants: &[crate::contract::TaggedVariant],
+    kinds: &[crate::contract::VariantContract],
     fallback: &RustIdent,
     contract: &TypeContract,
     contracts: &Contracts,
@@ -621,13 +630,31 @@ fn carried_tag_enum(
         let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
+    let kinds = kind_arms(kinds, quote! {}, contracts, config, scope);
     let fallback = fallback_variant(fallback, "names no variant in its tag");
     quote! {
         pub enum #name {
             #(#arms)*
+            #(#kinds)*
             #fallback
         }
     }
+}
+
+/// The variants of a tagged union that hold a value of another kind than an object, each behind
+/// `attribute`.
+fn kind_arms<'a>(
+    kinds: &'a [crate::contract::VariantContract],
+    attribute: TokenStream,
+    contracts: &'a Contracts,
+    config: &'a Config,
+    scope: Scope,
+) -> impl Iterator<Item = TokenStream> + 'a {
+    kinds.iter().map(move |kind| {
+        let variant_ident = ident(&kind.rust_name);
+        let ty = enum_type_ref(&kind.ty, contracts, config, scope);
+        quote! { #attribute #variant_ident(#ty), }
+    })
 }
 
 /// A tagged data-carrying enum: the tag member and each variant's exact wire name, straight off
@@ -636,9 +663,15 @@ fn carried_tag_enum(
 /// The tag attribute and the per-variant rename are two readings of one contract kind, which is
 /// why they are written together: a tagged union has exactly one name per variant and no choice
 /// about using it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a tagged union's item is the product of its contract's parts and the rendering \
+              scope; a struct would put the same values one indirection away"
+)]
 fn tagged_enum(
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    kinds: &[crate::contract::VariantContract],
     fallback: &RustIdent,
     contract: &TypeContract,
     contracts: &Contracts,
@@ -671,15 +704,21 @@ fn tagged_enum(
         let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         quote! { #rename #variant_ident(#ty), }
     });
-    // serde tries every tagged variant first and falls through to an untagged one only when
-    // none read the payload, which is exactly the open arm: a tag the description does not
-    // list, or a payload the named variant cannot read.
-    let untagged = with_serde.then(|| quote! { #[serde(untagged)] });
+    // serde tries every tagged variant first and falls through to the untagged ones, in order,
+    // only when none read the payload.
+    // A value that is not an object is read by the first variant of its kind, and the open arm
+    // holds the rest: a tag the description does not list, or a payload the named variant cannot
+    // read.
+    let untagged = with_serde
+        .then(|| quote! { #[serde(untagged)] })
+        .unwrap_or_default();
+    let kinds = kind_arms(kinds, untagged.clone(), contracts, config, scope);
     let fallback = fallback_variant(fallback, "names no variant in its tag");
     quote! {
         #tagging
         pub enum #name {
             #(#arms)*
+            #(#kinds)*
             #untagged
             #fallback
         }

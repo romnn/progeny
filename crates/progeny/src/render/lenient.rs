@@ -135,11 +135,13 @@ fn decoder(
         ContractKind::TaggedEnum {
             tag,
             variants,
+            kinds,
             fallback,
         } => tagged_body(
             contract,
             tag,
             variants,
+            kinds,
             fallback,
             TagMember::Consumed,
             contracts,
@@ -149,12 +151,14 @@ fn decoder(
         ContractKind::CarriedTagEnum {
             tag,
             variants,
+            kinds,
             routes,
             fallback,
         } => tagged_body(
             contract,
             tag,
             variants,
+            kinds,
             fallback,
             TagMember::Carried(*routes),
             contracts,
@@ -348,6 +352,7 @@ fn tagged_body(
     contract: &TypeContract,
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    kinds: &[crate::contract::VariantContract],
     fallback: &RustIdent,
     member: TagMember,
     contracts: &Contracts,
@@ -399,6 +404,25 @@ fn tagged_body(
                     .map(|value| #wrap),
             }
         });
+    // A value that is not an object is the first variant of its kind that reads it, and one none
+    // reads goes on to the tag lookup, which finds no tag in it.
+    // One condition per variant rather than an `if` around them, which is a collapsible `if` in
+    // the consumer's build where the union has one variant of another kind.
+    let kinds: Vec<TokenStream> = kinds
+        .iter()
+        .map(|kind| {
+            let name = ident(&kind.rust_name);
+            let ty = type_ref_in(&kind.ty, contracts, config, scope);
+            let wrap = wrapped(&kind.ty, contract.docs().deprecated, &name);
+            quote! {
+                if !matches!(content, #support::Content::Map(_))
+                    && let Some(value) = #support::lenient::probe::<#ty>(&content, site, report)
+                {
+                    return Ok(#wrap);
+                }
+            }
+        })
+        .collect();
     let unknown = unknown_arm(contract, fallback);
     let fallback = quote! {
         _ => {
@@ -410,6 +434,7 @@ fn tagged_body(
         return quote! {
             const TAG: &str = #tag;
             const VARIANTS: &[&str] = &[#(#wire_names),*];
+            #(#kinds)*
             match #support::lenient::tag_choice(&content, TAG, VARIANTS, #absent, #null)? {
                 #(#arms)*
                 #fallback
@@ -437,6 +462,7 @@ fn tagged_body(
     quote! {
         const TAG: &str = #tag;
         const VARIANTS: &[&str] = &[#(#wire_names),*];
+        #(#kinds)*
         for choice in #support::lenient::tag_choices(&content, TAG, VARIANTS, #absent, #null)? {
             match choice {
                 #(#probes)*
@@ -655,24 +681,40 @@ fn from_strict(
         }
         (
             ContractKind::TaggedEnum {
-                variants, fallback, ..
+                variants,
+                kinds,
+                fallback,
+                ..
             }
             | ContractKind::CarriedTagEnum {
-                variants, fallback, ..
+                variants,
+                kinds,
+                fallback,
+                ..
             },
             ContractKind::TaggedEnum {
                 variants: strict_variants,
+                kinds: strict_kinds,
                 ..
             }
             | ContractKind::CarriedTagEnum {
                 variants: strict_variants,
+                kinds: strict_kinds,
                 ..
             },
         ) => {
+            // A variant of another kind is never `()`, because a `null` branch makes the union
+            // an `Option` instead.
             let pairs = variants
                 .iter()
                 .zip(strict_variants)
-                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
+                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty))
+                .chain(
+                    kinds
+                        .iter()
+                        .zip(strict_kinds)
+                        .map(|(kind, source)| (&kind.rust_name, &kind.ty, &source.ty)),
+                );
             variant_conversions(pairs, fallback, &strict_name, contracts, Units::Variants)
         }
         (

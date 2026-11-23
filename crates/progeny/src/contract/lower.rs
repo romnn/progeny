@@ -635,15 +635,23 @@ impl Lower<'_> {
                             if tag.shared {
                                 self.name_by_type(&mut variants);
                             }
+                            let kinds = tag
+                                .kinds
+                                .iter()
+                                .map(|kind| self.reference(kind, key, ctx))
+                                .collect();
+                            let kinds = self.kind_variants(kinds, &variants);
                             match tag.style {
                                 TagStyle::Consumed => ContractKind::TaggedEnum {
                                     tag: tag.property.clone(),
                                     variants,
+                                    kinds,
                                     fallback,
                                 },
                                 TagStyle::Carried => ContractKind::CarriedTagEnum {
                                     tag: tag.property.clone(),
                                     variants,
+                                    kinds,
                                     routes: TagRoutes {
                                         absent: tag.absent,
                                         null: tag.null,
@@ -1057,11 +1065,17 @@ impl Lower<'_> {
         match shape {
             Shape::Any | Shape::Null | Shape::Optional(_) => true,
             Shape::Alias(inner) => self.holds_null_within(inner, seen),
-            // A tagged union reads only objects, which carry the tag.
-            Shape::Union(union) if union.tag.is_none() => union
-                .variants
-                .iter()
-                .any(|variant| self.holds_null_within(&variant.shape, seen)),
+            Shape::Union(union) => match &union.tag {
+                None => union
+                    .variants
+                    .iter()
+                    .any(|variant| self.holds_null_within(&variant.shape, seen)),
+                // The tagged variants read only objects, which carry the tag.
+                Some(tag) => tag
+                    .kinds
+                    .iter()
+                    .any(|kind| self.holds_null_within(kind, seen)),
+            },
             _ => false,
         }
     }
@@ -1126,6 +1140,22 @@ impl Lower<'_> {
             })
             .collect();
         (variants, RustIdent::fallback_variant())
+    }
+
+    /// Name the variants of a tagged union that hold values of other kinds after their types, as
+    /// an untagged union's are, apart from the names its tagged variants took.
+    fn kind_variants(&self, types: Vec<TypeRef>, tagged: &[TaggedVariant]) -> Vec<VariantContract> {
+        let mut used = Namer::default();
+        for variant in tagged {
+            used.take(&variant.rust_name);
+        }
+        types
+            .into_iter()
+            .map(|ty| VariantContract {
+                rust_name: used.unique(RustIdent::declared_variant(&self.variant_name(&ty))),
+                ty,
+            })
+            .collect()
     }
 
     /// Name each variant of a union whose variants share a value of its tag after its type, as an

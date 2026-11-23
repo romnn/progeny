@@ -85,6 +85,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MaybeHolder"
+  /detections:
+    post:
+      operationId: postDetection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Detection"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Detection"
+  /pets:
+    post:
+      operationId: postPet
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pet"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+  /pet-names:
+    post:
+      operationId: postPetOrName
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PetOrName"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PetOrName"
 components:
   schemas:
     Spike:
@@ -476,3 +521,66 @@ components:
               properties:
                 result:
                   type: string
+    # A string beside objects that each require `provider` with a value of their own, as vapi's
+    # voicemail detection is written: a string is the string branch, and an object the branch its
+    # `provider` names.
+    # Nothing else takes `provider` off the objects, so they keep it and the union carries it.
+    Detection:
+      oneOf:
+        - type: string
+          enum: ["off"]
+        - $ref: "#/components/schemas/GoogleDetection"
+        - $ref: "#/components/schemas/VapiDetection"
+    GoogleDetection:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [google]
+        model:
+          type: string
+    VapiDetection:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [vapi]
+        model:
+          type: string
+    # A union of objects tagged by `kind`, which consumes the tag, beside one that also reads a
+    # name: that one reuses the consumed tag, taking it off before the object reads the rest and
+    # writing it back itself.
+    Pet:
+      oneOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+      discriminator:
+        propertyName: kind
+        mapping:
+          cat: "#/components/schemas/Cat"
+          dog: "#/components/schemas/Dog"
+    PetOrName:
+      oneOf:
+        - type: string
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+    Cat:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [cat]
+        name:
+          type: string
+    Dog:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [dog]
+        name:
+          type: string

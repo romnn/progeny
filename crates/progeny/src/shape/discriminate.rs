@@ -23,6 +23,9 @@
 //! property that a carried union's payloads still put on the wire — so the settlement is a
 //! fixpoint: every union starts consumed, each round re-evaluates all of them against the styles
 //! of the rest, and a union only ever moves *away* from consumed, so the rounds run out of moves.
+//!
+//! A union that reads values of other kinds beside its tagged objects ([`super::Tag::kinds`]) is
+//! settled after the fixpoint, by the ownership the others settled on, which it never moves.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,10 +37,19 @@ use crate::resolve::ResolvedDocument;
 /// Settle every proposed tag: strip the variants of the consumed ones, mark the carried ones, and
 /// demote the rest.
 pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ctx) {
-    let proposed = proposals(shapes);
-    if proposed.is_empty() {
+    let all = proposals(shapes);
+    if all.is_empty() {
         return;
     }
+    // A union that also reads values of other kinds takes the ownership the rest settle on, so it
+    // sits out the fixpoint.
+    let (mixed, proposed): (Vec<_>, Vec<_>) = all.iter().cloned().partition(|(key, _)| {
+        shapes
+            .get(key)
+            .and_then(tagged_union)
+            .and_then(|union| union.tag.as_ref())
+            .is_some_and(|tag| !tag.kinds.is_empty())
+    });
     let base_borrowed = borrowed_outside_tagged_unions(shapes);
     let above = read_above(shapes);
 
@@ -51,7 +63,7 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
     // every union still consuming; a demotion's reason is kept from the round it flipped in,
     // which no later round revisits.
     let mut reasons: BTreeMap<ShapeKey, String> = BTreeMap::new();
-    let outcome = loop {
+    let mut outcome = loop {
         let round = evaluate(shapes, &proposed, &base_borrowed, &above, &modes);
         for (key, reason) in &round.demoted {
             reasons.entry(key.clone()).or_insert_with(|| reason.clone());
@@ -61,6 +73,16 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
         }
         modes = round.modes.clone();
     };
+    for (union_key, property) in &mixed {
+        let Some(union) = shapes.get(union_key).and_then(tagged_union) else {
+            continue;
+        };
+        let mode = taken_over(shapes, &outcome.strip, union, property).unwrap_or_else(|reason| {
+            reasons.insert(union_key.clone(), reason);
+            Mode::Demoted
+        });
+        outcome.modes.insert(union_key.clone(), mode);
+    }
 
     for (variant, property, first, union_key) in outcome.shared {
         // Both parents can have it: the tag is written by whichever enum is doing the
@@ -92,7 +114,7 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
     }
     // In proposal order rather than flip order, so which round a union fell in leaves no trace in
     // the report.
-    for (union_key, _) in &proposed {
+    for (union_key, _) in &all {
         if outcome.modes.get(union_key) != Some(&Mode::Demoted) {
             continue;
         }
@@ -277,6 +299,76 @@ fn evaluate(
         }
     }
     round
+}
+
+/// How a union whose objects name themselves beside branches of other kinds reads its tag, or why
+/// it cannot, once the other unions have settled.
+///
+/// It takes the ownership it finds, so it never moves another union's decision.
+/// Where no union takes anything off its variants, they keep the tag, and the union carries it.
+/// Where another union already consumes this same property on every one of them, this union
+/// consumes it too: it takes the property off before the variant reads the rest and writes it
+/// back itself.
+/// It cannot do either where another union takes a property off some variant that its payloads
+/// still carry, or where it would have to write back a spelling or an absence a consumed tag
+/// loses.
+fn taken_over(
+    shapes: &Shapes,
+    strip: &[(ShapeKey, String)],
+    union: &Union,
+    property: &str,
+) -> Result<Mode, String> {
+    let named: Vec<(ShapeKey, Option<String>)> = union
+        .variants
+        .iter()
+        .filter_map(|variant| match &variant.shape {
+            ShapeRef::Key(key) => Some((key.clone(), variant.tag.clone())),
+            ShapeRef::Inline(_) => None,
+        })
+        .collect();
+    if named.len() != union.variants.len() {
+        return Err(
+            "one of its variants is written inline rather than as a schema of its own".to_owned(),
+        );
+    }
+    if let Some(reason) = refuse_outright(shapes, &named, property, false) {
+        return Err(reason);
+    }
+    let taken: Vec<Option<&str>> = named
+        .iter()
+        .map(|(variant, _)| {
+            strip
+                .iter()
+                .find(|(stripped, _)| stripped == variant)
+                .map(|(_, taken)| taken.as_str())
+        })
+        .collect();
+    if taken.iter().all(Option::is_none) {
+        return match carried_shortfall(shapes, &named, property) {
+            None => Ok(Mode::Carried),
+            Some(shortfall) => Err(format!(
+                "the variants cannot carry the tag because {shortfall}"
+            )),
+        };
+    }
+    if !taken.iter().all(|taken| *taken == Some(property)) {
+        return Err(
+            "another union takes a member off some of its variants that its own payloads still \
+             carry"
+                .to_owned(),
+        );
+    }
+    if union
+        .tag
+        .as_ref()
+        .is_some_and(|tag| tag.reads_more_than_it_writes(union))
+    {
+        return Err(format!(
+            "another union takes `{property}` off its variants, and some payloads name their \
+             variant by a spelling the union would not write back, or by leaving the tag out"
+        ));
+    }
+    Ok(Mode::Consumed)
 }
 
 /// Every union that asked for a tag, in a deterministic order.

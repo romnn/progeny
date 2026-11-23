@@ -75,12 +75,18 @@ fn units(
     for contract in types {
         let mut reached = Vec::new();
         match &contract.kind {
-            // A tagged union holds types only in its variants.
-            ContractKind::TaggedEnum { variants, .. } => {
+            // A tagged union holds types only in its variants, and a variant of another kind holds
+            // a whole value rather than a payload whose tag was taken off.
+            ContractKind::TaggedEnum {
+                variants, kinds, ..
+            } => {
                 for variant in variants {
                     if !matches!(variant.ty, TypeRef::Named(_)) {
                         variant.ty.named(&mut reached);
                     }
+                }
+                for kind in kinds {
+                    kind.ty.named(&mut reached);
                 }
             }
             other => {

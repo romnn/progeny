@@ -55,10 +55,19 @@ pub(super) fn one(contract: &TypeContract) -> TokenStream {
             ContractKind::CarriedTagEnum {
                 tag,
                 variants,
+                kinds,
                 routes,
                 fallback,
             },
-        ) => carried(contract, tag, variants, *routes, fallback, serialize_only),
+        ) => carried(
+            contract,
+            tag,
+            variants,
+            kinds,
+            *routes,
+            fallback,
+            serialize_only,
+        ),
         // A read form's `Deserialize` is the lenient decoder's, and `Serialize` is derived in both.
         (DeserStrategy::HandWrittenKeyed, ContractKind::KeyedEnum { variants, fallback }) => {
             if serialize_only {
@@ -450,10 +459,13 @@ fn fieldless(
 /// payload's own tag wherever that already names it.
 /// The match the resolver runs binds its last variant with a `_` arm, sound because the support
 /// `dispatch` hands back only positions inside `VARIANTS`.
+/// A payload that is not an object is first tried against the variants of other kinds, in order,
+/// and one none of them reads goes on to `dispatch`, which keeps it in the open arm.
 fn carried(
     contract: &TypeContract,
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    kinds: &[crate::contract::VariantContract],
     routes: TagRoutes,
     fallback: &RustIdent,
     serialize_only: bool,
@@ -507,7 +519,49 @@ fn carried(
                 }
             }
         };
-    let write = carried_writes(contract, tag, variants, routes, &support);
+    let kind_reads = kinds.iter().map(|kind| {
+        let member = ident(&kind.rust_name);
+        let resolved = if contract.docs().deprecated {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated deserializer must construct this deprecated variant"
+                )]
+                let resolved = Self::#member(value);
+                return Ok(resolved);
+            }
+        } else {
+            quote! { return Ok(Self::#member(value)); }
+        };
+        // One condition rather than an `if` around the reads, which is a collapsible `if` in the
+        // consumer's build where the union has one variant of another kind.
+        quote! {
+            if !matches!(payload, #support::Content::Map(_))
+                && let Ok(value) = serde::Deserialize::deserialize(
+                    #support::ContentDeserializer::<'de, D::Error>::new(payload.clone()),
+                )
+            {
+                #resolved
+            }
+        }
+    });
+    let mut write: Vec<TokenStream> =
+        carried_writes(contract, tag, variants, routes, &support).collect();
+    write.extend(kinds.iter().map(|kind| {
+        let member = ident(&kind.rust_name);
+        let deprecated = contract.docs().deprecated.then(|| {
+            quote! {
+                #[expect(
+                    deprecated,
+                    reason = "the generated serializer must match this deprecated variant"
+                )]
+            }
+        });
+        quote! {
+            #deprecated
+            Self::#member(value) => serde::Serialize::serialize(value, serializer),
+        }
+    }));
     let deprecated = contract.docs().deprecated.then(|| {
         quote! {
             #[expect(
@@ -529,6 +583,7 @@ fn carried(
                     const VARIANTS: &[&str] = &[#(#wire_names),*];
                     let payload: #support::Content<'de> =
                         serde::Deserialize::deserialize(deserializer)?;
+                    #(#kind_reads)*
                     #support::dispatch(TAG, VARIANTS, #absent, #null, payload, #resolver, #unknown)
                 }
             }

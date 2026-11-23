@@ -537,6 +537,14 @@ pub(crate) struct Tag {
     /// fallback where none does, which is sound only where [`classify`] has shown that no earlier
     /// such variant reads a later one's payloads.
     pub(crate) shared: bool,
+    /// The branches that are not objects, which a payload of their kind is before any tag is read.
+    ///
+    /// Empty for a union of objects alone.
+    /// A payload that is not an object is the first of these whose type reads it, and an object is
+    /// the variant its tag names.
+    /// [`classify`] keeps these only where the generated type of each reads one kind of value no
+    /// object does, and no earlier one takes the payloads of a later one of its kind.
+    pub(crate) kinds: Vec<ShapeRef>,
 }
 
 impl Tag {
@@ -548,6 +556,7 @@ impl Tag {
             absent: None,
             null: None,
             shared: false,
+            kinds: Vec::new(),
         }
     }
 
@@ -798,6 +807,9 @@ fn children(shape: &Shape, out: &mut Vec<ShapeKey>) {
             for variant in &union.variants {
                 push(&variant.shape);
             }
+            for kind in union.tag.iter().flat_map(|tag| &tag.kinds) {
+                push(kind);
+            }
         }
         Shape::Keyed(keyed) => {
             for payload in keyed
@@ -969,6 +981,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             }),
             vec![Some("cat".to_owned()), Some("dog".to_owned())],
         );
@@ -1329,6 +1342,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         let tags: Vec<Option<&str>> = either
@@ -1464,6 +1478,7 @@ mod tests {
                 absent: Some(0),
                 null: Some(0),
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         // Each branch writes its first spelling and reads the rest.
@@ -1689,6 +1704,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         let Shape::Struct(a) = shape_of(&shapes, "A")? else {
@@ -1758,6 +1774,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
     }
@@ -1797,6 +1814,7 @@ mod tests {
                     absent: None,
                     null: None,
                     shared: false,
+                    kinds: Vec::new(),
                 }),
                 "{union_name}"
             );
@@ -5759,6 +5777,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
     }
@@ -5826,6 +5845,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         // And the variant gave the property up, because nothing else carries it.
@@ -6363,6 +6383,355 @@ mod tests {
         assert_eq!(
             shape_of(&shapes, "Plain")?,
             &Shape::Scalar(Scalar::Integer(IntType::I64))
+        );
+    }
+
+    /// Every location `class` is reported at, the ones folded into another record's included,
+    /// sorted.
+    fn reported_at(diagnostics: &[Diagnostic], class: BreakageClass) -> Vec<String> {
+        let mut locations: Vec<String> = diagnostics
+            .iter()
+            .filter(|found| found.class() == class)
+            .flat_map(|found| std::iter::once(found.location()).chain(found.related()))
+            .map(ToString::to_string)
+            .collect();
+        locations.sort();
+        locations
+    }
+
+    /// The key of the component named `name`.
+    fn component_key(shapes: &Shapes, name: &str) -> eyre::Result<ShapeRef> {
+        let root = shapes
+            .roots()
+            .iter()
+            .find(|root| root.hint.iter().any(|segment| segment == name))
+            .ok_or_else(|| eyre::eyre!("no root named {name}"))?;
+        Ok(ShapeRef::Key(root.key.clone()))
+    }
+
+    /// An object requiring `member` with the values `values`, beside a member every such object
+    /// declares, so by shape alone each would read the others' payloads.
+    fn named_object(member: &str, values: &[&str]) -> Value {
+        json!({
+            "type": "object",
+            "required": [member],
+            "properties": {member: {"type": "string", "enum": values}, "model": {"type": "string"}},
+        })
+    }
+
+    /// The tagged variants of `union` as the component each holds and the tag it writes, and the
+    /// branches of other kinds.
+    fn tagged_and_kinds(union: &Union) -> (Vec<(ShapeRef, Option<String>)>, Vec<ShapeRef>) {
+        let tagged = union
+            .variants
+            .iter()
+            .map(|variant| (variant.shape.clone(), variant.tag.clone()))
+            .collect();
+        let kinds = union
+            .tag
+            .as_ref()
+            .map(|tag| tag.kinds.clone())
+            .unwrap_or_default();
+        (tagged, kinds)
+    }
+
+    /// vapi's voicemail detection: `"off"` beside four objects each requiring `provider` with a
+    /// value of its own reads a string as the string branch and an object by its tag, where it
+    /// used to degrade because one object reads another's payloads by shape.
+    #[test_util::test]
+    fn a_string_beside_objects_that_name_themselves_reads_each_by_kind_then_tag() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "OpenAi": named_object("provider", &["openai"]),
+            "Twilio": named_object("provider", &["twilio"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            "Detection": {"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Google"),
+                reference("OpenAi"),
+                reference("Twilio"),
+                reference("Vapi"),
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Detection")? else {
+            eyre::bail!("`Detection` is a union");
+        };
+        let (tagged, kinds) = tagged_and_kinds(union);
+
+        // One object arm per provider, each named by its own value of `provider`.
+        let mut expected = Vec::new();
+        for (name, tag) in [
+            ("Google", "google"),
+            ("OpenAi", "openai"),
+            ("Twilio", "twilio"),
+            ("Vapi", "vapi"),
+        ] {
+            expected.push((component_key(&shapes, name)?, Some(tag.to_owned())));
+        }
+        assert_eq!(tagged, expected);
+        // The string is the one branch of another kind, and it reads as the string it lists.
+        let [ShapeRef::Key(string)] = kinds.as_slice() else {
+            eyre::bail!("one branch of another kind: {kinds:?}");
+        };
+        assert_eq!(
+            shapes.get(string),
+            Some(&Shape::StringEnum(StringEnum::listed(vec![
+                "off".to_owned()
+            ])))
+        );
+        // Only this union reads the objects, so they keep their tag and the union carries it.
+        let tag = union.tag.as_ref().ok_or_eyre("the union is tagged")?;
+        assert_eq!(
+            (tag.property.as_str(), tag.style),
+            ("provider", TagStyle::Carried)
+        );
+        let Shape::Struct(google) = shape_of(&shapes, "Google")? else {
+            eyre::bail!("`Google` is a struct");
+        };
+        assert!(google.fields.iter().any(|field| field.wire == "provider"));
+    }
+
+    /// A list beside objects that name themselves, as opensearch's geo shapes put an envelope's
+    /// coordinates beside six tagged objects, reads a list as the list and an object by its tag.
+    /// An arm may list several spellings of its name, as long as no two arms share one.
+    #[test_util::test]
+    fn a_list_beside_objects_whose_tags_list_several_spellings_reads_each_by_kind_then_tag() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Point": named_object("type", &["point", "Point"]),
+            "Line": named_object("type", &["line"]),
+            "Shapes": {"oneOf": [
+                reference("Point"),
+                {"type": "array", "items": {"type": "number"}},
+                reference("Line"),
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Shapes")? else {
+            eyre::bail!("`Shapes` is a union");
+        };
+        let (tagged, kinds) = tagged_and_kinds(union);
+        assert_eq!(
+            tagged,
+            [
+                (component_key(&shapes, "Point")?, Some("point".to_owned())),
+                (component_key(&shapes, "Line")?, Some("line".to_owned())),
+            ]
+        );
+        // The other spelling names the point too, and the list is the branch of another kind.
+        let aliases: Vec<&[String]> = union
+            .variants
+            .iter()
+            .map(|variant| variant.aliases.as_slice())
+            .collect();
+        assert_eq!(aliases, [&["Point".to_owned()][..], &[][..]]);
+        let [ShapeRef::Key(list)] = kinds.as_slice() else {
+            eyre::bail!("one branch of another kind: {kinds:?}");
+        };
+        assert!(matches!(shapes.get(list), Some(Shape::Array { .. })));
+    }
+
+    /// Beside a string, objects that share a spelling of their tag name no branch by it, an
+    /// earlier listed number takes the payloads of a later plain one, and a `null` hidden in a
+    /// union of its own is no variant, so each union still degrades.
+    #[test_util::test]
+    fn what_the_kind_and_tag_reading_cannot_settle_still_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Point": named_object("type", &["point", "shape"]),
+            "Line": named_object("type", &["line", "shape"]),
+            "Circle": named_object("type", &["circle"]),
+            "Square": named_object("type", &["square"]),
+            "Overlapping": {"oneOf": [
+                {"type": "string"},
+                reference("Point"),
+                reference("Line"),
+            ]},
+            "Numbers": {"oneOf": [
+                {"type": "integer", "enum": [1]},
+                reference("Circle"),
+                {"type": "integer"},
+                reference("Square"),
+            ]},
+            "Nothing": {"oneOf": [
+                {"oneOf": [{"type": "null"}]},
+                reference("Circle"),
+                reference("Square"),
+            ]},
+        })))?;
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            [
+                "/components/schemas/Nothing",
+                "/components/schemas/Numbers",
+                "/components/schemas/Overlapping",
+            ],
+            "{diagnostics:?}"
+        );
+        for name in ["Overlapping", "Numbers", "Nothing"] {
+            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
+        }
+    }
+
+    /// The reading by kind and then tag only steps in where shape and every other reading gave
+    /// up, so a union told apart today keeps its variants in their order, untagged, and a
+    /// declared family listed first, whose open arm reads every kind, still degrades.
+    #[test_util::test]
+    fn unions_told_apart_or_led_by_a_family_keep_their_reading() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            "Family": {
+                "oneOf": [reference("Google"), reference("Vapi")],
+                "discriminator": {"propertyName": "provider"},
+            },
+            "Told": {"oneOf": [
+                {"type": "string"},
+                {"type": "integer"},
+                reference("Google"),
+            ]},
+            "StringFirst": {"oneOf": [{"type": "string"}, reference("Family")]},
+            "FamilyFirst": {"oneOf": [reference("Family"), {"type": "string"}]},
+        })))?;
+        // Told apart by shape, in the order the document lists them.
+        let Shape::Union(told) = shape_of(&shapes, "Told")? else {
+            eyre::bail!("`Told` is a union");
+        };
+        assert_eq!(told.tag, None);
+        assert_eq!(told.variants.len(), 3);
+        assert_eq!(told.variants[2].shape, component_key(&shapes, "Google")?);
+        // A string before the family is an untagged union whose second arm is the tagged family.
+        let Shape::Union(string_first) = shape_of(&shapes, "StringFirst")? else {
+            eyre::bail!("`StringFirst` is a union");
+        };
+        assert_eq!(string_first.tag, None);
+        assert_eq!(
+            string_first.variants[1].shape,
+            component_key(&shapes, "Family")?
+        );
+        // The family first would take the string into its open arm.
+        assert_eq!(shape_of(&shapes, "FamilyFirst")?, &Shape::Any);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            ["/components/schemas/FamilyFirst"],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A string beside objects another union already takes the tag off reuses that tag, so the
+    /// declared union keeps consuming it and nothing moves.
+    /// Where another union takes a different member off one of them, or the objects list a
+    /// spelling the consumed tag could not write back, the union beside the string degrades
+    /// instead.
+    #[test_util::test]
+    fn a_string_beside_shared_objects_takes_the_tag_ownership_it_finds() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let named_water = |kind: &str, water: &str| {
+            json!({
+                "type": "object",
+                "required": ["kind", "water"],
+                "properties": {
+                    "kind": {"type": "string", "enum": [kind]},
+                    "water": {"type": "string", "enum": [water]},
+                },
+            })
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Cat": named_object("kind", &["cat"]),
+            "Dog": named_object("kind", &["dog"]),
+            "Pet": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "PetOrName": {"oneOf": [{"type": "string"}, reference("Cat"), reference("Dog")]},
+            // Another tag taken off one of the objects this union tags by `kind`: the fish and
+            // the trout share their `kind`, so their union consumes `water` instead.
+            "Fish": named_water("fish", "salt"),
+            "Trout": named_water("fish", "fresh"),
+            "Bird": named_water("bird", "none"),
+            "ByWater": {"oneOf": [reference("Fish"), reference("Trout")]},
+            "FishOrName": {"oneOf": [{"type": "string"}, reference("Fish"), reference("Bird")]},
+            // A spelling the consumed tag would not write back: the declared union names the ant
+            // `ant` alone, and consumes `kind` because its third branch lists no value of it.
+            "Ant": named_object("kind", &["ant", "emmet"]),
+            "Bee": named_object("kind", &["bee"]),
+            "Cow": {"type": "object", "properties": {"kind": {"type": "string"}}},
+            "Farm": {
+                "oneOf": [reference("Ant"), reference("Bee"), reference("Cow")],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {"ant": "#/components/schemas/Ant", "bee": "#/components/schemas/Bee"},
+                },
+            },
+            "InsectOrName": {"oneOf": [{"type": "string"}, reference("Ant"), reference("Bee")]},
+        })))?;
+        // The declared union consumes `kind`, as it did when the union beside the string degraded.
+        let Shape::Union(pet) = shape_of(&shapes, "Pet")? else {
+            eyre::bail!("`Pet` is a union");
+        };
+        assert_eq!(
+            pet.tag.as_ref().map(|tag| tag.style),
+            Some(TagStyle::Consumed)
+        );
+        for name in ["Cat", "Dog"] {
+            let Shape::Struct(object) = shape_of(&shapes, name)? else {
+                eyre::bail!("`{name}` is a struct");
+            };
+            assert!(
+                object.fields.iter().all(|field| field.wire != "kind"),
+                "{name}"
+            );
+        }
+        // The union beside the string reuses the consumed tag, with the string as its other kind.
+        let Shape::Union(pet_or_name) = shape_of(&shapes, "PetOrName")? else {
+            eyre::bail!("`PetOrName` is a union");
+        };
+        let (tagged, kinds) = tagged_and_kinds(pet_or_name);
+        assert_eq!(
+            tagged,
+            [
+                (component_key(&shapes, "Cat")?, Some("cat".to_owned())),
+                (component_key(&shapes, "Dog")?, Some("dog".to_owned())),
+            ]
+        );
+        assert_eq!(kinds.len(), 1);
+        assert_eq!(
+            pet_or_name.tag.as_ref().map(|tag| tag.style),
+            Some(TagStyle::Consumed)
+        );
+
+        // The fish lost `water`, which its payloads beside a string still carry.
+        let Shape::Union(by_water) = shape_of(&shapes, "ByWater")? else {
+            eyre::bail!("`ByWater` is a union");
+        };
+        assert_eq!(
+            by_water
+                .tag
+                .as_ref()
+                .map(|tag| (tag.property.as_str(), tag.style)),
+            Some(("water", TagStyle::Consumed))
+        );
+        assert_eq!(shape_of(&shapes, "FishOrName")?, &Shape::Any);
+        // The farm consumes `kind`, and the union beside the string would write `emmet` back as
+        // `ant`.
+        let Shape::Union(farm) = shape_of(&shapes, "Farm")? else {
+            eyre::bail!("`Farm` is a union");
+        };
+        assert_eq!(
+            farm.tag.as_ref().map(|tag| tag.style),
+            Some(TagStyle::Consumed)
+        );
+        assert_eq!(shape_of(&shapes, "InsectOrName")?, &Shape::Any);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::DiscriminatorEdgeCase),
+            [
+                "/components/schemas/FishOrName",
+                "/components/schemas/InsectOrName"
+            ],
+            "{diagnostics:?}"
         );
     }
 }

@@ -721,3 +721,133 @@ fn a_flattened_union_round_trips_through_a_branch_that_flattens_its_own() {
         hand::types::ImageThreadItemVariant::FileId(ref id) if id.as_str() == "f"
     ));
 }
+
+/// Read a payload through the read forms of one type under both strategies, and write both back,
+/// with whether both read it without a report.
+///
+/// A macro because the trait a read form decodes through is in a module the two renderings do
+/// not name alike.
+macro_rules! read_back {
+    ($left:ty, $right:ty, $payload:expr) => {{
+        let payload: &str = $payload;
+        let left = derived::types::Decoded::<$left>::from_json(payload)?;
+        let right = hand::types::Decoded::<$right>::from_json(payload)?;
+        let clean = left.degradations.is_empty() && right.degradations.is_empty();
+        (
+            serde_json::to_string(&left.value)?,
+            serde_json::to_string(&right.value)?,
+            clean,
+        )
+    }};
+}
+
+/// A string beside objects that name themselves in `provider` reads a string as the string branch
+/// and an object as the branch its tag names, and writes each back as it came, under both
+/// strategies and in the read form.
+/// The objects are only this union's, so they keep the tag and the union carries it.
+#[test_util::test]
+fn a_string_beside_tagged_objects_reads_each_by_its_kind_and_then_its_tag() {
+    use derived::types::Detection;
+
+    let read = |payload: &str| serde_json::from_str::<Detection>(payload);
+    // The string is the string branch, and each object the branch its tag names, although the
+    // Google branch would read the Vapi payload by shape.
+    assert!(matches!(read(r#""off""#)?, Detection::Detection0(_)));
+    assert!(matches!(read(r#"{"provider":"google"}"#)?, Detection::Google(_)));
+    assert!(matches!(read(r#"{"model":"m","provider":"vapi"}"#)?, Detection::Vapi(_)));
+    // An unlisted tag, an object without one and a value of another kind are kept whole.
+    for payload in [r#"{"provider":"other"}"#, r#"{"model":"m"}"#, "7", "[]"] {
+        assert!(matches!(read(payload)?, Detection::Unknown(_)), "{payload}");
+    }
+    // The tag stays on the object type, which writes it where the payload had it.
+    let google = derived::types::GoogleDetection {
+        model: None,
+        provider: derived::types::GoogleDetectionProvider::Google,
+    };
+    assert_eq!(
+        serde_json::to_string(&Detection::Google(Box::new(google)))?,
+        r#"{"provider":"google"}"#
+    );
+
+    // Every payload comes back as it went in, the tag written first, and the read form reports
+    // only the ones the description does not list.
+    for (payload, listed) in [
+        (r#""off""#, true),
+        (r#"{"provider":"google","model":"m"}"#, true),
+        (r#"{"provider":"vapi"}"#, true),
+        (r#""on""#, false),
+        (r#"{"provider":"other"}"#, false),
+        ("7", false),
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::Detection, hand::types::Detection>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        let (left, right, clean) = read_back!(
+            derived::types::read::Detection,
+            hand::types::read::Detection,
+            payload
+        );
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        assert_eq!(clean, listed, "{payload}");
+    }
+}
+
+/// A string beside objects another union already takes `kind` off reuses that tag: it takes the
+/// tag off before the object reads the rest and writes it back first, and the other union keeps
+/// reading and writing the same payloads, under both strategies and in the read form.
+#[test_util::test]
+fn a_string_beside_objects_whose_tag_another_union_consumes_consumes_it_too() {
+    use derived::types::{Cat, Pet, PetOrName};
+
+    // The object types lost `kind` to the declared union, and kept nothing else of it.
+    let cat = Cat {
+        name: Some("tom".to_owned()),
+    };
+    assert_eq!(
+        serde_json::to_string(&PetOrName::Cat(Box::new(cat.clone())))?,
+        r#"{"kind":"cat","name":"tom"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&Pet::Cat(Box::new(cat)))?,
+        r#"{"kind":"cat","name":"tom"}"#
+    );
+
+    let read = |payload: &str| serde_json::from_str::<PetOrName>(payload);
+    assert!(matches!(read(r#""rex""#)?, PetOrName::Text(_)));
+    assert!(matches!(read(r#"{"kind":"dog","name":"rex"}"#)?, PetOrName::Dog(_)));
+    for payload in [r#"{"kind":"bird"}"#, r#"{"name":"rex"}"#, "true"] {
+        assert!(matches!(read(payload)?, PetOrName::Unknown(_)), "{payload}");
+    }
+
+    // Every payload comes back as it went in, and the read form reports only the unlisted tag.
+    for (payload, listed) in [
+        (r#""rex""#, true),
+        (r#"{"kind":"cat","name":"tom"}"#, true),
+        (r#"{"kind":"dog"}"#, true),
+        (r#"{"kind":"bird"}"#, false),
+    ] {
+        let (left, right) =
+            round_trip::<derived::types::PetOrName, hand::types::PetOrName>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        let (left, right, clean) = read_back!(
+            derived::types::read::PetOrName,
+            hand::types::read::PetOrName,
+            payload
+        );
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        assert_eq!(clean, listed, "{payload}");
+    }
+    // The declared union reads its own payloads as before.
+    for payload in [r#"{"kind":"cat","name":"tom"}"#, r#"{"kind":"dog"}"#] {
+        let (left, right) = round_trip::<derived::types::Pet, hand::types::Pet>(payload)?;
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        let (left, right, clean) =
+            read_back!(derived::types::read::Pet, hand::types::read::Pet, payload);
+        assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+        assert!(clean, "{payload}");
+    }
+    assert!(matches!(
+        serde_json::from_str::<Pet>(r#"{"kind":"dog"}"#)?,
+        Pet::Dog(_)
+    ));
+}
