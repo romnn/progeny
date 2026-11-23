@@ -44,17 +44,7 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
     // A union that also reads values of other kinds takes the ownership the rest settle on, so it
     // sits out the fixpoint, and so does whatever only such a union reaches, which classification
     // reached only because that union is typed.
-    let mixed_keys: BTreeSet<ShapeKey> = all
-        .iter()
-        .filter(|(key, _)| {
-            shapes
-                .get(key)
-                .and_then(tagged_union)
-                .and_then(|union| union.tag.as_ref())
-                .is_some_and(|tag| !tag.kinds.is_empty())
-        })
-        .map(|(key, _)| key.clone())
-        .collect();
+    let mixed_keys = mixed(shapes, &all);
     let fresh = reached_only_through(shapes, &mixed_keys);
     let (mixed, proposed): (Vec<_>, Vec<_>) = all
         .iter()
@@ -84,18 +74,7 @@ pub(super) fn run(resolved: &ResolvedDocument, shapes: &mut Shapes, ctx: &mut Ct
         }
         modes = round.modes.clone();
     };
-    for (union_key, property) in &mixed {
-        let Some(union) = shapes.get(union_key).and_then(tagged_union) else {
-            continue;
-        };
-        let mode = leaves_others_alone(shapes, &fresh, &outcome.strip, union)
-            .and_then(|()| taken_over(shapes, &outcome.strip, union, property))
-            .unwrap_or_else(|reason| {
-                reasons.insert(union_key.clone(), reason);
-                Mode::Demoted
-            });
-        outcome.modes.insert(union_key.clone(), mode);
-    }
+    settle_mixed(shapes, &mixed, &fresh, &mut outcome, &mut reasons);
 
     for (variant, property, first, union_key) in outcome.shared {
         // Both parents can have it: the tag is written by whichever enum is doing the
@@ -177,6 +156,44 @@ enum Mode {
     Consumed,
     Carried,
     Demoted,
+}
+
+/// The proposed unions that also read values of other kinds beside their tagged objects.
+fn mixed(shapes: &Shapes, proposals: &[(ShapeKey, String)]) -> BTreeSet<ShapeKey> {
+    proposals
+        .iter()
+        .filter(|(key, _)| {
+            shapes
+                .get(key)
+                .and_then(tagged_union)
+                .and_then(|union| union.tag.as_ref())
+                .is_some_and(|tag| !tag.kinds.is_empty())
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// Settle each union that also reads values of other kinds by the strips the fixpoint settled
+/// on, demoting it, with its reason, where it would move them.
+fn settle_mixed(
+    shapes: &Shapes,
+    mixed: &[(ShapeKey, String)],
+    fresh: &BTreeSet<ShapeKey>,
+    outcome: &mut Round,
+    reasons: &mut BTreeMap<ShapeKey, String>,
+) {
+    for (union_key, property) in mixed {
+        let Some(union) = shapes.get(union_key).and_then(tagged_union) else {
+            continue;
+        };
+        let mode = leaves_others_alone(shapes, fresh, &outcome.strip, union)
+            .and_then(|()| taken_over(shapes, &outcome.strip, union, property))
+            .unwrap_or_else(|reason| {
+                reasons.insert(union_key.clone(), reason);
+                Mode::Demoted
+            });
+        outcome.modes.insert(union_key.clone(), mode);
+    }
 }
 
 /// One round's answers, deterministic in the modes it was asked against.
