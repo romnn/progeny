@@ -487,7 +487,7 @@ fn names_deprecated(body: &BodyContract, contracts: &Contracts) -> bool {
     })
 }
 
-/// A generated name as the identifier the renderers spell it as, raw where it is a keyword.
+/// A generated name as the identifier the renderers spell it as.
 fn ident(name: &contract::RustIdent) -> Ident {
     format_ident!("{}", name.as_str())
 }

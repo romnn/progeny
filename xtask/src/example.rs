@@ -22,7 +22,6 @@
 
 use std::fmt::Write as _;
 
-use camino::Utf8PathBuf;
 use clap::Args as ClapArgs;
 use color_eyre::eyre::{self, ContextCompat, WrapErr, bail};
 
@@ -39,12 +38,6 @@ pub struct Args {
 
 /// The document the example is built from: committed, tiny, and exercising all four locations.
 const SUBJECT: &str = "petstore-31";
-
-/// The test that goes into the example crate, written by hand against the crate generated from
-/// [`SUBJECT`], which it imports by that crate's library name.
-fn test_fixture() -> Utf8PathBuf {
-    crate::paths::corpus_root().join("example/both_halves.rs")
-}
 
 pub fn run(args: &Args) -> eyre::Result<()> {
     crate::generated::require_cargo()?;
@@ -78,7 +71,9 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
 
-    let test = test_fixture();
+    // The test is written by hand against the crate generated from `SUBJECT`, which it imports by
+    // that crate's library name.
+    let test = crate::paths::corpus_root().join("example/both_halves.rs");
     let source = std::fs::read_to_string(&test).wrap_err_with(|| format!("reading {test}"))?;
     crate::generated::write_wire_test(&directory, "both_halves.rs", &source)?;
 
