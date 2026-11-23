@@ -709,9 +709,11 @@ fn tagged_enum(
     // A value that is not an object is read by the first variant of its kind, and the open arm
     // holds the rest: a tag the description does not list, or a payload the named variant cannot
     // read.
-    let untagged = with_serde
-        .then(|| quote! { #[serde(untagged)] })
-        .unwrap_or_default();
+    let untagged = if with_serde {
+        quote! { #[serde(untagged)] }
+    } else {
+        quote! {}
+    };
     let kinds = kind_arms(kinds, untagged.clone(), contracts, config, scope);
     let fallback = fallback_variant(fallback, "names no variant in its tag");
     quote! {

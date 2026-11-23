@@ -28,7 +28,9 @@ use crate::config::{Config, UnknownFields};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::cycles::Sccs;
-use crate::shape::{Docs, Extra, Fit, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes, TagStyle};
+use crate::shape::{
+    Docs, Extra, Fit, Format, Scalar, Shape, ShapeKey, ShapeRef, Shapes, TagStyle, Union,
+};
 
 /// One property whose directional distinction was collapsed onto the single shared type.
 ///
@@ -603,87 +605,7 @@ impl Lower<'_> {
                 }
             }
             Shape::Keyed(keyed) => self.keyed(keyed, key, ctx),
-            Shape::Union(union) => {
-                let consumed = union
-                    .tag
-                    .as_ref()
-                    .is_some_and(|tag| tag.style == TagStyle::Consumed);
-                let variants = union
-                    .variants
-                    .iter()
-                    .map(|variant| {
-                        // Whether a consumed-tag branch's payload is left with nothing to hold is
-                        // decided once its direction is known; see [`super::unit`].
-                        if let (true, ShapeRef::Key(branch)) = (consumed, &variant.shape) {
-                            self.tag_branches.insert(branch.clone());
-                        }
-                        (
-                            self.reference(&variant.shape, key, ctx),
-                            variant.tag.clone(),
-                            variant.aliases.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                match &union.tag {
-                    None => {
-                        let (variants, fallback) =
-                            self.variants(variants.into_iter().map(|(ty, ..)| ty).collect());
-                        ContractKind::Enum { variants, fallback }
-                    }
-                    Some(tag) => {
-                        if let Some((mut variants, fallback)) = tagged_variants(variants) {
-                            if tag.shared {
-                                self.name_by_type(&mut variants);
-                            }
-                            let kinds = tag
-                                .kinds
-                                .iter()
-                                .map(|kind| self.reference(kind, key, ctx))
-                                .collect();
-                            let kinds = self.kind_variants(kinds, &variants);
-                            match tag.style {
-                                TagStyle::Consumed => ContractKind::TaggedEnum {
-                                    tag: tag.property.clone(),
-                                    variants,
-                                    kinds,
-                                    fallback,
-                                },
-                                TagStyle::Carried => ContractKind::CarriedTagEnum {
-                                    tag: tag.property.clone(),
-                                    variants,
-                                    kinds,
-                                    routes: TagRoutes {
-                                        absent: tag.absent,
-                                        null: tag.null,
-                                    },
-                                    fallback,
-                                },
-                            }
-                        } else {
-                            // A tagged union with a variant nothing names is what
-                            // [`crate::shape::discriminate`] demotes before lowering ever runs,
-                            // so this arm is the pipeline contract breaking rather than a
-                            // document shape. The same demotion is applied here, because the
-                            // alternatives are both the forbidden failure mode: rendering the
-                            // union untagged matches whichever branch parses first, and rendering
-                            // it tagged writes a Rust variant name progeny made up onto the wire.
-                            ctx.report(Diagnostic::new(
-                                BreakageClass::DiscriminatorEdgeCase,
-                                Action::Degrade,
-                                self.types
-                                    .get(index.index())
-                                    .map_or_else(JsonPointer::root, |slot| slot.origin.clone()),
-                                "this union declares a discriminator, but nothing says what one \
-                                 of its variants' tags would read; the value is typed as \
-                                 arbitrary JSON rather than tagged with an invented name",
-                            ));
-                            ContractKind::Alias {
-                                target: TypeRef::Value,
-                            }
-                        }
-                    }
-                }
-            }
+            Shape::Union(union) => self.union(union, key, index, ctx),
             Shape::Tuple { items, .. } => ContractKind::Tuple {
                 items: items
                     .iter()
@@ -1140,6 +1062,95 @@ impl Lower<'_> {
             })
             .collect();
         (variants, RustIdent::fallback_variant())
+    }
+
+    /// The kind of item a union is: matched by shape, or by the tag its variants are named by.
+    fn union(
+        &mut self,
+        union: &Union,
+        key: &ShapeKey,
+        index: TypeIndex,
+        ctx: &mut Ctx,
+    ) -> ContractKind {
+        let consumed = union
+            .tag
+            .as_ref()
+            .is_some_and(|tag| tag.style == TagStyle::Consumed);
+        let variants = union
+            .variants
+            .iter()
+            .map(|variant| {
+                // Whether a consumed-tag branch's payload is left with nothing to hold is
+                // decided once its direction is known; see [`super::unit`].
+                if let (true, ShapeRef::Key(branch)) = (consumed, &variant.shape) {
+                    self.tag_branches.insert(branch.clone());
+                }
+                (
+                    self.reference(&variant.shape, key, ctx),
+                    variant.tag.clone(),
+                    variant.aliases.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        match &union.tag {
+            None => {
+                let (variants, fallback) =
+                    self.variants(variants.into_iter().map(|(ty, ..)| ty).collect());
+                ContractKind::Enum { variants, fallback }
+            }
+            Some(tag) => {
+                if let Some((mut variants, fallback)) = tagged_variants(variants) {
+                    if tag.shared {
+                        self.name_by_type(&mut variants);
+                    }
+                    let kinds = tag
+                        .kinds
+                        .iter()
+                        .map(|kind| self.reference(kind, key, ctx))
+                        .collect();
+                    let kinds = self.kind_variants(kinds, &variants);
+                    match tag.style {
+                        TagStyle::Consumed => ContractKind::TaggedEnum {
+                            tag: tag.property.clone(),
+                            variants,
+                            kinds,
+                            fallback,
+                        },
+                        TagStyle::Carried => ContractKind::CarriedTagEnum {
+                            tag: tag.property.clone(),
+                            variants,
+                            kinds,
+                            routes: TagRoutes {
+                                absent: tag.absent,
+                                null: tag.null,
+                            },
+                            fallback,
+                        },
+                    }
+                } else {
+                    // A tagged union with a variant nothing names is what
+                    // [`crate::shape::discriminate`] demotes before lowering ever runs,
+                    // so this arm is the pipeline contract breaking rather than a
+                    // document shape. The same demotion is applied here, because the
+                    // alternatives are both the forbidden failure mode: rendering the
+                    // union untagged matches whichever branch parses first, and rendering
+                    // it tagged writes a Rust variant name progeny made up onto the wire.
+                    ctx.report(Diagnostic::new(
+                        BreakageClass::DiscriminatorEdgeCase,
+                        Action::Degrade,
+                        self.types
+                            .get(index.index())
+                            .map_or_else(JsonPointer::root, |slot| slot.origin.clone()),
+                        "this union declares a discriminator, but nothing says what one \
+                         of its variants' tags would read; the value is typed as \
+                         arbitrary JSON rather than tagged with an invented name",
+                    ));
+                    ContractKind::Alias {
+                        target: TypeRef::Value,
+                    }
+                }
+            }
+        }
     }
 
     /// Name the variants of a tagged union that hold values of other kinds after their types, as

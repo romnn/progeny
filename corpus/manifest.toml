@@ -700,6 +700,13 @@ file = "runway.json"
 notes = "54 discriminators, 163 const"
 
 [[spec]]
+name = "scalar-beside-tagged-objects"
+version = "3.1"
+file = "scalar-beside-tagged-objects.yaml"
+local = true
+notes = "Hermetic fixture: strings and a list beside self-tagged objects, carried and reusing a consumed tag (#190)."
+
+[[spec]]
 name = "sentry"
 version = "3.0"
 url = "https://raw.githubusercontent.com/getsentry/sentry-api-schema/main/openapi-derefed.json"

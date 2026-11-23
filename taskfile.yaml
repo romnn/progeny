@@ -130,7 +130,9 @@ tasks:
     # and in crate packaging with each of the `client` and `server` features on or off.
     vars:
       TOOLCHAIN: '{{.TOOLCHAIN | default "stable"}}'
-      ONLY: --only petstore-31 --only oxide --only deprecated-request-body --only bare-operation
+      ONLY: >-
+        --only petstore-31 --only oxide --only deprecated-request-body --only bare-operation
+        --only scalar-beside-tagged-objects
     cmds:
       - for: [lenient, strict]
         cmd: >-

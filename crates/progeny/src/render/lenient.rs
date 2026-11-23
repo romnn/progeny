@@ -404,25 +404,7 @@ fn tagged_body(
                     .map(|value| #wrap),
             }
         });
-    // A value that is not an object is the first variant of its kind that reads it, and one none
-    // reads goes on to the tag lookup, which finds no tag in it.
-    // One condition per variant rather than an `if` around them, which is a collapsible `if` in
-    // the consumer's build where the union has one variant of another kind.
-    let kinds: Vec<TokenStream> = kinds
-        .iter()
-        .map(|kind| {
-            let name = ident(&kind.rust_name);
-            let ty = type_ref_in(&kind.ty, contracts, config, scope);
-            let wrap = wrapped(&kind.ty, contract.docs().deprecated, &name);
-            quote! {
-                if !matches!(content, #support::Content::Map(_))
-                    && let Some(value) = #support::lenient::probe::<#ty>(&content, site, report)
-                {
-                    return Ok(#wrap);
-                }
-            }
-        })
-        .collect();
+    let kinds = kind_probes(contract, kinds, contracts, config, scope);
     let unknown = unknown_arm(contract, fallback);
     let fallback = quote! {
         _ => {
@@ -472,6 +454,38 @@ fn tagged_body(
         let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);
         #support::lenient::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
     }
+}
+
+/// The probes a tagged union's decoder tries before its tag, one per variant of another kind
+/// than an object.
+///
+/// A value that is not an object is the first variant of its kind that reads it, and one none
+/// reads goes on to the tag lookup, which finds no tag in it.
+fn kind_probes(
+    contract: &TypeContract,
+    kinds: &[crate::contract::VariantContract],
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> Vec<TokenStream> {
+    let support = scope.support();
+    kinds
+        .iter()
+        .map(|kind| {
+            let name = ident(&kind.rust_name);
+            let ty = type_ref_in(&kind.ty, contracts, config, scope);
+            let wrap = wrapped(&kind.ty, contract.docs().deprecated, &name);
+            // One condition per variant rather than an `if` around them, which is a collapsible
+            // `if` in the consumer's build where the union has one variant of another kind.
+            quote! {
+                if !matches!(content, #support::Content::Map(_))
+                    && let Some(value) = #support::lenient::probe::<#ty>(&content, site, report)
+                {
+                    return Ok(#wrap);
+                }
+            }
+        })
+        .collect()
 }
 
 /// A keyed union's decoder: a listed string is its unit variant, a single-member object with a
