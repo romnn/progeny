@@ -5180,7 +5180,7 @@ mod tests {
     }
 
     /// A schema keeps what it says beside the rule: the members it requires on its own, a `null`
-    /// an `anyOf` admits, `additionalProperties`, and a `not` reported with the union, as OpenAI's
+    /// an `anyOf` admits, `additionalProperties`, and a `not` reported with the union, as openai's
     /// `ImageRefParam` writes "exactly one of `image_url` or `file_id`".
     #[test_util::test]
     fn a_presence_rule_keeps_what_its_schema_says_beside_it() -> eyre::Result<()> {

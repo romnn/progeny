@@ -321,9 +321,12 @@ fn presence_rule(resolved: &ResolvedDocument, key: &ShapeKey) -> Option<&'static
     let declared = object.properties.as_ref()?;
     let required: BTreeSet<&String> = object.required.iter().flatten().collect();
     let types: BTreeSet<&TypeName> = object.types.iter().flat_map(|types| types.iter()).collect();
-    let typed = types == BTreeSet::from([&TypeName::Object])
+    let object_typed = types == BTreeSet::from([&TypeName::Object])
         || (keyword == "anyOf" && types == BTreeSet::from([&TypeName::Object, &TypeName::Null]));
-    if !typed || written.len() < 2 || !required.iter().all(|name| declared.contains_key(*name)) {
+    if !object_typed
+        || written.len() < 2
+        || !required.iter().all(|name| declared.contains_key(*name))
+    {
         return None;
     }
     for &id in written {
