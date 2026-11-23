@@ -69,6 +69,10 @@ A type only a response yields is written in its read form. One a request sends a
 
 `decoding = "strict"` decodes responses into the strict types and fails a response on a deviation such as a missing required member or a value of the wrong type. String enums and unions stay open in this mode too, keeping a value the description does not list in their fallback variant, and undeclared members follow `unknown-fields`, which ignores them by default. It is a choice made when the crate is generated, not a switch on a client: strict leaves out `types::read`, so the response types change with it.
 
+### Integers
+
+A schema whose values are whole numbers becomes a Rust integer, sized as `integers` in the [configuration]({{< relref "reference/configuration.md" >}}) says: `type: integer`, an `enum` of whole numbers, or the same constants split across a union's branches. JSON Schema compares numbers by value, so `1.0` and `1e0` are integers too, but a Rust integer reads only `1`. Send whole numbers to a generated server, and expect them from a vendor, as `1`, without a fraction or an exponent. A response member written `1.0` reads as `None` and is reported among the response's degradations; strict decoding fails the response, and a generated server rejects such a request.
+
 ## The client
 
 Each operation is a method taking a params struct, returning a request whose `send()` produces a typed response per declared status. A required input is a plain field and an optional one an `Option`, so a missing input is a compile error at the call site. A further request media type the operation declares gets its own method (`_json`, `_multipart`, …), and a header the description does not declare rides one request through `.header(...)`.
