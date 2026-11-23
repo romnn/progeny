@@ -52,6 +52,9 @@ jobs:
 
   # A job of its own, so unformatted code fails within a minute and the lint job still reports
   # Clippy's findings on the same commit.
+  # Spellcheck is a step here rather than a job of its own. As a job it finished within seconds,
+  # and GitHub then left its check run in progress with a conclusion, so a green commit never
+  # reported green.
   format:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -62,24 +65,12 @@ jobs:
           install: false
           cache: true
           env: false
-      - run: mise install task
+      - run: mise install task typos
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Check formatting
         run: task format:check
-
-  spellcheck:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
-        with:
-          install: false
-          cache: true
-          env: false
-      - run: mise install task typos
       - name: Spellcheck
         run: task spellcheck
