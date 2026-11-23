@@ -16,6 +16,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args as ClapArgs;
 use color_eyre::eyre::{self, ContextCompat, WrapErr, bail};
 use progeny::{Config, Package, Packaging, SerdeImpl};
+use quote::quote;
 
 use crate::paths;
 
@@ -112,14 +113,16 @@ fn assemble(directory: &Utf8Path, document: &[u8], assertions: &str) -> eyre::Re
             .wrap_err_with(|| format!("writing {directory}/src/{module}.rs"))?;
     }
 
-    std::fs::write(
-        directory.join("src/lib.rs"),
-        indoc::indoc! {"
+    let lib = crate::generated::rust_source(
+        quote! {
             //! Both renderings of one document, for the differential harness.
             pub mod derived;
             pub mod hand;
-        "},
+        },
+        "src/lib.rs",
+        "spike.yaml",
     )?;
+    std::fs::write(directory.join("src/lib.rs"), lib)?;
     std::fs::write(directory.join("tests/differential.rs"), assertions)?;
     // The edition and dependency lines match what `render/manifest.rs` writes for a shipped
     // crate: this gate certifies "the derive and the hand-written path agree", and a crate
