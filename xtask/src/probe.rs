@@ -24,6 +24,7 @@
 
 use std::fmt::Write as _;
 
+use camino::Utf8Path;
 use clap::Args as ClapArgs;
 use color_eyre::eyre::{self, WrapErr, bail};
 use progeny::harness::{Probe, ProbeOp};
@@ -64,6 +65,10 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         if let Some(choice) = args.serde {
             config.serde_impl = choice.into();
         }
+        // The types, the client and the server as crates of their own, each compiled by a rustc
+        // of its own: as one crate, cloudflare's library alone needs 13.7 GiB, which a 16 GiB
+        // hosted runner does not survive.
+        config.packaging = progeny::Packaging::Workspace;
 
         let plan = progeny::harness::probe(bytes, &config)
             .wrap_err_with(|| format!("planning the probe for {name}"))?;
@@ -71,6 +76,7 @@ pub fn run(args: &Args) -> eyre::Result<()> {
             progeny::generate(bytes, &config).wrap_err_with(|| format!("generating {name}"))?;
         let directory = crate::generated::write(&format!("probe-{name}"), &output)?;
 
+        add_probe_package(&directory, &config.package.name)?;
         crate::generated::write_wire_test(
             &directory,
             "probe.rs",
@@ -117,7 +123,15 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         // 16 MiB gives that standing corpus case enough headroom.
         let run = command
             .env("RUST_MIN_STACK", "16777216")
-            .args(["test", "--quiet", "--all-features", "--test", "probe"])
+            // `--workspace`, so that `--all-features` reaches the generated crates as well.
+            .args([
+                "test",
+                "--quiet",
+                "--workspace",
+                "--all-features",
+                "--test",
+                "probe",
+            ])
             .output()
             .wrap_err("running the probe")?;
         if !run.status.success() {
@@ -147,10 +161,40 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Make the generated workspace's root the package the probe test belongs to.
+///
+/// The test drives the client against the server, so it depends on both crates, and on the
+/// libraries its double names itself.
+fn add_probe_package(directory: &Utf8Path, package: &str) -> eyre::Result<()> {
+    let manifest = directory.join("Cargo.toml");
+    let workspace =
+        std::fs::read_to_string(&manifest).wrap_err_with(|| format!("reading {manifest}"))?;
+    std::fs::write(
+        &manifest,
+        indoc::formatdoc! {r#"
+            {workspace}
+            [package]
+            name = "{package}-probe"
+            version = "0.0.0"
+            edition = "2024"
+            publish = false
+
+            [dependencies]
+            {package}-client = {{ path = "{package}-client" }}
+            {package}-server = {{ path = "{package}-server" }}
+            axum = "0.8"
+            serde = "1.0.164"
+            serde_json = "1"
+        "#},
+    )
+    .wrap_err_with(|| format!("writing {manifest}"))
+}
+
 /// The probe test file: the double implementing every servable operation, then one driver test per
 /// driven one.
-fn render(krate: &str, plan: &Probe) -> String {
-    let krate = crate::corpus::lib_name(krate);
+fn render(package: &str, plan: &Probe) -> String {
+    let client = crate::corpus::lib_name(&format!("{package}-client"));
+    let server = crate::corpus::lib_name(&format!("{package}-server"));
     let uses_types = plan.operations.iter().any(|operation| {
         operation
             .body
@@ -162,7 +206,7 @@ fn render(krate: &str, plan: &Probe) -> String {
                 .any(|input| input.json.is_some() && input.ty.contains("types::"))
     });
     let types_import = if uses_types {
-        format!("use {krate}::types;")
+        format!("use {client}::types;")
     } else {
         String::new()
     };
@@ -175,7 +219,7 @@ fn render(krate: &str, plan: &Probe) -> String {
                 .and_then(|answer| answer.headers.as_ref())
                 .is_some_and(|headers| !headers.fields.is_empty())
     });
-    let mut out = preamble(&krate, &types_import, compares_headers);
+    let mut out = preamble(&client, &server, &types_import, compares_headers);
     for operation in &plan.operations {
         out.push_str(&handler(operation));
     }
@@ -219,7 +263,7 @@ fn head_driver(head: &progeny::harness::ProbeHead) -> String {
 
 /// Everything above the double: imports, the value reader, the recording router and the
 /// reflection cross-check.
-fn preamble(krate: &str, types_import: &str, compares_headers: bool) -> String {
+fn preamble(client: &str, server: &str, types_import: &str, compares_headers: bool) -> String {
     // Only a driver that compares a header names it, and an unused helper is a warning.
     let like = if compares_headers {
         indoc::indoc! {"
@@ -239,7 +283,8 @@ fn preamble(krate: &str, types_import: &str, compares_headers: bool) -> String {
             use std::sync::{{Arc, Mutex}};
 
             use color_eyre::eyre::{{self, OptionExt as _}};
-            use {krate}::{{client, operations, server}};
+            use {client}::{{client, operations}};
+            use {server}::server;
             {types_import}
 
             /// Read a synthesized value out of its JSON spelling.
