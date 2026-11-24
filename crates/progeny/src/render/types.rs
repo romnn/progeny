@@ -130,9 +130,11 @@ pub(super) fn render(
             ///
             /// Reading through the generated client tolerates a member that is absent, `null`
             /// or unreadable and reports it, and leaves out a list element it cannot read.
-            /// `serde_json::from_str` on a read struct does the same and drops the report; keep
-            /// the report with `Decoded::from_json`, which reads any of these types and every
-            /// container of them. On a read alias of a list `serde_json::from_str` is serde's
+            /// `serde_json::from_str` on a read twin, or on a struct only responses yield, does
+            /// the same and drops the report.
+            /// A struct re-exported here from the parent module keeps strict serde for requests.
+            /// `Decoded::from_json` reads leniently and keeps the report for any of these types
+            /// and every container of them. On a read alias of a list `serde_json::from_str` is serde's
             /// own list reading, which refuses the whole list over one element.
             ///
             /// Every type here carries the sites a report keys its entries at: `Pet::SITE` for

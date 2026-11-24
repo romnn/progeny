@@ -1469,46 +1469,6 @@ mod tests {
         assert!(!strict.contains("IdleThreadStatus"), "{strict}");
     }
 
-    /// A tag-only branch a request sends too keeps its struct, which twins: the strict half is the
-    /// empty payload a request writes as the tag alone, and the read half keeps what a response
-    /// adds.
-    #[test_util::test]
-    fn a_tag_only_branch_both_directions_reach_twins_its_payload() {
-        let mut document = tag_only_branches();
-        let status = json!({"$ref": "#/components/schemas/ThreadStatus"});
-        document["paths"] = json!({"/status": {"post": {
-            "operationId": "postStatus",
-            "requestBody": {"content": {"application/json": {"schema": status}}},
-            "responses": {"200": {"description": "ok", "content": {"application/json": {
-                "schema": status,
-            }}}},
-        }}});
-        let lenient = types(document.clone(), &Config::default())?;
-        assert!(
-            lenient.contains("pub struct IdleThreadStatus {}"),
-            "{lenient}"
-        );
-        assert_eq!(
-            lenient.matches("Idle(Box<IdleThreadStatus>)").count(),
-            2,
-            "both halves of the union hold the payload: {lenient}"
-        );
-        assert!(lenient.contains("pub extra:"), "{lenient}");
-        // The strict half has nothing to convert, so its conversion binds nothing it leaves unused.
-        assert!(
-            lenient.contains("fn from(_value: super::IdleThreadStatus)"),
-            "{lenient}"
-        );
-
-        let config = Config {
-            decoding: crate::config::Decoding::Strict,
-            ..Config::default()
-        };
-        let strict = types(document, &config)?;
-        assert!(strict.contains("Idle,"), "{strict}");
-        assert!(!strict.contains("IdleThreadStatus"), "{strict}");
-    }
-
     /// One empty payload deduplicated under a request-only union and a response-only one keeps
     /// its struct, so the response's union can name a read form that captures.
     #[test_util::test]

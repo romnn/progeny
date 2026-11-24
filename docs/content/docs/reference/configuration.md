@@ -65,7 +65,7 @@ How a generated client reads responses. `"lenient"`, the default, decodes as far
 
 ### `unknown-fields` and `type-unknown-fields`
 
-What to do with members a payload has and the document did not declare, under strict decoding: the request bodies a generated server reads, the strict form of every type, and so every response under `decoding = "strict"`. Under lenient decoding every read form reports undeclared members and keeps them in `extra`, including the read twin of a type a request sends too; its strict form in `types` writes no `extra` and follows this setting.
+What to do with members a payload has and the document did not declare, under strict decoding: the request bodies a generated server reads, the strict form of every type, and so every response under `decoding = "strict"`. Under lenient decoding every read form reports undeclared members and keeps them in `extra`, including the read twin of a type a request sends too. Its strict form in `types` has no such synthetic map and follows this setting, so `"capture"` gives it a map of its own.
 
 | Value | Meaning |
 | --- | --- |
@@ -107,7 +107,7 @@ Which map type generated code uses: `"b-tree-map"` (the default, for determinist
 
 ### `derives` and `type-derives`
 
-Derives to add to generated types, from a closed set: `"clone"`, `"debug"`, `"partial-eq"`, `"eq"`, `"hash"`, `"partial-ord"`, `"ord"`, `"default"`, `"copy"`. `derives` applies to every type eligible for them, and an ineligible type is reported as `unsatisfiable-derive`. `type-derives` names types, and an ineligible request there is an error.
+Derives to add to generated types, from a closed set: `"clone"`, `"debug"`, `"partial-eq"`, `"eq"`, `"hash"`, `"partial-ord"`, `"ord"`, `"default"`, `"copy"`. `derives` applies to every type eligible for them, and an ineligible type is reported as `unsatisfiable-derive`. `type-derives` names types, and an ineligible request there is an error. The exception is the read twin of a named type: it leaves off, with an `unsatisfiable-derive` warning, a derive it cannot take, such as `"copy"` beside its `extra` map, which the strict form still has to take.
 
 ```toml
 derives = ["clone", "debug", "partial-eq"]

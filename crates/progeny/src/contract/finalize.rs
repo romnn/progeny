@@ -49,7 +49,12 @@ pub(super) fn run(
         let available = supported.get(index).cloned().unwrap_or_default();
         let requested =
             config.derives_for(contract.component.as_deref(), &contract.origin.to_string());
-        let explicit = config.type_derives.keys().any(|key| matches(contract, key));
+        let named = config.type_derives.keys().any(|key| matches(contract, key));
+        // The configuration names the type a caller builds.
+        // A read twin is the generator's lenient form of it, so a named derive the twin cannot
+        // take, such as `Copy` beside the map that keeps undeclared members, is reported and left
+        // off there, while the strict half still has to take it.
+        let read_twin = matches!(contract.form, Form::Lenient { strict: Some(_) });
 
         let mut derives: Vec<Derive> = BASE.to_vec();
         // A struct a response decodes into always has a `Default`: every member of a read form
@@ -72,7 +77,7 @@ pub(super) fn run(
                 derives.push(derive);
                 continue;
             }
-            if explicit {
+            if named && !read_twin {
                 return Err(RejectError::new(
                     RejectKind::UnsatisfiableConfig,
                     format!(
@@ -83,15 +88,24 @@ pub(super) fn run(
                 )
                 .at(contract.origin.clone()));
             }
-            ctx.report(Diagnostic::new(
-                BreakageClass::UnsatisfiableDerive,
-                Action::Warn,
-                contract.origin.clone(),
+            let detail = if named {
+                format!(
+                    "the configuration asks for `{}` by name; this read form of the type cannot \
+                     take it, so it was left off here and kept on the strict form",
+                    derive.name()
+                )
+            } else {
                 format!(
                     "the configuration asks every type to derive `{}`; this one cannot, so it was \
                      left off",
                     derive.name()
-                ),
+                )
+            };
+            ctx.report(Diagnostic::new(
+                BreakageClass::UnsatisfiableDerive,
+                Action::Warn,
+                contract.origin.clone(),
+                detail,
             ));
         }
         derives.sort_unstable();

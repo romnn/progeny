@@ -206,7 +206,7 @@ mod tests {
 
     use super::super::tests::{contracts_of, index_of, named};
     use super::super::{ContractKind, Contracts, Form, Presence, TypeRef};
-    use crate::config::{Config, Decoding};
+    use crate::config::{Config, Decoding, Derive};
 
     /// A document with one operation sending `request` and answering with `response`, both by
     /// reference, over the given component schemas.
@@ -265,6 +265,38 @@ mod tests {
 
     fn form_of(contracts: &Contracts, name: &str) -> eyre::Result<Form> {
         Ok(named(contracts, name)?.form())
+    }
+
+    /// A derive the configuration names stays on the type a caller builds, and the read twin
+    /// leaves off one its capture map cannot have, with a warning, rather than refusing the
+    /// document.
+    #[test_util::test]
+    fn a_named_derive_the_read_twin_cannot_take_stays_on_the_strict_form() {
+        let schemas =
+            json!({"Flags": {"type": "object", "properties": {"on": {"type": "boolean"}}}});
+        let config = Config {
+            type_derives: [("Flags".to_owned(), [Derive::Copy].into_iter().collect())]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let (contracts, diagnostics) = contracts_of(document("Flags", "Flags", &schemas), &config)?;
+        let Form::Strict { twin: Some(twin) } = form_of(&contracts, "Flags")? else {
+            eyre::bail!("`Flags` should have a read twin");
+        };
+        let strict = named(&contracts, "Flags")?;
+        let twin = contracts
+            .get(twin)
+            .ok_or_else(|| eyre::eyre!("twin missing"))?;
+        assert!(strict.derives().contains(&Derive::Copy));
+        assert!(!twin.derives().contains(&Derive::Copy));
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.class() == crate::diag::BreakageClass::UnsatisfiableDerive
+                    && diagnostic.detail().contains("by name")
+            }),
+            "{diagnostics:?}"
+        );
     }
 
     /// Each reach gets the form the design assigns it: request-only strict, response-only
