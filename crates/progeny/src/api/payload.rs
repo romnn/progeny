@@ -325,6 +325,10 @@ impl Collect<'_> {
     ) -> Option<Value> {
         match shape {
             // Arbitrary JSON is carried whole, so nothing is pruned from it.
+            #[expect(
+                clippy::match_same_arms,
+                reason = "one arm per shape, so a new shape has to say what pruning against it means"
+            )]
             Shape::Any => Some(value.clone()),
             Shape::Struct(structure) => {
                 self.prune_struct(value, structure, None, lenient, trail, leaves)
