@@ -387,6 +387,8 @@ fn runner() -> TokenStream {
 
 #[cfg(test)]
 mod tests {
+    use color_eyre::eyre;
+
     use crate::comparison::{Formatted, difference, same, same_clock};
 
     /// Two spellings of one number are one value, and two numbers one `f64` cannot tell apart are
@@ -484,22 +486,50 @@ mod tests {
         assert!(difference(r#"{"address":"a"}"#, r#"{"address":"A"}"#, &ipv6).is_some());
     }
 
-    /// A date-time or time whose text holds more than any clock type keeps is never one value
-    /// with another spelling, because the type reads it as a value it does not spell.
+    /// A date-time or time with a non-zero digit past the nanosecond is never one value with
+    /// another spelling, because every clock type reads it as a value it does not spell.
+    /// A leap second is one with a spelling that keeps it.
     /// `String` stands in for a type that reads both spellings as one value.
     #[test]
-    fn a_clock_reading_past_what_its_types_hold_is_never_equivalent() {
-        for (text, beyond) in [
-            ("2024-01-01T00:00:00Z", false),
-            ("2024-01-01T01:00:00.123456789+01:00", false),
-            ("12:00:00.1234567890Z", false),
-            ("2024-01-01T00:00:00.1234567891Z", true),
+    fn a_clock_reading_past_the_nanosecond_is_never_equivalent() {
+        for (text, kept) in [
+            ("2024-01-01T00:00:00Z", true),
+            ("2024-01-01T01:00:00.123456789+01:00", true),
+            ("12:00:00.1234567890Z", true),
             ("2016-12-31T23:59:60Z", true),
             ("23:59:60.5-08:00", true),
+            ("2024-01-01T00:00:00.1234567891Z", false),
         ] {
             let literal = format!("{text:?}");
-            assert_eq!(same_clock::<String>(&literal, &literal), !beyond, "{text}");
+            assert_eq!(same_clock::<String>(&literal, &literal), kept, "{text}");
         }
+    }
+
+    /// A leap second its type moved to the second before it is a different value, though the
+    /// type reads both spellings as one.
+    #[test_util::test]
+    fn a_clamped_leap_second_is_not_equivalent() {
+        /// A clock reading as a type that moves a leap second to the second before it reads it.
+        #[derive(PartialEq)]
+        struct Clamped(String);
+
+        impl<'de> serde::Deserialize<'de> for Clamped {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let text = String::deserialize(deserializer)?;
+                Ok(Self(text.replace(":60", ":59")))
+            }
+        }
+
+        let leap = r#""2016-12-31T23:59:60Z""#;
+        let clamped = r#""2016-12-31T23:59:59Z""#;
+        // The type cannot tell the two apart, which is exactly what the guard is for.
+        assert!(
+            serde_json::from_str::<Clamped>(leap)? == serde_json::from_str::<Clamped>(clamped)?
+        );
+        assert!(!same_clock::<Clamped>(leap, clamped));
     }
 }
 
@@ -567,12 +597,12 @@ mod integration_tests {
     }
 
     /// Formatted strings the generated types respell come back as the same values: an expanded
-    /// upper-case IPv6 address in a member and as the string beside two tagged objects, an
-    /// upper-case UUID, and a date-time at an offset.
+    /// upper-case IPv6 address, an upper-case UUID, a date-time at an offset, and a leap second
+    /// the type keeps.
     /// A date-time whose digits past the nanosecond the type drops still fails.
     #[test_util::test]
     fn a_respelled_formatted_string_is_the_same_value() {
-        let document = indoc::indoc! {r##"
+        let document = indoc::indoc! {r#"
             openapi: "3.1.0"
             info:
               title: Formats
@@ -601,12 +631,46 @@ mod integration_tests {
                               address: "2001:0DB8:0000:0000:0000:0000:0000:0001"
                               id: "6FA459EA-EE8A-3CA4-894E-DB77E160355E"
                               seen: "2024-01-01T01:00:00.5+01:00"
+                          leap:
+                            value:
+                              seen: "2016-12-31T23:59:60+00:00"
                           truncated:
                             value:
                               seen: "2024-01-01T00:00:00.1234567891Z"
                   responses:
                     "204":
                       description: Stored
+        "#};
+        let mut config = progeny::Config::default();
+        config.package.name = "payload-formats".to_owned();
+        config.emit.client = false;
+        config.emit.server = false;
+        config.formats.date_time = progeny::DateTimeCrate::Chrono;
+        config.formats.uuid = progeny::UuidCrate::Uuid;
+
+        let outcome = super::round_trip("formats", document.as_bytes(), &config, false, 0)?;
+
+        assert_eq!(outcome.checked, 3);
+        assert_eq!(
+            outcome.failures,
+            [
+                "/paths/~1hosts/post/requestBody/content/application~1json/examples/truncated: \
+                 `/seen` was \"2024-01-01T00:00:00.1234567891Z\" and came back \
+                 \"2024-01-01T00:00:00.123456789Z\""
+            ]
+        );
+    }
+
+    /// An expanded upper-case IPv6 address beside two tagged objects is read as an address and
+    /// comes back compressed as the same value.
+    #[test_util::test]
+    fn a_respelled_address_beside_tagged_objects_is_the_same_value() {
+        let document = indoc::indoc! {r##"
+            openapi: "3.1.0"
+            info:
+              title: Detections
+              version: "1.0"
+            paths:
               /detections:
                 post:
                   requestBody:
@@ -642,22 +706,36 @@ mod integration_tests {
                       enum: [vapi]
         "##};
         let mut config = progeny::Config::default();
-        config.package.name = "payload-formats".to_owned();
+        config.package.name = "payload-detections".to_owned();
         config.emit.client = false;
         config.emit.server = false;
-        config.formats.date_time = progeny::DateTimeCrate::Chrono;
-        config.formats.uuid = progeny::UuidCrate::Uuid;
 
-        let outcome = super::round_trip("formats", document.as_bytes(), &config, false, 0)?;
+        let outcome = super::round_trip("detections", document.as_bytes(), &config, false, 0)?;
 
-        assert_eq!(outcome.checked, 3);
-        assert_eq!(
-            outcome.failures,
-            [
-                "/paths/~1hosts/post/requestBody/content/application~1json/examples/truncated: \
-                 `/seen` was \"2024-01-01T00:00:00.1234567891Z\" and came back \
-                 \"2024-01-01T00:00:00.123456789Z\""
-            ]
+        assert_eq!(outcome.checked, 1);
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+
+        // The address would also come back unchanged if the union kept it as unknown JSON, so this
+        // checks that it was read as an address.
+        let directory = crate::generated::scratch_root().join("payloads-detections");
+        let file = directory.join("tests/variant.rs");
+        let source = indoc::indoc! {r#"
+            #[test]
+            fn the_address_takes_the_address_branch() -> Result<(), serde_json::Error> {
+                let detection: payload_detections::types::Detection =
+                    serde_json::from_str("\"2001:0DB8:0000:0000:0000:0000:0000:0001\"")?;
+                assert_eq!(serde_json::to_string(&detection)?, "\"2001:db8::1\"");
+                Ok(())
+            }
+        "#};
+        std::fs::write(&file, source)?;
+        let run = crate::generated::cargo(&directory)
+            .args(["test", "--quiet", "--test", "variant"])
+            .output()?;
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
         );
     }
 }

@@ -61,33 +61,44 @@ where
 ///
 /// The types a clock reading is held in keep no digit past the nanosecond, and some read a leap
 /// second as the second before it.
-/// A spelling with a non-zero digit past the nanosecond, or with a 60th second, can read as a
-/// value it does not spell, so it is never one value with another spelling.
+/// Either way they read the text as a value it does not spell, so equal values would hide the
+/// change.
+/// A spelling with a non-zero digit past the nanosecond is therefore never one value with another
+/// spelling, and a leap second is one only where the type wrote it back as a leap second.
 pub(crate) fn same_clock<T>(expected: &str, actual: &str) -> bool
 where
     T: serde::de::DeserializeOwned + PartialEq,
 {
-    let held = serde_json::from_str::<String>(expected).is_ok_and(|text| !beyond_types(&text));
-    held && same::<T>(expected, actual)
-}
-
-/// Whether an RFC 3339 date-time or time spells a leap second or a non-zero digit past the
-/// nanosecond.
-fn beyond_types(text: &str) -> bool {
-    // The clock follows the date, where there is one.
-    let clock = text.rsplit(['T', 't']).next().unwrap_or(text);
-    let Some(second) = clock.split(':').nth(2) else {
+    let (Ok(written), Ok(wrote)) = (
+        serde_json::from_str::<String>(expected),
+        serde_json::from_str::<String>(actual),
+    ) else {
         return false;
     };
+    let (Some(written_second), Some(wrote_second)) = (second(&written), second(&wrote)) else {
+        return same::<T>(expected, actual);
+    };
+    let leap_kept = written_second.starts_with("60") == wrote_second.starts_with("60");
+    !past_nanoseconds(written_second) && leap_kept && same::<T>(expected, actual)
+}
+
+/// The second of an RFC 3339 date-time or time, with whatever follows it.
+fn second(text: &str) -> Option<&str> {
+    // The clock follows the date, where there is one.
+    let clock = text.rsplit(['T', 't']).next().unwrap_or(text);
+    clock.split(':').nth(2)
+}
+
+/// Whether a second, as [`second`] returns it, has a non-zero digit past the nanosecond.
+fn past_nanoseconds(second: &str) -> bool {
     let fraction = second.get(2..).and_then(|rest| rest.strip_prefix('.'));
-    let past_nanoseconds = fraction.is_some_and(|fraction| {
+    fraction.is_some_and(|fraction| {
         fraction
             .chars()
             .take_while(char::is_ascii_digit)
             .skip(9)
             .any(|digit| digit != '0')
-    });
-    second.starts_with("60") || past_nanoseconds
+    })
 }
 
 fn walk(
