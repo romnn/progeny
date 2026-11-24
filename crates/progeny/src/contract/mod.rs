@@ -127,7 +127,8 @@ pub(crate) enum TypeRef {
     /// `[T; N]`.
     Array(Box<TypeRef>, u32),
     Tuple(Vec<TypeRef>),
-    /// An indirection, placed to break a cycle rustc would otherwise reject.
+    /// An indirection: every enum payload that holds a value has one, and so does a reference
+    /// that closes a cycle rustc would otherwise reject.
     Boxed(Box<TypeRef>),
 }
 
@@ -1045,6 +1046,28 @@ mod tests {
             matches!(fields[0].ty, TypeRef::Boxed(_)),
             "{:?}",
             fields[0].ty
+        );
+    }
+
+    /// A union's payloads are boxed in the contract itself, which is where the cycle breaker
+    /// reads them as indirections.
+    #[test_util::test]
+    fn a_union_payload_is_boxed_in_the_contract() {
+        let (contracts, _) = contracts_of(
+            with_schemas(json!({
+                "Either": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+            })),
+            &Config::default(),
+        )?;
+        let ContractKind::Enum { variants, .. } = named(&contracts, "Either")?.kind() else {
+            eyre::bail!("`Either` is an untagged union");
+        };
+        assert_eq!(variants.len(), 2, "{variants:?}");
+        assert!(
+            variants
+                .iter()
+                .all(|variant| matches!(variant.ty, TypeRef::Boxed(_))),
+            "{variants:?}"
         );
     }
 

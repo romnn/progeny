@@ -627,21 +627,12 @@ fn keyed(
     // Data variants: a position reads its payload type out of the member's value.
     let read = |variant: &&crate::contract::KeyedVariant| {
         let member = ident(&variant.rust_name);
-        let boxed = variant
-            .payload
-            .as_ref()
-            .is_some_and(super::types::enum_type_is_boxed);
-        // An unboxed variant is its own constructor, and a closure around it is a lint in the
-        // consumer's build.
-        if !boxed && !contract.docs().deprecated {
+        // A variant is its own constructor, and a closure around it is a lint in the consumer's
+        // build.
+        if !contract.docs().deprecated {
             return quote! { serde::Deserialize::deserialize(payload).map(Self::#member) };
         }
-        let value = if boxed {
-            quote! { Box::new(value) }
-        } else {
-            quote! { value }
-        };
-        let resolved = construct(quote! { Self::#member(#value) });
+        let resolved = construct(quote! { Self::#member(value) });
         quote! { serde::Deserialize::deserialize(payload).map(|value| #resolved) }
     };
     let reads: Vec<TokenStream> = data.iter().map(read).collect();

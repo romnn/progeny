@@ -39,6 +39,7 @@ pub(super) fn run(
 ) -> Result<Contracts, RejectError> {
     super::cycle::normalize(&mut types, ctx);
     promote_recursive_aliases(&mut types);
+    box_enum_payloads(&mut types);
     break_cycles(&mut types);
     reopen_nullable_members(&mut types);
 
@@ -304,6 +305,36 @@ fn promote_recursive_aliases(types: &mut [Provisional]) {
             contract.kind = ContractKind::Newtype {
                 inner: target.clone(),
             };
+        }
+    }
+}
+
+/// Put every enum payload that holds a value behind a `Box`.
+///
+/// An enum is as large as its largest variant, so an unboxed payload makes every value of the
+/// enum as large as that payload, and makes the enum's size and API change with the payload's
+/// configured representation.
+/// Boxing each one uniformly keeps the enum small whatever its variants hold.
+/// It runs before [`break_cycles`], which then sees these payloads as the indirections they are
+/// and boxes no struct member on a cycle that already passes through one.
+fn box_enum_payloads(types: &mut [Provisional]) {
+    for contract in types {
+        match contract.kind {
+            ContractKind::Enum { .. }
+            | ContractKind::TaggedEnum { .. }
+            | ContractKind::CarriedTagEnum { .. }
+            | ContractKind::KeyedEnum { .. } => {}
+            ContractKind::Struct { .. }
+            | ContractKind::StringEnum { .. }
+            | ContractKind::Newtype { .. }
+            | ContractKind::Tuple { .. }
+            | ContractKind::Alias { .. } => continue,
+        }
+        // A unit payload is a variant without a value, which has nothing to box.
+        for ty in references_mut(&mut contract.kind) {
+            if *ty != TypeRef::Unit {
+                *ty = TypeRef::Boxed(Box::new(std::mem::replace(ty, TypeRef::Unit)));
+            }
         }
     }
 }

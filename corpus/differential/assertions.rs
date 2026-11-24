@@ -929,3 +929,59 @@ fn a_tag_only_branch_both_directions_reach_keeps_what_a_response_adds() {
     };
     assert!(idle.extra.is_empty());
 }
+
+/// Build a chapter nested in another as the request's strict value under one strategy, then check
+/// that it writes the payload, reads it back strictly and leniently, and converts into the read
+/// form.
+///
+/// The struct literals are the layout assertion: they compile only while the union's arm holds
+/// the cycle's one box, so `Chapter.section` is a plain `Option<Section>`.
+macro_rules! nests_through_the_union {
+    ($rendering:ident) => {{
+        use $rendering::types::{Chapter, Decoded, Passage, Section, read};
+
+        let payload =
+            r#"{"section":{"body":{"section":{"body":"end"},"title":"inner"}},"title":"outer"}"#;
+        let inner = Chapter {
+            section: Some(Section {
+                body: Some(Passage::Text(Box::new("end".to_owned()))),
+            }),
+            title: "inner".to_owned(),
+        };
+        let outer = Chapter {
+            section: Some(Section {
+                body: Some(Passage::Chapter(Box::new(inner))),
+            }),
+            title: "outer".to_owned(),
+        };
+        assert_eq!(serde_json::to_string(&outer)?, payload);
+        let strict: Chapter = serde_json::from_str(payload)?;
+        assert_eq!(serde_json::to_string(&strict)?, payload);
+
+        // The read form reads the nested value without a degradation and writes the same bytes.
+        let decoded = Decoded::<read::Chapter>::from_json(payload)?;
+        assert!(decoded.degradations.is_empty(), "{}", decoded.degradations);
+        assert_eq!(serde_json::to_string(&decoded.value)?, payload);
+
+        // The conversion carries the inner chapter across the boxed arm into its read form.
+        let converted: read::Chapter = outer.into();
+        let Some(read::Section {
+            body: Some(read::Passage::Chapter(nested)),
+            ..
+        }) = &converted.section
+        else {
+            bail!("the conversion keeps the nested chapter: {converted:?}");
+        };
+        assert_eq!(nested.title.as_deref(), Some("inner"));
+        assert_eq!(serde_json::to_string(&converted)?, payload);
+    }};
+}
+
+/// A cycle that runs through a union's arm is boxed there alone, and a finite nested value
+/// round-trips through the strict form, the read form and the conversion between them, under
+/// both strategies.
+#[test_util::test]
+fn a_cycle_through_a_union_is_boxed_only_at_its_arm() {
+    nests_through_the_union!(derived);
+    nests_through_the_union!(hand);
+}
