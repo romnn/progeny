@@ -323,16 +323,16 @@ mod tests {
         // A list that differs only through what it holds twins too, and its read form names the
         // read form of its element.
         let Form::Strict {
-            twin: Some(notes_twin),
+            twin: Some(list_twin),
         } = form_of(&contracts, "Notes")?
         else {
             eyre::bail!("`Notes` should have a twin");
         };
-        let notes_twin = contracts
-            .get(notes_twin)
+        let list_twin = contracts
+            .get(list_twin)
             .ok_or_else(|| eyre::eyre!("twin missing"))?;
         assert_eq!(
-            notes_twin.kind().references(),
+            list_twin.kind().references(),
             [&TypeRef::Vec(Box::new(TypeRef::Named(note_twin)))]
         );
         // A struct whose own map already holds what its members leave reads the way it is

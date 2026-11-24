@@ -714,6 +714,16 @@ fn from_strict(
         // half's kind; nothing else can arrive.
         _ => return TokenStream::new(),
     };
+    from_impl(&name, &strict_name, strict, &body)
+}
+
+/// The `From` impl converting `strict_name` into `name` through `body`, which reads `value`.
+fn from_impl(
+    name: &TokenStream,
+    strict_name: &TokenStream,
+    strict: &TypeContract,
+    body: &TokenStream,
+) -> TokenStream {
     // An empty strict struct has nothing to bring along, and an unused binding is a warning in
     // the consumer's build.
     let value = if matches!(strict.kind(), ContractKind::Struct { fields } if fields.is_empty()) {
