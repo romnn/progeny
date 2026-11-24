@@ -880,7 +880,20 @@ pub(crate) fn build(
         Some(reach) => twin::run(&mut deduped, reach),
         None => twin::Twinned::default(),
     };
-    let mut contracts = finalize::run(deduped, config, &lowered.multipart, ctx)?;
+    // A response type leaves off a named derive for its multipart form only where a request
+    // sends that form; one lowered from an unused `requestBodies` entry promises nothing.
+    let sent: BTreeMap<TypeIndex, TypeIndex> = lowered
+        .multipart
+        .iter()
+        .filter(|(form, _)| {
+            reach
+                .as_ref()
+                .and_then(|reach| reach.get(form.index()))
+                .is_some_and(|reach| reach.request)
+        })
+        .map(|(&form, &ordinary)| (form, ordinary))
+        .collect();
+    let mut contracts = finalize::run(deduped, config, &sent, ctx)?;
     contracts.by_shape = lowered.by_shape;
     contracts.collapses = lowered.collapses;
     contracts.twins = twinned.twins;
@@ -2019,6 +2032,58 @@ mod tests {
             TypeRef::Named(form)
         );
         assert_eq!(contracts.declared_form(form), ordinary);
+    }
+
+    /// A multipart form nothing sends, lowered from an unused `requestBodies` entry, does not
+    /// excuse the response type from a derive the configuration names.
+    #[test_util::test]
+    fn a_named_derive_an_unsent_multipart_form_takes_still_stops_generation() {
+        use crate::config::Derive;
+        let config = Config {
+            type_derives: [(
+                "Attachment".to_owned(),
+                [
+                    Derive::PartialEq,
+                    Derive::Eq,
+                    Derive::PartialOrd,
+                    Derive::Ord,
+                ]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let attachment = json!({"$ref": "#/components/schemas/Attachment"});
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/attachments": {"get": {
+                "operationId": "getAttachment",
+                "responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": attachment,
+                }}}},
+            }}},
+            "components": {
+                "schemas": {
+                    "Attachment": {"type": "object", "properties": {
+                        "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                    }},
+                },
+                "requestBodies": {"Unused": {"content": {"multipart/form-data": {
+                    "schema": attachment,
+                }}}},
+            },
+        });
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(document, &mut ctx)?;
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
+        let error = build(&resolved, &shapes, &config, &mut ctx)
+            .err()
+            .ok_or_eyre("a derive nothing can take should stop generation")?;
+        assert_eq!(error.kind(), crate::RejectKind::UnsatisfiableConfig);
     }
 
     /// The type only responses reach, beside the multipart form a request sends, is the read
