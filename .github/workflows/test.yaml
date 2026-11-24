@@ -50,6 +50,11 @@ jobs:
         run: task test:fc
       - name: Doc-tests
         run: task test:doc
+      # The default profile leaves these out because they compile generated crates; one platform
+      # is enough for that.
+      - name: Integration tests
+        if: runner.os == 'Linux'
+        run: task test:integration
 
   corpus:
     name: conformance corpus (${{ matrix.part }})
