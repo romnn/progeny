@@ -125,8 +125,8 @@ impl Probe<'_> {
     /// Whether a branch is generated as scalar data: a scalar, a string enum, or lists of those,
     /// through aliases and `Option`s.
     ///
-    /// A tuple is not, because its generated Rust stops implementing `Debug` past 12 positions and
-    /// deserializing past 16.
+    /// A tuple is not: no union this reading was made for has one, so the carried reader's
+    /// handling of a tuple branch is untested.
     ///
     /// A key the settled graph does not hold is classified on its own and added to `reached`, the
     /// shapes the union would add to the graph.
