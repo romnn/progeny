@@ -334,6 +334,15 @@ pub(crate) fn is_json_media_type(media_type: &str) -> bool {
     base.eq_ignore_ascii_case("application/json") || base.to_ascii_lowercase().ends_with("+json")
 }
 
+/// Whether a media type is `multipart/form-data`, whatever its parameters.
+///
+/// Defined here for the same reason: the type layer gives a multipart body its own form, and
+/// both its lowering and its reach have to agree on which bodies those are.
+pub(crate) fn is_multipart_media_type(media_type: &str) -> bool {
+    let base = media_type.split(';').next().unwrap_or(media_type).trim();
+    base.eq_ignore_ascii_case("multipart/form-data")
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct MediaType {
     pub(crate) schema: Option<SchemaId>,

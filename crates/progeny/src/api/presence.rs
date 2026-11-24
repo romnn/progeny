@@ -235,7 +235,7 @@ fn seed(ty: &TypeRef, contracts: &Contracts, out: &mut BTreeSet<TypeIndex>) {
     out.extend(
         reached
             .into_iter()
-            .map(|index| contracts.strict_form(index)),
+            .map(|index| contracts.declared_form(index)),
     );
 }
 
@@ -257,7 +257,7 @@ fn close(contracts: &Contracts, start: BTreeSet<TypeIndex>) -> BTreeSet<TypeInde
         queue.extend(
             reached
                 .into_iter()
-                .map(|index| contracts.strict_form(index)),
+                .map(|index| contracts.declared_form(index)),
         );
     }
     seen
@@ -339,6 +339,85 @@ mod tests {
                 .iter()
                 .any(|detail| detail.contains("no operation's body")),
             "{found:#?}"
+        );
+    }
+
+    /// A multipart body that sends a form of its own still reaches the type the document
+    /// declared, so a marker the form carries on the way out is reported against that type.
+    #[test_util::test]
+    fn a_multipart_form_reaches_the_type_it_is_a_form_of() {
+        // The response makes `Attachment` a type of its own beside the multipart body's form.
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/attachments": {
+                    "post": {
+                        "operationId": "attach",
+                        "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/Attachment"}}}},
+                        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Attachment"}}}}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                "Attachment": {"type": "object", "properties": {
+                    "id": {"type": "integer", "readOnly": true},
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+            }},
+        }))?;
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("request body"), "{found:#?}");
+    }
+
+    /// A multipart form merges with no other struct, however alike: the struct would then count
+    /// as the form's ordinary type, and its own findings would be judged by that type's reach.
+    #[test_util::test]
+    fn a_multipart_form_keeps_apart_from_an_alike_struct() {
+        // The `/shared` body's own schema is also a JSON body, so its multipart body gets a form,
+        // which the `/single` body is written exactly like, apart from `readOnly`.
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/shared": {"post": {
+                    "operationId": "sendShared",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object", "properties": {
+                        "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                    }}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/json": {"post": {
+                    "operationId": "sendJson",
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "$ref": "#/paths/~1shared/post/requestBody/content/multipart~1form-data/schema",
+                    }}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/single": {"post": {
+                    "operationId": "sendSingle",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object", "properties": {
+                        "file": {"type": "string", "contentMediaType": "application/octet-stream", "readOnly": true},
+                    }}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+        }))?;
+        // The `/single` body is still a request body of its own, so its `readOnly` file costs
+        // something and is reported.
+        let found: Vec<String> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
+            .map(|found| found.location().to_string())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "/paths/~1single/post/requestBody/content/multipart~1form-data/schema/properties/file"
+            ]
         );
     }
 

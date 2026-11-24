@@ -1736,11 +1736,75 @@ mod tests {
         assert!(support.contains("pub struct Upload"), "{support}");
     }
 
+    /// Every stage up to rendering, for the tests that read the API model beside the source.
+    fn pipeline(
+        document: Value,
+        config: &Config,
+    ) -> eyre::Result<(
+        contract::Contracts,
+        crate::api::ApiModel,
+        Vec<crate::diag::Diagnostic>,
+    )> {
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(document, &mut ctx)?;
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
+        let contracts = contract::build(&resolved, &shapes, config, &mut ctx)?;
+        let api = crate::api::build(&resolved, &shapes, &contracts, config, &mut ctx)?;
+        Ok((contracts, api, ctx.into_diagnostics()))
+    }
+
+    /// The name of the type an operation's body sends, and the kind of each of its parts.
+    fn sent<'a>(
+        contracts: &'a contract::Contracts,
+        api: &'a crate::api::ApiModel,
+        operation: &str,
+    ) -> eyre::Result<(&'a str, Vec<(&'a str, crate::api::PartKind)>)> {
+        let body = api
+            .operations()
+            .iter()
+            .find(|candidate| candidate.rust_name.as_str() == operation)
+            .and_then(|found| found.body.as_ref())
+            .ok_or_eyre("the operation sends a body")?;
+        let mut ty = body.ty().ok_or_eyre("the body is typed")?;
+        // A nullable body sends an `Option` of the type.
+        while let contract::TypeRef::Option(inner) = ty {
+            ty = inner;
+        }
+        let contract::TypeRef::Named(index) = ty else {
+            eyre::bail!("{operation} sends {body:?}");
+        };
+        let name = contracts
+            .get(*index)
+            .ok_or_eyre("the body names a type")?
+            .rust_name()
+            .as_str();
+        let parts = match body {
+            crate::api::BodyContract::Multipart { parts, .. } => parts
+                .iter()
+                .map(|part| (part.wire_name.as_str(), part.kind))
+                .collect(),
+            _ => Vec::new(),
+        };
+        Ok((name, parts))
+    }
+
+    /// The source of one rendered struct, from its name to its closing brace.
+    fn struct_source<'a>(rendered: &'a str, name: &str) -> eyre::Result<&'a str> {
+        let opening = format!("pub struct {name} {{");
+        let start = rendered
+            .find(&opening)
+            .ok_or_eyre("the struct is rendered")?;
+        let rest = rendered.get(start..).unwrap_or_default();
+        let end = rest.find("\n}").ok_or_eyre("the struct closes")?;
+        Ok(rest.get(..end).unwrap_or_default())
+    }
+
     #[test_util::test]
-    fn a_schema_on_two_wires_keeps_the_json_spelling_and_says_so() {
-        // The same schema as a multipart body and a JSON body: one schema is one Rust type, so
-        // retyping its binary member to `Upload` would put the upload object form on the JSON
-        // wire. The conflict keeps `String` everywhere and degrades the multipart side out loud.
+    fn a_schema_on_two_wires_is_an_upload_form_and_a_json_type() {
+        // Two operations reference one schema directly, no union between them: one sends it as a
+        // multipart body, the other as JSON.
         let document = json!({
             "openapi": "3.1.0",
             "paths": {
@@ -1758,36 +1822,208 @@ mod tests {
             "components": {"schemas": {
                 "Payload": {"type": "object", "properties": {
                     "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                    "note": {"type": "string"},
                 }},
             }},
         });
-        let mut ctx = Ctx::new();
         let config = Config::default();
-        let normalized = normalize::normalize(document, &mut ctx)?;
-        let parsed = doc_parse::document(normalized, &mut ctx);
-        let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
-        let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        let (contracts, api, diagnostics) = pipeline(document, &config)?;
+
+        // The multipart body sends a form of its own whose file member is a file part, and the
+        // JSON body keeps the type the schema is named after.
+        let (form, parts) = sent(&contracts, &api, "send_form")?;
+        assert_eq!(form, "PayloadMultipart");
+        assert_eq!(
+            parts,
+            [
+                ("file", crate::api::PartKind::File),
+                ("note", crate::api::PartKind::Text)
+            ]
+        );
+        assert_eq!(sent(&contracts, &api, "send_json")?.0, "Payload");
+
+        // The form holds an upload, with its bytes, filename and content type, and the JSON type
+        // holds the caller's string, which it sends as it is.
         let rendered = super::run(&contracts, &api, &config)
             .get(camino::Utf8Path::new("src/types.rs"))
             .cloned()
             .unwrap_or_default();
-        assert!(rendered.contains("pub file: Option<String>"), "{rendered}");
-        assert!(!rendered.contains("Upload"), "{rendered}");
-        let diagnostics = ctx.into_diagnostics();
-        let collapse = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.detail().contains("keep the JSON spelling"))
-            .ok_or_eyre("the collapse is reported")?;
+        let multipart = struct_source(&rendered, "PayloadMultipart")?;
         assert!(
-            collapse.location().to_string().contains("~1form"),
-            "{collapse:?}"
+            multipart.contains("pub file: Option<super::support::Upload>"),
+            "{rendered}"
+        );
+        let json = struct_source(&rendered, "Payload")?;
+        assert!(json.contains("pub file: Option<String>"), "{rendered}");
+
+        // Nothing is degraded, so nothing is reported.
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|found| found.class() == crate::BreakageClass::EncodingCollapse),
+            "{diagnostics:?}"
         );
     }
 
     #[test_util::test]
-    fn a_schema_shared_with_a_response_header_keeps_the_json_spelling() {
+    fn a_body_declared_in_several_media_types_sends_the_upload_form_only_as_multipart() {
+        // openai's container file upload declares JSON and multipart for one schema, and
+        // posthog's feedback a URL-encoded form and multipart; this declares all three.
+        // A second multipart body nests the schema, which makes it a JSON part there.
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/files": {"post": {
+                    "operationId": "createFile",
+                    "requestBody": {"required": true, "content": {
+                        "application/json": {"schema": {"$ref": "#/components/schemas/Attachment"}},
+                        "application/x-www-form-urlencoded": {"schema": {"$ref": "#/components/schemas/Attachment"}},
+                        "multipart/form-data": {"schema": {"$ref": "#/components/schemas/Attachment"}},
+                    }},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/bundles": {"post": {
+                    "operationId": "createBundle",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {
+                        "$ref": "#/components/schemas/Bundle",
+                    }}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+            "components": {"schemas": {
+                "Attachment": {"type": "object", "properties": {
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                    "name": {"type": "string"},
+                }},
+                "Bundle": {"type": "object", "properties": {
+                    "attachment": {"$ref": "#/components/schemas/Attachment"},
+                    "scan": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+            }},
+        });
+
+        // JSON primary: the JSON and form methods send the ordinary type, and only the multipart
+        // method sends the upload form.
+        let (contracts, api, _) = pipeline(document.clone(), &Config::default())?;
+        assert_eq!(sent(&contracts, &api, "create_file")?.0, "Attachment");
+        assert_eq!(sent(&contracts, &api, "create_file_form")?.0, "Attachment");
+        let (form, parts) = sent(&contracts, &api, "create_file_multipart")?;
+        assert_eq!(form, "AttachmentMultipart");
+        assert_eq!(
+            parts,
+            [
+                ("file", crate::api::PartKind::File),
+                ("name", crate::api::PartKind::Text)
+            ]
+        );
+
+        // The nested reference is a JSON part of the ordinary type, whose file stays a string,
+        // beside the bundle's own file part.
+        let (bundle, parts) = sent(&contracts, &api, "create_bundle")?;
+        assert_eq!(bundle, "Bundle");
+        assert_eq!(
+            parts,
+            [
+                ("attachment", crate::api::PartKind::Json),
+                ("scan", crate::api::PartKind::File)
+            ]
+        );
+        let rendered = super::run(&contracts, &api, &Config::default())
+            .get(camino::Utf8Path::new("src/types.rs"))
+            .cloned()
+            .unwrap_or_default();
+        let nested = struct_source(&rendered, "Bundle")?;
+        assert!(
+            nested.contains("pub attachment: Option<Attachment>"),
+            "{rendered}"
+        );
+
+        // Multipart primary: the operation and the server's handler take the upload form.
+        let config = Config {
+            media_types: [(
+                "/paths/~1files/post/requestBody/content".to_owned(),
+                "multipart/form-data".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let (contracts, api, _) = pipeline(document, &config)?;
+        assert_eq!(
+            sent(&contracts, &api, "create_file")?.0,
+            "AttachmentMultipart"
+        );
+        assert_eq!(sent(&contracts, &api, "create_file_json")?.0, "Attachment");
+        let server = super::run(&contracts, &api, &config)
+            .get(camino::Utf8Path::new("src/server.rs"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            server.contains("body: super::types::AttachmentMultipart"),
+            "{server}"
+        );
+    }
+
+    #[test_util::test]
+    fn a_named_alias_of_a_shared_body_still_sends_the_upload_form() {
+        // `Wrapped` and `MaybeWrapped` name `Payload` through a single-branch `oneOf`, the second
+        // beside `null`, and each is a multipart body while `Payload` itself is a JSON body.
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/form": {"post": {
+                    "operationId": "sendForm",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/Wrapped"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/maybe": {"post": {
+                    "operationId": "sendMaybe",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/MaybeWrapped"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/json": {"post": {
+                    "operationId": "sendJson",
+                    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Payload"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+            "components": {"schemas": {
+                "Payload": {"type": "object", "properties": {
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+                "Wrapped": {"oneOf": [{"$ref": "#/components/schemas/Payload"}]},
+                "MaybeWrapped": {"oneOf": [{"$ref": "#/components/schemas/Payload"}, {"type": "null"}]},
+            }},
+        });
+        let (contracts, api, _) = pipeline(document, &Config::default())?;
+
+        // Both aliases send the upload form, and its file member is a file part.
+        let file = [("file", crate::api::PartKind::File)];
+        assert_eq!(
+            sent(&contracts, &api, "send_form")?,
+            ("PayloadMultipart", file.to_vec())
+        );
+        assert_eq!(
+            sent(&contracts, &api, "send_maybe")?,
+            ("PayloadMultipart", file.to_vec())
+        );
+        assert_eq!(sent(&contracts, &api, "send_json")?.0, "Payload");
+
+        // The nullable alias keeps its `null` around the form.
+        let maybe = api
+            .operations()
+            .iter()
+            .find(|operation| operation.rust_name.as_str() == "send_maybe")
+            .and_then(|operation| operation.body.as_ref())
+            .and_then(crate::api::BodyContract::ty);
+        assert!(
+            matches!(maybe, Some(contract::TypeRef::Option(_))),
+            "{maybe:?}"
+        );
+    }
+
+    #[test_util::test]
+    fn a_schema_shared_with_a_response_header_keeps_the_json_spelling_there() {
         // A response header's schema is a named-type position even though no renderer writes
         // headers yet; retyping its binary member for the multipart side would change the
         // header type's shape with nothing saying so.
@@ -1809,26 +2045,28 @@ mod tests {
                 }},
             }},
         });
-        let mut ctx = Ctx::new();
         let config = Config::default();
-        let normalized = normalize::normalize(document, &mut ctx)?;
-        let parsed = doc_parse::document(normalized, &mut ctx);
-        let resolved = resolve::resolve(parsed, &mut ctx);
-        let shapes = shape::classify(&resolved, crate::config::IntegerWidth::Wide, &mut ctx);
-        let contracts = contract::build(&resolved, &shapes, &config, &mut ctx)?;
-        let api = crate::api::build(&resolved, &shapes, &contracts, &config, &mut ctx)?;
+        let (contracts, api, _) = pipeline(document, &config)?;
+        // The header's type keeps the string, and the multipart body sends the upload form.
+        assert_eq!(
+            sent(&contracts, &api, "send_form")?.0,
+            "AttachmentMultipart"
+        );
+        // Only the header reaches the type the schema is named after, so it takes the read form
+        // alone, and the multipart body reaches the form instead.
+        let header_form = contracts
+            .types()
+            .iter()
+            .find(|contract| contract.rust_name().as_str() == "Attachment")
+            .ok_or_eyre("the header's type is generated")?
+            .form();
+        assert_eq!(header_form, contract::Form::Lenient { strict: None });
         let rendered = super::run(&contracts, &api, &config)
             .get(camino::Utf8Path::new("src/types.rs"))
             .cloned()
             .unwrap_or_default();
-        assert!(!rendered.contains("Upload"), "{rendered}");
-        let diagnostics = ctx.into_diagnostics();
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.detail().contains("keep the JSON spelling")),
-            "{diagnostics:?}"
-        );
+        let header = struct_source(&rendered, "Attachment")?;
+        assert!(header.contains("pub file: Option<String>"), "{rendered}");
     }
 
     #[test_util::test]
@@ -2254,7 +2492,7 @@ mod tests {
     fn a_wrapper_beside_a_direct_multipart_use_is_no_conflict() {
         // Both operations put the same schema on the same kind of wire — a multipart request
         // body. Seeding the wrapper's children marked the target as reachable from a foreign
-        // position and degraded the direct use with a reason that named a wire that does not
+        // position, which would give the direct use a second type for a wire that does not
         // exist.
         let document = json!({
             "openapi": "3.1.0",
@@ -2294,13 +2532,8 @@ mod tests {
             rendered.contains("pub file: Option<super::support::Upload>"),
             "{rendered}"
         );
-        let diagnostics = ctx.into_diagnostics();
-        assert!(
-            !diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.detail().contains("keep the JSON spelling")),
-            "{diagnostics:?}"
-        );
+        // One type holds the upload for both, with no multipart form beside it.
+        assert!(!rendered.contains("FormMultipart"), "{rendered}");
     }
 
     #[test_util::test]

@@ -32,9 +32,12 @@ pub(crate) const BASE: [Derive; 2] = [Derive::Clone, Derive::Debug];
 /// crate-wide request is a preference and gets skipped with a diagnostic; a named one is a stated
 /// intent that cannot be honoured, and quietly ignoring it would be the forbidden failure mode
 /// applied to the configuration instead of to the document.
+///
+/// `multipart` maps each multipart form to its ordinary type.
 pub(super) fn run(
     mut types: Vec<Provisional>,
     config: &Config,
+    multipart: &BTreeMap<TypeIndex, TypeIndex>,
     ctx: &mut Ctx,
 ) -> Result<Contracts, RejectError> {
     super::cycle::normalize(&mut types, ctx);
@@ -52,10 +55,17 @@ pub(super) fn run(
             config.derives_for(contract.component.as_deref(), &contract.origin.to_string());
         let named = config.type_derives.keys().any(|key| matches(contract, key));
         // The configuration names the type a caller builds.
-        // A read twin is the generator's lenient form of it, so a named derive the twin cannot
-        // take, such as `Copy` beside the map that keeps undeclared members, is reported and left
-        // off there, while the strict half still has to take it.
-        let read_twin = matches!(contract.form, Form::Lenient { strict: Some(_) });
+        // A read form of it is the generator's lenient form, so a named derive the read form
+        // cannot take, such as `Copy` beside the map that keeps undeclared members, is reported and
+        // left off there, while the type a request sends still has to take it.
+        // That read form is a read twin, or a type only responses reach whose multipart form a
+        // request sends.
+        let here = TypeIndex(u32::try_from(index).unwrap_or(u32::MAX));
+        let read_form = match contract.form {
+            Form::Lenient { strict: Some(_) } => true,
+            Form::Lenient { strict: None } => multipart.values().any(|&ordinary| ordinary == here),
+            Form::Strict { .. } | Form::Shared => false,
+        };
 
         let mut derives: Vec<Derive> = BASE.to_vec();
         // A struct a response decodes into always has a `Default`: every member of a read form
@@ -78,7 +88,7 @@ pub(super) fn run(
                 derives.push(derive);
                 continue;
             }
-            if named && !read_twin {
+            if named && !read_form {
                 return Err(RejectError::new(
                     RejectKind::UnsatisfiableConfig,
                     format!(
@@ -92,7 +102,7 @@ pub(super) fn run(
             let detail = if named {
                 format!(
                     "the configuration asks for `{}` by name; this read form of the type cannot \
-                     take it, so it was left off here and kept on the strict form",
+                     take it, so it was left off here and kept on the form a request sends",
                     derive.name()
                 )
             } else {
@@ -142,6 +152,7 @@ pub(super) fn run(
     Ok(Contracts {
         types: frozen,
         by_shape: BTreeMap::new(),
+        multipart: BTreeMap::new(),
         collapses: Vec::new(),
         twins: BTreeMap::new(),
     })

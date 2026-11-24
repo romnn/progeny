@@ -102,7 +102,7 @@ pub(super) fn run(
         resolved,
         shapes,
         config,
-        multipart_bodies: upload_bodies(resolved, shapes, ctx),
+        uploads: upload_bodies(resolved, shapes),
         namer: Namer::default(),
         done: BTreeMap::new(),
         types: Vec::new(),
@@ -158,9 +158,17 @@ pub(super) fn run(
     for root in shapes.roots() {
         lower.key(&root.key, ctx);
     }
+    // After every root, so that the ordinary types are complete and keep the names they ask for.
+    let mut multipart = BTreeMap::new();
+    for key in std::mem::take(&mut lower.uploads.specialized) {
+        if let Some((ordinary, form)) = lower.multipart_form(&key) {
+            multipart.insert(form, ordinary);
+        }
+    }
     Lowered {
         types: lower.types,
         by_shape: lower.done,
+        multipart,
         collapses: lower.collapses,
         tag_branches: lower.tag_branches,
         name_conflicts: lower.name_conflicts,
@@ -171,6 +179,11 @@ pub(super) fn run(
 pub(super) struct Lowered {
     pub(super) types: Vec<Provisional>,
     pub(super) by_shape: BTreeMap<ShapeKey, TypeRef>,
+    /// Each multipart form's ordinary type, by the form's index.
+    ///
+    /// Keyed by the form so that every form stays recorded whatever merges: see
+    /// [`Lower::multipart_form`].
+    pub(super) multipart: BTreeMap<TypeIndex, TypeIndex>,
     pub(super) collapses: Vec<Collapse>,
     /// The branches of every union that consumes its tag, by shape.
     pub(super) tag_branches: BTreeSet<ShapeKey>,
@@ -286,9 +299,9 @@ struct Lower<'a> {
     resolved: &'a ResolvedDocument,
     shapes: &'a Shapes,
     config: &'a Config,
-    /// The shapes that are `multipart/form-data` request bodies: their own binary members become
-    /// [`TypeRef::Upload`] rather than `String`, because those members are file parts.
-    multipart_bodies: BTreeSet<ShapeKey>,
+    /// The `multipart/form-data` request bodies whose binary members become
+    /// [`TypeRef::Upload`], because those members are file parts.
+    uploads: UploadBodies,
     namer: Namer,
     /// The type each key lowers to, so a shape reached twice is one type.
     done: BTreeMap<ShapeKey, TypeRef>,
@@ -703,7 +716,7 @@ impl Lower<'_> {
             .get(index.index())
             .map_or_else(JsonPointer::root, |contract| contract.origin.clone());
 
-        let multipart_body = self.multipart_bodies.contains(key);
+        let multipart_body = self.uploads.in_place.contains(key);
         for field in &structure.fields {
             // A member whose type reads `null` as a value of its own is nullable too, because an
             // `Option` around it reads a present `null` as absent.
@@ -864,27 +877,13 @@ impl Lower<'_> {
         owner: TypeIndex,
         position: JsonPointer,
     ) -> (Presence, TypeRef, SkipRule) {
-        match (required, nullable) {
-            (true, false) => (Presence::Required, inner, SkipRule::Never),
+        let (presence, skip) = match (required, nullable) {
+            (true, false) => (Presence::Required, SkipRule::Never),
             // Already an `Option` from the shape: the key is there and may be null.
-            (true, true) => (Presence::Nullable, inner, SkipRule::Never),
-            (false, false) => (
-                Presence::Optional,
-                TypeRef::Option(Box::new(inner)),
-                SkipRule::WhenNone,
-            ),
+            (true, true) => (Presence::Nullable, SkipRule::Never),
+            (false, false) => (Presence::Optional, SkipRule::WhenNone),
             (false, true) if self.config.preserves_optional_nullable_at(&position) => {
-                let value = match inner {
-                    TypeRef::Option(value) => value,
-                    // Multipart file detection replaces the nullable wrapper with the richer
-                    // upload payload before presence is ruled on.
-                    other => Box::new(other),
-                };
-                (
-                    Presence::OptionalNullable,
-                    TypeRef::Presence(value),
-                    SkipRule::WhenOmitted,
-                )
+                (Presence::OptionalNullable, SkipRule::WhenOmitted)
             }
             (false, true) => {
                 // Recorded rather than reported. The finding is real here, but *which half of the
@@ -896,14 +895,48 @@ impl Lower<'_> {
                     at: position,
                     kind: collapse,
                 });
-                // A type that holds `null` itself has no `Option` from the shape yet.
-                let ty = match inner {
-                    TypeRef::Option(_) => inner,
-                    other => TypeRef::Option(Box::new(other)),
-                };
-                (Presence::OptionalNullable, ty, SkipRule::WhenNone)
+                (Presence::OptionalNullable, SkipRule::WhenNone)
+            }
+        };
+        (presence, spelled(presence, skip, inner), skip)
+    }
+
+    /// A second type for a body sent as `multipart/form-data` whose schema another wire position
+    /// also uses: the ordinary type with every file member an upload.
+    ///
+    /// Only the body's own members change.
+    /// A nested object is a JSON part, and a recursive reference names the body as a value, so
+    /// both keep the ordinary types they already name.
+    /// The form is named after the ordinary type, which keeps its name.
+    ///
+    /// Returns the ordinary type's index and the form's.
+    fn multipart_form(&mut self, key: &ShapeKey) -> Option<(TypeIndex, TypeIndex)> {
+        let shapes = self.shapes;
+        let structure = body_struct(shapes, key)?;
+        let mut lowered = self.done.get(key)?;
+        while let TypeRef::Option(inner) = lowered {
+            lowered = inner;
+        }
+        let TypeRef::Named(ordinary) = *lowered else {
+            return None;
+        };
+        let mut form = self.types.get(ordinary.index())?.clone();
+        let ContractKind::Struct { fields } = &mut form.kind else {
+            return None;
+        };
+        // The declared members come first and in order; a capture member after them has no
+        // member of the schema to pair with.
+        for (field, member) in fields.iter_mut().zip(&structure.fields) {
+            if let Some(upload) = upload_shape(shapes, &member.shape, 0) {
+                field.ty = spelled(field.presence, field.skip_serializing_if, upload);
             }
         }
+        let segments = [form.rust_name.as_str().to_owned(), "Multipart".to_owned()];
+        form.rust_name = self.namer.unique(RustIdent::type_name(&segments));
+        form.explicit = false;
+        let index = TypeIndex(u32::try_from(self.types.len()).unwrap_or(u32::MAX));
+        self.types.push(form);
+        Some((ordinary, index))
     }
 
     /// Whether a member's type reads `null`: arbitrary JSON, `null` itself, an `Option`, or an
@@ -1297,43 +1330,25 @@ fn string_variants(values: &[String]) -> (Vec<StringVariant>, RustIdent) {
     (variants, RustIdent::fallback_variant())
 }
 
-/// One `multipart/form-data` request-body position: the body schema's key, and where the
-/// content map is written.
-struct MultipartPosition {
-    key: ShapeKey,
-    at: JsonPointer,
-}
-
 /// Every schema position that puts a type on a wire, split by whether it is a multipart body.
 struct WirePositions {
-    multipart: Vec<MultipartPosition>,
+    /// The schemas of `multipart/form-data` request bodies.
+    multipart: Vec<ShapeKey>,
     /// Body schemas of every other media type, response schemas, and parameter schemas.
     elsewhere: BTreeSet<ShapeKey>,
 }
 
-/// Collect every wire position from the document itself, because which wire a schema rides is a
-/// fact about positions and the positions are the document's to declare.
-///
-/// The `elsewhere` side is deliberately broad — it includes `components` entries no operation
-/// references, and positions whose body never serializes the schema (a `text/plain` body is a
-/// `String` whatever its schema says) — because the set only ever *withholds* the upload retype.
-/// Erring broad costs a degraded multipart part; erring narrow silently changes a JSON wire.
 /// One media-type map's schemas into the split, with multipart request bodies kept apart.
 fn split_content(
     resolved: &ResolvedDocument,
     positions: &mut WirePositions,
     content: Option<&BTreeMap<String, crate::doc::MediaType>>,
-    at: &JsonPointer,
 ) {
     for (media_type, entry) in content.into_iter().flatten() {
         let Some(id) = entry.schema else { continue };
         let key = crate::shape::key_of(resolved, id);
-        let base = media_type.split(';').next().unwrap_or(media_type).trim();
-        if base.eq_ignore_ascii_case("multipart/form-data") {
-            positions.multipart.push(MultipartPosition {
-                key,
-                at: at.clone(),
-            });
+        if crate::doc::is_multipart_media_type(media_type) {
+            positions.multipart.push(key);
         } else {
             positions.elsewhere.insert(key);
         }
@@ -1404,6 +1419,14 @@ fn header_positions(
     other_content(resolved, positions, header.content.as_ref());
 }
 
+/// Collect every wire position from the document itself, because which wire a schema rides is a
+/// fact about positions and the positions are the document's to declare.
+///
+/// The `elsewhere` side is deliberately broad — it includes `components` entries no operation
+/// references, and positions whose body never serializes the schema (a `text/plain` body is a
+/// `String` whatever its schema says) — because the set only ever decides whether a multipart
+/// body needs a form of its own.
+/// Erring broad costs one more type; erring narrow silently changes a JSON wire.
 fn wire_positions(resolved: &ResolvedDocument) -> WirePositions {
     let mut positions = WirePositions {
         multipart: Vec::new(),
@@ -1413,31 +1436,25 @@ fn wire_positions(resolved: &ResolvedDocument) -> WirePositions {
     let routes = document
         .paths
         .as_ref()
-        .map(|paths| (&paths.items, "paths"))
+        .map(|paths| &paths.items)
         .into_iter()
-        .chain(document.webhooks.as_ref().map(|hooks| (hooks, "webhooks")));
-    for (items, section) in routes {
-        for (route, item) in items {
+        .chain(document.webhooks.as_ref());
+    for items in routes {
+        for item in items.values() {
             let Some(item) = resolved.path_item(item) else {
                 continue;
             };
             for node in item.parameters.iter().flatten() {
                 parameter_positions(resolved, &mut positions, node);
             }
-            for (method, operation) in item.operations() {
+            for (_, operation) in item.operations() {
                 for node in operation.parameters.iter().flatten() {
                     parameter_positions(resolved, &mut positions, node);
                 }
                 if let Some(node) = &operation.request_body
                     && let Some(body) = resolved.request_body(node)
                 {
-                    let at = JsonPointer::root()
-                        .child(section)
-                        .child(route)
-                        .child(method.slug())
-                        .child("requestBody")
-                        .child("content");
-                    split_content(resolved, &mut positions, body.content.as_ref(), &at);
+                    split_content(resolved, &mut positions, body.content.as_ref());
                 }
                 for node in operation
                     .responses
@@ -1456,14 +1473,9 @@ fn wire_positions(resolved: &ResolvedDocument) -> WirePositions {
         }
     }
     if let Some(components) = &document.components {
-        for (name, node) in components.request_bodies.iter().flatten() {
+        for (_, node) in components.request_bodies.iter().flatten() {
             if let Some(body) = resolved.request_body(node) {
-                let at = JsonPointer::root()
-                    .child("components")
-                    .child("requestBodies")
-                    .child(name)
-                    .child("content");
-                split_content(resolved, &mut positions, body.content.as_ref(), &at);
+                split_content(resolved, &mut positions, body.content.as_ref());
             }
         }
         for (_, node) in components.responses.iter().flatten() {
@@ -1479,37 +1491,38 @@ fn wire_positions(resolved: &ResolvedDocument) -> WirePositions {
     positions
 }
 
-/// The multipart request-body schemas whose own binary members become [`TypeRef::Upload`]: the
-/// ones no other wire position can see.
+/// The `multipart/form-data` request bodies whose binary members become [`TypeRef::Upload`].
+#[derive(Default)]
+struct UploadBodies {
+    /// Bodies no other wire position sees, whose one type holds the uploads itself.
+    in_place: BTreeSet<ShapeKey>,
+    /// Bodies with a file member whose schema something else also uses: another wire position,
+    /// or another multipart body that nests it as a JSON part.
+    ///
+    /// Their ordinary type keeps the JSON spelling `String` for those other positions, and the
+    /// multipart positions get a form of their own: see [`Lower::multipart_form`].
+    specialized: BTreeSet<ShapeKey>,
+}
+
+/// Sort every multipart request body by whether its type can hold the uploads itself.
 ///
-/// One schema is one Rust type, so a multipart body that is also a JSON body, a response, a
-/// parameter, or a member nested inside another multipart body (a nested member is a JSON part)
-/// would carry the upload object form onto wires the document types as plain strings. That
-/// conflict keeps the JSON spelling: the multipart side degrades — parts get the conventional
-/// filename and no caller-chosen metadata — and says so, rather than the JSON side silently
-/// changing shape.
-fn upload_bodies(
-    resolved: &ResolvedDocument,
-    shapes: &Shapes,
-    ctx: &mut Ctx,
-) -> BTreeSet<ShapeKey> {
+/// The upload object form on a wire the document types as a plain string would change that wire
+/// silently, so a body any other position can see keeps its ordinary type for them.
+fn upload_bodies(resolved: &ResolvedDocument, shapes: &Shapes) -> UploadBodies {
     let positions = wire_positions(resolved);
     // Each multipart position is resolved to the core key its struct lowers under before
     // anything else looks at it — see [`core_key`].
-    let multipart: Vec<MultipartPosition> = positions
+    let multipart: Vec<ShapeKey> = positions
         .multipart
-        .into_iter()
-        .map(|position| MultipartPosition {
-            key: core_key(shapes, &position.key),
-            at: position.at,
-        })
+        .iter()
+        .map(|key| core_key(shapes, key))
         .collect();
     // Everything a non-multipart position can see, plus everything *below* a multipart body's
     // own fields. A file member only ever references a binary scalar, which has no members to
-    // retype, so seeding every child never poisons a legitimate upload root.
+    // retype, so seeding every child never makes a legitimate upload root need a second form.
     let mut queue: Vec<ShapeKey> = positions.elsewhere.iter().cloned().collect();
-    for position in &multipart {
-        if let Some(shape) = shapes.get(&position.key) {
+    for key in &multipart {
+        if let Some(shape) = shapes.get(key) {
             queue.extend(crate::shape::child_keys(shape));
         }
     }
@@ -1522,40 +1535,57 @@ fn upload_bodies(
             queue.extend(crate::shape::child_keys(shape));
         }
     }
-    let mut keys = BTreeSet::new();
-    let mut reported = BTreeSet::new();
-    for position in multipart {
-        if reachable.contains(&position.key) {
-            // Reported only where a file part actually exists: without one the retype is a
-            // no-op and the collapse costs nothing.
-            if has_file_member(shapes, &position.key) && reported.insert(position.at.clone()) {
-                ctx.report(Diagnostic::new(
-                    BreakageClass::EncodingCollapse,
-                    Action::Degrade,
-                    position.at,
-                    "the schema is also sent or received outside this multipart body, and one \
-                     schema is one Rust type, so its binary members keep the JSON spelling \
-                     `String`; the parts are sent under the conventional `file` filename with \
-                     no caller-chosen metadata",
-                ));
-            }
-        } else {
-            keys.insert(position.key);
+    let mut bodies = UploadBodies::default();
+    for key in multipart {
+        if !reachable.contains(&key) {
+            bodies.in_place.insert(key);
+        } else if has_file_member(shapes, &key) {
+            bodies.specialized.insert(key);
         }
     }
-    keys
+    bodies
 }
 
 /// Whether the shape has a member [`upload_shape`] would retype, mirrored at shape level: an
 /// array of files is a file, and anything else is a JSON part.
 fn has_file_member(shapes: &Shapes, key: &ShapeKey) -> bool {
-    let Some(Shape::Struct(structure)) = shapes.get(key) else {
-        return false;
-    };
-    structure
-        .fields
-        .iter()
-        .any(|field| upload_shape(shapes, &field.shape, 0).is_some())
+    body_struct(shapes, key).is_some_and(|structure| {
+        structure
+            .fields
+            .iter()
+            .any(|field| upload_shape(shapes, &field.shape, 0).is_some())
+    })
+}
+
+/// The struct a multipart body's core key lowers, looking through a nullable wrapper as
+/// [`Lower::key`] does.
+fn body_struct<'a>(shapes: &'a Shapes, key: &ShapeKey) -> Option<&'a crate::shape::Struct> {
+    match peel(shapes.get(key)?).1 {
+        Shape::Struct(structure) => Some(structure),
+        _ => None,
+    }
+}
+
+/// The type a member spells around the type its schema lowered to, by its presence and skip rule.
+///
+/// The skip rule tells the two optional-and-nullable spellings apart: [`SkipRule::WhenOmitted`]
+/// belongs to the three-state presence type, and [`SkipRule::WhenNone`] to the collapsed `Option`.
+fn spelled(presence: Presence, skip: SkipRule, inner: TypeRef) -> TypeRef {
+    match (presence, skip) {
+        (Presence::Required | Presence::Nullable, _) => inner,
+        (Presence::Optional, _) => TypeRef::Option(Box::new(inner)),
+        (Presence::OptionalNullable, SkipRule::WhenOmitted) => match inner {
+            TypeRef::Option(value) => TypeRef::Presence(value),
+            // Multipart file detection replaces the nullable wrapper with the richer upload
+            // payload before presence is ruled on.
+            other => TypeRef::Presence(Box::new(other)),
+        },
+        // A type that holds `null` itself has no `Option` from the shape yet.
+        (Presence::OptionalNullable, _) => match inner {
+            TypeRef::Option(_) => inner,
+            other => TypeRef::Option(Box::new(other)),
+        },
+    }
 }
 
 /// The file-part type a binary-shaped member of a multipart body lowers to, or `None` where the

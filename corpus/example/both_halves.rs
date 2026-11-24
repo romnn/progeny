@@ -38,6 +38,8 @@ struct Seen {
     photo_file: Option<String>,
     photo_subject: Option<String>,
     photo_label: Option<support::Presence<String>>,
+    attachment_upload: Option<support::Upload>,
+    attachment_text: Option<String>,
 }
 
 /// Cloneable rather than shared behind an `Arc` from outside, because `router` takes the
@@ -225,6 +227,28 @@ impl server::Api for Double {
                 rating: body.rating,
                 ..Default::default()
             }),
+        }
+    }
+
+    async fn attach_form(
+        &self,
+        _context: (),
+        body: types::AttachmentMultipart,
+    ) -> server::AttachFormResponse {
+        self.record(|seen| seen.attachment_upload = Some(body.file));
+        server::AttachFormResponse::NoContent {
+            headers: Default::default(),
+        }
+    }
+
+    async fn attach_json(
+        &self,
+        _context: (),
+        body: types::Attachment,
+    ) -> server::AttachJsonResponse {
+        self.record(|seen| seen.attachment_text = Some(body.file));
+        server::AttachJsonResponse::NoContent {
+            headers: Default::default(),
         }
     }
 
@@ -465,6 +489,18 @@ impl server::Api for Gatekeeper {
         body: types::UploadPetPhotoBody,
     ) -> server::UploadPetPhotoResponse {
         self.inner.upload_pet_photo((), path, body).await
+    }
+
+    async fn attach_form(
+        &self,
+        _: Caller,
+        body: types::AttachmentMultipart,
+    ) -> server::AttachFormResponse {
+        self.inner.attach_form((), body).await
+    }
+
+    async fn attach_json(&self, _: Caller, body: types::Attachment) -> server::AttachJsonResponse {
+        self.inner.attach_json((), body).await
     }
 
     async fn typed_errors(
@@ -828,6 +864,40 @@ async fn a_multipart_body_survives_the_round_trip() {
         Some(support::Presence::Value("a caption".to_owned()))
     );
     assert_eq!(reply.into_value().pet_id, Some(5));
+}
+
+#[test_util::test]
+async fn a_schema_also_sent_as_json_still_uploads_a_file() {
+    // `Attachment` is a multipart body of `attachForm` and a JSON body of `attachJson`.
+    let (double, client) = serving().await?;
+
+    // Bytes that are not UTF-8, under a filename and a content type the caller chose, arrive as
+    // they were sent, because the multipart body sends the form whose file member is an upload.
+    let upload = support::Upload::new(vec![0, 159, 146, 150, 255, b'\n'])
+        .with_filename("scan.bin")
+        .with_content_type("image/png");
+    client
+        .attach_form(client::AttachFormParams {
+            body: types::AttachmentMultipart {
+                file: upload.clone(),
+            },
+        })
+        .send()
+        .await?;
+    assert_eq!(double.seen().attachment_upload, Some(upload));
+
+    // The JSON body keeps the schema's own type, and the caller's string arrives verbatim rather
+    // than as an upload object.
+    let text = "a file id, not \"bytes\": file-123";
+    client
+        .attach_json(client::AttachJsonParams {
+            body: types::Attachment {
+                file: text.to_owned(),
+            },
+        })
+        .send()
+        .await?;
+    assert_eq!(double.seen().attachment_text.as_deref(), Some(text));
 }
 
 #[test_util::test]
