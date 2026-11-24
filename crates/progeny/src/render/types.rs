@@ -1120,7 +1120,7 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope)
 /// omission: inside a JSON payload a base64 or binary property *is* a string, and turning it into
 /// bytes needs a codec the generated crate does not have. The byte representation applies to a raw
 /// binary request or response body, which is the API model's business.
-fn format_type(format: Format, config: &Config, scope: Scope) -> TokenStream {
+pub(crate) fn format_type(format: Format, config: &Config, scope: Scope) -> TokenStream {
     let rfc3339 = rfc3339_path(config, scope);
     match format {
         Format::DateTime => match config.formats.date_time {

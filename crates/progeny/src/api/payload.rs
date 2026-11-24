@@ -27,7 +27,9 @@ use crate::diag::JsonPointer;
 use crate::doc::{MaybeRef, MediaType};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
-use crate::shape::{Extra, Keyed, Shape, ShapeKey, ShapeRef, Shapes, Tag, TagStyle, Trail, Union};
+use crate::shape::{
+    Extra, Format, Keyed, Shape, ShapeKey, ShapeRef, Shapes, Tag, TagStyle, Trail, Union,
+};
 
 /// One example payload, and what a faithful round trip through the generated type must produce.
 #[derive(Debug, Clone)]
@@ -47,6 +49,42 @@ pub(crate) struct Payload {
     /// 19 corpus documents carry such examples. A harness with no verdict for them reports 19
     /// failures that are findings about the vendor, not about progeny.
     pub(crate) vendor_defect: bool,
+    /// The strings the expectation reached through a format, in the order the walk met them.
+    pub(crate) formatted: Vec<Formatted>,
+}
+
+/// A string the expectation reached through a format, which the generated type may spell
+/// differently: an IPv6 address compressed, a UUID in lower case, a date-time in UTC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Formatted {
+    /// Where the string sits, as a JSON Pointer into the payload.
+    pub(crate) at: String,
+    pub(crate) format: Format,
+}
+
+/// Where a walk building an expectation is in the payload, and the formatted strings it has met.
+#[derive(Debug, Default)]
+struct Leaves {
+    at: JsonPointer,
+    formatted: Vec<Formatted>,
+}
+
+impl Leaves {
+    /// Runs `walk` on the member or element `token` of the value at hand.
+    fn inside<R>(&mut self, token: impl Into<String>, walk: impl FnOnce(&mut Self) -> R) -> R {
+        self.at.push(token);
+        let result = walk(self);
+        self.at.pop();
+        result
+    }
+
+    /// Records that the value at hand is a string of `format`.
+    fn record(&mut self, format: Format) {
+        self.formatted.push(Formatted {
+            at: self.at.to_string(),
+            format,
+        });
+    }
 }
 
 /// Why a position contributed no payload.
@@ -211,7 +249,9 @@ impl Collect<'_> {
                 }
             };
             for (location, original) in examples {
-                let Some(expected) = self.through(&original, &ShapeRef::Key(key.clone()), lenient)
+                let mut leaves = Leaves::default();
+                let Some(expected) =
+                    self.through(&original, &ShapeRef::Key(key.clone()), lenient, &mut leaves)
                 else {
                     skipped.push(Skipped::Captures);
                     continue;
@@ -231,6 +271,7 @@ impl Collect<'_> {
                     read: lenient,
                     original,
                     expected,
+                    formatted: leaves.formatted,
                 });
             }
         }
@@ -280,17 +321,22 @@ impl Collect<'_> {
         shape: &Shape,
         lenient: bool,
         trail: &mut Trail,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
         match shape {
             // Arbitrary JSON is carried whole, so nothing is pruned from it.
             Shape::Any => Some(value.clone()),
-            Shape::Struct(structure) => self.prune_struct(value, structure, None, lenient, trail),
+            Shape::Struct(structure) => {
+                self.prune_struct(value, structure, None, lenient, trail, leaves)
+            }
             Shape::Map { value: element } => {
                 let members = value.as_object()?;
                 let mut out = Map::new();
                 for (key, member) in members {
                     let pruned = match element {
-                        Some(element) => self.through(member, element, lenient)?,
+                        Some(element) => leaves.inside(key.clone(), |leaves| {
+                            self.through(member, element, lenient, leaves)
+                        })?,
                         None => member.clone(),
                     };
                     out.insert(key.clone(), pruned);
@@ -300,9 +346,11 @@ impl Collect<'_> {
             Shape::Array { item } => {
                 let items = value.as_array()?;
                 let mut out = Vec::with_capacity(items.len());
-                for element in items {
+                for (index, element) in items.iter().enumerate() {
                     out.push(match item {
-                        Some(item) => self.through(element, item, lenient)?,
+                        Some(item) => leaves.inside(index.to_string(), |leaves| {
+                            self.through(element, item, lenient, leaves)
+                        })?,
                         None => element.clone(),
                     });
                 }
@@ -311,8 +359,10 @@ impl Collect<'_> {
             Shape::FixedArray { item, .. } => {
                 let items = value.as_array()?;
                 let mut out = Vec::with_capacity(items.len());
-                for element in items {
-                    out.push(self.through(element, item, lenient)?);
+                for (index, element) in items.iter().enumerate() {
+                    out.push(leaves.inside(index.to_string(), |leaves| {
+                        self.through(element, item, lenient, leaves)
+                    })?);
                 }
                 Some(Value::Array(out))
             }
@@ -324,8 +374,10 @@ impl Collect<'_> {
                     return Some(value.clone());
                 }
                 let mut out = Vec::with_capacity(given.len());
-                for (element, item) in given.iter().zip(items) {
-                    out.push(self.through(element, item, lenient)?);
+                for (index, (element, item)) in given.iter().zip(items).enumerate() {
+                    out.push(leaves.inside(index.to_string(), |leaves| {
+                        self.through(element, item, lenient, leaves)
+                    })?);
                 }
                 Some(Value::Array(out))
             }
@@ -333,7 +385,7 @@ impl Collect<'_> {
                 if value.is_null() {
                     return Some(Value::Null);
                 }
-                self.follow(value, inner, None, lenient, trail)
+                self.follow(value, inner, None, lenient, trail, leaves)
             }
             // Serde tries an untagged enum's variants in declaration order and takes the first
             // that deserializes, so the expectation is the payload pruned under that same first
@@ -343,14 +395,20 @@ impl Collect<'_> {
                 // …unless the union dispatches on a tag, where the first branch that accepts the
                 // payload is not the branch serde takes.
                 if let Some(tag) = &union.tag {
-                    return self.tagged(value, union, tag, lenient, trail);
+                    return self.tagged(value, union, tag, lenient, trail, leaves);
                 }
-                self.untagged(value, union, lenient, trail)
+                self.untagged(value, union, lenient, trail, leaves)
             }
-            Shape::Keyed(keyed) => self.keyed(value, keyed, lenient),
-            Shape::Null | Shape::Scalar(_) | Shape::Format(_) | Shape::StringEnum(_) => {
+            Shape::Keyed(keyed) => self.keyed(value, keyed, lenient, leaves),
+            // The generated type may write a formatted string in a spelling of its own, so the
+            // harness compares it as that type reads it.
+            Shape::Format(format) => {
+                if value.is_string() {
+                    leaves.record(*format);
+                }
                 Some(value.clone())
             }
+            Shape::Null | Shape::Scalar(_) | Shape::StringEnum(_) => Some(value.clone()),
         }
     }
 
@@ -362,10 +420,11 @@ impl Collect<'_> {
         union: &Union,
         lenient: bool,
         trail: &mut Trail,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
         for variant in &union.variants {
             if self.accepts(value, &variant.shape) {
-                return self.follow(value, &variant.shape, None, lenient, trail);
+                return self.follow(value, &variant.shape, None, lenient, trail, leaves);
             }
         }
         // No branch accepts it, so the open arm keeps it whole.
@@ -389,7 +448,13 @@ impl Collect<'_> {
     /// A string, and an object that names no variant by its one key, stay whole in the open arm.
     /// A named payload is read the way its variant's type reads it, and one that type cannot read
     /// leaves the envelope whole too.
-    fn keyed(&self, value: &Value, keyed: &Keyed, lenient: bool) -> Option<Value> {
+    fn keyed(
+        &self,
+        value: &Value,
+        keyed: &Keyed,
+        lenient: bool,
+        leaves: &mut Leaves,
+    ) -> Option<Value> {
         // Anything but an object is a unit variant or the open arm, and either writes it back as
         // it is.
         let Some(members) = value.as_object() else {
@@ -420,7 +485,10 @@ impl Collect<'_> {
         }
         // Otherwise the envelope is the key around the payload as its type writes it.
         let mut out = Map::new();
-        out.insert(key.clone(), self.through(payload, shape, lenient)?);
+        let pruned = leaves.inside(key.clone(), |leaves| {
+            self.through(payload, shape, lenient, leaves)
+        })?;
+        out.insert(key.clone(), pruned);
         Some(Value::Object(out))
     }
 
@@ -444,16 +512,22 @@ impl Collect<'_> {
         tag: &Tag,
         lenient: bool,
         trail: &mut Trail,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
-        // A payload that names no variant is kept whole in the open arm, so it comes back as it
-        // went in.
+        // A payload of another kind is read by the branches of that kind in order, the first
+        // whose schema accepts it standing in for the first whose type reads it.
+        // One no branch accepts is kept whole in the open arm, so it comes back as it went in.
         let Value::Object(members) = value else {
-            return Some(value.clone());
+            return match tag.kinds.iter().find(|kind| self.accepts(value, kind)) {
+                Some(kind) => self.follow(value, kind, None, lenient, trail, leaves),
+                None => Some(value.clone()),
+            };
         };
         let member = members.get(&tag.property);
         // Variants that list one spelling are tried in order, and the first whose schema accepts
         // the payload stands in for the first whose type reads it, as for an untagged union.
         let position = match union.tagged_positions(member).as_slice() {
+            // An object that names no variant is kept whole in the open arm too.
             [] => return Some(value.clone()),
             [only] => *only,
             several => match several.iter().find(|&&position| {
@@ -467,7 +541,7 @@ impl Collect<'_> {
             },
         };
         let variant = union.variants.get(position)?;
-        let mut pruned = self.follow(value, &variant.shape, None, lenient, trail)?;
+        let mut pruned = self.follow(value, &variant.shape, None, lenient, trail, leaves)?;
         let object = pruned.as_object_mut()?;
         match tag.style {
             // A consumed tag is always one of the listed strings, because a union that reads any
@@ -503,6 +577,7 @@ impl Collect<'_> {
         fields: Option<&[FieldContract]>,
         lenient: bool,
         trail: &mut Trail,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
         let members = value.as_object()?;
         if matches!(structure.extra, Extra::Typed(_)) {
@@ -533,10 +608,10 @@ impl Collect<'_> {
                 continue;
             }
             let ty = contract.map(|contract| contract.ty.clone());
-            out.insert(
-                field.wire.clone(),
-                self.through_typed(present, &field.shape, ty, lenient)?,
-            );
+            let pruned = leaves.inside(field.wire.clone(), |leaves| {
+                self.through_typed(present, &field.shape, ty, lenient, leaves)
+            })?;
+            out.insert(field.wire.clone(), pruned);
         }
         if let Some(flattened) = &structure.flattened {
             // The union beside the members reads every other member as one object, and writes
@@ -547,8 +622,14 @@ impl Collect<'_> {
                 .map(|(key, member)| (key.clone(), member.clone()))
                 .collect();
             // The rest is this same object less its declared members, so it stays on this trail.
-            let Value::Object(kept) =
-                self.follow(&Value::Object(rest), flattened, None, lenient, trail)?
+            let Value::Object(kept) = self.follow(
+                &Value::Object(rest),
+                flattened,
+                None,
+                lenient,
+                trail,
+                leaves,
+            )?
             else {
                 return None;
             };
@@ -574,8 +655,14 @@ impl Collect<'_> {
         Some(Value::Object(out))
     }
 
-    fn through(&self, value: &Value, reference: &ShapeRef, lenient: bool) -> Option<Value> {
-        self.through_typed(value, reference, None, lenient)
+    fn through(
+        &self,
+        value: &Value,
+        reference: &ShapeRef,
+        lenient: bool,
+        leaves: &mut Leaves,
+    ) -> Option<Value> {
+        self.through_typed(value, reference, None, lenient, leaves)
     }
 
     /// [`Collect::through`], knowing the type the position became where the caller does.
@@ -589,8 +676,9 @@ impl Collect<'_> {
         reference: &ShapeRef,
         ty: Option<TypeRef>,
         lenient: bool,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
-        self.follow(value, reference, ty, lenient, &mut Trail::default())
+        self.follow(value, reference, ty, lenient, &mut Trail::default(), leaves)
     }
 
     /// [`Collect::through_typed`], for the same value a shape that holds this reference is pruning.
@@ -604,16 +692,19 @@ impl Collect<'_> {
         ty: Option<TypeRef>,
         lenient: bool,
         trail: &mut Trail,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
         match reference {
             ShapeRef::Key(key) => {
                 let shape = self.shapes.get(key)?;
                 let ty = self.type_of(key, lenient).or(ty);
                 trail
-                    .enter(key, |trail| self.shaped(value, shape, ty, lenient, trail))
+                    .enter(key, |trail| {
+                        self.shaped(value, shape, ty, lenient, trail, leaves)
+                    })
                     .unwrap_or_else(|| Some(value.clone()))
             }
-            ShapeRef::Inline(shape) => self.shaped(value, shape, ty, lenient, trail),
+            ShapeRef::Inline(shape) => self.shaped(value, shape, ty, lenient, trail, leaves),
         }
     }
 
@@ -625,12 +716,13 @@ impl Collect<'_> {
         ty: Option<TypeRef>,
         lenient: bool,
         trail: &mut Trail,
+        leaves: &mut Leaves,
     ) -> Option<Value> {
         match shape {
             // A struct is pruned against its contract, which the shape alone does not settle.
             Shape::Struct(structure) => {
                 let fields = ty.as_ref().and_then(|ty| self.fields_of(ty));
-                self.prune_struct(value, structure, fields, lenient, trail)
+                self.prune_struct(value, structure, fields, lenient, trail, leaves)
             }
             // The wrapper's type holds the inner one.
             Shape::Optional(inner) | Shape::Alias(inner) => {
@@ -638,9 +730,9 @@ impl Collect<'_> {
                     return Some(Value::Null);
                 }
                 let inner_ty = ty.and_then(|ty| self.unwrapped(ty));
-                self.follow(value, inner, inner_ty, lenient, trail)
+                self.follow(value, inner, inner_ty, lenient, trail, leaves)
             }
-            _ => self.prune(value, shape, lenient, trail),
+            _ => self.prune(value, shape, lenient, trail, leaves),
         }
     }
 
@@ -758,6 +850,7 @@ mod tests {
     use crate::config::Config;
     use crate::diag::Ctx;
     use crate::doc::parse as doc_parse;
+    use crate::shape::Format;
     use crate::{contract, normalize, resolve, shape};
 
     /// Collect the payloads of a document the way the harness does.
@@ -1144,6 +1237,70 @@ mod tests {
         assert_eq!(
             found[0].expected,
             json!({"factorType": "sms", "phone": "+1-555-415-1337"})
+        );
+    }
+
+    /// A formatted string is recorded where it sits in the payload, so the harness can compare it
+    /// as its type reads it, and a plain string beside it is not.
+    #[test_util::test]
+    fn a_formatted_member_is_recorded_at_its_pointer() {
+        let example = json!({
+            "hosts": [{"address": "2001:0DB8:0000:0000:0000:0000:0000:0001", "name": "A"}],
+        });
+        let schema = json!({
+            "type": "object",
+            "properties": {"hosts": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "format": "ipv6"},
+                    "name": {"type": "string"},
+                },
+            }}},
+        });
+        let found = payloads_of(requesting(&schema, &example))?;
+        let payload = found.first().ok_or_eyre("the example is a payload")?;
+        assert_eq!(
+            payload.formatted,
+            [super::Formatted {
+                at: "/hosts/0/address".to_owned(),
+                format: Format::Ipv6,
+            }]
+        );
+    }
+
+    /// A string beside objects that name themselves is read by the branch of its kind, so a
+    /// formatted one is recorded as that branch's type holds it.
+    #[test_util::test]
+    fn a_formatted_string_beside_tagged_objects_is_read_by_its_kind() {
+        let object = |provider: &str| {
+            json!({
+                "type": "object", "required": ["provider"],
+                "properties": {
+                    "provider": {"type": "string", "enum": [provider]},
+                    "model": {"type": "string"},
+                },
+            })
+        };
+        let example = json!("2001:0DB8:0000:0000:0000:0000:0000:0001");
+        let mut document = requesting(&json!({"$ref": "#/components/schemas/Host"}), &example);
+        document["components"] = json!({"schemas": {
+            "Google": object("google"),
+            "Vapi": object("vapi"),
+            "Host": {"oneOf": [
+                {"type": "string", "format": "ipv6"},
+                {"$ref": "#/components/schemas/Google"},
+                {"$ref": "#/components/schemas/Vapi"},
+            ]},
+        }});
+        let found = payloads_of(document)?;
+        let payload = found.first().ok_or_eyre("the example is a payload")?;
+        assert_eq!(payload.expected, example);
+        assert_eq!(
+            payload.formatted,
+            [super::Formatted {
+                at: String::new(),
+                format: Format::Ipv6,
+            }]
         );
     }
 

@@ -20,7 +20,7 @@
 use clap::Args as ClapArgs;
 use color_eyre::eyre::{self, WrapErr, bail};
 use proc_macro2::TokenStream;
-use progeny::harness::{Payload, Payloads};
+use progeny::harness::Payload;
 use quote::{format_ident, quote};
 
 #[derive(Debug, ClapArgs)]
@@ -60,9 +60,20 @@ struct Outcome {
     checked: usize,
     failures: Vec<String>,
     vendor: Vec<String>,
-    skipped: Payloads,
+    skipped: Skipped,
     /// Where `--generate-only` wrote the test.
     generated: Option<camino::Utf8PathBuf>,
+}
+
+/// The examples no test can check, by why, as [`progeny::harness::Payloads`] counts them.
+///
+/// Copied out of `Payloads`, whose payloads hold token streams, which cannot leave the worker
+/// thread that collected them.
+#[derive(Debug, Default)]
+struct Skipped {
+    opaque: usize,
+    unnamed: usize,
+    captures: usize,
 }
 
 pub fn run(args: &Args) -> eyre::Result<()> {
@@ -173,9 +184,10 @@ fn round_trip(
     let collected = progeny::harness::payloads(bytes, config)
         .wrap_err_with(|| format!("collecting payloads from {name}"))?;
     let mut outcome = Outcome {
-        skipped: Payloads {
-            payloads: Vec::new(),
-            ..collected
+        skipped: Skipped {
+            opaque: collected.opaque,
+            unnamed: collected.unnamed,
+            captures: collected.captures,
         },
         ..Outcome::default()
     };
@@ -250,8 +262,25 @@ fn test_source(package: &str, payloads: &[Payload]) -> eyre::Result<TokenStream>
         let original = payload.original.to_string();
         let expected = payload.expected.to_string();
         let vendor_defect = payload.vendor_defect;
+        let formatted = payload.formatted.iter().map(|leaf| {
+            let at = leaf.at.as_str();
+            let leaf_ty = &leaf.ty;
+            let equivalent = if leaf.clock {
+                quote! { comparison::same_clock::<#leaf_ty> }
+            } else {
+                quote! { comparison::same::<#leaf_ty> }
+            };
+            quote! { comparison::Formatted { at: #at, equivalent: #equivalent } }
+        });
         quote! {
-            check::<#ty>(&mut report, #location, #original, #expected, #vendor_defect);
+            check::<#ty>(
+                &mut report,
+                #location,
+                #original,
+                #expected,
+                #vendor_defect,
+                &[#(#formatted),*],
+            );
         }
     });
     let runner = runner();
@@ -263,6 +292,9 @@ fn test_source(package: &str, payloads: &[Payload]) -> eyre::Result<TokenStream>
 
         use color_eyre::eyre;
         use #krate::types;
+
+        // The name a formatted string's type is spelled through.
+        extern crate #krate as generated;
 
         mod comparison {
             #comparison
@@ -325,6 +357,7 @@ fn runner() -> TokenStream {
             original: &str,
             expected: &str,
             vendor_defect: bool,
+            formatted: &[comparison::Formatted],
         ) where
             T: serde::de::DeserializeOwned + serde::Serialize,
         {
@@ -333,7 +366,7 @@ fn runner() -> TokenStream {
                     .map_err(|error| format!("does not deserialize: {error}"))?;
                 let again = serde_json::to_string(&typed)
                     .map_err(|error| format!("does not serialize: {error}"))?;
-                match comparison::difference(expected, &again) {
+                match comparison::difference(expected, &again, formatted) {
                     Some(reason) => Err(reason),
                     None => Ok(()),
                 }
@@ -354,7 +387,7 @@ fn runner() -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use crate::comparison::difference;
+    use crate::comparison::{Formatted, difference, same, same_clock};
 
     /// Two spellings of one number are one value, and two numbers one `f64` cannot tell apart are
     /// still two.
@@ -368,7 +401,7 @@ mod tests {
             ("1.50", "15E-1"),
         ] {
             assert_eq!(
-                difference(expected, actual),
+                difference(expected, actual, &[]),
                 None,
                 "{expected} and {actual}"
             );
@@ -380,7 +413,7 @@ mod tests {
             ("0.1", "0.10000000000000001"),
         ] {
             assert_eq!(
-                difference(expected, actual),
+                difference(expected, actual, &[]),
                 Some(format!("`` was {expected} and came back {actual}")),
             );
         }
@@ -391,13 +424,14 @@ mod tests {
     #[test]
     fn a_nested_number_is_compared_exactly() {
         assert_eq!(
-            difference(r#"{"a/b": [1, 2.50]}"#, r#"{"a/b":[1.0,2.5]}"#),
+            difference(r#"{"a/b": [1, 2.50]}"#, r#"{"a/b":[1.0,2.5]}"#, &[]),
             None
         );
         assert_eq!(
             difference(
                 r#"{"a/b": [1, 9007199254740993]}"#,
-                r#"{"a/b":[1,9007199254740992.0]}"#
+                r#"{"a/b":[1,9007199254740992.0]}"#,
+                &[],
             ),
             Some("`/a~1b/1` was 9007199254740993 and came back 9007199254740992.0".to_owned()),
         );
@@ -421,10 +455,51 @@ mod tests {
                 r#"`/a` was "1" and came back 1"#,
             ),
         ] {
-            assert_eq!(difference(expected, actual).as_deref(), Some(reason));
+            assert_eq!(difference(expected, actual, &[]).as_deref(), Some(reason));
         }
         // A string is its text, whatever its escapes.
-        assert_eq!(difference(r#""a\/b""#, r#""a/b""#), None);
+        assert_eq!(difference(r#""a\/b""#, r#""a/b""#, &[]), None);
+    }
+
+    /// A formatted string compares as the type it is held in reads it, and only where it is held
+    /// in that type.
+    #[test]
+    fn a_formatted_string_compares_as_its_type_reads_it() {
+        let ipv6 = [Formatted {
+            at: "/address",
+            equivalent: same::<std::net::Ipv6Addr>,
+        }];
+        let expanded = r#"{"address":"2001:0DB8:0000:0000:0000:0000:0000:0001"}"#;
+
+        // The type's own spelling of the same address
+        assert_eq!(
+            difference(expanded, r#"{"address":"2001:db8::1"}"#, &ipv6),
+            None
+        );
+        // A different address
+        assert!(difference(expanded, r#"{"address":"2001:db8::2"}"#, &ipv6).is_some());
+        // The same respelling of a plain string
+        assert!(difference(expanded, r#"{"address":"2001:db8::1"}"#, &[]).is_some());
+        // Two spellings the type cannot read are not one value.
+        assert!(difference(r#"{"address":"a"}"#, r#"{"address":"A"}"#, &ipv6).is_some());
+    }
+
+    /// A date-time or time whose text holds more than any clock type keeps is never one value
+    /// with another spelling, because the type reads it as a value it does not spell.
+    /// `String` stands in for a type that reads both spellings as one value.
+    #[test]
+    fn a_clock_reading_past_what_its_types_hold_is_never_equivalent() {
+        for (text, beyond) in [
+            ("2024-01-01T00:00:00Z", false),
+            ("2024-01-01T01:00:00.123456789+01:00", false),
+            ("12:00:00.1234567890Z", false),
+            ("2024-01-01T00:00:00.1234567891Z", true),
+            ("2016-12-31T23:59:60Z", true),
+            ("23:59:60.5-08:00", true),
+        ] {
+            let literal = format!("{text:?}");
+            assert_eq!(same_clock::<String>(&literal, &literal), !beyond, "{text}");
+        }
     }
 }
 
@@ -487,6 +562,101 @@ mod integration_tests {
             [
                 "/paths/~1ratios/post/requestBody/content/application~1json/example: `/ratio` \
                  was 9007199254740993 and came back 9007199254740992.0"
+            ]
+        );
+    }
+
+    /// Formatted strings the generated types respell come back as the same values: an expanded
+    /// upper-case IPv6 address in a member and as the string beside two tagged objects, an
+    /// upper-case UUID, and a date-time at an offset.
+    /// A date-time whose digits past the nanosecond the type drops still fails.
+    #[test_util::test]
+    fn a_respelled_formatted_string_is_the_same_value() {
+        let document = indoc::indoc! {r##"
+            openapi: "3.1.0"
+            info:
+              title: Formats
+              version: "1.0"
+            paths:
+              /hosts:
+                post:
+                  requestBody:
+                    content:
+                      application/json:
+                        schema:
+                          type: object
+                          properties:
+                            address:
+                              type: string
+                              format: ipv6
+                            id:
+                              type: string
+                              format: uuid
+                            seen:
+                              type: string
+                              format: date-time
+                        examples:
+                          respelled:
+                            value:
+                              address: "2001:0DB8:0000:0000:0000:0000:0000:0001"
+                              id: "6FA459EA-EE8A-3CA4-894E-DB77E160355E"
+                              seen: "2024-01-01T01:00:00.5+01:00"
+                          truncated:
+                            value:
+                              seen: "2024-01-01T00:00:00.1234567891Z"
+                  responses:
+                    "204":
+                      description: Stored
+              /detections:
+                post:
+                  requestBody:
+                    content:
+                      application/json:
+                        schema:
+                          $ref: "#/components/schemas/Detection"
+                        example: "2001:0DB8:0000:0000:0000:0000:0000:0001"
+                  responses:
+                    "204":
+                      description: Stored
+            components:
+              schemas:
+                Detection:
+                  oneOf:
+                    - type: string
+                      format: ipv6
+                    - $ref: "#/components/schemas/Google"
+                    - $ref: "#/components/schemas/Vapi"
+                Google:
+                  type: object
+                  required: [provider]
+                  properties:
+                    provider:
+                      type: string
+                      enum: [google]
+                Vapi:
+                  type: object
+                  required: [provider]
+                  properties:
+                    provider:
+                      type: string
+                      enum: [vapi]
+        "##};
+        let mut config = progeny::Config::default();
+        config.package.name = "payload-formats".to_owned();
+        config.emit.client = false;
+        config.emit.server = false;
+        config.formats.date_time = progeny::DateTimeCrate::Chrono;
+        config.formats.uuid = progeny::UuidCrate::Uuid;
+
+        let outcome = super::round_trip("formats", document.as_bytes(), &config, false, 0)?;
+
+        assert_eq!(outcome.checked, 3);
+        assert_eq!(
+            outcome.failures,
+            [
+                "/paths/~1hosts/post/requestBody/content/application~1json/examples/truncated: \
+                 `/seen` was \"2024-01-01T00:00:00.1234567891Z\" and came back \
+                 \"2024-01-01T00:00:00.123456789Z\""
             ]
         );
     }

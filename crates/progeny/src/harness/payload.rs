@@ -1,8 +1,11 @@
 //! The payload gate's input: every example a document offers, with the expected round trip.
 
+use proc_macro2::TokenStream;
 use serde_json::Value;
 
 use crate::diag::{Ctx, RejectError};
+use crate::render::types::{Scope, format_type};
+use crate::shape::Format;
 use crate::{api, contract, doc, load, normalize, resolve, shape};
 
 /// One example payload, and what the generated types must do with it.
@@ -26,6 +29,24 @@ pub struct Payload {
     /// Whether the document's own example contradicts its own schema, so a failure here is a
     /// finding about the vendor rather than about progeny.
     pub vendor_defect: bool,
+    /// The strings [`Payload::expected`] reached through a format.
+    ///
+    /// The generated type may write one in a spelling of its own, such as an IPv6 address
+    /// compressed, and a round trip keeps it when that type reads both spellings as one value.
+    pub formatted: Vec<Formatted>,
+}
+
+/// A string a payload holds in a formatted type.
+#[derive(Debug, Clone)]
+pub struct Formatted {
+    /// Where the string sits, as a JSON Pointer into the payload.
+    pub at: String,
+    /// The type the generated code holds it in, spelled from a crate that names the generated
+    /// crate `generated`.
+    pub ty: TokenStream,
+    /// Whether it is a date-time or a time, whose type keeps no digit past the nanosecond and may
+    /// not keep a leap second.
+    pub clock: bool,
 }
 
 /// The payloads a document offers, and what was left out.
@@ -76,6 +97,15 @@ pub fn payloads(input: &[u8], config: &crate::Config) -> Result<Payloads, Reject
                 original: payload.original,
                 expected: payload.expected,
                 vendor_defect: payload.vendor_defect,
+                formatted: payload
+                    .formatted
+                    .into_iter()
+                    .map(|leaf| Formatted {
+                        at: leaf.at,
+                        ty: format_type(leaf.format, config, Scope::External),
+                        clock: matches!(leaf.format, Format::DateTime | Format::Time),
+                    })
+                    .collect(),
             })
             .collect(),
     })
