@@ -91,6 +91,15 @@ impl TypeIndex {
     }
 }
 
+/// Rewrite both sides of an index map through `remap`, as [`TypeRef::remap`] does a reference.
+fn remap_indices(map: &mut BTreeMap<TypeIndex, TypeIndex>, remap: &BTreeMap<TypeIndex, TypeIndex>) {
+    let renumbered = |index: TypeIndex| remap.get(&index).copied().unwrap_or(index);
+    *map = map
+        .iter()
+        .map(|(&from, &to)| (renumbered(from), renumbered(to)))
+        .collect();
+}
+
 /// A Rust type, as a renderer needs to write it.
 ///
 /// Structural rather than named wherever it can be: only [`TypeRef::Named`] needs identity, and
@@ -633,6 +642,8 @@ pub(crate) struct Contracts {
     collapses: Vec<Collapse>,
     /// Each twinned strict type's read twin.
     twins: BTreeMap<TypeIndex, TypeIndex>,
+    /// The multipart form of each ordinary type that has one, by the ordinary type's index.
+    multipart: BTreeMap<TypeIndex, TypeIndex>,
 }
 
 impl Contracts {
@@ -648,6 +659,16 @@ impl Contracts {
         let mut read = ty.clone();
         read.remap(&self.twins);
         read
+    }
+
+    /// The type reference a `multipart/form-data` body names: every ordinary type that has a
+    /// multipart form replaced by that form.
+    ///
+    /// A type with no multipart form is its own, so the reference comes back unchanged.
+    pub(crate) fn multipart_form(&self, ty: &TypeRef) -> TypeRef {
+        let mut form = ty.clone();
+        form.remap(&self.multipart);
+        form
     }
 
     /// The type a reference spells once every alias it names is replaced by what it names.
@@ -666,12 +687,16 @@ impl Contracts {
         current
     }
 
-    /// The strict half of a read twin, or the index itself for every other type.
+    /// The type the document declared that a generated type is a form of: the strict half of a
+    /// read twin, the ordinary type of a multipart form, or the index itself for every other type.
     ///
     /// What a question about the description's own graph — which direction reaches a member —
-    /// asks, so that a response position naming a twin still counts as reaching the type the
-    /// document declared.
-    pub(crate) fn strict_form(&self, index: TypeIndex) -> TypeIndex {
+    /// asks, so that a response position naming a twin, or a multipart body naming its form,
+    /// still counts as reaching the type the document declared.
+    pub(crate) fn declared_form(&self, index: TypeIndex) -> TypeIndex {
+        if let Some((&ordinary, _)) = self.multipart.iter().find(|(_, form)| **form == index) {
+            return ordinary;
+        }
         match self.get(index).map(TypeContract::form) {
             Some(Form::Lenient {
                 strict: Some(strict),
@@ -770,13 +795,19 @@ pub(crate) fn build(
             ),
         ));
     }
-    let deduped = dedup::run(lowered.types, &mut lowered.by_shape, &mut lowered.collapses);
+    let deduped = dedup::run(
+        lowered.types,
+        &mut lowered.by_shape,
+        &mut lowered.multipart,
+        &mut lowered.collapses,
+    );
     // Which direction each type travels is a fact about the document, read here so the forms
     // exist before anything is frozen; under strict decoding every type keeps its one form.
     let mut reach = match config.decoding {
         crate::config::Decoding::Lenient => Some(reach::run(
             resolved,
             &lowered.by_shape,
+            &lowered.multipart,
             |index| {
                 let mut reached = Vec::new();
                 if let Some(contract) = deduped.get(index.index()) {
@@ -796,6 +827,7 @@ pub(crate) fn build(
         deduped,
         config,
         &mut lowered.by_shape,
+        &mut lowered.multipart,
         &mut lowered.collapses,
         &lowered.tag_branches,
         reach.as_mut(),
@@ -808,6 +840,7 @@ pub(crate) fn build(
     contracts.by_shape = lowered.by_shape;
     contracts.collapses = lowered.collapses;
     contracts.twins = twinned.twins;
+    contracts.multipart = lowered.multipart;
     Ok(contracts)
 }
 

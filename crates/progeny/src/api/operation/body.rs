@@ -158,6 +158,9 @@ impl Build<'_> {
                 required,
             },
             "multipart/form-data" => {
+                // The parts and the server's reading come from the type the body sends, so the
+                // form that holds the uploads has to be chosen before either is derived.
+                let ty = self.contracts.multipart_form(&ty);
                 let parts = self.part_specs(&ty, entry, ctx);
                 BodyContract::Multipart {
                     reading: reading::multipart(&ty, &parts, self.contracts),
@@ -564,9 +567,9 @@ fn preference(media_type: &str) -> u8 {
 /// type layer gave it `support::Upload`, because the server-side parser re-wraps file parts into
 /// the upload object form and only that type's `Deserialize` reads it — a `File` spec over a
 /// `String`-typed member would make the generated server reject its own client. A binary member
-/// the type layer left as `String` — a base64 (`format: byte`) member, or a schema the
-/// encoding-collapse rule kept on the JSON spelling — is a text part whose bytes are the
-/// string's, with the stated consequence that such a part cannot carry invalid UTF-8.
+/// the type layer left as `String`, such as a base64 (`format: byte`) member, is a text part
+/// whose bytes are the string's, with the stated consequence that such a part cannot carry
+/// invalid UTF-8.
 ///
 /// A recursive member, such as `Tree(Vec<Tree>)`, is a JSON part: its structure has no faithful
 /// text form.

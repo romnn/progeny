@@ -25,11 +25,12 @@ use crate::shape::ShapeKey;
 ///
 /// `reach` is each type's direction under lenient decoding, and `None` under strict decoding,
 /// where no type has a read form.
-/// It is renumbered with the types, as `by_shape` and `collapses` are.
+/// It is renumbered with the types, as `by_shape`, `multipart` and `collapses` are.
 pub(super) fn run(
     types: Vec<Provisional>,
     config: &Config,
     by_shape: &mut BTreeMap<ShapeKey, TypeRef>,
+    multipart: &mut BTreeMap<TypeIndex, TypeIndex>,
     collapses: &mut Vec<Collapse>,
     tag_branches: &BTreeSet<ShapeKey>,
     reach: Option<&mut Vec<Reach>>,
@@ -44,7 +45,7 @@ pub(super) fn run(
     if units.is_empty() {
         return types;
     }
-    remove(types, &units, by_shape, collapses, reach)
+    remove(types, &units, by_shape, multipart, collapses, reach)
 }
 
 /// The types that exist only to be a tag-only branch's empty payload.
@@ -115,6 +116,7 @@ fn remove(
     mut types: Vec<Provisional>,
     units: &BTreeSet<TypeIndex>,
     by_shape: &mut BTreeMap<ShapeKey, TypeRef>,
+    multipart: &mut BTreeMap<TypeIndex, TypeIndex>,
     collapses: &mut Vec<Collapse>,
     reach: Option<&mut Vec<Reach>>,
 ) -> Vec<Provisional> {
@@ -150,6 +152,8 @@ fn remove(
     for ty in by_shape.values_mut() {
         ty.remap(&remap);
     }
+    // A multipart form and its ordinary type both hold a file member, so neither is a unit.
+    super::remap_indices(multipart, &remap);
     collapses.retain(|collapse| !units.contains(&collapse.owner));
     for collapse in collapses.iter_mut() {
         if let Some(&to) = remap.get(&collapse.owner) {

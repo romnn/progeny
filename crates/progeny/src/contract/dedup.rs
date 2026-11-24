@@ -24,12 +24,13 @@ use crate::shape::ShapeKey;
 ///
 /// A second round is not paranoia: when two types merge, the types that referred to them separately
 /// become identical too, and that only becomes visible once the first merge has been applied.
-/// `lowered` and `collapses` are rewritten alongside the contracts: both name types by index, so a
-/// merge that renumbers them would leave them pointing at whatever now sits where a merged type
-/// used to.
+/// `lowered`, `multipart` and `collapses` are rewritten alongside the contracts: all three name
+/// types by index, so a merge that renumbers them would leave them pointing at whatever now sits
+/// where a merged type used to.
 pub(super) fn run(
     mut types: Vec<Provisional>,
     lowered: &mut BTreeMap<ShapeKey, TypeRef>,
+    multipart: &mut BTreeMap<TypeIndex, TypeIndex>,
     collapses: &mut Vec<Collapse>,
 ) -> Vec<Provisional> {
     // Each round strictly reduces the number of types, so this terminates; the bound is a
@@ -39,7 +40,7 @@ pub(super) fn run(
         if merge.is_empty() {
             break;
         }
-        types = apply(types, &merge, lowered, collapses);
+        types = apply(types, &merge, lowered, multipart, collapses);
     }
     // Two types that merged reported the same collapse at the same place, and the merge is what
     // makes that visible: one type now, so one finding. The kind is part of the identity — a
@@ -101,6 +102,7 @@ fn apply(
     mut types: Vec<Provisional>,
     merge: &BTreeMap<usize, usize>,
     lowered: &mut BTreeMap<ShapeKey, TypeRef>,
+    multipart: &mut BTreeMap<TypeIndex, TypeIndex>,
     collapses: &mut [Collapse],
 ) -> Vec<Provisional> {
     let mut renumbered = BTreeMap::new();
@@ -132,6 +134,7 @@ fn apply(
     for ty in lowered.values_mut() {
         ty.remap(&remap);
     }
+    super::remap_indices(multipart, &remap);
     for collapse in collapses {
         if let Some(&to) = remap.get(&collapse.owner) {
             collapse.owner = to;

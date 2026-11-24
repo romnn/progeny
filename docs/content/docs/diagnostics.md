@@ -71,7 +71,7 @@ The catalogue is closed, with no catch-all: a newly observed way for description
 | `irreconcilable-all-of` | An `allOf` whose branches cannot be merged into one shape. |
 | `presence-collapse` | An optional and nullable property collapsed onto one `Option`. |
 | `access-collapse` | A `readOnly` or `writeOnly` property in a type that crosses the direction the marker excludes. |
-| `encoding-collapse` | A schema sent as `multipart/form-data` and also used at another wire position. |
+| `encoding-collapse` | Never reported. A schema sent as `multipart/form-data` and also used at another wire position gets a second type for the multipart body; the class stays so that policies naming it still read. |
 | `multipart-null` | A `multipart/form-data` member that can hold an explicit `null` its part cannot carry — a text or file part, a `null` element of a repeated text or file member, or a `null` repeated member as a whole — which the generated client sends as absent. A JSON part carries `null` as the JSON `null`. |
 | `colliding-type-name` | Two shapes whose names sanitize to the same Rust identifier. |
 | `unsatisfiable-derive` | A derive asked of every type, or asked by name of a type whose read twin cannot have it, left off the type that cannot have it. |

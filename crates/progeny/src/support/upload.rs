@@ -24,10 +24,10 @@ use serde::ser::SerializeMap as _;
 ///
 /// Between the typed body and the wire the value travels as a JSON object holding the bytes
 /// base64-encoded; the multipart writer unpacks it into a real part, so base64 never reaches the
-/// wire. That object is also what this type looks like inside a plain JSON payload, which is a
-/// deliberate trade: a schema used both as a multipart body and as a JSON body is one type, and
-/// the multipart reading is the one with a defined meaning — 3.0 defines `format: binary` for
-/// exactly that position.
+/// wire.
+/// That object is also what this type looks like inside a plain JSON payload, which only a caller
+/// serializing the type themselves produces: a schema the description also uses as JSON keeps
+/// a `String` member there, and the multipart body gets a type of its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Upload {
     pub bytes: Vec<u8>,

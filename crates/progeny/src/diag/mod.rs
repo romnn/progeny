@@ -167,10 +167,10 @@ pub enum BreakageClass {
     /// excludes: the one generated type serves both directions, so the member travels where the
     /// document says it does not.
     AccessCollapse,
-    /// A schema sent as a `multipart/form-data` body and also used at another wire position:
-    /// one schema is one Rust type, so its binary members keep the JSON spelling `String`
-    /// everywhere, and the multipart parts carry the conventional filename rather than a
-    /// caller-chosen one.
+    /// Never reported: a schema sent as a `multipart/form-data` body and also used at another
+    /// wire position gets a second type for the multipart body, so nothing collapses.
+    ///
+    /// Kept so that a deny or accept policy naming `encoding-collapse` still reads.
     EncodingCollapse,
     /// A `multipart/form-data` member that can hold an explicit `null` its part cannot carry,
     /// which the generated client sends as absent: a text or file part, a `null` element of a
@@ -374,8 +374,7 @@ impl BreakageClass {
             | Self::NonproductiveCycle
             | Self::NonConsumingCycle
             | Self::InheritanceCycle
-            // Each occurrence names one position whose schemas a reader would split; the count
-            // is never the finding, and the collapse cannot fire at its siblings' scale.
+            // Never reported, so how it would fold is moot.
             | Self::EncodingCollapse => Aggregation::PerOccurrence,
         }
     }

@@ -235,7 +235,7 @@ fn seed(ty: &TypeRef, contracts: &Contracts, out: &mut BTreeSet<TypeIndex>) {
     out.extend(
         reached
             .into_iter()
-            .map(|index| contracts.strict_form(index)),
+            .map(|index| contracts.declared_form(index)),
     );
 }
 
@@ -257,7 +257,7 @@ fn close(contracts: &Contracts, start: BTreeSet<TypeIndex>) -> BTreeSet<TypeInde
         queue.extend(
             reached
                 .into_iter()
-                .map(|index| contracts.strict_form(index)),
+                .map(|index| contracts.declared_form(index)),
         );
     }
     seen
@@ -340,6 +340,38 @@ mod tests {
                 .any(|detail| detail.contains("no operation's body")),
             "{found:#?}"
         );
+    }
+
+    /// A multipart body that sends a form of its own still reaches the type the document
+    /// declared, so a marker the form carries on the way out is reported against that type.
+    #[test_util::test]
+    fn a_multipart_form_reaches_the_type_it_is_a_form_of() {
+        // The response makes `Attachment` a type of its own beside the multipart body's form.
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/attachments": {
+                    "post": {
+                        "operationId": "attach",
+                        "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/Attachment"}}}},
+                        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Attachment"}}}}},
+                    },
+                },
+            },
+            "components": {"schemas": {
+                "Attachment": {"type": "object", "properties": {
+                    "id": {"type": "integer", "readOnly": true},
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+            }},
+        }))?;
+        let found: Vec<&str> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
+            .map(crate::Diagnostic::detail)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("request body"), "{found:#?}");
     }
 
     /// An access marker is reported exactly where it costs something.

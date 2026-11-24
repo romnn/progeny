@@ -75,7 +75,7 @@ A schema whose values are whole numbers becomes a Rust integer, sized as `intege
 
 ## The client
 
-Each operation is a method taking a params struct, returning a request whose `send()` produces a typed response per declared status. A required input is a plain field and an optional one an `Option`, so a missing input is a compile error at the call site. A further request media type the operation declares gets its own method (`_json`, `_multipart`, …), and a header the description does not declare rides one request through `.header(...)`.
+Each operation is a method taking a params struct, returning a request whose `send()` produces a typed response per declared status. A required input is a plain field and an optional one an `Option`, so a missing input is a compile error at the call site. A further request media type the operation declares gets its own method (`_json`, `_multipart`, …), and a header the description does not declare rides one request through `.header(...)`. A binary member of a `multipart/form-data` body is a `support::Upload`, which carries the file's bytes, filename and content type; when the body's schema is also sent as JSON or used anywhere else, that use keeps the type with a `String` member, and the multipart body takes a copy named with a `Multipart` suffix.
 
 - **Credentials.** Every security scheme progeny can send becomes a setter on the client, named after the scheme. A credential is sent only on the requests whose operation requires the scheme.
 - **Body limits.** `response_body_limit` bounds the body a client reads, on the client or on one request. A body past the limit is `Error::BodyTooLarge`.

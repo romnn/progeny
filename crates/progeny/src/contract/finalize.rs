@@ -141,6 +141,7 @@ pub(super) fn run(
     Ok(Contracts {
         types: frozen,
         by_shape: BTreeMap::new(),
+        multipart: BTreeMap::new(),
         collapses: Vec::new(),
         twins: BTreeMap::new(),
     })

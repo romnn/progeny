@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{TypeIndex, TypeRef};
 use crate::doc::{
     Header, MaybeRef, MediaType, Parameter, ignored_response_header, is_json_media_type,
+    is_multipart_media_type,
 };
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
@@ -32,9 +33,13 @@ pub(crate) struct Reach {
 }
 
 /// The reach of every type, by index.
+///
+/// `multipart` holds the multipart form of each ordinary type that has one, by the ordinary
+/// type's index.
 pub(super) fn run(
     resolved: &ResolvedDocument,
     by_shape: &BTreeMap<ShapeKey, TypeRef>,
+    multipart: &BTreeMap<TypeIndex, TypeIndex>,
     references: impl Fn(TypeIndex) -> Vec<TypeIndex>,
     count: usize,
 ) -> Vec<Reach> {
@@ -83,11 +88,21 @@ pub(super) fn run(
             }
             // Every media type of a request body is a request position: a multipart or form
             // body carries its type out exactly as a JSON one does.
+            // A multipart body carries its own form where it has one, and the type the other
+            // media types send is reached only where something else reaches it.
             if let Some(node) = &operation.request_body
                 && let Some(body) = resolved.request_body(node)
             {
-                for key in content_keys(resolved, body.content.as_ref(), false) {
-                    seed(key, &mut requests);
+                for (media_type, entry) in body.content.iter().flatten() {
+                    let Some(id) = entry.schema else { continue };
+                    let Some(ty) = by_shape.get(&crate::shape::key_of(resolved, id)) else {
+                        continue;
+                    };
+                    let mut ty = ty.clone();
+                    if is_multipart_media_type(media_type) {
+                        ty.remap(multipart);
+                    }
+                    ty.named_into(&mut requests);
                 }
             }
             let arms = operation.responses.iter().flat_map(|responses| {

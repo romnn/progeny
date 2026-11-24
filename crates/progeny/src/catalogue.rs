@@ -25,6 +25,9 @@ enum Wiring {
     Arrives(&'static str),
     /// The architecture dissolves the class rather than handling it, so the fixture asserts its
     /// *absence*: the document that would have triggered it in the predecessor goes through clean.
+    ///
+    /// A variant the architecture has since dissolved is kept so that policies naming it still
+    /// read, and its fixture is the document that used to produce it.
     Dissolved(Value),
 }
 
@@ -55,9 +58,9 @@ fn wiring(class: BreakageClass) -> Wiring {
         BreakageClass::PresenceCollapse => Wiring::Fixture(document(json!({
             "Thing": {"type": "object", "properties": {"both": {"type": ["string", "null"]}}},
         }))),
-        // The collapse needs the same schema on two wires: a binary member sent as a multipart
-        // body by one operation and as JSON by another.
-        BreakageClass::EncodingCollapse => Wiring::Fixture(document_with(
+        // The same schema on two wires, a binary member sent as a multipart body by one operation
+        // and as JSON by another, is two types: the multipart body gets a form of its own.
+        BreakageClass::EncodingCollapse => Wiring::Dissolved(document_with(
             json!({
                 "Payload": {"type": "object", "properties": {
                     "file": {"type": "string", "contentMediaType": "application/octet-stream"},
@@ -402,10 +405,13 @@ fn every_breakage_class_is_pinned_by_a_fixture_or_dated() {
                 );
             }
             Wiring::Arrives(reason) => undated.push(format!("{class}: waiting on {reason}")),
-            // A dissolution has no class to be: those live in `dissolved()` under a name, and
-            // `wiring` — one arm per *variant* — can never return one.
-            Wiring::Dissolved(_) => {
-                eyre::bail!("`{class}` is a variant, and a dissolution has none")
+            // A variant whose class the architecture dissolved stays dissolved.
+            Wiring::Dissolved(document) => {
+                let produced = diagnostics_of(&document)?;
+                assert!(
+                    !produced.iter().any(|found| found.class() == class),
+                    "the dissolved `{class}` was reported again"
+                );
             }
         }
     }

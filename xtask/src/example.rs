@@ -65,8 +65,10 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     config
         .nullability_overrides
         .insert(LABEL_POINTER.to_owned(), progeny::SchemaType::String);
-    let keyed = with_json_declared_member(&with_string_union_member(&with_streamed_bytes(
-        &with_problem_arms(&with_response_headers(&with_security_schemes(bytes)?)?)?,
+    let keyed = with_shared_attachment(&with_json_declared_member(&with_string_union_member(
+        &with_streamed_bytes(&with_problem_arms(&with_response_headers(
+            &with_security_schemes(bytes)?,
+        )?)?)?,
     )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
     let directory = crate::generated::write("example-petstore", &output)?;
@@ -461,6 +463,60 @@ fn with_json_declared_member(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
                 ],
                 text: LABEL,
                 indent: "                ",
+            },
+        ],
+    )
+}
+
+/// The subject with one schema sent as a multipart body by `attachForm` and as JSON by
+/// `attachJson`, which no other gate needs.
+///
+/// The multipart body sends a form of the schema whose file member is an upload, and the JSON
+/// body the schema's own type, whose file member is the caller's string.
+fn with_shared_attachment(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const OPERATIONS: &str = indoc::indoc! {"
+        /attachments/form:
+          post:
+            operationId: attachForm
+            summary: Attach a file as a multipart body
+            requestBody:
+              required: true
+              content:
+                multipart/form-data:
+                  schema: {$ref: '#/components/schemas/Attachment'}
+            responses:
+              \"204\": {description: Attached}
+        /attachments/json:
+          post:
+            operationId: attachJson
+            summary: Attach the same schema as JSON
+            requestBody:
+              required: true
+              content:
+                application/json:
+                  schema: {$ref: '#/components/schemas/Attachment'}
+            responses:
+              \"204\": {description: Attached}
+    "};
+    const SCHEMA: &str = indoc::indoc! {"
+        Attachment:
+          type: object
+          required: [file]
+          properties:
+            file: {type: string, contentMediaType: application/octet-stream}
+    "};
+    spliced(
+        bytes,
+        &[
+            Insertion {
+                after: &["\npaths:\n"],
+                text: OPERATIONS,
+                indent: "  ",
+            },
+            Insertion {
+                after: &["components:\n", "  schemas:\n"],
+                text: SCHEMA,
+                indent: "    ",
             },
         ],
     )
