@@ -375,7 +375,7 @@ fn tagged_body(
             // A variant is its own constructor, and a closure around it is a lint in the
             // consumer's build.
             let construct = if contract.docs().deprecated {
-                let wrap = wrapped(true, &name);
+                let wrap = wrapped(true, &name, &quote! { value });
                 quote! { |value| #wrap }
             } else {
                 quote! { Self::#name }
@@ -420,8 +420,9 @@ fn tagged_body(
         .zip(&table.patterns)
         .map(|(variant, pattern)| {
             let name = ident(&variant.rust_name);
-            let ty = type_ref_in(&variant.ty, contracts, config, scope);
-            let wrap = wrapped(contract.docs().deprecated, &name);
+            let (probed, kept) = probed(&variant.ty);
+            let ty = type_ref_in(probed, contracts, config, scope);
+            let wrap = wrapped(contract.docs().deprecated, &name, &kept);
             quote! {
                 #pattern => {
                     if let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
@@ -457,8 +458,9 @@ fn probe(
 ) -> TokenStream {
     let support = scope.support();
     let name = ident(&variant.rust_name);
-    let ty = type_ref_in(&variant.ty, contracts, config, scope);
-    let wrap = wrapped(contract.docs().deprecated, &name);
+    let (probed, kept) = probed(&variant.ty);
+    let ty = type_ref_in(probed, contracts, config, scope);
+    let wrap = wrapped(contract.docs().deprecated, &name, &kept);
     quote! {
         if #guard let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
             return Ok(#wrap);
@@ -517,7 +519,7 @@ fn keyed_body(
         let payload = variant.payload.as_ref()?;
         let name = ident(&variant.rust_name);
         let ty = type_ref_in(payload, contracts, config, scope);
-        let wrap = wrapped(deprecated, &name);
+        let wrap = wrapped(deprecated, &name, &quote! { value });
         Some(quote! {
             #support::KeyedChoice::Data(#index) => {
                 Ok(match #support::lenient::keyed_payload::<#ty>(content, site, report)? {
@@ -544,8 +546,19 @@ fn keyed_body(
     }
 }
 
-/// A read value placed in its variant.
-fn wrapped(deprecated: bool, variant: &proc_macro2::Ident) -> TokenStream {
+/// The type a probe reads for a variant's payload, and the value it places in the variant.
+///
+/// A probe reads every candidate and drops each one the payload fails strictly, so a boxed
+/// payload is probed as the type it boxes and only the value the probe keeps is boxed.
+fn probed(ty: &TypeRef) -> (&TypeRef, TokenStream) {
+    match ty {
+        TypeRef::Boxed(inner) => (inner, quote! { Box::new(value) }),
+        other => (other, quote! { value }),
+    }
+}
+
+/// A read value placed in its variant, held by the expression `value`.
+fn wrapped(deprecated: bool, variant: &proc_macro2::Ident, value: &TokenStream) -> TokenStream {
     if deprecated {
         quote! {
             {
@@ -553,12 +566,12 @@ fn wrapped(deprecated: bool, variant: &proc_macro2::Ident) -> TokenStream {
                     deprecated,
                     reason = "the generated decoder must construct this deprecated variant"
                 )]
-                let resolved = Self::#variant(value);
+                let resolved = Self::#variant(#value);
                 resolved
             }
         }
     } else {
-        quote! { Self::#variant(value) }
+        quote! { Self::#variant(#value) }
     }
 }
 

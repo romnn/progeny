@@ -2490,6 +2490,57 @@ mod tests {
         }
     }
 
+    /// A lenient union probes each candidate as the type its variant boxes and boxes only the one
+    /// it keeps, so a candidate the payload fails strictly costs no allocation.
+    /// `Pet` is told apart by shape and `Field`'s variants share a tag value, the two ways a union
+    /// probes.
+    #[test_util::test]
+    fn a_lenient_probe_boxes_only_the_variant_it_keeps() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let tagged = |kind: &[&str], member: &str| {
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": kind},
+                    member: {"type": "string"},
+                },
+            })
+        };
+        let mut document = with_schemas(json!({
+            "Cat": {"type": "object", "required": ["name", "meow"], "properties": {
+                "name": {"type": "string"},
+                "meow": {"type": "string"},
+            }},
+            "Dog": {"type": "object", "required": ["name", "bark"], "properties": {
+                "name": {"type": "string"},
+                "bark": {"type": "integer"},
+            }},
+            "Pet": {"anyOf": [reference("Cat"), reference("Dog")]},
+            "Choice": tagged(&["string"], "option"),
+            "Text": tagged(&["string"], "format"),
+            "Number": tagged(&["number"], "unit"),
+            "Field": {"anyOf": [reference("Choice"), reference("Text"), reference("Number")]},
+            "Holder": {"type": "object", "properties": {
+                "pet": reference("Pet"),
+                "field": reference("Field"),
+            }},
+        }));
+        document["paths"] = json!({"/holder": {"get": {"responses": {"200": {
+            "description": "a holder",
+            "content": {"application/json": {"schema": reference("Holder")}},
+        }}}}});
+        let rendered = types(document, &Config::default())?;
+        let flat = squeezed(&rendered);
+        // Every probe reads the unboxed type, and each variant boxes the value its probe kept.
+        assert!(!flat.contains("probe::<Box<"), "{rendered}");
+        for name in ["Cat", "Dog", "Choice", "Text", "Number"] {
+            assert!(
+                flat.contains(&format!("Self::{name}(Box::new(value))")),
+                "{name}: {rendered}"
+            );
+        }
+    }
+
     /// Two tagged unions that agree on everything but the bytes their tags read are two types.
     ///
     /// The trap is that a Rust variant name is a *normalization* of the tag value — `a-cat` and

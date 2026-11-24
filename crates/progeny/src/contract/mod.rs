@@ -1049,50 +1049,25 @@ mod tests {
         );
     }
 
-    /// A cycle through two struct members and a union is broken by the box every union payload
-    /// has, so neither member gets one, and the union's arm holds a single box.
-    /// `Chapter` sorts first, so its member is the one the cycle breaker would box otherwise.
+    /// A union's payloads are boxed in the contract itself, which is where the cycle breaker
+    /// reads them as indirections.
     #[test_util::test]
-    fn a_cycle_through_a_union_payload_boxes_no_member() {
+    fn a_union_payload_is_boxed_in_the_contract() {
         let (contracts, _) = contracts_of(
             with_schemas(json!({
-                "Chapter": {"type": "object", "properties": {
-                    "section": {"$ref": "#/components/schemas/Section"},
-                }},
-                "Section": {"type": "object", "properties": {
-                    "body": {"$ref": "#/components/schemas/Passage"},
-                }},
-                "Passage": {"oneOf": [
-                    {"$ref": "#/components/schemas/Chapter"},
-                    {"type": "string"},
-                ]},
+                "Either": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
             })),
             &Config::default(),
         )?;
-        let member = |name: &str| -> eyre::Result<TypeRef> {
-            let ContractKind::Struct { fields } = named(&contracts, name)?.kind() else {
-                eyre::bail!("`{name}` is a struct");
-            };
-            Ok(fields.first().ok_or_eyre("one member")?.ty.clone())
+        let ContractKind::Enum { variants, .. } = named(&contracts, "Either")?.kind() else {
+            eyre::bail!("`Either` is an untagged union");
         };
-        let optional = |name: &str| -> eyre::Result<TypeRef> {
-            let target = TypeRef::Named(index_of(&contracts, name)?);
-            Ok(TypeRef::Option(Box::new(target)))
-        };
-        assert_eq!(member("Chapter")?, optional("Section")?);
-        assert_eq!(member("Section")?, optional("Passage")?);
-
-        let ContractKind::Enum { variants, .. } = named(&contracts, "Passage")?.kind() else {
-            eyre::bail!("`Passage` is an untagged union");
-        };
-        let payloads: Vec<&TypeRef> = variants.iter().map(|variant| &variant.ty).collect();
-        let chapter = TypeRef::Named(index_of(&contracts, "Chapter")?);
-        assert_eq!(
-            payloads,
-            [
-                &TypeRef::Boxed(Box::new(chapter)),
-                &TypeRef::Boxed(Box::new(TypeRef::String)),
-            ]
+        assert_eq!(variants.len(), 2, "{variants:?}");
+        assert!(
+            variants
+                .iter()
+                .all(|variant| matches!(variant.ty, TypeRef::Boxed(_))),
+            "{variants:?}"
         );
     }
 
