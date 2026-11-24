@@ -118,21 +118,23 @@ pub(super) fn render(
         quote! {
             /// What a response decodes into.
             ///
-            /// Every type here is the *read form* of a type in the description. A struct the
-            /// description requires members of has every member optional here, and keeps the
-            /// members the description does not declare in `extra`. A type the description
-            /// reaches from a request as well has its strict form in the parent module and its
-            /// read twin here, and converts into it with `From`; a type both forms agree on —
-            /// nothing required anywhere inside — is defined in the parent module and
-            /// re-exported here, so everything a response yields can be named as `read::…`.
-            /// Such a shared type has no `extra`: an undeclared member it reads is reported and
-            /// not kept, because the same type is what a request sends.
+            /// Every type here is the *read form* of a type in the description.
+            /// A struct has every member optional here, and keeps the members the description
+            /// does not declare in `extra`, unless its own map or a union flattened beside its
+            /// members already holds them.
+            /// A type the description reaches from a request as well has its strict form in the
+            /// parent module and its read twin here, and converts into it with `From`.
+            /// A type both forms agree on — the same members and the same types inside — is
+            /// defined in the parent module and re-exported here, so everything a response
+            /// yields can be named as `read::…`.
             ///
             /// Reading through the generated client tolerates a member that is absent, `null`
             /// or unreadable and reports it, and leaves out a list element it cannot read.
-            /// `serde_json::from_str` on a read struct does the same and drops the report; keep
-            /// the report with `Decoded::from_json`, which reads any of these types and every
-            /// container of them. On a read alias of a list `serde_json::from_str` is serde's
+            /// `serde_json::from_str` on a read twin, or on a struct only responses yield, does
+            /// the same and drops the report.
+            /// A struct re-exported here from the parent module keeps strict serde for requests.
+            /// `Decoded::from_json` reads leniently and keeps the report for any of these types
+            /// and every container of them. On a read alias of a list `serde_json::from_str` is serde's
             /// own list reading, which refuses the whole list over one element.
             ///
             /// Every type here carries the sites a report keys its entries at: `Pet::SITE` for

@@ -4,24 +4,24 @@
 //! and the type it decodes into has to be able to say so.
 //! A request is built by the caller, and the description's required-ness is enforced by
 //! the type.
-//! Where the two shapes are the same — no required member anywhere inside — one type
-//! serves both directions.
+//! A struct's read form makes every required member optional and keeps the members the
+//! description does not declare in a capture map.
+//! Where the two shapes are the same — no required member anywhere inside, and every struct
+//! already holding what its members leave — one type serves both directions.
 //! Where they differ, a type reached from both directions gets a *read twin*: the same
-//! contract with every required member made optional and a capture map for the members
-//! the description does not declare.
+//! contract in its read form.
 //! A type reached from responses alone is simply written in that form; a type reached
 //! from requests alone, or from nothing, keeps the strict one.
 //!
-//! The capture map alone does not earn a twin.
+//! The capture map alone earns a twin.
 //! A shared type is one type, and a capture map on it would be written into requests too,
-//! which the strict encoding must not do; so a shared type reports the undeclared members
-//! it read and does not keep them, and only a type twinned for its required members keeps
-//! them.
-//! Twinning every both-direction struct for the map alone would roughly double the type
-//! layer for a property whose detectable half — the report — a shared type already has.
+//! which the strict encoding must not do.
+//! So which directions reach a type decides only where its read form lives, never what that
+//! form holds: adding a request use of a type that responses yield keeps its read form's
+//! `extra`.
 //!
 //! The difference propagates upward: a type holding a twinned type differs too, however
-//! deep the required member sits, because the read form of the holder has to name the
+//! deep the differing struct sits, because the read form of the holder has to name the
 //! read form of what it holds.
 //! That is a fixed point over the type graph, computed here before anything is frozen.
 
@@ -101,17 +101,20 @@ pub(super) fn run(types: &mut Vec<Provisional>, reach: &[Reach]) -> Twinned {
 
 /// The types whose read form has a different shape from their strict form.
 ///
-/// A struct with a required member differs on its own; anything holding a differing type
-/// differs through it.
+/// A struct differs on its own when it has a required member or its read form gains a capture
+/// member; anything holding a differing type differs through it.
 /// Monotone, so the loop settles.
 fn differs(types: &[Provisional]) -> BTreeSet<usize> {
     let mut differing: BTreeSet<usize> = types
         .iter()
         .enumerate()
         .filter(|(_, contract)| match &contract.kind {
-            ContractKind::Struct { fields } => fields
-                .iter()
-                .any(|field| field.presence == Presence::Required && !field.is_capture()),
+            ContractKind::Struct { fields } => {
+                gains_capture(fields)
+                    || fields
+                        .iter()
+                        .any(|field| field.presence == Presence::Required && !field.is_capture())
+            }
             ContractKind::Enum { .. }
             | ContractKind::TaggedEnum { .. }
             | ContractKind::CarriedTagEnum { .. }
@@ -163,9 +166,15 @@ fn loosen(contract: &mut Provisional) {
             field.skip_serializing_if = SkipRule::WhenNone;
         }
     }
-    if !fields.iter().any(FieldContract::is_capture) {
+    if gains_capture(fields) {
         fields.push(capture_member(&mut used));
     }
+}
+
+/// Whether a struct's read form adds a capture member: it has none of its own, neither the
+/// schema's `additionalProperties` nor a union flattened beside its members.
+fn gains_capture(fields: &[FieldContract]) -> bool {
+    !fields.iter().any(FieldContract::is_capture)
 }
 
 /// The member that holds what the description did not declare, as arbitrary JSON.
@@ -197,7 +206,7 @@ mod tests {
 
     use super::super::tests::{contracts_of, index_of, named};
     use super::super::{ContractKind, Contracts, Form, Presence, TypeRef};
-    use crate::config::{Config, Decoding};
+    use crate::config::{Config, Decoding, Derive};
 
     /// A document with one operation sending `request` and answering with `response`, both by
     /// reference, over the given component schemas.
@@ -228,8 +237,13 @@ mod tests {
                                    "both": {"$ref": "#/components/schemas/Both"}}},
             "Both": {"type": "object", "required": ["name"],
                      "properties": {"name": {"type": "string"},
-                                    "note": {"$ref": "#/components/schemas/Note"}}},
+                                    "note": {"$ref": "#/components/schemas/Note"},
+                                    "notes": {"$ref": "#/components/schemas/Notes"},
+                                    "labels": {"$ref": "#/components/schemas/Labels"}}},
             "Note": {"type": "object", "properties": {"text": {"type": "string"}}},
+            "Notes": {"type": "array", "items": {"$ref": "#/components/schemas/Note"}},
+            "Labels": {"type": "object", "properties": {"name": {"type": "string"}},
+                       "additionalProperties": {"type": "string"}},
             "Tag": {"type": "string", "enum": ["a", "b"]},
             "Unreached": {"type": "object", "required": ["x"],
                           "properties": {"x": {"type": "integer"}}},
@@ -253,9 +267,41 @@ mod tests {
         Ok(named(contracts, name)?.form())
     }
 
+    /// A derive the configuration names stays on the type a caller builds, and the read twin
+    /// leaves off one its capture map cannot have, with a warning, rather than refusing the
+    /// document.
+    #[test_util::test]
+    fn a_named_derive_the_read_twin_cannot_take_stays_on_the_strict_form() {
+        let schemas =
+            json!({"Flags": {"type": "object", "properties": {"on": {"type": "boolean"}}}});
+        let config = Config {
+            type_derives: [("Flags".to_owned(), [Derive::Copy].into_iter().collect())]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let (contracts, diagnostics) = contracts_of(document("Flags", "Flags", &schemas), &config)?;
+        let Form::Strict { twin: Some(twin) } = form_of(&contracts, "Flags")? else {
+            eyre::bail!("`Flags` should have a read twin");
+        };
+        let strict = named(&contracts, "Flags")?;
+        let twin = contracts
+            .get(twin)
+            .ok_or_else(|| eyre::eyre!("twin missing"))?;
+        assert!(strict.derives().contains(&Derive::Copy));
+        assert!(!twin.derives().contains(&Derive::Copy));
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.class() == crate::diag::BreakageClass::UnsatisfiableDerive
+                    && diagnostic.detail().contains("by name")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
     /// Each reach gets the form the design assigns it: request-only strict, response-only
     /// lenient, shared where nothing differs, and a twin where both directions meet a required
-    /// member.
+    /// member or a struct whose read form gains a capture member.
     #[test_util::test]
     fn forms_follow_reach_and_shape() {
         let (contracts, _) = contracts_of(
@@ -286,13 +332,47 @@ mod tests {
                 strict: Some(both_index)
             }
         );
-        // Reached from both, nothing required anywhere inside: one type serves both — and, being
-        // what a request sends too, keeps no capture map for what a response adds.
-        assert_eq!(form_of(&contracts, "Note")?, Form::Shared);
-        let ContractKind::Struct { fields } = named(&contracts, "Note")?.kind() else {
-            eyre::bail!("a struct");
+        // Reached from both with nothing required, but its read form gains the capture map a
+        // request must not write: a strict half without one, and a twin with one.
+        let note = index_of(&contracts, "Note")?;
+        let Form::Strict {
+            twin: Some(note_twin),
+        } = form_of(&contracts, "Note")?
+        else {
+            eyre::bail!("`Note` should have a twin");
         };
-        assert!(!fields.iter().any(super::FieldContract::is_capture));
+        let captures = |index| -> eyre::Result<usize> {
+            let contract = contracts
+                .get(index)
+                .ok_or_else(|| eyre::eyre!("no type at {index:?}"))?;
+            let ContractKind::Struct { fields } = contract.kind() else {
+                eyre::bail!("a struct");
+            };
+            Ok(fields.iter().filter(|field| field.is_capture()).count())
+        };
+        assert_eq!(captures(note)?, 0);
+        assert_eq!(captures(note_twin)?, 1);
+        // A list that differs only through what it holds twins too, and its read form names the
+        // read form of its element.
+        let Form::Strict {
+            twin: Some(list_twin),
+        } = form_of(&contracts, "Notes")?
+        else {
+            eyre::bail!("`Notes` should have a twin");
+        };
+        let list_twin = contracts
+            .get(list_twin)
+            .ok_or_else(|| eyre::eyre!("twin missing"))?;
+        assert_eq!(
+            list_twin.kind().references(),
+            [&TypeRef::Vec(Box::new(TypeRef::Named(note_twin)))]
+        );
+        // A struct whose own map already holds what its members leave reads the way it is
+        // written, so one type serves both directions, with that map and no second one.
+        let labels = index_of(&contracts, "Labels")?;
+        assert_eq!(form_of(&contracts, "Labels")?, Form::Shared);
+        assert_eq!(captures(labels)?, 1);
+        // Nothing in a string enum differs, so it is shared.
         assert_eq!(form_of(&contracts, "Tag")?, Form::Shared);
         assert!(contracts.has_read_forms());
         // The read form of a reference goes through the twin and leaves the rest alone.
@@ -300,10 +380,9 @@ mod tests {
             contracts.read_form(&TypeRef::Vec(Box::new(TypeRef::Named(both_index)))),
             TypeRef::Vec(Box::new(TypeRef::Named(twin)))
         );
-        let note = index_of(&contracts, "Note")?;
         assert_eq!(
-            contracts.read_form(&TypeRef::Named(note)),
-            TypeRef::Named(note)
+            contracts.read_form(&TypeRef::Named(labels)),
+            TypeRef::Named(labels)
         );
     }
 

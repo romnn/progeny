@@ -52,7 +52,7 @@ The hand-written path for structs buffers members before assigning them, which n
 
 ### Reading responses
 
-A vendor's description is a promise the vendor does not always keep, so the generated client reads responses **leniently** by default. A member that is absent, `null`, or not what the description declared becomes `None`; a list element that cannot be read is left out; an enum value or union payload the description does not list lands in the type's `Unknown` arm; a member the description never declared is reported, and kept in `extra` where the type has a read form of its own. Every deviation is recorded, keyed by its place in the *description*, and returned beside the value:
+A vendor's description is a promise the vendor does not always keep, so the generated client reads responses **leniently** by default. A member that is absent, `null`, or not what the description declared becomes `None`; a list element that cannot be read is left out; an enum value or union payload the description does not list lands in the type's `Unknown` arm; a member the description never declared is reported and kept in the struct's `extra` map. Every deviation is recorded, keyed by its place in the *description*, and returned beside the value:
 
 ```rust
 let page = client.list_users().send().await?;
@@ -65,7 +65,7 @@ for user in page.into_value() {
 }
 ```
 
-A type only a response yields is written in its read form. One a request sends as well keeps its strict form in `types` and gains a read twin in `types::read` only where the two shapes differ. A response whose root is not what the description declares is still an error: there is no value to hand back.
+A type only a response yields is written in its read form. One a request sends as well keeps its strict form in `types` and gains a read twin in `types::read` where the two forms differ. A type both forms agree on, with the same field layout and the same types inside, is one Rust definition in `types`, re-exported under `types::read`; it keeps strict serde for requests and a lenient decoder for responses. The synthetic `extra` map makes the layouts differ, so a struct a request sends too has a read twin unless it has a map of its own, from `additionalProperties` or a union beside its members. Adding a request use of a response type never takes `extra` away. A struct with a map of its own still twins when a member it requires, or a type inside it, differs between the forms. The strict half in `types` then has no synthetic `extra` (a map of its own stays), no automatic `Default` and no report sites, and converts into the read twin with `From`. A response whose root is not what the description declares is still an error: there is no value to hand back.
 
 `decoding = "strict"` decodes responses into the strict types and fails a response on a deviation such as a missing required member or a value of the wrong type. String enums and unions stay open in this mode too, keeping a value the description does not list in their fallback variant, and undeclared members follow `unknown-fields`, which ignores them by default. It is a choice made when the crate is generated, not a switch on a client: strict leaves out `types::read`, so the response types change with it.
 

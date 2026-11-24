@@ -1469,6 +1469,40 @@ mod tests {
         assert!(!strict.contains("IdleThreadStatus"), "{strict}");
     }
 
+    /// One empty payload deduplicated under a request-only union and a response-only one keeps
+    /// its struct, so the response's union can name a read form that captures.
+    #[test_util::test]
+    fn a_deduplicated_tag_only_payload_a_response_reaches_keeps_its_struct() {
+        let idle = json!({"type": "object", "required": ["type"], "properties": {
+            "type": {"enum": ["idle"], "type": "string"},
+        }});
+        let busy = |since: &str| {
+            json!({"type": "object", "required": ["type", since], "properties": {
+                "type": {"enum": ["busy"], "type": "string"},
+                since: {"type": "integer"},
+            }})
+        };
+        let mut document = with_schemas(json!({
+            "Sent": {"oneOf": [idle.clone(), busy("from")]},
+            "Got": {"oneOf": [idle, busy("since")]},
+        }));
+        document["paths"] = json!({"/status": {"post": {
+            "operationId": "postStatus",
+            "requestBody": {"content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/Sent"},
+            }}},
+            "responses": {"200": {"description": "ok", "content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/Got"},
+            }}}},
+        }}});
+        let rendered = types(document, &Config::default())?;
+        // The request's union names the strict half and the response's the read half, so neither
+        // is a unit variant.
+        assert!(!rendered.contains("Idle,"), "{rendered}");
+        assert_eq!(rendered.matches("Idle(Box<").count(), 2, "{rendered}");
+        assert!(rendered.contains("pub extra:"), "{rendered}");
+    }
+
     /// A tag-only branch that is a component of its own stays that component: the document named
     /// it, so it is a type a caller can name whichever union holds it.
     #[test_util::test]

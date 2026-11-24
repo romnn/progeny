@@ -797,3 +797,135 @@ fn a_string_beside_tagged_objects_reads_each_by_its_kind_and_then_its_tag() {
         assert_eq!(clean, listed, "{payload}");
     }
 }
+
+/// Read an optional-only struct's read form out of a payload with an undeclared member, under one
+/// strategy, and check what it keeps: the member captured in `extra`, reported at the type's own
+/// site, and written back; and a standalone `Deserialize` that reads a mistyped member as absent.
+///
+/// A macro because the two renderings' types are only named alike up to their module.
+macro_rules! keeps_undeclared {
+    ($rendering:ident, $note:ident) => {{
+        use $rendering::types::{Decoded, DegradationKind, read};
+
+        let payload = r#"{"text":"t","color":"red"}"#;
+        let decoded = Decoded::<read::$note>::from_json(payload)?;
+        assert_eq!(
+            decoded.value.extra.get("color"),
+            Some(&serde_json::json!("red"))
+        );
+        let reported: Vec<(DegradationKind, Vec<String>)> = decoded
+            .degradations
+            .iter()
+            .map(|entry| (entry.kind, entry.samples.to_vec()))
+            .collect();
+        assert_eq!(
+            reported,
+            [(DegradationKind::UndeclaredMember, vec!["color".to_owned()])]
+        );
+        assert!(decoded.degradations.touches(read::$note::SITE));
+        assert_eq!(serde_json::to_string(&decoded.value)?, payload);
+
+        let mistyped: read::$note = serde_json::from_value(serde_json::json!({"text": 5}))?;
+        assert_eq!(mistyped.text, None);
+        assert!(mistyped.extra.is_empty());
+    }};
+}
+
+/// An optional-only struct's read form is the same whichever directions reach it: `Note`, which
+/// only a response yields, and `SharedNote`, which a request sends too, both keep and report an
+/// undeclared member and tolerate a mistyped one.
+/// The request's strict `SharedNote` stays strict: it writes no capture map, refuses the mistyped
+/// member, and converts into a read form with nothing captured.
+#[test_util::test]
+fn a_read_form_keeps_undeclared_members_whichever_directions_reach_it() {
+    keeps_undeclared!(derived, Note);
+    keeps_undeclared!(hand, Note);
+    keeps_undeclared!(derived, SharedNote);
+    keeps_undeclared!(hand, SharedNote);
+
+    let left = derived::types::SharedNote {
+        text: Some("t".to_owned()),
+    };
+    let right = hand::types::SharedNote {
+        text: Some("t".to_owned()),
+    };
+    assert_eq!(serde_json::to_string(&left)?, r#"{"text":"t"}"#);
+    assert_eq!(serde_json::to_string(&right)?, r#"{"text":"t"}"#);
+    assert!(serde_json::from_str::<derived::types::SharedNote>(r#"{"text":5}"#).is_err());
+    assert!(serde_json::from_str::<hand::types::SharedNote>(r#"{"text":5}"#).is_err());
+    let left: derived::types::read::SharedNote = left.into();
+    let right: hand::types::read::SharedNote = right.into();
+    assert!(left.extra.is_empty() && right.extra.is_empty());
+}
+
+/// A named list that differs from its read form only through the struct it lists names that
+/// struct's read form, so each element keeps what the description does not declare.
+#[test_util::test]
+fn a_list_of_a_twinned_struct_names_its_read_form() {
+    let payload = r#"{"notes":[{"text":"a","pinned":true}]}"#;
+    let (left, right, clean) = read_back!(
+        derived::types::read::NoteBoard,
+        hand::types::read::NoteBoard,
+        payload
+    );
+    assert_eq!((left.as_str(), right.as_str()), (payload, payload));
+    assert!(!clean, "the undeclared member is reported");
+
+    let board = derived::types::Decoded::<derived::types::read::NoteBoard>::from_json(payload)?;
+    let notes: derived::types::read::SharedNotes = board.value.notes.ok_or_eyre("notes")?;
+    let note = notes.first().ok_or_eyre("one note")?;
+    assert_eq!(note.extra.get("pinned"), Some(&serde_json::json!(true)));
+}
+
+/// Read a tag-only branch that a request sends too, under one strategy: a member beside the tag
+/// is captured, reported and written back, while the tag the union consumes is not.
+macro_rules! tag_only_keeps_undeclared {
+    ($rendering:ident) => {{
+        use $rendering::types::{Decoded, DegradationKind, read};
+
+        let payload = r#"{"state":"idle","note":"x"}"#;
+        let decoded = Decoded::<read::NoteStatus>::from_json(payload)?;
+        let read::NoteStatus::Idle(idle) = &decoded.value else {
+            bail!("the tag names the idle branch: {:?}", decoded.value);
+        };
+        assert_eq!(idle.extra.keys().collect::<Vec<_>>(), ["note"]);
+        let reported: Vec<(DegradationKind, Vec<String>)> = decoded
+            .degradations
+            .iter()
+            .map(|entry| (entry.kind, entry.samples.to_vec()))
+            .collect();
+        assert_eq!(
+            reported,
+            [(DegradationKind::UndeclaredMember, vec!["note".to_owned()])]
+        );
+        assert_eq!(serde_json::to_string(&decoded.value)?, payload);
+
+        let clean = Decoded::<read::NoteStatus>::from_json(r#"{"state":"idle"}"#)?;
+        assert!(clean.degradations.is_empty(), "{}", clean.degradations);
+    }};
+}
+
+/// A branch that carries only the tag its union consumes, used in both directions, keeps its
+/// empty struct: a response keeps a member beside the tag, and a request writes the tag alone.
+#[test_util::test]
+fn a_tag_only_branch_both_directions_reach_keeps_what_a_response_adds() {
+    tag_only_keeps_undeclared!(derived);
+    tag_only_keeps_undeclared!(hand);
+
+    let left = derived::types::NoteStatus::Idle(Box::new(derived::types::IdleNoteStatus {}));
+    let right = hand::types::NoteStatus::Idle(Box::new(hand::types::IdleNoteStatus {}));
+    assert_eq!(serde_json::to_string(&left)?, r#"{"state":"idle"}"#);
+    assert_eq!(serde_json::to_string(&right)?, r#"{"state":"idle"}"#);
+    let payload = r#"{"state":"idle"}"#;
+    let (left_back, right_back) =
+        round_trip::<derived::types::NoteStatus, hand::types::NoteStatus>(payload)?;
+    assert_eq!(
+        (left_back.as_str(), right_back.as_str()),
+        (payload, payload)
+    );
+
+    let derived::types::read::NoteStatus::Idle(idle) = left.into() else {
+        bail!("the conversion keeps the branch");
+    };
+    assert!(idle.extra.is_empty());
+}

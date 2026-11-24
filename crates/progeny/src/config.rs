@@ -41,6 +41,8 @@ pub struct Config {
     ///
     /// Unlike [`Config::derives`], an ineligible request here is an error rather than a note: the
     /// caller named a type and stated an intent that cannot be honoured.
+    /// The exception is the read twin of a named type, the generator's lenient form of it, which
+    /// leaves off with a note a derive it cannot take while the strict form still has to.
     #[serde(default)]
     pub type_derives: BTreeMap<String, BTreeSet<Derive>>,
     /// What to do with members a payload has and the document did not declare.
