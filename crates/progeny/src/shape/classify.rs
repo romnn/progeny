@@ -570,8 +570,10 @@ fn open_tuple(resolved: &ResolvedDocument, view: &View) -> bool {
 ///
 /// A long tuple declares its shape, but the branches of a union that degrades are never
 /// classified, so the arity limit that makes it arbitrary JSON is reported here.
-fn unshaped_branch(view: &View) -> String {
-    if long_tuple(view) {
+/// That is the reason only for an array whose tail is closed: an open tail, or a second kind,
+/// degrades the branch whatever its length.
+fn unshaped_branch(resolved: &ResolvedDocument, view: &View) -> String {
+    if declared_kind(view) == Some(Kind::Array) && !open_tuple(resolved, view) && long_tuple(view) {
         let positions = view.prefix_items.as_ref().map_or(0, Vec::len);
         return format!(
             "one of its branches is arbitrary JSON because it lists {positions} `prefixItems` \
@@ -2439,7 +2441,7 @@ fn swallows_payloads_of(
     // list"), and behind branches that admit what they read it loses nothing.
     // Anywhere else the same branch swallows the ones after it, which loses everything.
     let Some(left) = kind_of(resolved, &first) else {
-        return Some(unshaped_branch(&first));
+        return Some(unshaped_branch(resolved, &first));
     };
     // A later branch that admits every payload of the earlier one's kind is a catch-all, reached
     // only by what every branch before it refuses, and it declares no members an earlier branch

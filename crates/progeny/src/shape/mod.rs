@@ -6098,6 +6098,34 @@ mod tests {
                 .contains("lists 17 `prefixItems` positions, past the 16"),
             "{found:#?}"
         );
+
+        // An open tail, or a second kind, degrades the branch whatever its length, so the limit
+        // is not given as the reason.
+        for branch in [
+            json!({
+                "type": "array",
+                "prefixItems": vec![json!({"type": "string"}); 17],
+                "items": true,
+            }),
+            json!({
+                "type": ["array", "string"],
+                "prefixItems": vec![json!({"type": "string"}); 17],
+                "items": false,
+            }),
+        ] {
+            let (_, diagnostics) = shapes_of(with_schemas(json!({
+                "D": {
+                    "type": "object", "required": ["d"],
+                    "properties": {"d": {"type": "string"}},
+                },
+                "Either": {"oneOf": [branch, {"$ref": "#/components/schemas/D"}]},
+            })))?;
+            let wild = diagnostics
+                .iter()
+                .find(|found| found.class() == BreakageClass::WildUnion)
+                .ok_or_eyre("the union degrades")?;
+            assert!(!wild.detail().contains("past the 16"), "{wild:#?}");
+        }
     }
 
     #[test_util::test]
