@@ -32,6 +32,10 @@ ureq.workspace = true
 nix.workspace = true
 
 [dev-dependencies]
+# `raw_value`, because the payload comparison walks JSON text without parsing its numbers.
+# Only xtask's tests compile the comparison, and the feature changes how a `Value` reads an object
+# keyed by `serde_json`'s private raw-value marker, so the gates' own build goes without it.
+serde_json = { workspace = true, features = ["raw_value"] }
 test-util.workspace = true
 
 [lints]

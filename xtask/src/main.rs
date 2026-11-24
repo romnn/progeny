@@ -5,7 +5,14 @@
 //! trivially testable and leaves I/O to the callers that need it.
 
 mod bench;
+// The payload gate ships these two into every payload test as source.
+// Compiled here only for the tests that call them.
+#[cfg(test)]
+mod comparison;
 mod corpus;
+#[cfg(test)]
+#[path = "../../crates/progeny/src/load/decimal.rs"]
+mod decimal;
 mod differential;
 mod example;
 mod generated;

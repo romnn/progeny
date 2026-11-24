@@ -9,6 +9,7 @@
 //! exactly under the `exact-numbers` feature, which enables arbitrary-precision numbers.
 //! Without it, a number the model cannot hold as written is reported, never rounded silently.
 
+mod decimal;
 mod number;
 mod yaml;
 

@@ -22,7 +22,7 @@ use crate::{doc, load, normalize, resolve};
 
 pub use crate::resolve::Counts as Resolution;
 pub use convergence::{Convergence, convergence};
-pub use payload::{Payload, Payloads, payloads};
+pub use payload::{Formatted, Payload, Payloads, payloads};
 pub use probe::{
     Probe, ProbeAnswer, ProbeBody, ProbeField, ProbeGroup, ProbeHead, ProbeHeader, ProbeHeaders,
     ProbeInput, ProbeOp, ProbeResponse, ProbeValue, probe,
