@@ -24,6 +24,26 @@ use crate::schema::cycles::Sccs;
 /// a caller can ask for by name.
 pub(crate) const BASE: [Derive; 2] = [Derive::Clone, Derive::Debug];
 
+/// Whether `contract` is the generator's lenient read form of a type a caller builds.
+///
+/// The configuration names the type a caller builds, so a named derive its read form cannot take,
+/// such as `Copy` beside the map that keeps undeclared members, is reported and left off there,
+/// while the type a request sends still has to take it.
+/// That read form is a read twin, or a type only responses reach whose multipart form a request
+/// sends.
+fn is_read_form(
+    contract: &Provisional,
+    index: usize,
+    multipart: &BTreeMap<TypeIndex, TypeIndex>,
+) -> bool {
+    let here = TypeIndex(u32::try_from(index).unwrap_or(u32::MAX));
+    match contract.form {
+        Form::Lenient { strict: Some(_) } => true,
+        Form::Lenient { strict: None } => multipart.values().any(|&ordinary| ordinary == here),
+        Form::Strict { .. } | Form::Shared => false,
+    }
+}
+
 /// Freeze the provisional contracts.
 ///
 /// # Errors
@@ -54,18 +74,7 @@ pub(super) fn run(
         let requested =
             config.derives_for(contract.component.as_deref(), &contract.origin.to_string());
         let named = config.type_derives.keys().any(|key| matches(contract, key));
-        // The configuration names the type a caller builds.
-        // A read form of it is the generator's lenient form, so a named derive the read form
-        // cannot take, such as `Copy` beside the map that keeps undeclared members, is reported and
-        // left off there, while the type a request sends still has to take it.
-        // That read form is a read twin, or a type only responses reach whose multipart form a
-        // request sends.
-        let here = TypeIndex(u32::try_from(index).unwrap_or(u32::MAX));
-        let read_form = match contract.form {
-            Form::Lenient { strict: Some(_) } => true,
-            Form::Lenient { strict: None } => multipart.values().any(|&ordinary| ordinary == here),
-            Form::Strict { .. } | Form::Shared => false,
-        };
+        let read_form = is_read_form(contract, index, multipart);
 
         let mut derives: Vec<Derive> = BASE.to_vec();
         // A struct a response decodes into always has a `Default`: every member of a read form
