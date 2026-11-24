@@ -1750,7 +1750,12 @@ mod tests {
             .find(|candidate| candidate.rust_name.as_str() == operation)
             .and_then(|found| found.body.as_ref())
             .ok_or_eyre("the operation sends a body")?;
-        let Some(contract::TypeRef::Named(index)) = body.ty() else {
+        let mut ty = body.ty().ok_or_eyre("the body is typed")?;
+        // A nullable body sends an `Option` of the type.
+        while let contract::TypeRef::Option(inner) = ty {
+            ty = inner;
+        }
+        let contract::TypeRef::Named(index) = ty else {
             eyre::bail!("{operation} sends {body:?}");
         };
         let name = contracts
@@ -1848,17 +1853,6 @@ mod tests {
         // openai's container file upload declares JSON and multipart for one schema, and
         // posthog's feedback a URL-encoded form and multipart; this declares all three.
         // A second multipart body nests the schema, which makes it a JSON part there.
-        // The two operations' alike responses merge into one type, and `Kind`'s tag-only
-        // branches become unit variants, so both renumber every type after them, the upload
-        // form included.
-        let reply = json!({"200": {"description": "done", "content": {"application/json": {"schema": {
-            "type": "object", "properties": {"id": {"type": "string"}},
-        }}}}});
-        let tag_only = |title: &str, tag: &str| {
-            json!({"title": title, "type": "object", "required": ["type"], "properties": {
-                "type": {"enum": [tag], "type": "string"},
-            }})
-        };
         let document = json!({
             "openapi": "3.1.0",
             "paths": {
@@ -1869,14 +1863,14 @@ mod tests {
                         "application/x-www-form-urlencoded": {"schema": {"$ref": "#/components/schemas/Attachment"}},
                         "multipart/form-data": {"schema": {"$ref": "#/components/schemas/Attachment"}},
                     }},
-                    "responses": reply.clone(),
+                    "responses": {"204": {"description": "done"}},
                 }},
                 "/bundles": {"post": {
                     "operationId": "createBundle",
                     "requestBody": {"content": {"multipart/form-data": {"schema": {
                         "$ref": "#/components/schemas/Bundle",
                     }}}},
-                    "responses": reply,
+                    "responses": {"204": {"description": "done"}},
                 }},
             },
             "components": {"schemas": {
@@ -1888,7 +1882,6 @@ mod tests {
                     "attachment": {"$ref": "#/components/schemas/Attachment"},
                     "scan": {"type": "string", "contentMediaType": "application/octet-stream"},
                 }},
-                "Kind": {"oneOf": [tag_only("AKind", "a"), tag_only("BKind", "b")]},
             }},
         });
 
@@ -1951,6 +1944,64 @@ mod tests {
         assert!(
             server.contains("body: super::types::AttachmentMultipart"),
             "{server}"
+        );
+    }
+
+    #[test_util::test]
+    fn a_named_alias_of_a_shared_body_still_sends_the_upload_form() {
+        // `Wrapped` and `MaybeWrapped` name `Payload` through a single-branch `oneOf`, the second
+        // beside `null`, and each is a multipart body while `Payload` itself is a JSON body.
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/form": {"post": {
+                    "operationId": "sendForm",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/Wrapped"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/maybe": {"post": {
+                    "operationId": "sendMaybe",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/MaybeWrapped"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/json": {"post": {
+                    "operationId": "sendJson",
+                    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Payload"}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+            "components": {"schemas": {
+                "Payload": {"type": "object", "properties": {
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+                "Wrapped": {"oneOf": [{"$ref": "#/components/schemas/Payload"}]},
+                "MaybeWrapped": {"oneOf": [{"$ref": "#/components/schemas/Payload"}, {"type": "null"}]},
+            }},
+        });
+        let (contracts, api, _) = pipeline(document, &Config::default())?;
+
+        // Both aliases send the upload form, and its file member is a file part.
+        let file = [("file", crate::api::PartKind::File)];
+        assert_eq!(
+            sent(&contracts, &api, "send_form")?,
+            ("PayloadMultipart", file.to_vec())
+        );
+        assert_eq!(
+            sent(&contracts, &api, "send_maybe")?,
+            ("PayloadMultipart", file.to_vec())
+        );
+        assert_eq!(sent(&contracts, &api, "send_json")?.0, "Payload");
+
+        // The nullable alias keeps its `null` around the form.
+        let maybe = api
+            .operations()
+            .iter()
+            .find(|operation| operation.rust_name.as_str() == "send_maybe")
+            .and_then(|operation| operation.body.as_ref())
+            .and_then(crate::api::BodyContract::ty);
+        assert!(
+            matches!(maybe, Some(contract::TypeRef::Option(_))),
+            "{maybe:?}"
         );
     }
 

@@ -34,12 +34,11 @@ pub(crate) struct Reach {
 
 /// The reach of every type, by index.
 ///
-/// `multipart` holds the multipart form of each ordinary type that has one, by the ordinary
-/// type's index.
+/// `multipart_form` says which type a multipart body sends, given the type its schema lowered to.
 pub(super) fn run(
     resolved: &ResolvedDocument,
     by_shape: &BTreeMap<ShapeKey, TypeRef>,
-    multipart: &BTreeMap<TypeIndex, TypeIndex>,
+    multipart_form: impl Fn(&TypeRef) -> TypeRef,
     references: impl Fn(TypeIndex) -> Vec<TypeIndex>,
     count: usize,
 ) -> Vec<Reach> {
@@ -98,11 +97,12 @@ pub(super) fn run(
                     let Some(ty) = by_shape.get(&crate::shape::key_of(resolved, id)) else {
                         continue;
                     };
-                    let mut ty = ty.clone();
-                    if is_multipart_media_type(media_type) {
-                        ty.remap(multipart);
-                    }
-                    ty.named_into(&mut requests);
+                    let sent = if is_multipart_media_type(media_type) {
+                        multipart_form(ty)
+                    } else {
+                        ty.clone()
+                    };
+                    sent.named_into(&mut requests);
                 }
             }
             let arms = operation.responses.iter().flat_map(|responses| {

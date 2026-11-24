@@ -100,6 +100,39 @@ fn remap_indices(map: &mut BTreeMap<TypeIndex, TypeIndex>, remap: &BTreeMap<Type
         .collect();
 }
 
+/// The multipart form a body's type stands for, or `None` where it names no struct that has one.
+///
+/// The body's schema can name the struct through an alias, such as a single-branch `oneOf` the
+/// document named, and through nullable wrappers.
+/// Lowering gives the form to the struct at the end of that chain, so the lookup follows the
+/// aliases to it, and keeps the wrappers around the form.
+/// `forms` maps each form to its ordinary type, and `kind_of` reads a type's kind.
+fn multipart_body<'a>(
+    ty: &TypeRef,
+    forms: &BTreeMap<TypeIndex, TypeIndex>,
+    kind_of: &impl Fn(TypeIndex) -> Option<&'a ContractKind>,
+    followed: &mut std::collections::BTreeSet<TypeIndex>,
+) -> Option<TypeRef> {
+    match ty {
+        TypeRef::Option(inner) => Some(TypeRef::Option(Box::new(multipart_body(
+            inner, forms, kind_of, followed,
+        )?))),
+        TypeRef::Named(index) => {
+            if let Some((&form, _)) = forms.iter().find(|(_, ordinary)| *ordinary == index) {
+                return Some(TypeRef::Named(form));
+            }
+            match kind_of(*index) {
+                // A cycle of aliases ends where it closes.
+                Some(ContractKind::Alias { target }) if followed.insert(*index) => {
+                    multipart_body(target, forms, kind_of, followed)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// A Rust type, as a renderer needs to write it.
 ///
 /// Structural rather than named wherever it can be: only [`TypeRef::Named`] needs identity, and
@@ -642,7 +675,7 @@ pub(crate) struct Contracts {
     collapses: Vec<Collapse>,
     /// Each twinned strict type's read twin.
     twins: BTreeMap<TypeIndex, TypeIndex>,
-    /// The multipart form of each ordinary type that has one, by the ordinary type's index.
+    /// Each multipart form's ordinary type, by the form's index.
     multipart: BTreeMap<TypeIndex, TypeIndex>,
 }
 
@@ -661,14 +694,17 @@ impl Contracts {
         read
     }
 
-    /// The type reference a `multipart/form-data` body names: every ordinary type that has a
-    /// multipart form replaced by that form.
+    /// The type a `multipart/form-data` body sends, given the type its schema lowered to.
     ///
-    /// A type with no multipart form is its own, so the reference comes back unchanged.
+    /// See [`multipart_body`]; a type with no multipart form comes back unchanged.
     pub(crate) fn multipart_form(&self, ty: &TypeRef) -> TypeRef {
-        let mut form = ty.clone();
-        form.remap(&self.multipart);
-        form
+        multipart_body(
+            ty,
+            &self.multipart,
+            &|index| self.get(index).map(TypeContract::kind),
+            &mut std::collections::BTreeSet::new(),
+        )
+        .unwrap_or_else(|| ty.clone())
     }
 
     /// The type a reference spells once every alias it names is replaced by what it names.
@@ -694,7 +730,7 @@ impl Contracts {
     /// asks, so that a response position naming a twin, or a multipart body naming its form,
     /// still counts as reaching the type the document declared.
     pub(crate) fn declared_form(&self, index: TypeIndex) -> TypeIndex {
-        if let Some((&ordinary, _)) = self.multipart.iter().find(|(_, form)| **form == index) {
+        if let Some(&ordinary) = self.multipart.get(&index) {
             return ordinary;
         }
         match self.get(index).map(TypeContract::form) {
@@ -807,7 +843,15 @@ pub(crate) fn build(
         crate::config::Decoding::Lenient => Some(reach::run(
             resolved,
             &lowered.by_shape,
-            &lowered.multipart,
+            |ty| {
+                multipart_body(
+                    ty,
+                    &lowered.multipart,
+                    &|index| deduped.get(index.index()).map(|contract| &contract.kind),
+                    &mut std::collections::BTreeSet::new(),
+                )
+                .unwrap_or_else(|| ty.clone())
+            },
             |index| {
                 let mut reached = Vec::new();
                 if let Some(contract) = deduped.get(index.index()) {
@@ -836,7 +880,7 @@ pub(crate) fn build(
         Some(reach) => twin::run(&mut deduped, reach),
         None => twin::Twinned::default(),
     };
-    let mut contracts = finalize::run(deduped, config, ctx)?;
+    let mut contracts = finalize::run(deduped, config, &lowered.multipart, ctx)?;
     contracts.by_shape = lowered.by_shape;
     contracts.collapses = lowered.collapses;
     contracts.twins = twinned.twins;
@@ -1929,6 +1973,104 @@ mod tests {
         assert_eq!(
             titled[0].location().to_string(),
             "/components/schemas/Clash/oneOf/0"
+        );
+    }
+
+    /// A body sent as multipart and as JSON, beside two alike responses that merge into one type
+    /// and a union whose tag-only branches become unit variants: both renumber every type after
+    /// them, the multipart form included.
+    #[test_util::test]
+    fn a_multipart_form_keeps_its_ordinary_type_through_renumbering() {
+        let reply = json!({"200": {"description": "done", "content": {"application/json": {"schema": {
+            "type": "object", "properties": {"id": {"type": "string"}},
+        }}}}});
+        let tag_only = |title: &str, tag: &str| {
+            json!({"title": title, "type": "object", "required": ["type"], "properties": {
+                "type": {"enum": [tag], "type": "string"},
+            }})
+        };
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/files": {"post": {
+                    "operationId": "createFile",
+                    "requestBody": {"content": {
+                        "application/json": {"schema": {"$ref": "#/components/schemas/Attachment"}},
+                        "multipart/form-data": {"schema": {"$ref": "#/components/schemas/Attachment"}},
+                    }},
+                    "responses": reply.clone(),
+                }},
+                "/notes": {"post": {"operationId": "createNote", "responses": reply}},
+            },
+            "components": {"schemas": {
+                "Attachment": {"type": "object", "properties": {
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+                "Kind": {"oneOf": [tag_only("AKind", "a"), tag_only("BKind", "b")]},
+            }},
+        });
+        let (contracts, _) = contracts_of(document, &Config::default())?;
+        let ordinary = index_of(&contracts, "Attachment")?;
+        let form = index_of(&contracts, "AttachmentMultipart")?;
+        // A multipart body naming the ordinary type sends the form, and the form still counts as
+        // the type the document declared.
+        assert_eq!(
+            contracts.multipart_form(&TypeRef::Named(ordinary)),
+            TypeRef::Named(form)
+        );
+        assert_eq!(contracts.declared_form(form), ordinary);
+    }
+
+    /// The type only responses reach, beside the multipart form a request sends, is the read
+    /// form of that request type: a derive named for the schema that its capture map rules out is
+    /// left off there and reported, and the form still takes it.
+    #[test_util::test]
+    fn a_named_derive_the_read_form_cannot_take_stays_on_the_multipart_form() {
+        use crate::config::Derive;
+        let config = Config {
+            type_derives: [(
+                "Attachment".to_owned(),
+                [
+                    Derive::PartialEq,
+                    Derive::Eq,
+                    Derive::PartialOrd,
+                    Derive::Ord,
+                ]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/attachments": {"post": {
+                "operationId": "attach",
+                "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/Attachment"}}}},
+                "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Attachment"}}}}},
+            }}},
+            "components": {"schemas": {
+                "Attachment": {"type": "object", "properties": {
+                    "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                }},
+            }},
+        });
+        let (contracts, diagnostics) = contracts_of(document, &config)?;
+        let ordinary = named(&contracts, "Attachment")?;
+        assert_eq!(ordinary.form(), super::Form::Lenient { strict: None });
+        assert!(!ordinary.derives().contains(&Derive::Ord));
+        assert!(
+            named(&contracts, "AttachmentMultipart")?
+                .derives()
+                .contains(&Derive::Ord)
+        );
+        assert!(
+            diagnostics.iter().any(|found| {
+                found.class() == crate::BreakageClass::UnsatisfiableDerive
+                    && found.detail().contains("kept on the form a request sends")
+            }),
+            "{diagnostics:?}"
         );
     }
 }

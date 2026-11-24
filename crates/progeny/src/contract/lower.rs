@@ -162,7 +162,7 @@ pub(super) fn run(
     let mut multipart = BTreeMap::new();
     for key in std::mem::take(&mut lower.uploads.specialized) {
         if let Some((ordinary, form)) = lower.multipart_form(&key) {
-            multipart.insert(ordinary, form);
+            multipart.insert(form, ordinary);
         }
     }
     Lowered {
@@ -179,9 +179,10 @@ pub(super) fn run(
 pub(super) struct Lowered {
     pub(super) types: Vec<Provisional>,
     pub(super) by_shape: BTreeMap<ShapeKey, TypeRef>,
-    /// The multipart form of each ordinary type that has one, by the ordinary type's index.
+    /// Each multipart form's ordinary type, by the form's index.
     ///
-    /// See [`Lower::multipart_form`].
+    /// Keyed by the form so that every form stays recorded whatever merges: see
+    /// [`Lower::multipart_form`].
     pub(super) multipart: BTreeMap<TypeIndex, TypeIndex>,
     pub(super) collapses: Vec<Collapse>,
     /// The branches of every union that consumes its tag, by shape.

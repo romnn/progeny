@@ -107,7 +107,7 @@ Which map type generated code uses: `"b-tree-map"` (the default, for determinist
 
 ### `derives` and `type-derives`
 
-Derives to add to generated types, from a closed set: `"clone"`, `"debug"`, `"partial-eq"`, `"eq"`, `"hash"`, `"partial-ord"`, `"ord"`, `"default"`, `"copy"`. `derives` applies to every type eligible for them, and an ineligible type is reported as `unsatisfiable-derive`. `type-derives` names types, and an ineligible request there is an error. The exception is the read twin of a named type: it leaves off, with an `unsatisfiable-derive` warning, a derive it cannot take, such as `"copy"` beside its `extra` map, which the strict form still has to take.
+Derives to add to generated types, from a closed set: `"clone"`, `"debug"`, `"partial-eq"`, `"eq"`, `"hash"`, `"partial-ord"`, `"ord"`, `"default"`, `"copy"`. `derives` applies to every type eligible for them, and an ineligible type is reported as `unsatisfiable-derive`. `type-derives` names types, and an ineligible request there is an error. The exception is a read form of a named type, its read twin or the response type whose multipart form a request sends: it leaves off, with an `unsatisfiable-derive` warning, a derive it cannot take, such as `"copy"` beside its `extra` map, which the form a request sends still has to take.
 
 ```toml
 derives = ["clone", "debug", "partial-eq"]

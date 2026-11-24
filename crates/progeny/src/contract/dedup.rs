@@ -36,7 +36,7 @@ pub(super) fn run(
     // Each round strictly reduces the number of types, so this terminates; the bound is a
     // belt-and-braces guard against a fingerprint that is not stable under remapping.
     for _ in 0..types.len().saturating_add(1) {
-        let merge = plan(&types);
+        let merge = plan(&types, multipart);
         if merge.is_empty() {
             break;
         }
@@ -57,10 +57,23 @@ pub(super) fn run(
 }
 
 /// Which types merge into which, by index.
-fn plan(types: &[Provisional]) -> BTreeMap<usize, usize> {
+///
+/// A multipart form is the multipart half of its ordinary type, so it merges only with another
+/// form of the same ordinary type.
+/// Merged into any other struct, it would hand that struct's requests to its ordinary type and
+/// take that struct's findings with them.
+fn plan(
+    types: &[Provisional],
+    multipart: &BTreeMap<TypeIndex, TypeIndex>,
+) -> BTreeMap<usize, usize> {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, contract) in types.iter().enumerate() {
-        groups.entry(fingerprint(contract)).or_default().push(index);
+        let mut print = fingerprint(contract);
+        let form = TypeIndex(u32::try_from(index).unwrap_or(u32::MAX));
+        if let Some(ordinary) = multipart.get(&form) {
+            let _ = write!(print, "|multipart form of {}", ordinary.raw());
+        }
+        groups.entry(print).or_default().push(index);
     }
 
     let mut merge = BTreeMap::new();

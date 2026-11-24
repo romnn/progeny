@@ -374,6 +374,53 @@ mod tests {
         assert!(found[0].contains("request body"), "{found:#?}");
     }
 
+    /// A multipart form merges with no other struct, however alike: the struct would then count
+    /// as the form's ordinary type, and its own findings would be judged by that type's reach.
+    #[test_util::test]
+    fn a_multipart_form_keeps_apart_from_an_alike_struct() {
+        // The `/shared` body's own schema is also a JSON body, so its multipart body gets a form,
+        // which the `/single` body is written exactly like, apart from `readOnly`.
+        let (_, diagnostics) = model_of(json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/shared": {"post": {
+                    "operationId": "sendShared",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object", "properties": {
+                        "file": {"type": "string", "contentMediaType": "application/octet-stream"},
+                    }}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/json": {"post": {
+                    "operationId": "sendJson",
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "$ref": "#/paths/~1shared/post/requestBody/content/multipart~1form-data/schema",
+                    }}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+                "/single": {"post": {
+                    "operationId": "sendSingle",
+                    "requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object", "properties": {
+                        "file": {"type": "string", "contentMediaType": "application/octet-stream", "readOnly": true},
+                    }}}}},
+                    "responses": {"204": {"description": "done"}},
+                }},
+            },
+        }))?;
+        // The `/single` body is still a request body of its own, so its `readOnly` file costs
+        // something and is reported.
+        let found: Vec<String> = diagnostics
+            .iter()
+            .filter(|found| found.class() == crate::BreakageClass::AccessCollapse)
+            .map(|found| found.location().to_string())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "/paths/~1single/post/requestBody/content/multipart~1form-data/schema/properties/file"
+            ]
+        );
+    }
+
     /// An access marker is reported exactly where it costs something.
     ///
     /// `readOnly` says only responses carry the member; a type that crosses a request body
