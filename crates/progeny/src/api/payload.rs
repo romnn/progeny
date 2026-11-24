@@ -312,9 +312,9 @@ impl Collect<'_> {
     /// does not declare and makes every member optional; the rules differ at exactly those two
     /// points and nowhere else.
     ///
-    /// One arm per shape, and deliberately not collapsed where two happen to agree: adding a shape
-    /// should not compile until somebody has said what pruning a payload against it means, and a
-    /// merged arm would quietly absorb the next one.
+    /// Every shape is listed by name, and there is no wildcard arm: adding a shape should not
+    /// compile until somebody has said what pruning a payload against it means, and a wildcard
+    /// would quietly absorb the next one.
     fn prune(
         &self,
         value: &Value,
@@ -324,12 +324,6 @@ impl Collect<'_> {
         leaves: &mut Leaves,
     ) -> Option<Value> {
         match shape {
-            // Arbitrary JSON is carried whole, so nothing is pruned from it.
-            #[expect(
-                clippy::match_same_arms,
-                reason = "one arm per shape, so a new shape has to say what pruning against it means"
-            )]
-            Shape::Any => Some(value.clone()),
             Shape::Struct(structure) => {
                 self.prune_struct(value, structure, None, lenient, trail, leaves)
             }
@@ -412,7 +406,11 @@ impl Collect<'_> {
                 }
                 Some(value.clone())
             }
-            Shape::Null | Shape::Scalar(_) | Shape::StringEnum(_) => Some(value.clone()),
+            // Arbitrary JSON is carried whole, so nothing is pruned from it, and a leaf has nothing
+            // inside it to prune.
+            Shape::Any | Shape::Null | Shape::Scalar(_) | Shape::StringEnum(_) => {
+                Some(value.clone())
+            }
         }
     }
 
