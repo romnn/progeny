@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use super::merge::{self, Discriminated, View};
 use super::{
-    Docs, Extra, Field, Format, IntType, Keyed, KeyedVariant, MAX_FIXED_ARRAY, Scalar, Shape,
-    ShapeKey, ShapeRef, StringEnum, Struct, Tag, TagStyle, Union, Variant,
+    Docs, Extra, Field, Format, IntType, Keyed, KeyedVariant, MAX_FIXED_ARRAY, MAX_TUPLE, Scalar,
+    Shape, ShapeKey, ShapeRef, StringEnum, Struct, Tag, TagStyle, Union, Variant,
 };
 use crate::config::IntegerWidth;
 use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer};
@@ -526,6 +526,19 @@ fn array(
                 );
                 return Shape::Any;
             }
+            if long_tuple(view) {
+                degrade(
+                    reports,
+                    at,
+                    BreakageClass::UnsupportedConstruct,
+                    &format!(
+                        "`prefixItems` lists {} positions, past the {MAX_TUPLE} a generated tuple \
+                         supports",
+                        prefix.len()
+                    ),
+                );
+                return Shape::Any;
+            }
             return Shape::Tuple {
                 items: prefix.iter().cloned().map(ShapeRef::Key).collect(),
             };
@@ -551,6 +564,14 @@ fn open_tuple(resolved: &ResolvedDocument, view: &View) -> bool {
             .items
             .as_ref()
             .is_some_and(|rest| !merge::view(resolved, rest).impossible)
+}
+
+/// Whether a view is a `prefixItems` tuple longer than [`MAX_TUPLE`], which [`array`] degrades to
+/// arbitrary JSON.
+fn long_tuple(view: &View) -> bool {
+    view.prefix_items
+        .as_ref()
+        .is_some_and(|prefix| prefix.len() > MAX_TUPLE)
 }
 
 fn string(view: &View) -> Shape {
@@ -2604,9 +2625,10 @@ fn kind_of(resolved: &ResolvedDocument, view: &View) -> Option<Kind> {
     {
         return Some(Kind::Object);
     }
-    // The open tuple [`array`] gives up on is arbitrary JSON, for the reason the degraded views
-    // in [`declared_kind`] are.
-    declared_kind(view).filter(|&kind| kind != Kind::Array || !open_tuple(resolved, view))
+    // The open and long tuples [`array`] gives up on are arbitrary JSON, for the reason the
+    // degraded views in [`declared_kind`] are.
+    declared_kind(view)
+        .filter(|&kind| kind != Kind::Array || !(open_tuple(resolved, view) || long_tuple(view)))
 }
 
 fn declared_kind(view: &View) -> Option<Kind> {
@@ -2997,7 +3019,8 @@ fn view_overreaches(resolved: &ResolvedDocument, view: &View, depth: usize) -> b
                 .chain(&view.uniform_pattern)
                 .any(member)
         }
-        // An open tuple, which [`kind_of`] reads as arbitrary JSON although it describes a list.
+        // An open or long tuple, which [`kind_of`] reads as arbitrary JSON although it describes a
+        // list.
         None if declared_kind(view).is_some() => true,
         // A `type` that names several kinds is arbitrary JSON, which reads the kinds it does not
         // name too, and so are required names with nothing to say they belong to an object.

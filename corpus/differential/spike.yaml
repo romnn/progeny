@@ -130,6 +130,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Chapter"
+  /tuples:
+    post:
+      operationId: postTuples
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Tuples"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tuples"
 components:
   schemas:
     Spike:
@@ -628,3 +643,85 @@ components:
       oneOf:
         - $ref: "#/components/schemas/Chapter"
         - type: string
+    # Positional arrays at the arities where the Rust representation changes, each named with
+    # integers and inline with strings, so that no inline one is the same type as a named one.
+    # One position is `(T,)`, which a named type wraps because a one-member tuple struct is serde's
+    # newtype and would write its member bare.
+    # Past 12 positions an inline tuple is named, because Rust implements `Debug` for tuples only
+    # up to 12 elements.
+    # Past 16, where serde stops implementing tuples, it is arbitrary JSON.
+    Tuples:
+      type: object
+      properties:
+        one:
+          $ref: "#/components/schemas/One"
+        oneInline:
+          type: array
+          prefixItems: [{type: string}]
+        twelve:
+          $ref: "#/components/schemas/Twelve"
+        twelveInline:
+          type: array
+          prefixItems: [
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string}]
+        thirteen:
+          $ref: "#/components/schemas/Thirteen"
+        thirteenInline:
+          type: array
+          prefixItems: [
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}]
+        sixteen:
+          $ref: "#/components/schemas/Sixteen"
+        sixteenInline:
+          type: array
+          prefixItems: [
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string}]
+        seventeen:
+          $ref: "#/components/schemas/Seventeen"
+        seventeenInline:
+          type: array
+          prefixItems: [
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}, {type: string}, {type: string}, {type: string},
+            {type: string}]
+    One:
+      type: array
+      prefixItems: [{type: integer}]
+    Twelve:
+      type: array
+      prefixItems: [
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer}]
+    Thirteen:
+      type: array
+      prefixItems: [
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}]
+    Sixteen:
+      type: array
+      prefixItems: [
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer}]
+    Seventeen:
+      type: array
+      prefixItems: [
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}, {type: integer}, {type: integer}, {type: integer},
+        {type: integer}]
