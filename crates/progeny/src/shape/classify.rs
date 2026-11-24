@@ -2421,6 +2421,16 @@ fn swallows_payloads_of(
     // list"), and behind branches that admit what they read it loses nothing.
     // Anywhere else the same branch swallows the ones after it, which loses everything.
     let Some(left) = kind_of(resolved, &first) else {
+        // A long tuple declares its shape, but the branches of a union that degrades are never
+        // classified, so the arity limit that makes it arbitrary JSON is reported here.
+        if long_tuple(&first) {
+            let positions = first.prefix_items.as_ref().map_or(0, Vec::len);
+            return Some(format!(
+                "one of its branches is arbitrary JSON because it lists {positions} `prefixItems` \
+                 positions, past the {MAX_TUPLE} a generated tuple supports, and it is not the \
+                 last, so it accepts the payloads meant for every branch after it"
+            ));
+        }
         return Some(
             "one of its branches says nothing about the shape of its own payload and is not the \
              last, so it accepts the payloads meant for every branch after it"

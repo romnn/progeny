@@ -6069,10 +6069,11 @@ mod tests {
 
     /// A tuple too long to generate is arbitrary JSON in a union too, which reads `{"d": …}`
     /// before `D` is tried, so the union cannot tell its branches apart.
+    /// The branch is never classified on its own, so the union's diagnostic names the arity
+    /// limit.
     #[test_util::test]
     fn a_long_tuple_is_arbitrary_json_and_tells_nothing_apart() {
-        assert!(degrades_as_wild_union(
-            json!({
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
                 "D": {
                     "type": "object", "required": ["d"],
                     "properties": {"d": {"type": "string"}},
@@ -6085,9 +6086,18 @@ mod tests {
                     },
                     {"$ref": "#/components/schemas/D"},
                 ]},
-            }),
-            "Either",
-        )?);
+        })))?;
+        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
+        let [found] = diagnostics.as_slice() else {
+            eyre::bail!("one diagnostic: {diagnostics:#?}");
+        };
+        assert_eq!(found.class(), BreakageClass::WildUnion);
+        assert!(
+            found
+                .detail()
+                .contains("lists 17 `prefixItems` positions, past the 16"),
+            "{found:#?}"
+        );
     }
 
     #[test_util::test]
