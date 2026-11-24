@@ -1293,7 +1293,8 @@ fn transport(operation: &OperationContract) -> TokenStream {
     quote! { self.client.credentials.send(request, &[#(#alternatives),*]).await? }
 }
 
-/// The URL expression: the base, then the template with its variables filled in.
+/// The URL expression: the base, then the template with its variables filled in, then the query
+/// the URL string carries.
 fn path_expression(operation: &OperationContract) -> TokenStream {
     let mut steps = Vec::new();
     for segment in operation.path.segments() {
@@ -1389,7 +1390,7 @@ fn path_expression(operation: &OperationContract) -> TokenStream {
             }
         });
     }
-    let reserved = reserved_query(operation);
+    let query = url_query(operation);
     // An operation that declares its own server is sent there while the client still points at
     // the document's server; a client pointed anywhere else keeps the request there.
     let base = operation.server.as_ref().map_or_else(
@@ -1409,19 +1410,31 @@ fn path_expression(operation: &OperationContract) -> TokenStream {
         {
             let mut url = ::std::string::String::from(#base);
             #(#steps)*
-            #reserved
+            #query
             url
         }
     }
 }
 
-/// The query pairs `allowReserved: true` routes around reqwest's encoder.
+/// The query the URL string carries before reqwest adds the ordinary pairs: the one the path key
+/// writes, then the pairs `allowReserved: true` routes around reqwest's encoder.
+///
+/// The written query is appended as written: the description supplies it, so the caller has
+/// nothing to set, and `miro`'s bare `?` writes nothing.
 ///
 /// reqwest's `.query(...)` percent-encodes every reserved character in the values it is handed,
 /// which is exactly the spelling the flag turns off. These pairs are appended to the URL string
 /// directly, through [`support::style::reserved_pair`]'s reserved-preserving encoding; pairs
 /// reqwest adds afterwards join the query string behind them correctly.
-fn reserved_query(operation: &OperationContract) -> TokenStream {
+fn url_query(operation: &OperationContract) -> TokenStream {
+    let written = operation
+        .path
+        .query()
+        .filter(|query| !query.is_empty())
+        .map(|query| {
+            let query = format!("?{query}");
+            quote! { url.push_str(#query); }
+        });
     let pairs: Vec<TokenStream> = operation
         .params_at(Location::Query)
         .filter(|param| param.style.allow_reserved())
@@ -1439,14 +1452,16 @@ fn reserved_query(operation: &OperationContract) -> TokenStream {
         })
         .collect();
     if pairs.is_empty() {
-        return TokenStream::new();
+        return quote! { #written };
     }
     quote! {
+        #written
         let mut reserved: ::std::vec::Vec<(::std::string::String, ::std::string::String)> =
             ::std::vec::Vec::new();
         #(#pairs)*
-        for (index, (name, value)) in reserved.iter().enumerate() {
-            url.push(if index == 0 { '?' } else { '&' });
+        for (name, value) in &reserved {
+            // The first pair opens the query, unless the path key already did.
+            url.push(if url.contains('?') { '&' } else { '?' });
             url.push_str(&support::style::reserved_pair(name, value));
         }
     }

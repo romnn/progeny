@@ -13,6 +13,9 @@
 //!   [`RegistrableRoute::path()`](crate::api::RegistrableRoute::path), the string the router
 //!   registers — and the router registers *through* `Route::X.path()`, so removing or renaming a
 //!   route here fails the server's compile rather than a request.
+//!   Where the description tells operations on one path and method apart by a query written into
+//!   their paths, the server picks one through `Route::from_matched_with_query`, the lookup a
+//!   middleware calls.
 //! * **A `Route` exists iff a handler exists.** Both read `operation.registrable.is_some()`.
 //!
 //! The per-operation facts live in one table indexed by discriminant, so the module costs a row
@@ -161,13 +164,9 @@ fn tables(operations: &[&OperationContract], route_variants: &[proc_macro2::Iden
     let entries = operations.iter().map(|operation| {
         let rust_name = operation.rust_name.as_str();
         let method = method_variant(operation.method);
-        // The registered template where there is one, so that `Route::path()` is by construction
-        // the string `server::router()` registers; the template as written otherwise, which is
-        // the same spelling and only says where a client would send the request.
-        let path = operation.registrable.as_ref().map_or_else(
-            || operation.path.to_string(),
-            |route| route.path().to_owned(),
-        );
+        // The template as written, a query included: `Route::path()` reads the registered path
+        // off it, by the same `const fn` `server::router()` registers through.
+        let path = operation.path.to_string();
         let route = operation.registrable.as_ref().map_or_else(
             || quote! { ::std::option::Option::None },
             |_| {
@@ -211,6 +210,7 @@ fn accessors(
     route_variants: &[proc_macro2::Ident],
 ) -> TokenStream {
     // An empty enum cannot be cast to an index, so its one accessor is the empty match.
+    let query_pairs = query_pairs();
     let route_operation = if route_variants.is_empty() {
         quote! { match self {} }
     } else {
@@ -237,7 +237,8 @@ fn accessors(
                 TABLE[self as usize].method
             }
 
-            /// The path template as the description writes it, with `{name}` variables.
+            /// The path template as the description writes it, with `{name}` variables and any
+            /// query it writes after the path.
             #[must_use]
             pub const fn path(self) -> &'static str {
                 TABLE[self as usize].path
@@ -269,30 +270,152 @@ fn accessors(
             /// The template `server::router()` registers, which is what axum's `MatchedPath`
             /// reports when the router is mounted at the root; strip any nesting prefix before
             /// matching.
+            ///
+            /// The operation's path up to any `?`: a query the description writes into a path
+            /// is no part of what a router matches.
             #[must_use]
             pub const fn path(self) -> &'static str {
-                self.operation().path()
+                let written = self.operation().path();
+                let mut rest = written.as_bytes();
+                while let [byte, tail @ ..] = rest {
+                    if *byte == b'?' {
+                        break;
+                    }
+                    rest = tail;
+                }
+                let (path, _) = written.split_at(written.len() - rest.len());
+                path
+            }
+
+            /// The `name=value` pair the description writes after this route's path, which a
+            /// request has to carry to reach it rather than the route the pair is absent from.
+            fn selector(self) -> ::std::option::Option<&'static str> {
+                let (_, pair) = self.operation().path().split_once('?')?;
+                ::std::option::Option::Some(pair)
+            }
+
+            /// The routes axum dispatches a request with this method and matched template to:
+            /// the ones declared under the method, or for a `HEAD` where none is, the `GET` ones.
+            fn dispatched(method: Method, path: &str) -> impl ::std::iter::Iterator<Item = Self> + '_ {
+                let declared = move |method: Method| {
+                    Self::ALL
+                        .iter()
+                        .copied()
+                        .filter(move |route| route.method() == method && route.path() == path)
+                };
+                let method = if method == Method::Head && declared(Method::Head).next().is_none() {
+                    Method::Get
+                } else {
+                    method
+                };
+                declared(method)
             }
 
             /// The route that served a request, from its method and matched template: exact
             /// first, then `HEAD` falls back to the `GET` route axum dispatched it to. Linear over
             /// `ALL`; a hot middleware indexes `ALL` once.
+            ///
+            /// `None` also where the description tells routes on the template apart by a query
+            /// written into their path, which [`Self::from_matched_with_query`] reads.
             #[must_use]
             pub fn from_matched(method: Method, path: &str) -> ::std::option::Option<Self> {
-                let declared = |method: Method| {
-                    Self::ALL
-                        .iter()
-                        .copied()
-                        .find(|route| route.method() == method && route.path() == path)
-                };
-                declared(method).or_else(|| {
-                    if method == Method::Head {
-                        declared(Method::Get)
-                    } else {
-                        ::std::option::Option::None
-                    }
-                })
+                let mut routes = Self::dispatched(method, path);
+                let route = routes.next()?;
+                (routes.next().is_none() && route.selector().is_none()).then_some(route)
             }
+
+            /// The route that served a request, from its method, matched template and query
+            /// string: the route whose path the description writes with a `name=value` pair the
+            /// query carries, or else the one it writes without a query.
+            ///
+            /// The pair is compared percent-decoded, wherever it stands among the query's pairs.
+            /// A query naming the pair's name twice selects nothing, and the server answers it,
+            /// like one that selects no route, with `404 Not Found`.
+            #[must_use]
+            pub fn from_matched_with_query(
+                method: Method,
+                path: &str,
+                query: ::std::option::Option<&str>,
+            ) -> ::std::option::Option<Self> {
+                let mut plain = ::std::option::Option::None;
+                for route in Self::dispatched(method, path) {
+                    match route.selector() {
+                        ::std::option::Option::None => plain = ::std::option::Option::Some(route),
+                        ::std::option::Option::Some(pair) => {
+                            match carries(query.unwrap_or_default(), pair) {
+                                ::std::option::Option::Some(true) => {
+                                    return ::std::option::Option::Some(route);
+                                }
+                                ::std::option::Option::Some(false) => {}
+                                ::std::option::Option::None => return ::std::option::Option::None,
+                            }
+                        }
+                    }
+                }
+                plain
+            }
+        }
+
+        #query_pairs
+    }
+}
+
+/// How `Route::from_matched_with_query` finds a pair in a query string, the way the server reads
+/// one: split on `&`, and percent-decoded with a `+` for a space.
+fn query_pairs() -> TokenStream {
+    quote! {
+        /// Whether `query` carries the `name=value` pair, compared percent-decoded; `None` when
+        /// it names the pair's name more than once.
+        fn carries(query: &str, pair: &str) -> ::std::option::Option<bool> {
+            let (name, value) = pair.split_once('=')?;
+            let mut found = ::std::option::Option::None;
+            for carried in query.split('&') {
+                let (key, text) = carried.split_once('=').unwrap_or((carried, ""));
+                if decoded(key) != name.as_bytes() {
+                    continue;
+                }
+                if found.is_some() {
+                    return ::std::option::Option::None;
+                }
+                found = ::std::option::Option::Some(decoded(text) == value.as_bytes());
+            }
+            ::std::option::Option::Some(found == ::std::option::Option::Some(true))
+        }
+
+        /// One query component's bytes, its `%` escapes and its `+` for a space decoded.
+        fn decoded(text: &str) -> ::std::vec::Vec<u8> {
+            let mut out = ::std::vec::Vec::with_capacity(text.len());
+            let mut rest = text.as_bytes();
+            while let [byte, tail @ ..] = rest {
+                match (byte, escaped(tail)) {
+                    (b'%', ::std::option::Option::Some(spelled)) => {
+                        out.push(spelled);
+                        rest = tail.get(2..).unwrap_or_default();
+                    }
+                    (b'+', _) => {
+                        out.push(b' ');
+                        rest = tail;
+                    }
+                    (other, _) => {
+                        out.push(*other);
+                        rest = tail;
+                    }
+                }
+            }
+            out
+        }
+
+        /// The byte the two hex digits `digits` starts with spell, if it starts with two.
+        fn escaped(digits: &[u8]) -> ::std::option::Option<u8> {
+            let [high, low, ..] = digits else {
+                return ::std::option::Option::None;
+            };
+            let nibble = |digit: &u8| {
+                char::from(*digit)
+                    .to_digit(16)
+                    .and_then(|value| u8::try_from(value).ok())
+            };
+            ::std::option::Option::Some((nibble(high)? << 4) | nibble(low)?)
         }
     }
 }
@@ -313,7 +436,7 @@ pub(super) const METHODS: [(&str, &str); 8] = [
 ///
 /// Spelled arm by arm so that a method the document model gains is a compile error here rather
 /// than a silently missing variant: the generated enum is the closed set progeny supports.
-fn method_variant(method: Method) -> proc_macro2::Ident {
+pub(super) fn method_variant(method: Method) -> proc_macro2::Ident {
     let name = match method {
         Method::Get => "Get",
         Method::Put => "Put",
@@ -558,10 +681,7 @@ mod tests {
                 fields.get("method").map(String::as_str),
                 Some(format!("Method::{}", super::method_variant(operation.method)).as_str())
             );
-            let path = operation.registrable.as_ref().map_or_else(
-                || operation.path.to_string(),
-                |route| route.path().to_owned(),
-            );
+            let path = operation.path.to_string();
             assert_eq!(
                 fields.get("path").map(String::as_str),
                 Some(format!("{path:?}").as_str())

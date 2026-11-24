@@ -65,9 +65,9 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     config
         .nullability_overrides
         .insert(LABEL_POINTER.to_owned(), progeny::SchemaType::String);
-    let keyed = with_shared_attachment(&with_json_declared_member(&with_string_union_member(
-        &with_streamed_bytes(&with_problem_arms(&with_response_headers(
-            &with_security_schemes(bytes)?,
+    let keyed = with_fixed_query(&with_shared_attachment(&with_json_declared_member(
+        &with_string_union_member(&with_streamed_bytes(&with_problem_arms(
+            &with_response_headers(&with_security_schemes(bytes)?)?,
         )?)?)?,
     )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
@@ -519,6 +519,75 @@ fn with_shared_attachment(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
                 indent: "    ",
             },
         ],
+    )
+}
+
+/// The subject with operations whose path keys write a query, which no other gate needs.
+///
+/// `showBetaReply` writes `?beta=true` straight after the variable on `showReply`'s path, and
+/// `checkBetaReply` is a `HEAD` only that key declares.
+/// `purgeReply` writes a bare `?` on `deleteReply`'s path and method, which nothing on the wire
+/// tells apart, so only the client has it.
+fn with_fixed_query(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    const REPLIES: &str = indoc::indoc! {"
+        /replies/{replyId}:
+          get:
+            operationId: showReply
+            summary: The stable reply
+            parameters:
+              - {name: replyId, in: path, required: true, schema: {type: string}}
+              - {name: note, in: query, schema: {type: string}}
+            responses:
+              \"200\":
+                description: The reply
+                content:
+                  text/plain:
+                    schema: {type: string}
+          delete:
+            operationId: deleteReply
+            summary: Delete a reply
+            parameters:
+              - {name: replyId, in: path, required: true, schema: {type: string}}
+              - {name: everything, in: query, schema: {type: boolean}}
+            responses:
+              \"204\": {description: Deleted}
+        /replies/{replyId}?beta=true:
+          get:
+            operationId: showBetaReply
+            summary: The beta reply, on the stable reply's path
+            parameters:
+              - {name: replyId, in: path, required: true, schema: {type: string}}
+              - {name: note, in: query, schema: {type: string}}
+            responses:
+              \"200\":
+                description: The reply
+                content:
+                  text/plain:
+                    schema: {type: string}
+          head:
+            operationId: checkBetaReply
+            summary: Whether a beta reply exists
+            parameters:
+              - {name: replyId, in: path, required: true, schema: {type: string}}
+            responses:
+              \"204\": {description: It exists}
+        /replies/{replyId}?:
+          delete:
+            operationId: purgeReply
+            summary: Delete a reply and everything under it
+            parameters:
+              - {name: replyId, in: path, required: true, schema: {type: string}}
+              - {name: everything, in: query, schema: {type: boolean}}
+            responses:
+              \"204\": {description: Purged}
+    "};
+    spliced(
+        bytes,
+        &[Insertion {
+            after: &["\npaths:\n"],
+            text: REPLIES,
+            indent: "  ",
+        }],
     )
 }
 

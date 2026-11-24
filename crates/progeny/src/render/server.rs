@@ -832,16 +832,60 @@ fn router(servable: &[(&OperationContract, &RegistrableRoute)], config: &Config)
         // the group names it; the rest share the template by construction.
         let (first, _) = group.first()?;
         let route = super::operations::variant(first);
-        let handlers = group.iter().map(|(operation, route)| {
-            let verb = format_ident!("{}", route.method().slug());
-            let handler = handler_name(operation);
-            quote! { ::axum::routing::#verb(#handler::<A>) }
+        let path = quote! { const { operations::Route::#route.path() } };
+        let methods: std::collections::BTreeSet<crate::api::Method> =
+            group.iter().map(|(_, route)| route.method()).collect();
+        let handlers = methods.into_iter().map(|method| {
+            let slot: Vec<&OperationContract> = group
+                .iter()
+                .filter(|(_, route)| route.method() == method)
+                .map(|(operation, _)| *operation)
+                .collect();
+            let verb = format_ident!("{}", method.slug());
+            let handler = match slot.as_slice() {
+                // One operation and no query to read: its handler serves the slot directly
+                [operation] if operation.path.query().is_none() => {
+                    let handler = handler_name(operation);
+                    quote! { #handler::<A> }
+                }
+                // Operations a query written into their paths tells apart, chosen by the lookup the
+                // reflection offers a middleware, so the two cannot pick differently
+                _ => {
+                    let method = super::operations::method_variant(method);
+                    let arms = slot.iter().map(|operation| {
+                        let route = super::operations::variant(operation);
+                        let handler = handler_name(operation);
+                        quote! {
+                            ::std::option::Option::Some(operations::Route::#route) => {
+                                #handler::<A>(state, request).await
+                            }
+                        }
+                    });
+                    quote! {
+                        |state: ::axum::extract::State<::std::sync::Arc<A>>,
+                         request: ::axum::extract::Request| async move {
+                            let selected = operations::Route::from_matched_with_query(
+                                operations::Method::#method,
+                                #path,
+                                request.uri().query(),
+                            );
+                            match selected {
+                                #(#arms)*
+                                _ => ::axum::response::IntoResponse::into_response(
+                                    ::axum::http::StatusCode::NOT_FOUND,
+                                ),
+                            }
+                        }
+                    }
+                }
+            };
+            quote! { ::axum::routing::#verb(#handler) }
         });
         // `MethodRouter::merge` rather than chained builder calls: the chained form needs the
         // methods in a fixed order to typecheck, and the document supplies whatever order it likes.
         Some(quote! {
             router = router.route(
-                const { operations::Route::#route.path() },
+                #path,
                 ::axum::routing::MethodRouter::new()#(.merge(#handlers))*,
             );
         })

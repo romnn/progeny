@@ -242,16 +242,18 @@ pub fn probe(input: &[u8], config: &Config) -> Result<Probe, RejectError> {
     // Not one whose template also declares a `HEAD`: axum dispatches to that handler first, and
     // `from_matched` rightly names that route, so the fallback this request exists to exercise
     // would never run.
+    // And not one a query written into its path selects, which a bare `HEAD` does not carry.
     let head = planned
         .iter()
         .find(|(operation, planned)| {
             planned.skip.is_none()
                 && operation.method == crate::api::Method::Get
                 && operation.params.is_empty()
+                && operation.path.query().is_none()
                 && !model.operations().iter().any(|other| {
                     other.registrable.is_some()
                         && other.method == crate::api::Method::Head
-                        && other.path == operation.path
+                        && other.path.path() == operation.path.path()
                 })
         })
         .map(|(operation, planned)| ProbeHead {

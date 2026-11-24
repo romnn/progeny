@@ -9,6 +9,12 @@
 //! refusing them would delete working operations for no safety gained. Filling one is the same
 //! rule as filling a whole segment, applied piece by piece.
 //!
+//! A key may also write a query after its path, as `/responses?beta=true` does, which OpenAPI
+//! does not allow and `openai`, `anthropic` and `miro` write anyway.
+//! The query is split off before anything else, so the segments and variables are the path's
+//! alone: the client sends the query beside its own pairs, and the server registers the path and
+//! tells such operations apart by the query ([`super::registrable`]).
+//!
 //! The check this performs is narrower than the registrability classifier
 //! ([03](../../../plan/03-api-model.md)) will be at stage 7, and deliberately so. Whether two
 //! routes *collide* is a question about a router, and there is no router yet; whether a template
@@ -21,13 +27,42 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathTemplate {
     segments: Vec<Segment>,
-    /// The template as written, for diagnostics and for the docs the client renders.
+    /// The template as written, a query included, for diagnostics and for the docs the client
+    /// renders.
     literal: String,
 }
 
 impl PathTemplate {
     pub(crate) fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    /// The template up to any `?`, which is what a router registers and matches.
+    pub(crate) fn path(&self) -> &str {
+        self.literal
+            .split_once('?')
+            .map_or(self.literal.as_str(), |(path, _)| path)
+    }
+
+    /// What the template writes after a `?`, possibly nothing; `None` when it writes no `?`.
+    pub(crate) fn query(&self) -> Option<&str> {
+        self.literal.split_once('?').map(|(_, query)| query)
+    }
+
+    /// Whether the template writes one `name=value` pair after a `?`, and nothing else.
+    ///
+    /// Both halves are limited to the characters a URL never percent-encodes, so the pair a
+    /// request carries can be compared with this one without encoding either.
+    pub(crate) fn writes_one_pair(&self) -> bool {
+        let plain = |text: &str| {
+            !text.is_empty()
+                && text.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "-._~".contains(character)
+                })
+        };
+        self.query()
+            .and_then(|query| query.split_once('='))
+            .is_some_and(|(name, value)| plain(name) && plain(value))
     }
 
     /// The variables the template names, in order.
@@ -79,8 +114,10 @@ pub(crate) fn parse(template: &str) -> Result<PathTemplate, Malformed> {
             detail: format!("the path `{template}` does not start with `/`"),
         });
     }
+    // The query is no part of any segment, and a variable written there is no path variable.
+    let path = template.split_once('?').map_or(template, |(path, _)| path);
     let mut segments = Vec::new();
-    for raw in template.split('/').skip(1) {
+    for raw in path.split('/').skip(1) {
         segments.push(Segment(pieces(raw, template)?));
     }
 
@@ -219,6 +256,31 @@ mod tests {
             template.variables().collect::<Vec<_>>(),
             ["itemId", "container"]
         );
+    }
+
+    #[test_util::test]
+    fn a_query_written_into_the_key_is_no_part_of_the_path() {
+        // `openai` writes the suffix straight after a variable, which then still ends its segment.
+        assert_eq!(
+            shape("/responses/{response_id}?beta=true")?,
+            [vec![literal("responses")], vec![variable("response_id")]]
+        );
+        let template = parse("/responses/{response_id}?beta=true")?;
+        assert_eq!(template.path(), "/responses/{response_id}");
+        assert_eq!(template.query(), Some("beta=true"));
+        assert_eq!(template.to_string(), "/responses/{response_id}?beta=true");
+        assert!(template.writes_one_pair());
+
+        // A key without a `?` has no query, and `miro`'s bare `?` has an empty one.
+        assert_eq!(parse("/responses")?.query(), None);
+        assert_eq!(parse("/groups/{id}?")?.query(), Some(""));
+        assert_eq!(parse("/groups/{id}?")?.path(), "/groups/{id}");
+
+        // Only one pair of characters a URL never encodes selects an operation.
+        for query in ["", "beta", "beta=", "=true", "a=1&b=2", "a=%20", "a={x}"] {
+            let template = parse(&format!("/x?{query}"))?;
+            assert!(!template.writes_one_pair(), "{query}");
+        }
     }
 
     #[test_util::test]
