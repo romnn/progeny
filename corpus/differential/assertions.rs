@@ -984,6 +984,7 @@ macro_rules! nests_through_the_union {
 fn a_cycle_through_a_union_is_boxed_only_at_its_arm() {
     nests_through_the_union!(derived);
     nests_through_the_union!(hand);
+}
 
 /// A JSON array of `arity` integers, which the named tuples hold.
 fn integers(arity: usize) -> serde_json::Value {
