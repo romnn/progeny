@@ -365,18 +365,6 @@ impl<'de> Members<'de> {
             .collect()
     }
 
-    /// Report the members no declared name claimed, for a type that keeps none.
-    pub(crate) fn report_rest(self, site: Site, report: &mut Degradations, denied: bool) {
-        for (key, _) in self.members {
-            report.record(
-                site,
-                DegradationKind::UndeclaredMember,
-                key.as_str().map(str::to_owned),
-                denied,
-            );
-        }
-    }
-
     /// The members no declared name claimed, read as the union flattened beside them.
     ///
     /// The union reads them as one object and reports its own drift, because they are its
@@ -399,27 +387,6 @@ impl<'de> Members<'de> {
         self.members.retain(|(key, _)| key.as_str() != Some(name));
         Content::Map(self.members)
     }
-}
-
-/// Read a tagged union's unit variant: an object holding the tag the union already matched.
-///
-/// Every other member is reported as one the variant never declared, which is what the empty
-/// struct the variant stands for reports.
-///
-/// # Errors
-///
-/// Returns a [`Problem`] when the payload is not an object.
-pub(crate) fn tag_only(
-    content: Content<'_>,
-    union: &'static str,
-    tag: &str,
-    site: Site,
-    report: &mut Degradations,
-) -> Result<(), Problem> {
-    let mut members = Members::of(content, union)?;
-    members.members.retain(|(key, _)| key.as_str() != Some(tag));
-    members.report_rest(site, report, false);
-    Ok(())
 }
 
 /// What a struct expected, for an `invalid type` message.
@@ -1016,43 +983,6 @@ mod tests {
         );
     }
 
-    /// A tagged union's variant that carries only its tag, decoded the way the renderer writes
-    /// one once the tag has chosen it.
-    #[derive(Debug, PartialEq)]
-    struct Idle;
-
-    impl Idle {
-        const SITE: Site = Site::new("ThreadStatus", "/components/schemas/ThreadStatus", None);
-    }
-
-    impl<'de> Lenient<'de> for Idle {
-        const ROOT: Site = Self::SITE;
-
-        fn lenient(
-            content: Content<'de>,
-            _site: Site,
-            report: &mut Degradations,
-        ) -> Result<Self, super::Problem> {
-            super::tag_only(content, "ThreadStatus", "type", Self::SITE, report).map(|()| Self)
-        }
-    }
-
-    /// A unit variant reads its tag alone silently, reports any other member as undeclared, and
-    /// refuses a payload that is not an object.
-    #[test_util::test]
-    fn a_unit_variant_reports_every_member_but_its_tag() {
-        let (value, report) = decode::<Idle>(r#"{"type":"idle"}"#)?;
-        assert_eq!(value, Idle);
-        assert!(report.is_empty(), "{report}");
-
-        let (_, report) = decode::<Idle>(r#"{"type":"idle","note":"x"}"#)?;
-        let entry = only(&report, Idle::SITE)?;
-        assert_eq!(entry.kind, DegradationKind::UndeclaredMember);
-        assert_eq!(entry.samples, ["note"]);
-
-        assert!(decode::<Idle>(r#""idle""#).is_err());
-    }
-
     /// Undeclared members are kept, written back, and reported by name.
     #[test_util::test]
     fn an_undeclared_member_is_captured_and_reported() {
@@ -1243,14 +1173,15 @@ mod tests {
         assert_eq!(only(&report, ROOT)?.kind, DegradationKind::SkippedElement);
     }
 
-    /// A shared type, written the way the renderer writes one: no capture map, so what the
-    /// description did not declare is reported and dropped; a nullable member and one that may
-    /// be absent or null take `null` without a word.
+    /// The read form of a type whose strict form refuses undeclared members, written the way the
+    /// renderer writes one: what the description did not declare is kept and reported as refused;
+    /// a nullable member and one that may be absent or null take `null` without a word.
     #[derive(Debug, PartialEq)]
     struct Address {
         street: Option<String>,
         unit: Option<String>,
         note: Option<String>,
+        extra: std::collections::BTreeMap<String, serde_json::Value>,
     }
 
     impl Address {
@@ -1272,25 +1203,25 @@ mod tests {
             report: &mut Degradations,
         ) -> Result<Self, super::Problem> {
             let mut members = Members::of(content, "Address")?;
-            let value = Self {
+            Ok(Self {
                 street: members.take(Self::SITE_STREET, Declared::Required, report),
                 unit: members.take(Self::SITE_UNIT, Declared::Nullable, report),
                 note: members.take(Self::SITE_NOTE, Declared::OptionalNullable, report),
-            };
-            members.report_rest(Self::SITE, report, true);
-            Ok(value)
+                extra: members.rest(Self::SITE, report, false, true),
+            })
         }
     }
 
-    /// A type without a capture map reports what it drops, and a member declared nullable takes
-    /// `null` without a word.
+    /// A member the strict form refuses is still kept, and reported as refused; a member declared
+    /// nullable takes `null` without a word.
     #[test_util::test]
-    fn a_type_that_keeps_nothing_undeclared_still_says_what_it_dropped() {
+    fn an_undeclared_member_the_strict_form_refuses_is_kept_and_reported() {
         let (value, report) =
             decode::<Address>(r#"{"street":"Main","unit":null,"note":null,"floor":3}"#)?;
         assert_eq!(value.street.as_deref(), Some("Main"));
         assert_eq!(value.unit, None);
         assert_eq!(value.note, None);
+        assert_eq!(value.extra["floor"], serde_json::json!(3));
         let entry = only(&report, Address::SITE)?;
         assert_eq!(entry.kind, DegradationKind::UndeclaredMember);
         assert_eq!(entry.samples, ["floor"]);
@@ -1439,6 +1370,7 @@ mod tests {
                 street: Some("Main".to_owned()),
                 unit: None,
                 note: None,
+                extra: std::collections::BTreeMap::new(),
             })
         );
         assert!(report.is_empty(), "{report}");

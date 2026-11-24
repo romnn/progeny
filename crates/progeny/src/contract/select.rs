@@ -272,7 +272,10 @@ mod tests {
                 "Both": {"type": "object", "required": ["name"],
                          "properties": {"name": {"type": "string"},
                                         "note": {"$ref": "#/components/schemas/Note"}}},
-                "Note": {"type": "object", "properties": {"text": {"type": "string"}}},
+                // Its own map is its capture member, so its read form adds nothing and both
+                // directions share it.
+                "Note": {"type": "object", "properties": {"text": {"type": "string"}},
+                         "additionalProperties": {"type": "string"}},
             }},
         })
     }

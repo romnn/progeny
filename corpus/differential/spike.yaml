@@ -100,6 +100,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Detection"
+  /notes:
+    post:
+      operationId: postNotes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotePost"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoteBoard"
 components:
   schemas:
     Spike:
@@ -519,3 +534,60 @@ components:
           enum: [vapi]
         model:
           type: string
+    # The same optional-only struct twice: `Note` only a response reaches, and `SharedNote` a
+    # request sends too. Both read forms keep what the description does not declare, so both are
+    # read forms of their own, and the request's strict `SharedNote` writes no capture map.
+    # `SharedNotes` differs only through the struct it lists, and `NoteStatus` is a union whose
+    # `idle` branch carries only the tag it consumes.
+    Note:
+      type: object
+      properties:
+        text:
+          type: string
+    SharedNote:
+      type: object
+      properties:
+        text:
+          type: string
+    SharedNotes:
+      type: array
+      items:
+        $ref: "#/components/schemas/SharedNote"
+    NoteStatus:
+      oneOf:
+        - title: IdleNoteStatus
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [idle]
+        - title: BusyNoteStatus
+          type: object
+          required: [state, since]
+          properties:
+            state:
+              type: string
+              enum: [busy]
+            since:
+              type: integer
+    NotePost:
+      type: object
+      properties:
+        note:
+          $ref: "#/components/schemas/SharedNote"
+        notes:
+          $ref: "#/components/schemas/SharedNotes"
+        status:
+          $ref: "#/components/schemas/NoteStatus"
+    NoteBoard:
+      type: object
+      properties:
+        read:
+          $ref: "#/components/schemas/Note"
+        note:
+          $ref: "#/components/schemas/SharedNote"
+        notes:
+          $ref: "#/components/schemas/SharedNotes"
+        status:
+          $ref: "#/components/schemas/NoteStatus"

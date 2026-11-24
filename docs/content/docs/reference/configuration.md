@@ -65,7 +65,7 @@ How a generated client reads responses. `"lenient"`, the default, decodes as far
 
 ### `unknown-fields` and `type-unknown-fields`
 
-What to do with members a payload has and the document did not declare, under strict decoding: the request bodies a generated server reads, the strict form of every type, and so every response under `decoding = "strict"`. Under lenient decoding a read form with a twin of its own keeps undeclared members in `extra`; a type shared by requests and responses reports them and does not keep them, because the same type is what a request sends.
+What to do with members a payload has and the document did not declare, under strict decoding: the request bodies a generated server reads, the strict form of every type, and so every response under `decoding = "strict"`. Under lenient decoding every read form reports undeclared members and keeps them in `extra`, including the read twin of a type a request sends too; its strict form in `types` writes no `extra` and follows this setting.
 
 | Value | Meaning |
 | --- | --- |

@@ -3,7 +3,10 @@
 //! Lowering gives every branch a payload type, because whether that type is empty in every form
 //! depends on the direction it travels, which is known only once the type graph exists.
 //! A read form keeps the members its description did not declare in a capture map, so a branch
-//! read only from responses under lenient decoding has something to hold, and it stays a struct.
+//! any response reaches under lenient decoding has something to hold, and it stays a struct.
+//! That holds when requests reach it too, even where deduplication made one payload serve a
+//! response-only union and a request-only one: twinning gives the payload a read form with the
+//! capture map, which an erased payload would have nowhere to put.
 //! Everywhere else an empty struct that ignores undeclared members reads and writes exactly what
 //! a unit variant does, and the variant drops it.
 //!
@@ -52,20 +55,20 @@ fn units(
     tag_branches: &BTreeSet<ShapeKey>,
     reach: Option<&[Reach]>,
 ) -> BTreeSet<TypeIndex> {
-    // Candidates: empty structs that ignore undeclared members, that no read form gives a capture
-    // map, and that neither the document nor the configuration talks about by name.
+    // Candidates: empty structs that ignore undeclared members, that no response reaches under
+    // lenient decoding, and that neither the document nor the configuration talks about by name.
     let mut units: BTreeSet<TypeIndex> = types
         .iter()
         .enumerate()
         .filter(|(index, contract)| {
-            let read_only = reach
+            let read = reach
                 .and_then(|reach| reach.get(*index))
-                .is_some_and(|at| at.response && !at.request);
+                .is_some_and(|at| at.response);
             matches!(&contract.kind, ContractKind::Struct { fields } if fields.is_empty())
                 && contract.unknown_fields == UnknownFields::Ignore
                 && contract.component.is_none()
                 && !config.configures_type(None, &contract.origin.to_string())
-                && !read_only
+                && !read
         })
         .filter_map(|(index, _)| u32::try_from(index).ok().map(TypeIndex))
         .collect();

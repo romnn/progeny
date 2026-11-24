@@ -557,8 +557,7 @@ impl Collect<'_> {
         }
         // The read form keeps every member the description did not declare, verbatim, in its
         // capture map.
-        // A type both directions share has no such map: it reports those members and drops them,
-        // so they are not expected back.
+        // The strict form has no such map and drops them, so a request does not expect them back.
         // Without the struct's contract, a lenient read is taken to keep them.
         let keeps_undeclared = fields.map_or(lenient, |fields| {
             fields
@@ -1013,11 +1012,10 @@ mod tests {
         assert_eq!(found[0].expected, json!({"name": null}));
     }
 
-    /// A response keeps the undeclared members of a type twinned for it, in the twin's capture
-    /// map, but a type both directions share reports its undeclared members and drops them, so
-    /// only the first come back, as influxdb's `links.logs` showed.
+    /// A response keeps the undeclared members of every struct in it, in its read form's capture
+    /// map, a struct a request sends too among them, as influxdb's `links.logs` showed.
     #[test_util::test]
-    fn a_shared_type_in_a_response_drops_its_undeclared_members() {
+    fn a_response_keeps_the_undeclared_members_of_a_type_requests_send_too() {
         let owner = json!({"$ref": "#/components/schemas/Owner"});
         let found = payloads_of(json!({
             "openapi": "3.1.0",
@@ -1042,7 +1040,7 @@ mod tests {
         };
         assert_eq!(
             payload.expected,
-            json!({"name": "n", "links": {"self": "s"}, "other": 1})
+            json!({"name": "n", "links": {"self": "s", "logs": "l"}, "other": 1})
         );
     }
 
