@@ -729,13 +729,10 @@ mod integration_tests {
             }
         "#};
         std::fs::write(&file, source)?;
-        let run = crate::generated::cargo(&directory)
+        // Its output goes straight to this test's, so a failed assertion shows both addresses.
+        let status = crate::generated::cargo(&directory)
             .args(["test", "--quiet", "--test", "variant"])
-            .output()?;
-        assert!(
-            run.status.success(),
-            "{}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+            .status()?;
+        assert!(status.success());
     }
 }
