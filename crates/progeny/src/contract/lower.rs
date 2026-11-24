@@ -619,6 +619,11 @@ impl Lower<'_> {
             }
             Shape::Keyed(keyed) => self.keyed(keyed, key, ctx),
             Shape::Union(union) => self.union(union, key, index, ctx),
+            // A one-member tuple struct is serde's newtype, which writes its member bare, so a
+            // named singleton wraps the anonymous `(T,)` to keep the array.
+            Shape::Tuple { items } if items.len() == 1 => ContractKind::Newtype {
+                inner: self.inline(core, key, ctx),
+            },
             Shape::Tuple { items, .. } => ContractKind::Tuple {
                 items: items
                     .iter()
@@ -1310,12 +1315,19 @@ fn wrap(wraps: &[Wrap], mut ty: TypeRef) -> TypeRef {
     ty
 }
 
-/// Whether a shape has no anonymous Rust form.
+/// The most positions an anonymous tuple has, because Rust implements `Debug` for tuples only up
+/// to 12 elements.
+///
+/// A longer tuple is a named tuple struct, whose derives work member by member.
+const MAX_INLINE_TUPLE: usize = 12;
+
+/// Whether a shape has no anonymous Rust form, or none that implements every derive.
 fn nameable(shape: &Shape) -> bool {
-    matches!(
-        shape,
-        Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) | Shape::Keyed(_)
-    )
+    match shape {
+        Shape::Struct(_) | Shape::StringEnum(_) | Shape::Union(_) | Shape::Keyed(_) => true,
+        Shape::Tuple { items } => items.len() > MAX_INLINE_TUPLE,
+        _ => false,
+    }
 }
 
 fn string_variants(values: &[String]) -> (Vec<StringVariant>, RustIdent) {

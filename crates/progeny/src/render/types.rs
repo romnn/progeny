@@ -1100,9 +1100,10 @@ fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope)
             let len = usize::try_from(*len).unwrap_or(0);
             quote! { [#inner; #len] }
         }
+        // The trailing comma is what makes a single item `(T,)`, a tuple, rather than `(T)`.
         TypeRef::Tuple(items) => {
             let items = items.iter().map(&type_ref);
-            quote! { (#(#items),*) }
+            quote! { (#(#items,)*) }
         }
         TypeRef::Boxed(inner) => {
             let inner = type_ref(inner);

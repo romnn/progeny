@@ -62,6 +62,12 @@ pub(crate) use trail::Trail;
 /// superset — the sound direction.
 const MAX_FIXED_ARRAY: u32 = 32;
 
+/// The most `prefixItems` positions progeny generates a tuple for.
+///
+/// serde and the lenient decoder implement tuples up to 16 elements, and a longer prefix is
+/// arbitrary JSON rather than a type that does not compile.
+const MAX_TUPLE: usize = 16;
+
 /// The set of schemas a shape is the classification of.
 ///
 /// Sorted and deduplicated, so that two documents writing the same `allOf` in different orders
@@ -6031,6 +6037,95 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "{found:#?}");
         assert!(found[0].detail().contains("prefixItems"), "{found:#?}");
+    }
+
+    /// A prefix of 16 positions is a tuple, and one of 17 is past what serde and the lenient
+    /// decoder implement, so it degrades with a diagnostic naming both numbers.
+    #[test_util::test]
+    fn a_tuple_past_sixteen_positions_degrades_loudly() {
+        let tuple = |arity: usize| {
+            json!({"type": "array", "prefixItems": vec![json!({"type": "string"}); arity],
+                   "items": false})
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Longest": tuple(16),
+            "TooLong": tuple(17),
+        })))?;
+        assert!(matches!(
+            shape_of(&shapes, "Longest")?,
+            Shape::Tuple { items } if items.len() == 16
+        ));
+        assert_eq!(shape_of(&shapes, "TooLong")?, &Shape::Any);
+        let [found] = diagnostics.as_slice() else {
+            eyre::bail!("one diagnostic: {diagnostics:#?}");
+        };
+        assert_eq!(found.class(), BreakageClass::UnsupportedConstruct);
+        assert_eq!(found.location().to_string(), "/components/schemas/TooLong");
+        assert!(
+            found.detail().contains("lists 17 positions, past the 16"),
+            "{found:#?}"
+        );
+    }
+
+    /// A tuple too long to generate is arbitrary JSON in a union too, which reads `{"d": …}`
+    /// before `D` is tried, so the union cannot tell its branches apart.
+    /// The branch is never classified on its own, so the union's diagnostic names the arity
+    /// limit.
+    #[test_util::test]
+    fn a_long_tuple_is_arbitrary_json_and_tells_nothing_apart() {
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+                "D": {
+                    "type": "object", "required": ["d"],
+                    "properties": {"d": {"type": "string"}},
+                },
+                "Either": {"oneOf": [
+                    {
+                        "type": "array",
+                        "prefixItems": vec![json!({"type": "string"}); 17],
+                        "items": false,
+                    },
+                    {"$ref": "#/components/schemas/D"},
+                ]},
+        })))?;
+        assert_eq!(shape_of(&shapes, "Either")?, &Shape::Any);
+        let [found] = diagnostics.as_slice() else {
+            eyre::bail!("one diagnostic: {diagnostics:#?}");
+        };
+        assert_eq!(found.class(), BreakageClass::WildUnion);
+        assert!(
+            found
+                .detail()
+                .contains("lists 17 `prefixItems` positions, past the 16"),
+            "{found:#?}"
+        );
+
+        // An open tail, or a second kind, degrades the branch whatever its length, so the limit
+        // is not given as the reason.
+        for branch in [
+            json!({
+                "type": "array",
+                "prefixItems": vec![json!({"type": "string"}); 17],
+                "items": true,
+            }),
+            json!({
+                "type": ["array", "string"],
+                "prefixItems": vec![json!({"type": "string"}); 17],
+                "items": false,
+            }),
+        ] {
+            let (_, diagnostics) = shapes_of(with_schemas(json!({
+                "D": {
+                    "type": "object", "required": ["d"],
+                    "properties": {"d": {"type": "string"}},
+                },
+                "Either": {"oneOf": [branch, {"$ref": "#/components/schemas/D"}]},
+            })))?;
+            let wild = diagnostics
+                .iter()
+                .find(|found| found.class() == BreakageClass::WildUnion)
+                .ok_or_eyre("the union degrades")?;
+            assert!(!wild.detail().contains("past the 16"), "{wild:#?}");
+        }
     }
 
     #[test_util::test]

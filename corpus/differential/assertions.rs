@@ -985,3 +985,111 @@ fn a_cycle_through_a_union_is_boxed_only_at_its_arm() {
     nests_through_the_union!(derived);
     nests_through_the_union!(hand);
 }
+
+/// A JSON array of `arity` integers, which the named tuples hold.
+fn integers(arity: usize) -> serde_json::Value {
+    (1..=arity).collect()
+}
+
+/// A JSON array of `arity` strings, which the inline tuples hold.
+fn strings(arity: usize) -> serde_json::Value {
+    (1..=arity).map(|position| position.to_string()).collect()
+}
+
+/// A payload filling every tuple member of `Tuples` with an array of its arity.
+fn every_tuple() -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    for (member, arity) in [
+        ("one", 1),
+        ("twelve", 12),
+        ("thirteen", 13),
+        ("sixteen", 16),
+        ("seventeen", 17),
+    ] {
+        payload.insert(member.to_owned(), integers(arity));
+        payload.insert(format!("{member}Inline"), strings(arity));
+    }
+    payload.into()
+}
+
+/// Read a payload through the read form of `Tuples`, and return what it writes back and
+/// whether reading it tolerated nothing.
+macro_rules! read_tuples {
+    ($rendering:ident, $payload:expr) => {{
+        use $rendering::types::{Decoded, read};
+
+        let decoded = Decoded::<read::Tuples>::from_json($payload)?;
+        let written: serde_json::Value = serde_json::to_value(&decoded.value)?;
+        (written, decoded.degradations.is_empty())
+    }};
+}
+
+/// A tuple of every arity up to 16, named or inline, reads and writes the JSON array it was
+/// given, strictly and leniently, under both strategies; past 16 the member is the same JSON.
+#[test_util::test]
+fn tuples_of_every_supported_arity_round_trip_as_arrays() {
+    let payload = every_tuple();
+    let text = payload.to_string();
+
+    // Strict
+    let (left, right) = round_trip::<derived::types::Tuples, hand::types::Tuples>(&text)?;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&left)?, payload);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&right)?, payload);
+
+    // Lenient
+    assert_eq!(read_tuples!(derived, &text), (payload.clone(), true));
+    assert_eq!(read_tuples!(hand, &text), (payload, true));
+}
+
+/// A named singleton is built from the one-element tuple it wraps and written as a one-element
+/// array, and an inline one is the `(T,)` read from one.
+#[test_util::test]
+fn a_singleton_tuple_is_a_one_element_array() {
+    assert_eq!(serde_json::to_string(&derived::types::One((7,)))?, "[7]");
+    assert_eq!(serde_json::to_string(&hand::types::One((7,)))?, "[7]");
+    let inline: derived::types::Tuples = serde_json::from_str(r#"{"oneInline":["a"]}"#)?;
+    assert_eq!(inline.one_inline, Some(("a".to_owned(),)));
+}
+
+/// A singleton refuses its bare element and an array of any other length, named or inline,
+/// strictly under both strategies and leniently at the root; a lenient read form reports the
+/// member and leaves it out.
+#[test_util::test]
+fn a_singleton_tuple_refuses_a_scalar_and_other_lengths() {
+    for element in ["7", "[]", "[7,8]"] {
+        assert!(serde_json::from_str::<derived::types::One>(element).is_err());
+        assert!(serde_json::from_str::<hand::types::One>(element).is_err());
+        assert!(derived::types::Decoded::<derived::types::One>::from_json(element).is_err());
+        assert!(hand::types::Decoded::<hand::types::One>::from_json(element).is_err());
+
+        for member in ["one", "oneInline"] {
+            let payload = format!(r#"{{"{member}":{element}}}"#);
+            assert!(serde_json::from_str::<derived::types::Tuples>(&payload).is_err());
+            assert!(serde_json::from_str::<hand::types::Tuples>(&payload).is_err());
+            assert_eq!(
+                read_tuples!(derived, &payload),
+                (serde_json::json!({}), false)
+            );
+            assert_eq!(read_tuples!(hand, &payload), (serde_json::json!({}), false));
+        }
+    }
+}
+
+/// A tuple past 16 positions is arbitrary JSON, which keeps whatever arrives, the declared
+/// array or anything else, exactly as it was.
+#[test_util::test]
+fn a_tuple_past_sixteen_positions_keeps_any_json() {
+    for value in [
+        integers(17),
+        integers(18),
+        serde_json::json!({"not": "a list"}),
+    ] {
+        let payload = serde_json::json!({"seventeen": value, "seventeenInline": value});
+        let text = payload.to_string();
+        let (left, right) = round_trip::<derived::types::Tuples, hand::types::Tuples>(&text)?;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&left)?, payload);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&right)?, payload);
+        assert_eq!(read_tuples!(derived, &text), (payload.clone(), true));
+        assert_eq!(read_tuples!(hand, &text), (payload, true));
+    }
+}
