@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795559371929,
+  "lastUpdate": 1795561332202,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -5040,6 +5040,126 @@ window.BENCHMARK_DATA = {
             "range": "± 0.4",
             "unit": "MiB",
             "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "Roman Dahm",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5fb401e1578a23c681dc17c85804b7aedfce0931",
+          "message": "fix(xtask): compare payloads by exact value and by the type that holds a format (#209)\n\nThe payload gate (`task payloads`) could pass a type that changes a valid payload, and fail one that only respells it.\n\n- **Numbers (#199).** The gate compared numbers through `f64`, so `9007199254740993` and `9007199254740992.0` counted as equal. The detached test also parsed its expectation into a default `serde_json::Value`, which could drop digits. The test now reads the original JSON straight into the generated type, writes it back, and compares both sides as raw JSON. Equal number tokens pass. Otherwise both sides must normalize to the same exact decimal, so `1`/`1.0` and `1e2`/`100` pass, and a rounded value is a `PAYLOAD FAIL` with its path and both values. It uses the loader's own `Decimal`, moved to `load/decimal.rs`, with no tolerance and no second parser.\n- **Formats (#200).** A typed format normalizes its spelling: an expanded upper-case IPv6 address is written back compressed. The expectation walk now records each formatted leaf, including the scalar branch of a #194 union beside tagged objects. The gate compares a differing string at such a path through the field's own Rust type (`format_type`). A clock value must not lose a digit past the nanosecond, and a leap second passes only when the type writes it back as one. Plain strings still compare exactly.\n\nThe corpus counts are unchanged: 1371 round-tripped, 18 vendor defects, 199 not checkable.\n\nValidation:\n- `cargo nextest run -p progeny -p xtask --all-features` (1013 pass), with direct comparator tests for the number pairs, IPv6 respelling and the clock guard.\n- New detached fixtures: a large integer that passes through `int64` and fails through `number`; IPv6, UUID case, time offsets and a kept leap second through chrono and uuid; and the mixed union, which is checked to read the address into its typed branch. PR CI now runs them through `task test:integration` on the Linux leg.\n- `task payloads`, `task corpus` (81/81), `task differential`, `task unused`, `cargo lint`.\n\nCloses #199\nCloses #200",
+          "timestamp": "2026-11-24T23:32:01+01:00",
+          "tree_id": "a3671945e4b1d5084fed0223ccf9e2390ec672fc",
+          "url": "https://github.com/romnn/progeny/commit/5fb401e1578a23c681dc17c85804b7aedfce0931"
+        },
+        "date": 1795561330922,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written instructions",
+            "value": 126965714811,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written peak heap",
+            "value": 3192.66072845459,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written average heap",
+            "value": 1751.8448553085327,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written cpu",
+            "value": 32.83992333333333,
+            "range": "± 0.29",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"EPYC 7763\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3048.455728530884,
+            "range": "± 1.1",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written instructions",
+            "value": 42400974941,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written peak heap",
+            "value": 1087.619400024414,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written average heap",
+            "value": 610.3880205154419,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 10.949829333333334,
+            "range": "± 0.06",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"EPYC 7763\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1215.852864265442,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written instructions",
+            "value": 2615215767,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written peak heap",
+            "value": 92.98628997802734,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written average heap",
+            "value": 53.569369316101074,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.8105323333333333,
+            "range": "± 0",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"EPYC 7763\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 323.5846347808838,
+            "range": "± 0.6",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; AMD EPYC 7763 64-Core Processor; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
           }
         ]
       }
