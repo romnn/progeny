@@ -1,0 +1,90 @@
+openapi: "3.1.0"
+info:
+  title: Scalar beside tagged objects
+  version: "1.0"
+paths:
+  /detections:
+    post:
+      operationId: detect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Detection"
+      responses:
+        "200":
+          description: The detection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Detection"
+  /shapes:
+    post:
+      operationId: draw
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Shape"
+      responses:
+        "200":
+          description: The shape
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Shape"
+components:
+  schemas:
+    # A string beside objects that each keep `provider`, which the union carries.
+    Detection:
+      oneOf:
+        - type: string
+          enum: ["off"]
+        - $ref: "#/components/schemas/GoogleDetection"
+        - $ref: "#/components/schemas/VapiDetection"
+    GoogleDetection:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [google]
+        model:
+          type: string
+    VapiDetection:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [vapi]
+        model:
+          type: string
+    # A list beside objects tagged by `type`, one of which lists two spellings.
+    Shape:
+      oneOf:
+        - $ref: "#/components/schemas/Point"
+        - type: array
+          items:
+            type: number
+        - $ref: "#/components/schemas/Line"
+    Point:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [point, Point]
+        label:
+          type: string
+    Line:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [line]
+        label:
+          type: string

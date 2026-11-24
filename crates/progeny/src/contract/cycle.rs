@@ -102,9 +102,13 @@ fn replayed(kind: &ContractKind) -> Vec<&TypeRef> {
     match kind {
         ContractKind::Alias { target: inner } | ContractKind::Newtype { inner } => vec![inner],
         ContractKind::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
-        ContractKind::CarriedTagEnum { variants, .. } => {
-            variants.iter().map(|variant| &variant.ty).collect()
-        }
+        ContractKind::CarriedTagEnum {
+            variants, kinds, ..
+        } => variants
+            .iter()
+            .map(|variant| &variant.ty)
+            .chain(kinds.iter().map(|kind| &kind.ty))
+            .collect(),
         // A flattened union can be handed the whole object, when no declared member is present.
         ContractKind::Struct { fields } => fields
             .iter()
@@ -712,6 +716,7 @@ mod tests {
             ContractKind::CarriedTagEnum {
                 tag: "kind".to_owned(),
                 variants: tagged(boxed(0)),
+                kinds: Vec::new(),
                 routes: TagRoutes::default(),
                 fallback: RustIdent::fallback_variant(),
             },

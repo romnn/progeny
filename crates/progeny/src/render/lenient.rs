@@ -140,6 +140,7 @@ fn decoder(
             contract,
             tag,
             variants,
+            &[],
             fallback,
             TagMember::Consumed,
             contracts,
@@ -149,12 +150,14 @@ fn decoder(
         ContractKind::CarriedTagEnum {
             tag,
             variants,
+            kinds,
             routes,
             fallback,
         } => tagged_body(
             contract,
             tag,
             variants,
+            kinds,
             fallback,
             TagMember::Carried(*routes),
             contracts,
@@ -312,16 +315,9 @@ fn untagged_body(
     scope: Scope,
 ) -> TokenStream {
     let support = scope.support();
-    let probes = variants.iter().map(|variant| {
-        let name = ident(&variant.rust_name);
-        let ty = type_ref_in(&variant.ty, contracts, config, scope);
-        let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
-        quote! {
-            if let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
-                return Ok(#wrap);
-            }
-        }
-    });
+    let probes = variants
+        .iter()
+        .map(|variant| probe(contract, variant, &quote! {}, contracts, config, scope));
     let unknown = unknown_arm(contract, fallback);
     quote! {
         #(#probes)*
@@ -348,6 +344,7 @@ fn tagged_body(
     contract: &TypeContract,
     tag: &str,
     variants: &[crate::contract::TaggedVariant],
+    kinds: &[crate::contract::VariantContract],
     fallback: &RustIdent,
     member: TagMember,
     contracts: &Contracts,
@@ -399,6 +396,15 @@ fn tagged_body(
                     .map(|value| #wrap),
             }
         });
+    // A value that is not an object is the first variant of its kind that reads it, and one none
+    // reads goes on to the tag lookup, which finds no tag in it.
+    // The test goes in each condition rather than in an `if` around them, which is a collapsible
+    // `if` in the consumer's build where the union has one variant of another kind.
+    let not_object = quote! { !matches!(content, #support::Content::Map(_)) && };
+    let kinds: Vec<TokenStream> = kinds
+        .iter()
+        .map(|kind| probe(contract, kind, &not_object, contracts, config, scope))
+        .collect();
     let unknown = unknown_arm(contract, fallback);
     let fallback = quote! {
         _ => {
@@ -410,6 +416,7 @@ fn tagged_body(
         return quote! {
             const TAG: &str = #tag;
             const VARIANTS: &[&str] = &[#(#wire_names),*];
+            #(#kinds)*
             match #support::lenient::tag_choice(&content, TAG, VARIANTS, #absent, #null)? {
                 #(#arms)*
                 #fallback
@@ -437,6 +444,7 @@ fn tagged_body(
     quote! {
         const TAG: &str = #tag;
         const VARIANTS: &[&str] = &[#(#wire_names),*];
+        #(#kinds)*
         for choice in #support::lenient::tag_choices(&content, TAG, VARIANTS, #absent, #null)? {
             match choice {
                 #(#probes)*
@@ -445,6 +453,27 @@ fn tagged_body(
         }
         let tag = #support::lenient::tag_text(&content, TAG).map(str::to_owned);
         #support::lenient::unknown_union(content, site, report, tag.as_deref()).map(#unknown)
+    }
+}
+
+/// The variant a payload is when its type reads the payload strictly, read leniently, where the
+/// payload also passes `guard`, a condition written to stand before the probe's `let`.
+fn probe(
+    contract: &TypeContract,
+    variant: &crate::contract::VariantContract,
+    guard: &TokenStream,
+    contracts: &Contracts,
+    config: &Config,
+    scope: Scope,
+) -> TokenStream {
+    let support = scope.support();
+    let name = ident(&variant.rust_name);
+    let ty = type_ref_in(&variant.ty, contracts, config, scope);
+    let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
+    quote! {
+        if #guard let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
+            return Ok(#wrap);
+        }
     }
 }
 
@@ -656,15 +685,8 @@ fn from_strict(
         (
             ContractKind::TaggedEnum {
                 variants, fallback, ..
-            }
-            | ContractKind::CarriedTagEnum {
-                variants, fallback, ..
             },
             ContractKind::TaggedEnum {
-                variants: strict_variants,
-                ..
-            }
-            | ContractKind::CarriedTagEnum {
                 variants: strict_variants,
                 ..
             },
@@ -673,6 +695,33 @@ fn from_strict(
                 .iter()
                 .zip(strict_variants)
                 .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
+            variant_conversions(pairs, fallback, &strict_name, contracts, Units::Variants)
+        }
+        (
+            ContractKind::CarriedTagEnum {
+                variants,
+                kinds,
+                fallback,
+                ..
+            },
+            ContractKind::CarriedTagEnum {
+                variants: strict_variants,
+                kinds: strict_kinds,
+                ..
+            },
+        ) => {
+            // A variant of another kind is never `()`, because a `null` branch makes the union
+            // an `Option` instead.
+            let pairs = variants
+                .iter()
+                .zip(strict_variants)
+                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty))
+                .chain(
+                    kinds
+                        .iter()
+                        .zip(strict_kinds)
+                        .map(|(kind, source)| (&kind.rust_name, &kind.ty, &source.ty)),
+                );
             variant_conversions(pairs, fallback, &strict_name, contracts, Units::Variants)
         }
         (

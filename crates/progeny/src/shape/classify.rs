@@ -8,7 +8,7 @@
 //!   `if`/`then`, `contains` — makes the generated type accept a *superset* of what the document
 //!   allows. Accepting a payload the vendor would reject is a tolerance decision; rejecting one
 //!   they would accept would be a bug in the generated client.
-//! * **Nothing degrades quietly.** Every arm that gives up says so through `ctx`.
+//! * **Nothing degrades quietly.** Every arm that gives up says so in a diagnostic it reports.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
@@ -20,7 +20,7 @@ use super::{
     ShapeKey, ShapeRef, StringEnum, Struct, Tag, TagStyle, Union, Variant,
 };
 use crate::config::IntegerWidth;
-use crate::diag::{Action, BreakageClass, Ctx, Diagnostic, JsonPointer};
+use crate::diag::{Action, BreakageClass, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::{Schema, SchemaId, SchemaObject, TypeName};
 
@@ -28,13 +28,30 @@ use crate::schema::{Schema, SchemaId, SchemaObject, TypeName};
 /// when its mapping does not name a branch.
 pub(super) type ComponentNames = BTreeMap<ShapeKey, String>;
 
+/// What classifying one key reads of the document's other types, and what it found.
+pub(super) struct Known<'a> {
+    /// The name `components.schemas` gave each shape.
+    pub(super) component_names: &'a ComponentNames,
+    /// The unions classification could have read by the kind of each payload and then by tag and
+    /// left arbitrary JSON ([`super::admit`]).
+    pub(super) found: BTreeMap<ShapeKey, Found>,
+}
+
+/// A union classification could have read by the kind of each payload and then by tag.
+pub(super) struct Found {
+    /// The union it would be.
+    pub(super) union: Union,
+    /// Where among the reported diagnostics is the one saying it is arbitrary JSON instead.
+    pub(super) fallback: usize,
+}
+
 /// Classify one key.
 pub(crate) fn key(
     resolved: &ResolvedDocument,
     key: &ShapeKey,
-    component_names: &ComponentNames,
+    known: &mut Known<'_>,
     integers: IntegerWidth,
-    ctx: &mut Ctx,
+    reports: &mut Vec<Diagnostic>,
 ) -> Shape {
     let mut view = merge::view(resolved, key);
     let at = key.anchor().map_or_else(JsonPointer::root, |id| {
@@ -43,7 +60,7 @@ pub(crate) fn key(
 
     if view.impossible {
         degrade(
-            ctx,
+            reports,
             &at,
             BreakageClass::UnsupportedConstruct,
             "a schema in this position accepts no value at all, which no Rust type expresses",
@@ -51,12 +68,12 @@ pub(crate) fn key(
         return Shape::Any;
     }
     if let Some(conflict) = view.conflict.take() {
-        degrade(ctx, &at, BreakageClass::IrreconcilableAllOf, &conflict);
+        degrade(reports, &at, BreakageClass::IrreconcilableAllOf, &conflict);
         return Shape::Any;
     }
     if view.unions_collide {
         degrade(
-            ctx,
+            reports,
             &at,
             BreakageClass::IrreconcilableAllOf,
             "two branches of this schema each declare their own `oneOf`/`anyOf`, and the \
@@ -64,12 +81,12 @@ pub(crate) fn key(
         );
         return Shape::Any;
     }
-    report_unknown_types(&mut view, ctx, &at);
-    inheritance_union(resolved, &mut view, key, ctx, &at);
+    report_unknown_types(&mut view, reports, &at);
+    inheritance_union(resolved, &mut view, key, reports, &at);
 
-    let shape = nullable(resolved, &view, key, component_names, ctx, &at);
-    let shape = sized(&view, shape, integers, ctx, &at);
-    report_uninterpreted(&view, &shape, ctx, &at);
+    let shape = nullable(resolved, &view, key, known, reports, &at);
+    let shape = sized(&view, shape, integers, reports, &at);
+    report_uninterpreted(&view, &shape, reports, &at);
     shape
 }
 
@@ -82,19 +99,19 @@ fn sized(
     view: &View,
     shape: Shape,
     integers: IntegerWidth,
-    ctx: &mut Ctx,
+    reports: &mut Vec<Diagnostic>,
     at: &JsonPointer,
 ) -> Shape {
     if integers == IntegerWidth::Wide {
         return shape;
     }
-    let size = |scalar: Scalar, ctx: &mut Ctx| match scalar {
+    let size = |scalar: Scalar, reports: &mut Vec<Diagnostic>| match scalar {
         Scalar::Integer(wide) => match format_width(view) {
             Ok(Some(width)) => Scalar::Integer(width),
             Ok(None) => scalar,
             Err(reason) => {
                 degrade(
-                    ctx,
+                    reports,
                     at,
                     BreakageClass::UnsupportedConstruct,
                     &format!("{reason}, so the integer is `{}`", wide.rust()),
@@ -109,7 +126,7 @@ fn sized(
                 .filter(|format| IntType::of_format(format).is_some())
             {
                 degrade(
-                    ctx,
+                    reports,
                     at,
                     BreakageClass::UnsupportedConstruct,
                     &format!(
@@ -124,14 +141,14 @@ fn sized(
     };
     // A format beside a union, or anything else that is no integer of this schema's own, has
     // nothing here to size.
-    let unsized_format = |ctx: &mut Ctx| {
+    let unsized_format = |reports: &mut Vec<Diagnostic>| {
         if let Some(format) = view
             .format
             .as_deref()
             .filter(|format| IntType::of_format(format).is_some())
         {
             degrade(
-                ctx,
+                reports,
                 at,
                 BreakageClass::UnsupportedConstruct,
                 &format!(
@@ -142,18 +159,18 @@ fn sized(
         }
     };
     match shape {
-        Shape::Scalar(scalar) => Shape::Scalar(size(scalar, ctx)),
+        Shape::Scalar(scalar) => Shape::Scalar(size(scalar, reports)),
         Shape::Optional(ShapeRef::Inline(inner)) => match *inner {
-            Shape::Scalar(scalar) => {
-                Shape::Optional(ShapeRef::Inline(Box::new(Shape::Scalar(size(scalar, ctx)))))
-            }
+            Shape::Scalar(scalar) => Shape::Optional(ShapeRef::Inline(Box::new(Shape::Scalar(
+                size(scalar, reports),
+            )))),
             other => {
-                unsized_format(ctx);
+                unsized_format(reports);
                 Shape::Optional(ShapeRef::Inline(Box::new(other)))
             }
         },
         other => {
-            unsized_format(ctx);
+            unsized_format(reports);
             other
         }
     }
@@ -227,7 +244,7 @@ fn inheritance_union(
     resolved: &ResolvedDocument,
     view: &mut View,
     key: &ShapeKey,
-    ctx: &mut Ctx,
+    reports: &mut Vec<Diagnostic>,
     at: &JsonPointer,
 ) {
     let Subtypes { branches, unmapped } = subtypes(resolved, view, key);
@@ -236,7 +253,7 @@ fn inheritance_union(
     let report = !key.is_branches();
     for target in unmapped.into_iter().filter(|_| report) {
         degrade(
-            ctx,
+            reports,
             at,
             BreakageClass::DiscriminatorEdgeCase,
             &format!(
@@ -254,7 +271,7 @@ fn inheritance_union(
         view.union = Some(branches);
         return;
     }
-    ctx.report(Diagnostic::new(
+    reports.push(Diagnostic::new(
         BreakageClass::InheritanceDiscriminator,
         Action::Repair,
         at.clone(),
@@ -274,8 +291,8 @@ fn nullable(
     resolved: &ResolvedDocument,
     view: &View,
     key: &ShapeKey,
-    component_names: &ComponentNames,
-    ctx: &mut Ctx,
+    known: &mut Known<'_>,
+    reports: &mut Vec<Diagnostic>,
     at: &JsonPointer,
 ) -> Shape {
     let nulls = view
@@ -293,15 +310,7 @@ fn nullable(
         return Shape::Null;
     }
 
-    let core = core(
-        resolved,
-        view,
-        key,
-        others.as_ref(),
-        component_names,
-        ctx,
-        at,
-    );
+    let core = core(resolved, view, key, others.as_ref(), known, reports, at);
     if declares_null(view) {
         return Shape::Optional(ShapeRef::Inline(Box::new(core)));
     }
@@ -328,8 +337,8 @@ fn core(
     view: &View,
     key: &ShapeKey,
     types: Option<&BTreeSet<TypeName>>,
-    component_names: &ComponentNames,
-    ctx: &mut Ctx,
+    known: &mut Known<'_>,
+    reports: &mut Vec<Diagnostic>,
     at: &JsonPointer,
 ) -> Shape {
     if let Some(branches) = &view.union {
@@ -341,13 +350,20 @@ fn core(
             // A family's subtypes all hold the base's members, so their shapes say little, and the
             // tag the base declares is what the document dispatches by, even with one subtype.
             Some(declared) if super::inheritance::heads_family(resolved, key) => {
-                tagged_family(resolved, declared, branches, component_names)
+                tagged_family(resolved, declared, branches, known.component_names)
             }
-            _ => union(resolved, view, key, branches, component_names, ctx, at),
+            _ => union(resolved, view, key, branches, known, reports, at),
         };
-        return keep_own_members(resolved, view, shape, ctx, at);
+        // A union found readable by kind would be checked here as the union it would be, so one
+        // whose branches would drop the members beside it is not found at all.
+        if let Some(found) = known.found.get(key)
+            && !dropped_beside(resolved, view, &Shape::Union(found.union.clone())).is_empty()
+        {
+            known.found.remove(key);
+        }
+        return keep_own_members(resolved, view, shape, reports, at);
     }
-    if let Some(values) = string_values(view, ctx, at) {
+    if let Some(values) = string_values(view, reports, at) {
         return Shape::StringEnum(StringEnum::listed(values));
     }
 
@@ -355,7 +371,7 @@ fn core(
     let (first, second) = (named.next(), named.next());
     if second.is_some() {
         degrade(
-            ctx,
+            reports,
             at,
             BreakageClass::UnsupportedConstruct,
             "`type` names more than one kind of value, which no single Rust type expresses",
@@ -365,7 +381,7 @@ fn core(
 
     match first {
         Some(TypeName::Object) => object(view),
-        Some(TypeName::Array) => array(resolved, view, ctx, at),
+        Some(TypeName::Array) => array(resolved, view, reports, at),
         Some(TypeName::String) => string(view),
         Some(TypeName::Integer) => Shape::Scalar(Scalar::Integer(IntType::wide(!view.unsigned))),
         Some(TypeName::Number) => Shape::Scalar(Scalar::Number),
@@ -376,16 +392,21 @@ fn core(
         // A document that omits `type` but says what the members are means an object, and the
         // corpus is full of both spellings. Guessing from the other keywords is not a repair: it
         // is what the schema says.
-        None => untyped(resolved, view, ctx, at),
+        None => untyped(resolved, view, reports, at),
     }
 }
 
-fn untyped(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Shape {
+fn untyped(
+    resolved: &ResolvedDocument,
+    view: &View,
+    reports: &mut Vec<Diagnostic>,
+    at: &JsonPointer,
+) -> Shape {
     if !view.properties.is_empty() || view.additional.is_some() || view.additional_denied {
         return object(view);
     }
     if view.items.is_some() || view.prefix_items.is_some() {
-        return array(resolved, view, ctx, at);
+        return array(resolved, view, reports, at);
     }
     if view.uniform_pattern.is_some() {
         return object(view);
@@ -478,7 +499,12 @@ fn object(view: &View) -> Shape {
     })
 }
 
-fn array(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Shape {
+fn array(
+    resolved: &ResolvedDocument,
+    view: &View,
+    reports: &mut Vec<Diagnostic>,
+    at: &JsonPointer,
+) -> Shape {
     let item = view.items.clone().map(ShapeRef::Key);
     if let Some(prefix) = &view.prefix_items {
         // An empty `prefixItems` constrains no position, so it is an array and not a tuple of
@@ -492,7 +518,7 @@ fn array(resolved: &ResolvedDocument, view: &View, ctx: &mut Ctx, at: &JsonPoint
             // be dropped with no diagnostic at all.
             if open_tuple(resolved, view) {
                 degrade(
-                    ctx,
+                    reports,
                     at,
                     BreakageClass::UnsupportedConstruct,
                     "`prefixItems` is followed by an `items` that admits values, so instances may \
@@ -556,6 +582,9 @@ fn string(view: &View) -> Shape {
 /// a union that is neither soundly structural nor soundly tagged degrades to arbitrary JSON.
 /// Before it degrades for want of a tag, a union whose branches include unions of their own is
 /// matched by shape once more, with those read as their branches ([`spread_union`]).
+/// Without a declared or inherited discriminator, it is then read by the kind of each payload and
+/// the tag its objects name themselves with, where those tell every branch apart
+/// ([`kind_tagged`]).
 ///
 /// The order is the whole policy in one sentence: **a union is matched by shape when shape decides
 /// it, by its tag when only the tag decides it, and by neither when nothing does.**
@@ -564,8 +593,8 @@ fn union(
     view: &View,
     key: &ShapeKey,
     branches: &[ShapeKey],
-    component_names: &ComponentNames,
-    ctx: &mut Ctx,
+    known: &mut Known<'_>,
+    reports: &mut Vec<Diagnostic>,
     at: &JsonPointer,
 ) -> Shape {
     let (reading, mut nullable) = Reading::of_union(resolved, key, branches);
@@ -583,7 +612,7 @@ fn union(
                 uninterpreted: restricted,
                 ..View::default()
             };
-            report_uninterpreted(&omitted, &string, ctx, at);
+            report_uninterpreted(&omitted, &string, reports, at);
             string
         }
         Reading::Variants(rest) => match told_apart(resolved, view, rest) {
@@ -593,7 +622,8 @@ fn union(
                     nullable |= null;
                     shape
                 }
-                None => tagged(resolved, view, &rest, component_names, &reason, ctx, at),
+                None => tagged(resolved, view, &rest, known.component_names)
+                    .unwrap_or_else(|| wild(resolved, key, &rest, known, &reason, reports, at)),
             },
         },
     };
@@ -622,7 +652,7 @@ fn told_apart(
         // The branches name themselves: read the tag, the way a declared discriminator is read,
         // rather than match by shape — which would rest on the constants, and a generated string
         // enum reads any string.
-        return Ok(self_named(named));
+        return Ok(Shape::Union(self_named(named, Vec::new())));
     }
     match ambiguity(resolved, &rest) {
         // Shape decides it: an untagged enum is exact, and every variant keeps every property the
@@ -745,6 +775,7 @@ fn partitioned(resolved: &ResolvedDocument, view: &View, branches: &[ShapeKey]) 
                 absent: None,
                 null: None,
                 shared: true,
+                kinds: Vec::new(),
             }),
         }));
     }
@@ -1306,10 +1337,32 @@ fn keep_own_members(
     resolved: &ResolvedDocument,
     view: &View,
     shape: Shape,
-    ctx: &mut Ctx,
+    reports: &mut Vec<Diagnostic>,
     at: &JsonPointer,
 ) -> Shape {
-    let inner = match &shape {
+    let dropped = dropped_beside(resolved, view, &shape);
+    if dropped.is_empty() {
+        return shape;
+    }
+    let dropped: Vec<String> = dropped.into_iter().collect();
+    degrade(
+        reports,
+        at,
+        BreakageClass::UnsupportedConstruct,
+        &format!(
+            "this schema declares {} beside its `oneOf`/`anyOf`, and a branch does not keep them, \
+             so that branch would drop them; the value is typed as arbitrary JSON so that no member \
+             is lost",
+            dropped.join(", ")
+        ),
+    );
+    Shape::Any
+}
+
+/// The members declared beside a union that a branch of its shape would drop, each named for the
+/// diagnostic.
+fn dropped_beside(resolved: &ResolvedDocument, view: &View, shape: &Shape) -> BTreeSet<String> {
+    let inner = match shape {
         Shape::Optional(ShapeRef::Inline(inner)) => inner.as_ref(),
         other => other,
     };
@@ -1328,7 +1381,7 @@ fn keep_own_members(
         ),
         // Strings carry no members, and arbitrary JSON keeps them all.
         // A keyed union is read so only where nothing is declared beside it ([`keyed`]).
-        _ => return shape,
+        _ => return BTreeSet::new(),
     };
     let mut dropped: BTreeSet<String> = BTreeSet::new();
     for key in variants {
@@ -1337,22 +1390,7 @@ fn keep_own_members(
     if let Some(tag) = tag {
         dropped.remove(&format!("`{tag}`"));
     }
-    if dropped.is_empty() {
-        return shape;
-    }
-    let dropped: Vec<String> = dropped.into_iter().collect();
-    degrade(
-        ctx,
-        at,
-        BreakageClass::UnsupportedConstruct,
-        &format!(
-            "this schema declares {} beside its `oneOf`/`anyOf`, and a branch does not keep them, \
-             so that branch would drop them; the value is typed as arbitrary JSON so that no member \
-             is lost",
-            dropped.join(", ")
-        ),
-    );
-    Shape::Any
+    dropped
 }
 
 /// How deep into nested members the test for dropped members follows them before giving up.
@@ -1564,7 +1602,8 @@ impl Reading {
     }
 }
 
-/// A union whose variants shape alone cannot tell apart: carry the tag, or give up.
+/// A union whose variants shape alone cannot tell apart, read by the tag it declares or inherits,
+/// or `None` where it has neither.
 ///
 /// Proposed rather than decided here. Whether the tag can actually be consumed depends on facts no
 /// single schema knows — chiefly whether the variant types are used anywhere but in this union,
@@ -1575,32 +1614,101 @@ fn tagged(
     view: &View,
     branches: &[ShapeKey],
     component_names: &ComponentNames,
-    reason: &str,
-    ctx: &mut Ctx,
-    at: &JsonPointer,
-) -> Shape {
+) -> Option<Shape> {
     let inherited = view
         .discriminator
         .is_none()
         .then(|| shared_base_discriminator(resolved, branches))
         .flatten();
-    let Some(declared) = view.discriminator.as_ref().or(inherited.as_ref()) else {
-        // No discriminator and no way to tell the variants apart. An untagged enum here picks
-        // whichever variant happens to deserialize first, which is the predecessor's "wild union
-        // semantics" breakage class and the one forbidden failure mode.
-        degrade(
-            ctx,
-            at,
-            BreakageClass::WildUnion,
-            &format!(
-                "this union declares no discriminator and {reason}, so nothing decides which \
-                 branch a payload is; the value is typed as arbitrary JSON rather than matched \
-                 against whichever branch happens to parse first"
-            ),
-        );
-        return Shape::Any;
-    };
-    dispatched(resolved, declared, branches, component_names)
+    let declared = view.discriminator.as_ref().or(inherited.as_ref())?;
+    Some(dispatched(resolved, declared, branches, component_names))
+}
+
+/// A union nothing tells apart, which is arbitrary JSON.
+///
+/// Where it could be read by the kind of each payload and the tag its objects name themselves
+/// with ([`kind_tagged`]), it is found too, and stays arbitrary JSON while the document's other
+/// types and tags are settled without it.
+/// [`super::admit`] decides from that settled graph whether it is typed so.
+fn wild(
+    resolved: &ResolvedDocument,
+    key: &ShapeKey,
+    branches: &[ShapeKey],
+    known: &mut Known<'_>,
+    reason: &str,
+    reports: &mut Vec<Diagnostic>,
+    at: &JsonPointer,
+) -> Shape {
+    if let Some(union) = kind_tagged(resolved, branches) {
+        let fallback = reports.len();
+        known.found.insert(key.clone(), Found { union, fallback });
+    }
+    // No discriminator and no way to tell the variants apart. An untagged enum here picks
+    // whichever variant happens to deserialize first, which is the predecessor's "wild union
+    // semantics" breakage class and the one forbidden failure mode.
+    degrade(
+        reports,
+        at,
+        BreakageClass::WildUnion,
+        &format!(
+            "this union declares no discriminator and {reason}, so nothing decides which \
+             branch a payload is; the value is typed as arbitrary JSON rather than matched \
+             against whichever branch happens to parse first"
+        ),
+    );
+    Shape::Any
+}
+
+/// Branches told apart by the kind of value they read, and the objects among them by a tag they
+/// name themselves with.
+///
+/// `"off"` beside four objects that each require `provider` with a value of their own: a string
+/// is the string branch, and an object is the branch its `provider` names.
+/// A tag only has to tell apart the branches that read the same kind of value.
+/// So the branches that are not objects are compared among themselves, in order, as [`ambiguity`]
+/// compares any branches, and the objects are read by the constants [`constant_discriminator`]
+/// finds, which may list several spellings per branch.
+///
+/// Every branch has to show the one kind its generated type reads ([`read_kind`]).
+/// A branch that says nothing about its kind, or a union of its own, whose open arm reads every
+/// kind, leaves the union to degrade.
+fn kind_tagged(resolved: &ResolvedDocument, branches: &[ShapeKey]) -> Option<Union> {
+    let mut objects = Vec::new();
+    let mut others = Vec::new();
+    for branch in branches {
+        match read_kind(resolved, branch, 0)? {
+            Kind::Object => objects.push(branch.clone()),
+            Kind::Array | Kind::String | Kind::Number | Kind::Boolean => {
+                others.push(branch.clone());
+            }
+            // A `null` among the branches makes the union an `Option` rather than a variant.
+            Kind::Null => return None,
+        }
+    }
+    // A union of objects alone was read by its constants already, in [`told_apart`].
+    if others.is_empty() || ambiguity(resolved, &others).is_some() {
+        return None;
+    }
+    let named = constant_discriminator(resolved, &objects, None)?;
+    let mut union = self_named(named, others);
+    // Admitted only over variants that keep their tag, so the variants carry it.
+    if let Some(tag) = union.tag.as_mut() {
+        tag.style = TagStyle::Carried;
+    }
+    Some(union)
+}
+
+/// The one kind of value the type generated for a branch reads, when it reads one.
+fn read_kind(resolved: &ResolvedDocument, key: &ShapeKey, depth: usize) -> Option<Kind> {
+    if depth > MAX_AMBIGUITY_DEPTH {
+        return None;
+    }
+    match Branch::of(resolved, key) {
+        Branch::Through(inner) => read_kind(resolved, &inner, depth.saturating_add(1)),
+        Branch::Union(_) => None,
+        Branch::Flattened(_) => Some(Kind::Object),
+        Branch::Leaf(view) | Branch::Restricted(view) => kind_of(resolved, &view),
+    }
 }
 
 /// The union a family's base declares, read by its declared tag however many subtypes it lists.
@@ -1622,7 +1730,7 @@ fn tagged_family(
         }
     }
     match constant_discriminator(resolved, &subtypes, Some(&declared.property)) {
-        Some(named) => self_named(named),
+        Some(named) => Shape::Union(self_named(named, Vec::new())),
         None => dispatched(resolved, declared, &subtypes, component_names),
     }
 }
@@ -1750,9 +1858,10 @@ fn constant_discriminator(
     None
 }
 
-/// A union whose branches name themselves, read by the constants they name themselves with.
-fn self_named(named: SelfNamed) -> Shape {
-    Shape::Union(Union {
+/// A union whose branches name themselves, read by the constants they name themselves with, beside
+/// the branches of other kinds in `kinds`.
+fn self_named(named: SelfNamed, kinds: Vec<ShapeKey>) -> Union {
+    Union {
         variants: named
             .variants
             .into_iter()
@@ -1772,8 +1881,9 @@ fn self_named(named: SelfNamed) -> Shape {
             absent: named.absent,
             null: named.null,
             shared: false,
+            kinds: kinds.into_iter().map(ShapeRef::Key).collect(),
         }),
-    })
+    }
 }
 
 /// A union whose branches name themselves, as [`constant_discriminator`] reads it.
@@ -3048,7 +3158,11 @@ fn is_null(resolved: &ResolvedDocument, key: &ShapeKey) -> bool {
 }
 
 /// The strings an `enum`/`const` names, when every value is one.
-fn string_values(view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Option<Vec<String>> {
+fn string_values(
+    view: &View,
+    reports: &mut Vec<Diagnostic>,
+    at: &JsonPointer,
+) -> Option<Vec<String>> {
     let declared = match (&view.enumeration, &view.constant) {
         (Some(values), _) => values.clone(),
         (None, Some(value)) => vec![value.clone()],
@@ -3071,7 +3185,7 @@ fn string_values(view: &View, ctx: &mut Ctx, at: &JsonPointer) -> Option<Vec<Str
     // is the case 02 calls out and the one worth reporting.
     if !values.iter().all(|value| same_kind(value, values.first())) {
         degrade(
-            ctx,
+            reports,
             at,
             BreakageClass::UnsupportedConstruct,
             "`enum` mixes values of different kinds, so no single Rust type holds them; the value \
@@ -3352,7 +3466,7 @@ fn unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
-fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {
+fn report_unknown_types(view: &mut View, reports: &mut Vec<Diagnostic>, at: &JsonPointer) {
     for spelling in std::mem::take(&mut view.unknown_types) {
         if spelling == "file" {
             // The Swagger-era spelling for a binary payload, with a confident meaning.
@@ -3361,7 +3475,7 @@ fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {
             view.types
                 .get_or_insert_with(BTreeSet::new)
                 .insert(TypeName::String);
-            ctx.report(Diagnostic::new(
+            reports.push(Diagnostic::new(
                 BreakageClass::UnknownSchemaType,
                 Action::Repair,
                 at.child("type"),
@@ -3370,7 +3484,7 @@ fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {
             ));
             continue;
         }
-        ctx.report(Diagnostic::new(
+        reports.push(Diagnostic::new(
             BreakageClass::UnknownSchemaType,
             Action::Degrade,
             at.child("type"),
@@ -3385,7 +3499,12 @@ fn report_unknown_types(view: &mut View, ctx: &mut Ctx, at: &JsonPointer) {
 /// It runs once the shape is chosen, because only the chosen type says what is expressed.
 /// An unsigned integer holds every integer from zero up, so a lower bound that admits zero and
 /// nothing below it narrows nothing.
-fn report_uninterpreted(view: &View, shape: &Shape, ctx: &mut Ctx, at: &JsonPointer) {
+fn report_uninterpreted(
+    view: &View,
+    shape: &Shape,
+    reports: &mut Vec<Diagnostic>,
+    at: &JsonPointer,
+) {
     // A bound the integer's own range ends at is what the type expresses: a zero `minimum` on an
     // unsigned integer, or a `maximum` of 65535 on a `u16`.
     let integer = match shape {
@@ -3425,7 +3544,7 @@ fn report_uninterpreted(view: &View, shape: &Shape, ctx: &mut Ctx, at: &JsonPoin
         "narrow"
     };
     degrade(
-        ctx,
+        reports,
         at,
         BreakageClass::UnsupportedConstruct,
         &format!(
@@ -3436,8 +3555,8 @@ fn report_uninterpreted(view: &View, shape: &Shape, ctx: &mut Ctx, at: &JsonPoin
     );
 }
 
-fn degrade(ctx: &mut Ctx, at: &JsonPointer, class: BreakageClass, detail: &str) {
-    ctx.report(Diagnostic::new(class, Action::Degrade, at.clone(), detail));
+fn degrade(reports: &mut Vec<Diagnostic>, at: &JsonPointer, class: BreakageClass, detail: &str) {
+    reports.push(Diagnostic::new(class, Action::Degrade, at.clone(), detail));
 }
 
 /// The docs a shape carries, for the contract layer.

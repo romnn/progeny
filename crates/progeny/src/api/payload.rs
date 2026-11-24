@@ -1149,6 +1149,32 @@ mod tests {
         );
     }
 
+    /// A list beside objects that name themselves is read by its kind, so an example list is the
+    /// schema's own payload rather than a vendor's defect, and comes back as it went in.
+    #[test_util::test]
+    fn a_list_beside_tagged_objects_is_the_schemas_own_payload() {
+        let object = |kind: &str| {
+            json!({
+                "type": "object", "required": ["type"],
+                "properties": {"type": {"type": "string", "enum": [kind]}, "name": {"type": "string"}},
+            })
+        };
+        let example = json!([1.5, 2]);
+        let mut document = requesting(&json!({"$ref": "#/components/schemas/Shape"}), &example);
+        document["components"] = json!({"schemas": {
+            "Point": object("point"),
+            "Line": object("line"),
+            "Shape": {"oneOf": [
+                {"$ref": "#/components/schemas/Point"},
+                {"type": "array", "items": {"type": "number"}},
+                {"$ref": "#/components/schemas/Line"},
+            ]},
+        }});
+        let found = payloads_of(document)?;
+        assert_eq!(found[0].expected, example);
+        assert!(!found[0].vendor_defect);
+    }
+
     /// Variants that list one value of their tag are tried in order, so a payload only the later
     /// one reads is expected back as that one reads it, not pruned under the first.
     #[test_util::test]

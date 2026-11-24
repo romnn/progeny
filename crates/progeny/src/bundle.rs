@@ -1395,4 +1395,78 @@ mod tests {
         let none = generate_schemas(&bundle(), &input(&[]), &Config::default());
         assert!(none.is_err(), "{none:?}");
     }
+
+    /// A bundle classifies only what its roots reach, so a union beside a string is typed where
+    /// its objects are reached without it, its string named by a definition nothing else reaches,
+    /// and stays arbitrary JSON where only it reaches its objects.
+    #[test_util::test]
+    fn a_bundle_types_a_union_beside_a_string_only_over_objects_its_roots_reach() {
+        let object = |provider: &str| {
+            json!({
+                "type": "object",
+                "required": ["provider"],
+                "properties": {
+                    "provider": {"type": "string", "enum": [provider]},
+                    "model": {"type": "string"},
+                },
+            })
+        };
+        let reference = |name: &str| json!({"$ref": format!("#/definitions/{name}")});
+        let bundle = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "definitions": {
+                "Off": {"type": "string", "enum": ["off"]},
+                "Google": object("google"),
+                "Vapi": object("vapi"),
+                "Detection": {"oneOf": [reference("Off"), reference("Google"), reference("Vapi")]},
+                "Holder": {
+                    "type": "object",
+                    "properties": {
+                        "detection": reference("Detection"),
+                        "google": reference("Google"),
+                        "vapi": reference("Vapi"),
+                    },
+                },
+                "Twilio": object("twilio"),
+                "Openai": object("openai"),
+                "Lonely": {"oneOf": [reference("Off"), reference("Twilio"), reference("Openai")]},
+                "LonelyHolder": {
+                    "type": "object",
+                    "properties": {"lonely": reference("Lonely")},
+                },
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let output = generate_schemas(
+            &bundle,
+            &SchemaInput {
+                namespaces: vec!["/definitions".to_owned()],
+                roots: ["Holder", "LonelyHolder"]
+                    .into_iter()
+                    .map(|name| SchemaRoot {
+                        name: name.to_owned(),
+                        direction: Direction::Sent,
+                    })
+                    .collect(),
+            },
+            &Config::default(),
+        )?;
+        let source = types(&output);
+        // The objects the holder reaches carry their tag beside the string it names.
+        assert!(source.contains("pub enum Detection {"), "{source}");
+        assert!(source.contains("pub enum Off {"), "{source}");
+        // Only the union reaches the other two objects, so it stays arbitrary JSON.
+        assert!(
+            source.contains("pub type Lonely = serde_json::Value;"),
+            "{source}"
+        );
+        let wild: Vec<String> = output
+            .diagnostics
+            .iter()
+            .filter(|found| found.class() == BreakageClass::WildUnion)
+            .map(|found| found.location().to_string())
+            .collect();
+        assert_eq!(wild, ["/definitions/Lonely"]);
+    }
 }

@@ -363,9 +363,14 @@ fn one(contract: &TypeContract, contracts: &Contracts, config: &Config) -> Token
             }
         }
         ContractKind::CarriedTagEnum {
-            variants, fallback, ..
+            variants,
+            kinds,
+            fallback,
+            ..
         } => {
-            let body = carried_tag_enum(variants, fallback, contract, contracts, config, scope);
+            let body = carried_tag_enum(
+                variants, kinds, fallback, contract, contracts, config, scope,
+            );
             quote! {
                 #docs
                 #derives
@@ -609,6 +614,7 @@ fn keyed_enum(
 /// else — the tag and the wire names are the impls' business.
 fn carried_tag_enum(
     variants: &[crate::contract::TaggedVariant],
+    kinds: &[crate::contract::VariantContract],
     fallback: &RustIdent,
     contract: &TypeContract,
     contracts: &Contracts,
@@ -621,10 +627,17 @@ fn carried_tag_enum(
         let ty = enum_type_ref(&variant.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
+    // The variants holding a value of another kind than an object
+    let kinds = kinds.iter().map(|kind| {
+        let variant_ident = ident(&kind.rust_name);
+        let ty = enum_type_ref(&kind.ty, contracts, config, scope);
+        quote! { #variant_ident(#ty), }
+    });
     let fallback = fallback_variant(fallback, "names no variant in its tag");
     quote! {
         pub enum #name {
             #(#arms)*
+            #(#kinds)*
             #fallback
         }
     }

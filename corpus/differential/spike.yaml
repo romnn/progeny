@@ -85,6 +85,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MaybeHolder"
+  /detections:
+    post:
+      operationId: postDetection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Detection"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Detection"
 components:
   schemas:
     Spike:
@@ -476,3 +491,31 @@ components:
               properties:
                 result:
                   type: string
+    # A string beside objects that each require `provider` with a value of their own, as vapi's
+    # voicemail detection is written: a string is the string branch, and an object the branch its
+    # `provider` names.
+    # Nothing else takes `provider` off the objects, so they keep it and the union carries it.
+    Detection:
+      oneOf:
+        - type: string
+          enum: ["off"]
+        - $ref: "#/components/schemas/GoogleDetection"
+        - $ref: "#/components/schemas/VapiDetection"
+    GoogleDetection:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [google]
+        model:
+          type: string
+    VapiDetection:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [vapi]
+        model:
+          type: string

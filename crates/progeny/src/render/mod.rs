@@ -769,6 +769,37 @@ mod tests {
         );
     }
 
+    /// The schema of a union that reads a string beside objects named by their tag admits the
+    /// string as the string branch's own schema, beside each tagged object.
+    #[test_util::test]
+    fn a_json_schema_admits_the_branch_of_another_kind_beside_the_tagged_objects() {
+        let object = |kind: &str| {
+            json!({
+                "type": "object", "required": ["provider"],
+                "properties": {
+                    "provider": {"type": "string", "enum": [kind]},
+                    "model": {"type": "string"},
+                },
+            })
+        };
+        let rendered = types(
+            with_schemas(json!({
+                "Google": object("google"),
+                "Vapi": object("vapi"),
+                "Off": {"type": "string", "enum": ["off"]},
+                "Detection": {"oneOf": [
+                    {"$ref": "#/components/schemas/Off"},
+                    {"$ref": "#/components/schemas/Google"},
+                    {"$ref": "#/components/schemas/Vapi"},
+                ]},
+            })),
+            &json_schema_for(&["Detection"]),
+        )?;
+        let flat = squeezed(&rendered);
+        assert!(flat.contains("Off(Box<Off>),"), "{rendered}");
+        assert!(flat.contains("subschema_for::<Off>()"), "{rendered}");
+    }
+
     /// A read form's schema requires nothing and admits the undeclared members it keeps in
     /// `extra`, under a name that cannot collide with its strict twin's; the strict twin, not
     /// selected, gets no impl at all.

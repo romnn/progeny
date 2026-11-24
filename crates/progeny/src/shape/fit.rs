@@ -314,12 +314,30 @@ impl<'a> Fit<'a> {
     /// branches nothing tells apart — so "no branch accepts this" is the only sound finding, and it
     /// needs every branch checked rather than any one of them.
     fn union(&self, value: &Value, union: &Union, trail: &mut Trail) -> Option<String> {
-        if let Some(tag) = &union.tag {
-            return self.tagged(value, union, tag, trail);
+        match &union.tag {
+            // A value that is not an object is read by the branches of other kinds alone.
+            Some(tag) if !tag.kinds.is_empty() && !value.is_object() => {
+                self.any(value, &tag.kinds, trail)
+            }
+            Some(tag) => self.tagged(value, union, tag, trail),
+            None => self.any(
+                value,
+                union.variants.iter().map(|variant| &variant.shape),
+                trail,
+            ),
         }
+    }
+
+    /// Why none of these branches accepts the value, if none does.
+    fn any<'s>(
+        &self,
+        value: &Value,
+        branches: impl IntoIterator<Item = &'s ShapeRef>,
+        trail: &mut Trail,
+    ) -> Option<String> {
         let mut reasons = Vec::new();
-        for variant in &union.variants {
-            let reason = self.follow(value, &variant.shape, trail)?;
+        for branch in branches {
+            let reason = self.follow(value, branch, trail)?;
             reasons.push(reason);
         }
         (!reasons.is_empty())

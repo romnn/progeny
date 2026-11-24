@@ -310,7 +310,7 @@ fn break_cycles(types: &mut [Provisional]) {
             let Ok(from) = u32::try_from(index) else {
                 continue;
             };
-            for ty in references(&contract.kind) {
+            for ty in contract.kind.references() {
                 let mut reached = Vec::new();
                 ty.reaches(false, &mut reached);
                 for (to, indirect) in reached {
@@ -380,25 +380,6 @@ fn box_target(ty: &mut TypeRef, target: TypeIndex) -> bool {
     }
 }
 
-pub(crate) fn references(kind: &ContractKind) -> Vec<&TypeRef> {
-    match kind {
-        ContractKind::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
-        ContractKind::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
-        ContractKind::TaggedEnum { variants, .. }
-        | ContractKind::CarriedTagEnum { variants, .. } => {
-            variants.iter().map(|variant| &variant.ty).collect()
-        }
-        ContractKind::KeyedEnum { variants, .. } => variants
-            .iter()
-            .filter_map(|variant| variant.payload.as_ref())
-            .collect(),
-        ContractKind::StringEnum { .. } => Vec::new(),
-        ContractKind::Newtype { inner } => vec![inner],
-        ContractKind::Tuple { items } => items.iter().collect(),
-        ContractKind::Alias { target } => vec![target],
-    }
-}
-
 /// Which of the optional derives each type can actually have.
 ///
 /// A fixed point, because support is contagious: a struct can be `Eq` only if every type it holds
@@ -465,7 +446,9 @@ fn holds(
         | ContractKind::Tuple { .. }
         | ContractKind::Alias { .. } => None,
     };
-    references(&contract.kind)
+    contract
+        .kind
+        .references()
         .into_iter()
         .chain(fallback.as_ref())
         .all(|ty| carries(derive, ty, supported, config))

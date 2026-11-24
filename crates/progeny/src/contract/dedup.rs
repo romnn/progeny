@@ -153,10 +153,16 @@ pub(super) fn references_mut(kind: &mut ContractKind) -> Vec<&mut TypeRef> {
         ContractKind::Enum { variants, .. } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
-        ContractKind::TaggedEnum { variants, .. }
-        | ContractKind::CarriedTagEnum { variants, .. } => {
+        ContractKind::TaggedEnum { variants, .. } => {
             variants.iter_mut().map(|variant| &mut variant.ty).collect()
         }
+        ContractKind::CarriedTagEnum {
+            variants, kinds, ..
+        } => variants
+            .iter_mut()
+            .map(|variant| &mut variant.ty)
+            .chain(kinds.iter_mut().map(|kind| &mut kind.ty))
+            .collect(),
         ContractKind::KeyedEnum { variants, .. } => variants
             .iter_mut()
             .filter_map(|variant| variant.payload.as_mut())
@@ -215,6 +221,7 @@ fn fingerprint(contract: &Provisional) -> String {
         ContractKind::CarriedTagEnum {
             tag,
             variants,
+            kinds,
             routes,
             fallback,
         } => {
@@ -226,6 +233,9 @@ fn fingerprint(contract: &Provisional) -> String {
                     "|{}={}{:?}:{:?}",
                     variant.rust_name, variant.tag_value, variant.aliases, variant.ty
                 );
+            }
+            for kind in kinds {
+                let _ = write!(out, "|kind {}:{:?}", kind.rust_name, kind.ty);
             }
             let _ = write!(out, "|absent={:?}|null={:?}", routes.absent, routes.null);
             let _ = write!(out, "|?{fallback}");

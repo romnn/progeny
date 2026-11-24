@@ -370,6 +370,9 @@ pub(crate) enum ContractKind {
         /// The member of every payload that carries its variant's name.
         tag: String,
         variants: Vec<TaggedVariant>,
+        /// The variants holding a value that is not an object, each tried in order for such a
+        /// payload, before the tag of an object is read.
+        kinds: Vec<VariantContract>,
         /// The variants a payload is when its tag member is missing or `null`.
         routes: TagRoutes,
         /// The variant holding a payload whose tag names no variant, as `serde_json::Value`.
@@ -416,9 +419,16 @@ impl ContractKind {
         match self {
             Self::Struct { fields } => fields.iter().map(|field| &field.ty).collect(),
             Self::Enum { variants, .. } => variants.iter().map(|variant| &variant.ty).collect(),
-            Self::TaggedEnum { variants, .. } | Self::CarriedTagEnum { variants, .. } => {
+            Self::TaggedEnum { variants, .. } => {
                 variants.iter().map(|variant| &variant.ty).collect()
             }
+            Self::CarriedTagEnum {
+                variants, kinds, ..
+            } => variants
+                .iter()
+                .map(|variant| &variant.ty)
+                .chain(kinds.iter().map(|kind| &kind.ty))
+                .collect(),
             Self::KeyedEnum { variants, .. } => variants
                 .iter()
                 .filter_map(|variant| variant.payload.as_ref())
@@ -680,7 +690,9 @@ impl Contracts {
     /// `support::Upload`.
     pub(crate) fn uses_upload(&self) -> bool {
         self.types.iter().any(|contract| {
-            finalize::references(contract.kind())
+            contract
+                .kind()
+                .references()
                 .iter()
                 .any(|ty| ty.holds_upload())
         })
@@ -689,7 +701,9 @@ impl Contracts {
     /// Whether any field names the generated three-state presence support type.
     pub(crate) fn uses_presence(&self) -> bool {
         self.types.iter().any(|contract| {
-            finalize::references(contract.kind())
+            contract
+                .kind()
+                .references()
                 .iter()
                 .any(|ty| ty.holds_presence())
         })

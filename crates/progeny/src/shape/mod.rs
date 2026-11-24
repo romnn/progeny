@@ -33,6 +33,7 @@
 //! No schema states that union on its own, but a struct holding those members flattens it as a
 //! type of its own, so it needs a key to be named and settled by.
 
+mod admit;
 mod classify;
 mod discriminate;
 mod fit;
@@ -46,7 +47,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::diag::{Ctx, JsonPointer};
+use crate::diag::{Ctx, Diagnostic, JsonPointer};
 use crate::resolve::ResolvedDocument;
 use crate::schema::SchemaId;
 
@@ -537,6 +538,15 @@ pub(crate) struct Tag {
     /// fallback where none does, which is sound only where [`classify`] has shown that no earlier
     /// such variant reads a later one's payloads.
     pub(crate) shared: bool,
+    /// The branches that are not objects, which a payload of their kind is before any tag is read.
+    ///
+    /// Empty for a union of objects alone.
+    /// A payload that is not an object is the first of these whose type reads it, and an object is
+    /// the variant its tag names.
+    /// [`classify`] keeps these only where the generated type of each reads one kind of value no
+    /// object does, and no earlier one takes the payloads of a later one of its kind, and
+    /// [`admit`] types such a union only with a carried tag and scalar data in these.
+    pub(crate) kinds: Vec<ShapeRef>,
 }
 
 impl Tag {
@@ -548,6 +558,7 @@ impl Tag {
             absent: None,
             null: None,
             shared: false,
+            kinds: Vec::new(),
         }
     }
 
@@ -630,11 +641,21 @@ impl Shapes {
         self.by_key.iter()
     }
 
+    /// Add what a key classified as, with where its schema is written.
+    fn insert(&mut self, resolved: &ResolvedDocument, key: ShapeKey, shape: Shape) {
+        if let Some(anchor) = key.anchor() {
+            self.addresses
+                .insert(key.clone(), resolved.schemas().address(anchor).clone());
+        }
+        self.by_key.insert(key, shape);
+    }
+
     /// Replace what a key classified as.
     ///
-    /// The one mutation classification allows after the fact, and it exists for one caller:
-    /// [`discriminate`] can only tell whether a proposed tag is affordable once every shape is
-    /// known, so the union it demotes was necessarily classified before the answer existed.
+    /// The one mutation classification allows after the fact, and it exists for the decisions
+    /// only every shape together settles: [`discriminate`] can only tell whether a proposed tag is
+    /// affordable once every shape is known, so the union it demotes was necessarily classified
+    /// before the answer existed, and [`admit`] types a union only once that is settled.
     pub(crate) fn replace(&mut self, key: &ShapeKey, shape: Shape) {
         let slot = self.by_key.get_mut(key);
         // Not a tolerable miss: `replace` is how an unsound union is demoted, and a demotion
@@ -663,19 +684,56 @@ impl Shapes {
 
 /// Classify every shape the document's API surface reaches.
 ///
-/// Iterative rather than recursive: a document can nest schemas 128 deep and reference in cycles,
-/// and the work list makes both ordinary rather than a stack-depth question.
+/// A union read by the kind of each payload and the tag its objects name themselves with is found
+/// while the document is classified as if it were arbitrary JSON, so every other shape and tag is
+/// settled without it.
+/// The ones [`admit`] finds reading so changes nothing else are then typed in the settled graph,
+/// with the scalar data they hold.
 pub(crate) fn classify(
     resolved: &ResolvedDocument,
     integers: crate::config::IntegerWidth,
     ctx: &mut Ctx,
 ) -> Shapes {
+    let mut discovered = discover(resolved, integers);
+    // Every shape exists now, which is the earliest moment a proposed discriminator tag can be
+    // priced: what it costs is a property off each variant type, and whether that is affordable
+    // depends on where else those types are used.
+    let settlement = discriminate::settle(&discovered.shapes);
+    let admission = admit::admit(resolved, &discovered, &settlement, integers);
+    discovered.install(resolved, admission);
+    let Discovered {
+        mut shapes,
+        reports,
+        ..
+    } = discovered;
+    for diagnostic in reports {
+        ctx.report(diagnostic);
+    }
+    inheritance::report(resolved, shapes.by_key.keys(), ctx);
+    discriminate::apply(resolved, &mut shapes, settlement, ctx);
+    shapes
+}
+
+/// What classifying the document's API surface found, before any tag is settled.
+struct Discovered {
+    shapes: Shapes,
+    /// Every position that could name a shape, of which [`Shapes::roots`] holds those reached.
+    named: Vec<Root>,
+    /// The name `components.schemas` gave each shape.
+    component_names: classify::ComponentNames,
+    /// The unions found readable by kind and then by tag, each classified as arbitrary JSON.
+    found: BTreeMap<ShapeKey, classify::Found>,
+    /// What classifying the shapes reported, in the order the work list classified them, kept
+    /// until admission decides which unions are not arbitrary JSON after all.
+    reports: Vec<Diagnostic>,
+}
+
+/// Classify every shape the document's API surface reaches.
+///
+/// Iterative rather than recursive: a document can nest schemas 128 deep and reference in cycles,
+/// and the work list makes both ordinary rather than a stack-depth question.
+fn discover(resolved: &ResolvedDocument, integers: crate::config::IntegerWidth) -> Discovered {
     let roots = roots::discover(resolved);
-    let mut shapes = Shapes {
-        by_key: BTreeMap::new(),
-        roots: Vec::new(),
-        addresses: BTreeMap::new(),
-    };
 
     // A bundle's roots are its wire: only what they reach is classified, and each is a position a
     // payload really sits at.
@@ -716,28 +774,70 @@ pub(crate) fn classify(
     }
     named.extend(selected);
 
+    let mut shapes = Shapes::default();
+    let mut reports = Vec::new();
+    let mut known = classify::Known {
+        component_names: &component_names,
+        found: BTreeMap::new(),
+    };
     while let Some(key) = queue.pop() {
         if shapes.by_key.contains_key(&key) {
             continue;
         }
-        let shape = classify::key(resolved, &key, &component_names, integers, ctx);
+        let shape = classify::key(resolved, &key, &mut known, integers, &mut reports);
         children(&shape, &mut queue);
-        if let Some(anchor) = key.anchor() {
-            shapes
-                .addresses
-                .insert(key.clone(), resolved.schemas().address(anchor).clone());
-        }
-        shapes.by_key.insert(key, shape);
+        shapes.insert(resolved, key, shape);
     }
-    inheritance::report(resolved, shapes.by_key.keys(), ctx);
-    // A name the bundle gives a type its roots never reach names nothing generated.
-    named.retain(|root| shapes.by_key.contains_key(&root.key));
-    shapes.roots = named;
-    // Every shape exists now, which is the earliest moment a proposed discriminator tag can be
-    // priced: what it costs is a property off each variant type, and whether that is affordable
-    // depends on where else those types are used.
-    discriminate::run(resolved, &mut shapes, ctx);
-    shapes
+    let found = known.found;
+    shapes.roots = reached(&named, &shapes);
+    Discovered {
+        shapes,
+        named,
+        component_names,
+        found,
+        reports,
+    }
+}
+
+impl Discovered {
+    /// Type the admitted unions and add the scalar data they reach, leaving every other shape as
+    /// it is.
+    ///
+    /// The diagnostics keep the order they were reported in, without each admitted union's
+    /// saying it is arbitrary JSON, and then what classifying the added scalar data reported.
+    fn install(&mut self, resolved: &ResolvedDocument, admission: admit::Admission) {
+        let mut typed = BTreeSet::new();
+        for (key, shape) in admission.unions {
+            if let Some(found) = self.found.get(&key) {
+                typed.insert(found.fallback);
+            }
+            self.shapes.replace(&key, shape);
+        }
+        let reports = std::mem::take(&mut self.reports);
+        self.reports = reports
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !typed.contains(index))
+            .map(|(_, diagnostic)| diagnostic)
+            .collect();
+        for (key, data) in admission.data {
+            self.reports.extend(data.reports);
+            self.shapes.insert(resolved, key, data.shape);
+        }
+        // A name the bundle gives scalar data only an admitted union reaches names it now.
+        self.shapes.roots = reached(&self.named, &self.shapes);
+    }
+}
+
+/// The positions in `named` that name a shape classification reached, in order.
+///
+/// A name the bundle gives a type its roots never reach names nothing generated.
+fn reached(named: &[Root], shapes: &Shapes) -> Vec<Root> {
+    named
+        .iter()
+        .filter(|root| shapes.by_key.contains_key(&root.key))
+        .cloned()
+        .collect()
 }
 
 /// What a shape's own schemas say about themselves, for the doc comments a renderer writes.
@@ -798,6 +898,9 @@ fn children(shape: &Shape, out: &mut Vec<ShapeKey>) {
             for variant in &union.variants {
                 push(&variant.shape);
             }
+            for kind in union.tag.iter().flat_map(|tag| &tag.kinds) {
+                push(kind);
+            }
         }
         Shape::Keyed(keyed) => {
             for payload in keyed
@@ -816,11 +919,16 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
     use serde_json::{Value, json};
 
+    use std::collections::BTreeSet;
+
     use super::{
-        Extra, IntType, Scalar, Shape, ShapeRef, Shapes, StringEnum, Tag, TagStyle, Union, classify,
+        Extra, IntType, Scalar, Shape, ShapeKey, ShapeRef, Shapes, StringEnum, Tag, TagStyle,
+        Union, classify,
     };
+    use crate::config::IntegerWidth;
     use crate::diag::{BreakageClass, Ctx, Diagnostic};
     use crate::doc::parse as doc_parse;
+    use crate::resolve::ResolvedDocument;
     use crate::{normalize, resolve};
 
     /// Classify a document, keeping the diagnostics.
@@ -969,6 +1077,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             }),
             vec![Some("cat".to_owned()), Some("dog".to_owned())],
         );
@@ -1329,6 +1438,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         let tags: Vec<Option<&str>> = either
@@ -1464,6 +1574,7 @@ mod tests {
                 absent: Some(0),
                 null: Some(0),
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         // Each branch writes its first spelling and reads the rest.
@@ -1689,6 +1800,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         let Shape::Struct(a) = shape_of(&shapes, "A")? else {
@@ -1758,6 +1870,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
     }
@@ -1797,6 +1910,7 @@ mod tests {
                     absent: None,
                     null: None,
                     shared: false,
+                    kinds: Vec::new(),
                 }),
                 "{union_name}"
             );
@@ -5759,6 +5873,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
     }
@@ -5826,6 +5941,7 @@ mod tests {
                 absent: None,
                 null: None,
                 shared: false,
+                kinds: Vec::new(),
             })
         );
         // And the variant gave the property up, because nothing else carries it.
@@ -6363,6 +6479,908 @@ mod tests {
         assert_eq!(
             shape_of(&shapes, "Plain")?,
             &Shape::Scalar(Scalar::Integer(IntType::I64))
+        );
+    }
+
+    /// Every location `class` is reported at, the ones folded into another record's included,
+    /// sorted.
+    fn reported_at(diagnostics: &[Diagnostic], class: BreakageClass) -> Vec<String> {
+        let mut locations: Vec<String> = diagnostics
+            .iter()
+            .filter(|found| found.class() == class)
+            .flat_map(|found| std::iter::once(found.location()).chain(found.related()))
+            .map(ToString::to_string)
+            .collect();
+        locations.sort();
+        locations
+    }
+
+    /// The key of the component named `name`.
+    fn component_key(shapes: &Shapes, name: &str) -> eyre::Result<ShapeRef> {
+        let root = shapes
+            .roots()
+            .iter()
+            .find(|root| root.hint.iter().any(|segment| segment == name))
+            .ok_or_else(|| eyre::eyre!("no root named {name}"))?;
+        Ok(ShapeRef::Key(root.key.clone()))
+    }
+
+    /// An object requiring `member` with the values `values`, beside a member every such object
+    /// declares, so by shape alone each would read the others' payloads.
+    fn named_object(member: &str, values: &[&str]) -> Value {
+        json!({
+            "type": "object",
+            "required": [member],
+            "properties": {member: {"type": "string", "enum": values}, "model": {"type": "string"}},
+        })
+    }
+
+    /// The tagged variants of `union` as the component each holds and the tag it writes, and the
+    /// branches of other kinds.
+    fn tagged_and_kinds(union: &Union) -> (Vec<(ShapeRef, Option<String>)>, Vec<ShapeRef>) {
+        let tagged = union
+            .variants
+            .iter()
+            .map(|variant| (variant.shape.clone(), variant.tag.clone()))
+            .collect();
+        let kinds = union
+            .tag
+            .as_ref()
+            .map(|tag| tag.kinds.clone())
+            .unwrap_or_default();
+        (tagged, kinds)
+    }
+
+    /// vapi's voicemail detection: `"off"` beside four objects each requiring `provider` with a
+    /// value of its own reads a string as the string branch and an object by its tag, where it
+    /// used to degrade because one object reads another's payloads by shape.
+    #[test_util::test]
+    fn a_string_beside_objects_that_name_themselves_reads_each_by_kind_then_tag() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "OpenAi": named_object("provider", &["openai"]),
+            "Twilio": named_object("provider", &["twilio"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            "Detection": {"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Google"),
+                reference("OpenAi"),
+                reference("Twilio"),
+                reference("Vapi"),
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Detection")? else {
+            eyre::bail!("`Detection` is a union");
+        };
+        let (tagged, kinds) = tagged_and_kinds(union);
+
+        // One object arm per provider, each named by its own value of `provider`.
+        let mut expected = Vec::new();
+        for (name, tag) in [
+            ("Google", "google"),
+            ("OpenAi", "openai"),
+            ("Twilio", "twilio"),
+            ("Vapi", "vapi"),
+        ] {
+            expected.push((component_key(&shapes, name)?, Some(tag.to_owned())));
+        }
+        assert_eq!(tagged, expected);
+        // The string is the one branch of another kind, and it reads as the string it lists.
+        let [ShapeRef::Key(string)] = kinds.as_slice() else {
+            eyre::bail!("one branch of another kind: {kinds:?}");
+        };
+        assert_eq!(
+            shapes.get(string),
+            Some(&Shape::StringEnum(StringEnum::listed(vec![
+                "off".to_owned()
+            ])))
+        );
+        // Only this union reads the objects, so they keep their tag and the union carries it.
+        let tag = union.tag.as_ref().ok_or_eyre("the union is tagged")?;
+        assert_eq!(
+            (tag.property.as_str(), tag.style),
+            ("provider", TagStyle::Carried)
+        );
+        let Shape::Struct(google) = shape_of(&shapes, "Google")? else {
+            eyre::bail!("`Google` is a struct");
+        };
+        assert!(google.fields.iter().any(|field| field.wire == "provider"));
+    }
+
+    /// A list beside objects that name themselves, as opensearch's geo shapes put an envelope's
+    /// coordinates beside six tagged objects, reads a list as the list and an object by its tag.
+    /// An arm may list several spellings of its name, as long as no two arms share one.
+    #[test_util::test]
+    fn a_list_beside_objects_whose_tags_list_several_spellings_reads_each_by_kind_then_tag() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Point": named_object("type", &["point", "Point"]),
+            "Line": named_object("type", &["line"]),
+            "Shapes": {"oneOf": [
+                reference("Point"),
+                {"type": "array", "items": {"type": "number"}},
+                reference("Line"),
+            ]},
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Union(union) = shape_of(&shapes, "Shapes")? else {
+            eyre::bail!("`Shapes` is a union");
+        };
+        let (tagged, kinds) = tagged_and_kinds(union);
+        assert_eq!(
+            tagged,
+            [
+                (component_key(&shapes, "Point")?, Some("point".to_owned())),
+                (component_key(&shapes, "Line")?, Some("line".to_owned())),
+            ]
+        );
+        // The other spelling names the point too, and the list is the branch of another kind.
+        let aliases: Vec<&[String]> = union
+            .variants
+            .iter()
+            .map(|variant| variant.aliases.as_slice())
+            .collect();
+        assert_eq!(aliases, [&["Point".to_owned()][..], &[][..]]);
+        let [ShapeRef::Key(list)] = kinds.as_slice() else {
+            eyre::bail!("one branch of another kind: {kinds:?}");
+        };
+        assert!(matches!(shapes.get(list), Some(Shape::Array { .. })));
+    }
+
+    /// A fixed-position list beside objects that name themselves stays arbitrary JSON, because a
+    /// tuple of 17 positions is past what its generated Rust can debug-print or deserialize.
+    #[test_util::test]
+    fn a_tuple_beside_objects_that_name_themselves_still_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let positions = vec![json!({"type": "string"}); 17];
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(json!({
+            "Point": named_object("type", &["point"]),
+            "Line": named_object("type", &["line"]),
+            "Shapes": {"oneOf": [
+                reference("Point"),
+                {"type": "array", "prefixItems": positions, "items": false},
+                reference("Line"),
+            ]},
+        })))?;
+        assert_eq!(shape_of(&shapes, "Shapes")?, &Shape::Any);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            ["/components/schemas/Shapes"],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Beside a string, objects that share a spelling of their tag name no branch by it, an
+    /// earlier listed number takes the payloads of a later plain one, and a `null` hidden in a
+    /// union of its own is no variant, so each union still degrades.
+    #[test_util::test]
+    fn what_the_kind_and_tag_reading_cannot_settle_still_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Point": named_object("type", &["point", "shape"]),
+            "Line": named_object("type", &["line", "shape"]),
+            "Circle": named_object("type", &["circle"]),
+            "Square": named_object("type", &["square"]),
+            "Overlapping": {"oneOf": [
+                {"type": "string"},
+                reference("Point"),
+                reference("Line"),
+            ]},
+            "Numbers": {"oneOf": [
+                {"type": "integer", "enum": [1]},
+                reference("Circle"),
+                {"type": "integer"},
+                reference("Square"),
+            ]},
+            "Nothing": {"oneOf": [
+                {"oneOf": [{"type": "null"}]},
+                reference("Circle"),
+                reference("Square"),
+            ]},
+        })))?;
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            [
+                "/components/schemas/Nothing",
+                "/components/schemas/Numbers",
+                "/components/schemas/Overlapping",
+            ],
+            "{diagnostics:?}"
+        );
+        for name in ["Overlapping", "Numbers", "Nothing"] {
+            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
+        }
+    }
+
+    /// The reading by kind and then tag only steps in where shape and every other reading gave
+    /// up, so a union told apart today keeps its variants in their order, untagged, and a
+    /// declared family listed first, whose open arm reads every kind, still degrades.
+    #[test_util::test]
+    fn unions_told_apart_or_led_by_a_family_keep_their_reading() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            "Family": {
+                "oneOf": [reference("Google"), reference("Vapi")],
+                "discriminator": {"propertyName": "provider"},
+            },
+            "Told": {"oneOf": [
+                {"type": "string"},
+                {"type": "integer"},
+                reference("Google"),
+            ]},
+            "StringFirst": {"oneOf": [{"type": "string"}, reference("Family")]},
+            "FamilyFirst": {"oneOf": [reference("Family"), {"type": "string"}]},
+        })))?;
+        // Told apart by shape, in the order the document lists them.
+        let Shape::Union(told) = shape_of(&shapes, "Told")? else {
+            eyre::bail!("`Told` is a union");
+        };
+        assert_eq!(told.tag, None);
+        assert_eq!(told.variants.len(), 3);
+        assert_eq!(told.variants[2].shape, component_key(&shapes, "Google")?);
+        // A string before the family is an untagged union whose second arm is the tagged family.
+        let Shape::Union(string_first) = shape_of(&shapes, "StringFirst")? else {
+            eyre::bail!("`StringFirst` is a union");
+        };
+        assert_eq!(string_first.tag, None);
+        assert_eq!(
+            string_first.variants[1].shape,
+            component_key(&shapes, "Family")?
+        );
+        // The family first would take the string into its open arm.
+        assert_eq!(shape_of(&shapes, "FamilyFirst")?, &Shape::Any);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            ["/components/schemas/FamilyFirst"],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A union beside other kinds is typed only over objects no settled union takes a member off,
+    /// so the unions that do keep their reading and the union beside the other kinds degrades as
+    /// it did.
+    ///
+    /// The pets lose `kind`, which a payload beside a string or a list would still carry, and serde
+    /// would read `["cat"]` as the cat, an object holding nothing but its tag.
+    /// The fish loses `water` to a union that tags by it, which the union tagging by `kind` does
+    /// not even read.
+    #[test_util::test]
+    fn a_union_beside_other_kinds_over_objects_another_union_takes_from_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let named_water = |kind: &str, water: &str| {
+            json!({
+                "type": "object",
+                "required": ["kind", "water"],
+                "properties": {
+                    "kind": {"type": "string", "enum": [kind]},
+                    "water": {"type": "string", "enum": [water]},
+                },
+            })
+        };
+        let (shapes, diagnostics) = shapes_of(with_schemas(json!({
+            "Cat": tag_only("cat"),
+            "Dog": tag_only("dog"),
+            "Pet": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "PetOrName": {"oneOf": [{"type": "string"}, reference("Cat"), reference("Dog")]},
+            "PetOrList": {"oneOf": [
+                reference("Cat"),
+                reference("Dog"),
+                {"type": "array", "items": {"type": "string"}},
+            ]},
+            // The fish and the trout share their `kind`, so their union consumes `water` instead.
+            "Fish": named_water("fish", "salt"),
+            "Trout": named_water("fish", "fresh"),
+            "Bird": named_water("bird", "none"),
+            "ByWater": {"oneOf": [reference("Fish"), reference("Trout")]},
+            "FishOrName": {"oneOf": [{"type": "string"}, reference("Fish"), reference("Bird")]},
+        })))?;
+        for (name, property) in [("Pet", "kind"), ("ByWater", "water")] {
+            let Shape::Union(union) = shape_of(&shapes, name)? else {
+                eyre::bail!("`{name}` is a union");
+            };
+            assert_eq!(
+                union
+                    .tag
+                    .as_ref()
+                    .map(|tag| (tag.property.as_str(), tag.style)),
+                Some((property, TagStyle::Consumed)),
+                "{name}"
+            );
+        }
+        for name in ["PetOrName", "PetOrList", "FishOrName"] {
+            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
+        }
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            [
+                "/components/schemas/FishOrName",
+                "/components/schemas/PetOrList",
+                "/components/schemas/PetOrName",
+            ],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// An object that requires `kind` with one value and declares nothing else.
+    fn tag_only(kind: &str) -> Value {
+        json!({
+            "type": "object",
+            "required": ["kind"],
+            "properties": {"kind": {"type": "string", "enum": [kind]}},
+        })
+    }
+
+    /// What a union beside other kinds would newly reach cannot move another union's tag, because
+    /// its branches of other kinds hold scalar data alone.
+    /// A list of cats is a place the cat keeps `kind`, which the unions over the cats take off it,
+    /// and a list of a union of its own would settle a tag nothing settled before.
+    /// So the unions over the cats keep consuming the tag, and still say they both do, the hen
+    /// keeps hers, and each union beside a list degrades as it did.
+    #[test_util::test]
+    fn what_a_union_beside_other_kinds_reaches_leaves_other_tags_alone() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let named = |kind: &str| named_object("kind", &[kind]);
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(json!({
+            "Cat": named("cat"),
+            "Dog": named("dog"),
+            "Pet": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "Animal": {
+                "oneOf": [reference("Cat"), reference("Dog")],
+                "discriminator": {"propertyName": "kind"},
+            },
+            "PetOrList": {"oneOf": [
+                reference("Cat"),
+                reference("Dog"),
+                {"type": "array", "items": reference("Cat")},
+            ]},
+            "Bird": named("bird"),
+            "Fish": named("fish"),
+            "BirdOrCats": {"oneOf": [
+                reference("Bird"),
+                reference("Fish"),
+                {"type": "array", "items": reference("Cat")},
+            ]},
+            "Hen": named("hen"),
+            "Duck": named("duck"),
+            "BirdOrFlock": {"oneOf": [
+                reference("Bird"),
+                reference("Fish"),
+                {"type": "array", "items": {"oneOf": [reference("Hen"), reference("Duck")]}},
+            ]},
+        })))?;
+        for name in ["Pet", "Animal"] {
+            let Shape::Union(union) = shape_of(&shapes, name)? else {
+                eyre::bail!("`{name}` is a union");
+            };
+            assert_eq!(
+                union.tag.as_ref().map(|tag| tag.style),
+                Some(TagStyle::Consumed),
+                "{name}"
+            );
+        }
+        let Shape::Struct(cat) = shape_of(&shapes, "Cat")? else {
+            eyre::bail!("`Cat` is a struct");
+        };
+        assert!(cat.fields.iter().all(|field| field.wire != "kind"));
+        assert!(
+            !reported_at(&diagnostics, BreakageClass::MultiParentDiscriminator).is_empty(),
+            "{diagnostics:?}"
+        );
+        let Shape::Struct(hen) = shape_of(&shapes, "Hen")? else {
+            eyre::bail!("`Hen` is a struct");
+        };
+        assert!(hen.fields.iter().any(|field| field.wire == "kind"));
+        for name in ["PetOrList", "BirdOrCats", "BirdOrFlock"] {
+            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
+        }
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            [
+                "/components/schemas/BirdOrCats",
+                "/components/schemas/BirdOrFlock",
+                "/components/schemas/PetOrList",
+            ],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A union beside other kinds stays arbitrary JSON where typing it would change how anything
+    /// else reads it: over an object with a union flattened into it, or beside members its objects
+    /// would drop.
+    #[test_util::test]
+    fn a_union_beside_other_kinds_that_would_change_another_reading_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let detection = |members: Value| {
+            let mut union = json!({"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Google"),
+                reference("Vapi"),
+            ]});
+            if let (Some(union), Value::Object(members)) = (union.as_object_mut(), members) {
+                union.extend(members);
+            }
+            union
+        };
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            // The control, typed
+            "Detection": detection(json!({})),
+            // A member beside the union its objects do not declare
+            "Described": detection(json!({"properties": {"note": {"type": "string"}}})),
+            // An object with a union flattened beside its members
+            "Mixed": {
+                "type": "object",
+                "required": ["provider"],
+                "properties": {"provider": {"type": "string", "enum": ["mixed"]}},
+                "anyOf": [
+                    {"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "required": ["b"], "properties": {"b": {"type": "string"}}},
+                ],
+            },
+            "Flattening": {"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Google"),
+                reference("Mixed"),
+            ]},
+        })))?;
+        assert!(matches!(shape_of(&shapes, "Detection")?, Shape::Union(_)));
+        for name in ["Described", "Flattening"] {
+            assert_eq!(shape_of(&shapes, name)?, &Shape::Any, "{name}");
+        }
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            [
+                "/components/schemas/Described",
+                "/components/schemas/Flattening",
+            ],
+            "{diagnostics:?}"
+        );
+        assert!(
+            reported_at(&diagnostics, BreakageClass::UnsupportedConstruct).is_empty(),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Which unions beside other kinds are typed does not turn on the order they are classified
+    /// in: two over the same objects, listed either way round, are both typed, each the same.
+    #[test_util::test]
+    fn unions_beside_other_kinds_are_admitted_whatever_their_order() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let detection =
+            |other: Value| json!({"oneOf": [other, reference("Google"), reference("Vapi")]});
+        let schemas = |first: &str, second: &str| {
+            let mut schemas = serde_json::Map::new();
+            schemas.insert("Google".to_owned(), named_object("provider", &["google"]));
+            schemas.insert("Vapi".to_owned(), named_object("provider", &["vapi"]));
+            schemas.insert(first.to_owned(), detection(json!({"type": "string"})));
+            schemas.insert(
+                second.to_owned(),
+                detection(json!({"type": "array", "items": {"type": "integer"}})),
+            );
+            Value::Object(schemas)
+        };
+        let (forward, forward_diagnostics) = shapes_admitting(with_schemas(schemas("Aa", "Bb")))?;
+        let (backward, backward_diagnostics) = shapes_admitting(with_schemas(schemas("Bb", "Aa")))?;
+        assert!(forward_diagnostics.is_empty(), "{forward_diagnostics:?}");
+        assert!(backward_diagnostics.is_empty(), "{backward_diagnostics:?}");
+        for name in ["Aa", "Bb"] {
+            assert!(
+                matches!(shape_of(&forward, name)?, Shape::Union(_)),
+                "{name}"
+            );
+            assert!(
+                matches!(shape_of(&backward, name)?, Shape::Union(_)),
+                "{name}"
+            );
+        }
+        let tags = |shapes: &Shapes, name: &str| -> eyre::Result<Option<Tag>> {
+            let Shape::Union(union) = shape_of(shapes, name)? else {
+                eyre::bail!("`{name}` is a union");
+            };
+            Ok(union.tag.clone().map(|tag| Tag {
+                kinds: Vec::new(),
+                ..tag
+            }))
+        };
+        assert_eq!(tags(&forward, "Aa")?, tags(&backward, "Bb")?);
+        assert_eq!(tags(&forward, "Bb")?, tags(&backward, "Aa")?);
+    }
+
+    /// [`shapes_of`], checking first that admitting the unions beside other kinds changes nothing
+    /// but them ([`installs_only_what_it_admits`]).
+    fn shapes_admitting(document: Value) -> eyre::Result<(Shapes, Vec<Diagnostic>)> {
+        let mut ctx = Ctx::new();
+        let normalized = normalize::normalize(document, &mut ctx)?;
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        installs_only_what_it_admits(&resolved)?;
+        let shapes = classify(&resolved, IntegerWidth::Wide, &mut ctx);
+        Ok((shapes, ctx.into_diagnostics()))
+    }
+
+    /// Install what admission decided for `resolved`, check that it changed no shape
+    /// classification found but each admitted union's arbitrary JSON, and that it added exactly
+    /// the shapes those unions' branches of other kinds reach, and return the admitted unions.
+    fn installs_only_what_it_admits(
+        resolved: &ResolvedDocument,
+    ) -> eyre::Result<BTreeSet<ShapeKey>> {
+        let integers = IntegerWidth::Wide;
+        let mut discovered = super::discover(resolved, integers);
+        let settlement = super::discriminate::settle(&discovered.shapes);
+        let admission = super::admit::admit(resolved, &discovered, &settlement, integers);
+        let admitted: BTreeSet<ShapeKey> = admission.unions.keys().cloned().collect();
+        let before = discovered.shapes.by_key.clone();
+        discovered.install(resolved, admission);
+        let after = &discovered.shapes.by_key;
+
+        let mut queue = Vec::new();
+        for (key, shape) in &before {
+            let installed = after.get(key).ok_or_eyre("installing drops no shape")?;
+            if !admitted.contains(key) {
+                assert_eq!(installed, shape, "{key:?}");
+                continue;
+            }
+            // Only the arbitrary JSON is typed, inside every `Option` it was in.
+            let (untyped, union) = untyped(installed);
+            assert_eq!(&untyped, shape, "{key:?}");
+            let union = union.ok_or_eyre("an admitted union is typed")?;
+            for kind in union.tag.iter().flat_map(|tag| &tag.kinds) {
+                match kind {
+                    ShapeRef::Key(key) => queue.push(key.clone()),
+                    ShapeRef::Inline(inner) => super::children(inner, &mut queue),
+                }
+            }
+        }
+        // What the branches of other kinds reach that classification did not.
+        let mut reached = BTreeSet::new();
+        while let Some(key) = queue.pop() {
+            if before.contains_key(&key) || !reached.insert(key.clone()) {
+                continue;
+            }
+            let shape = after.get(&key).ok_or_eyre("a reached shape is installed")?;
+            super::children(shape, &mut queue);
+        }
+        let added: BTreeSet<ShapeKey> = after
+            .keys()
+            .filter(|key| !before.contains_key(*key))
+            .cloned()
+            .collect();
+        assert_eq!(added, reached);
+        Ok(admitted)
+    }
+
+    /// `shape` with the union inside its `Option`s back to arbitrary JSON, and that union.
+    fn untyped(shape: &Shape) -> (Shape, Option<&Union>) {
+        match shape {
+            Shape::Optional(ShapeRef::Inline(inner)) => {
+                let (inner, union) = untyped(inner);
+                (Shape::Optional(ShapeRef::Inline(Box::new(inner))), union)
+            }
+            Shape::Union(union) => (Shape::Any, Some(union)),
+            other => (other.clone(), None),
+        }
+    }
+
+    /// A union beside other kinds stays arbitrary JSON where settling read a variant's tag
+    /// declaration through it, however many `Option`s and aliases stand between, while one
+    /// nothing reads so is typed, and the union reading the tag settles as it does without it.
+    #[test_util::test]
+    fn a_union_beside_other_kinds_a_tag_declaration_reads_through_degrades() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let detection = || {
+            json!({"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Google"),
+                reference("Vapi"),
+            ]})
+        };
+        let schemas = |label: Value| {
+            with_schemas(json!({
+                "Google": named_object("provider", &["google"]),
+                "Vapi": named_object("provider", &["vapi"]),
+                "Control": detection(),
+                "Label": label,
+                "Labelled": {
+                    "type": "object",
+                    "required": ["label"],
+                    "properties": {"label": reference("Label"), "a": {"type": "string"}},
+                },
+                "Marked": {
+                    "type": "object",
+                    "required": ["label"],
+                    "properties": {"label": {"type": "string"}, "b": {"type": "string"}},
+                },
+                // Nullable twice over: by its `type` and by a branch
+                "Either": {
+                    "type": ["object", "null"],
+                    "oneOf": [reference("Labelled"), reference("Marked"), {"type": "null"}],
+                    "discriminator": {"propertyName": "label"},
+                },
+                "Detection": detection(),
+            }))
+        };
+        // The tag declared as `Detection` through a nullable alias, against the same tag declared
+        // as arbitrary JSON.
+        let (shapes, diagnostics) = shapes_admitting(schemas(
+            json!({"anyOf": [reference("Detection"), {"type": "null"}]}),
+        ))?;
+        let (baseline, _) = shapes_of(schemas(json!({})))?;
+        assert_eq!(shape_of(&shapes, "Detection")?, &Shape::Any);
+        assert!(matches!(shape_of(&shapes, "Control")?, Shape::Union(_)));
+        // How `Either` reads its tag and what its variants keep, by name.
+        let reading = |shapes: &Shapes| -> eyre::Result<_> {
+            let (_, either) = untyped(shape_of(shapes, "Either")?);
+            let either = either.ok_or_eyre("`Either` is a union")?;
+            let tag = either.tag.as_ref().ok_or_eyre("`Either` is tagged")?;
+            let mut members = Vec::new();
+            for name in ["Labelled", "Marked"] {
+                let Shape::Struct(variant) = shape_of(shapes, name)? else {
+                    eyre::bail!("`{name}` is a struct");
+                };
+                let wires: Vec<String> = variant.fields.iter().map(|f| f.wire.clone()).collect();
+                members.push(wires);
+            }
+            let tags: Vec<Option<String>> = either.variants.iter().map(|v| v.tag.clone()).collect();
+            Ok((tag.property.clone(), tag.style, tags, members))
+        };
+        assert_eq!(reading(&shapes)?, reading(&baseline)?);
+        assert_eq!(reading(&shapes)?.1, TagStyle::Consumed);
+        assert_eq!(
+            reported_at(&diagnostics, BreakageClass::WildUnion),
+            ["/components/schemas/Detection"],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// A union beside other kinds that is nullable both by its `type` and by a branch is typed
+    /// inside both `Option`s.
+    #[test_util::test]
+    fn a_union_beside_other_kinds_typed_keeps_every_option_around_it() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            "Detection": {
+                "type": ["string", "object", "null"],
+                "oneOf": [
+                    {"type": "string", "enum": ["off"]},
+                    reference("Google"),
+                    reference("Vapi"),
+                    {"type": "null"},
+                ],
+            },
+        })))?;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let Shape::Optional(ShapeRef::Inline(outer)) = shape_of(&shapes, "Detection")? else {
+            eyre::bail!("`Detection` is optional");
+        };
+        let Shape::Optional(ShapeRef::Inline(inner)) = outer.as_ref() else {
+            eyre::bail!("`Detection` is optional twice: {outer:?}");
+        };
+        assert!(matches!(inner.as_ref(), Shape::Union(_)), "{inner:?}");
+    }
+
+    /// A bundle whose roots reach a string only through a union beside other kinds adds it when
+    /// the union is typed, under the name the bundle gives it.
+    #[test_util::test]
+    fn a_bundle_adds_the_string_only_a_typed_union_reaches_under_its_own_name() {
+        let reference = |name: &str| json!({"$ref": format!("#/definitions/{name}")});
+        let bundle = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "definitions": {
+                "Off": {"type": "string", "enum": ["off"]},
+                "Google": named_object("provider", &["google"]),
+                "Vapi": named_object("provider", &["vapi"]),
+                "Detection": {"oneOf": [reference("Off"), reference("Google"), reference("Vapi")]},
+                "Holder": {
+                    "type": "object",
+                    "properties": {
+                        "detection": reference("Detection"),
+                        "google": reference("Google"),
+                        "vapi": reference("Vapi"),
+                    },
+                },
+            },
+        });
+        let input = crate::SchemaInput {
+            namespaces: vec!["/definitions".to_owned()],
+            roots: vec![crate::SchemaRoot {
+                name: "Holder".to_owned(),
+                direction: crate::doc::Direction::Sent,
+            }],
+        };
+        let mut ctx = Ctx::new();
+        let parsed = crate::bundle::read(bundle, &input, &mut ctx)?;
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        assert_eq!(installs_only_what_it_admits(&resolved)?.len(), 1);
+        let shapes = classify(&resolved, IntegerWidth::Wide, &mut ctx);
+        let ShapeRef::Key(off) = component_key(&shapes, "Off")? else {
+            eyre::bail!("a component is a key");
+        };
+        assert!(
+            matches!(shapes.get(&off), Some(Shape::StringEnum(_))),
+            "{:?}",
+            shapes.get(&off)
+        );
+    }
+
+    /// Scalar data two typed unions share is classified and reported once, and scalar data only a
+    /// union that stays arbitrary JSON reaches is neither added nor reported.
+    #[test_util::test]
+    fn scalar_data_typed_unions_reach_is_reported_once_and_a_rejected_ones_never() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let detection =
+            |other: Value| json!({"oneOf": [other, reference("Google"), reference("Vapi")]});
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            // Only the unions reach the integer, which the second takes from the first.
+            "First": detection(json!({"type": "integer", "minimum": 3})),
+            "Second": detection(json!({
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/First/oneOf/0"},
+            })),
+            // A list of objects is not scalar data, so the union stays arbitrary JSON however its
+            // integer reads.
+            "Rejected": {"oneOf": [
+                {"type": "integer", "minimum": 5},
+                {"type": "array", "items": {"type": "object", "properties": {"a": {"type": "string"}}}},
+                reference("Google"),
+                reference("Vapi"),
+            ]},
+        })))?;
+        for name in ["First", "Second"] {
+            assert!(
+                matches!(shape_of(&shapes, name)?, Shape::Union(_)),
+                "{name}"
+            );
+        }
+        assert_eq!(shape_of(&shapes, "Rejected")?, &Shape::Any);
+        let restricted: Vec<(String, u32)> = diagnostics
+            .iter()
+            .filter(|found| found.class() == BreakageClass::UnsupportedConstruct)
+            .map(|found| (found.location().to_string(), found.occurrences().get()))
+            .collect();
+        assert_eq!(
+            restricted,
+            [("/components/schemas/First/oneOf/0".to_owned(), 1)],
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Where a typed union would report the finding unions that stay arbitrary JSON report, the
+    /// finding holds only the ones that stay, in the order they are classified (the work list's,
+    /// last listed first), and an acceptance of the typed one matches nothing.
+    #[test_util::test]
+    fn a_typed_union_leaves_no_trace_in_the_finding_it_shares_with_those_that_stay() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        // Members beside the union that its objects do not declare keep it arbitrary JSON.
+        let detection = |beside: bool| {
+            let mut union = json!({"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Google"),
+                reference("Vapi"),
+            ]});
+            if beside && let Some(union) = union.as_object_mut() {
+                union.insert("properties".to_owned(), json!({"note": {"type": "string"}}));
+            }
+            union
+        };
+        let document = with_schemas(json!({
+            "Google": named_object("provider", &["google"]),
+            "Vapi": named_object("provider", &["vapi"]),
+            "Aa": detection(true),
+            "Bb": detection(false),
+            "Cc": detection(true),
+            "Dd": detection(true),
+        }));
+        let accepted = |name: &str| -> eyre::Result<crate::diag::Accepted> {
+            Ok(crate::diag::Accepted {
+                class: BreakageClass::WildUnion,
+                action: crate::diag::Action::Degrade,
+                at: crate::diag::JsonPointer::parse(&format!("/components/schemas/{name}"))
+                    .ok_or_eyre("a pointer")?,
+            })
+        };
+        let mut ctx = Ctx::new().accepting([accepted("Bb")?, accepted("Dd")?]);
+        let normalized = normalize::normalize(document, &mut ctx)?;
+        let parsed = doc_parse::document(normalized, &mut ctx);
+        let resolved = resolve::resolve(parsed, &mut ctx);
+        let shapes = classify(&resolved, IntegerWidth::Wide, &mut ctx);
+        assert!(matches!(shape_of(&shapes, "Bb")?, Shape::Union(_)));
+        assert_eq!(ctx.unmatched_accepts().collect::<Vec<_>>(), [0]);
+        let found: Vec<(String, Vec<String>, u32, bool)> = ctx
+            .into_diagnostics()
+            .iter()
+            .filter(|found| found.class() == BreakageClass::WildUnion)
+            .map(|found| {
+                (
+                    found.location().to_string(),
+                    found.related().iter().map(ToString::to_string).collect(),
+                    found.occurrences().get(),
+                    found.accepted(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("/components/schemas/Dd".to_owned(), vec![], 1, true),
+                (
+                    "/components/schemas/Cc".to_owned(),
+                    vec!["/components/schemas/Aa".to_owned()],
+                    2,
+                    false
+                ),
+            ]
+        );
+    }
+
+    /// A typed union reaching objects classification reached before it leaves the order of their
+    /// findings alone: a finding they share with another type keeps the location it was first
+    /// reported at.
+    #[test_util::test]
+    fn a_typed_union_keeps_where_its_objects_findings_were_first_reported() {
+        let reference = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
+        let counted = |provider: &str| {
+            json!({
+                "type": "object",
+                "required": ["provider"],
+                "properties": {
+                    "provider": {"type": "string", "enum": [provider]},
+                    "count": {"type": "integer", "minimum": 3},
+                },
+            })
+        };
+        let schemas = json!({
+            "Google": counted("google"),
+            "Vapi": counted("vapi"),
+            // Classified first and listing its objects the other way round, so it reaches them in
+            // the other order.
+            "Voicemail": {"oneOf": [
+                {"type": "string", "enum": ["off"]},
+                reference("Vapi"),
+                reference("Google"),
+            ]},
+        });
+        let (shapes, diagnostics) = shapes_admitting(with_schemas(schemas.clone()))?;
+        assert!(matches!(shape_of(&shapes, "Voicemail")?, Shape::Union(_)));
+        // The same document with the union left out reports the finding the same way.
+        let mut without = schemas;
+        if let Some(schemas) = without.as_object_mut() {
+            schemas.remove("Voicemail");
+        }
+        let (_, baseline) = shapes_of(with_schemas(without))?;
+        let restricted = |diagnostics: &[Diagnostic]| -> Vec<(String, Vec<String>)> {
+            diagnostics
+                .iter()
+                .filter(|found| found.class() == BreakageClass::UnsupportedConstruct)
+                .map(|found| {
+                    (
+                        found.location().to_string(),
+                        found.related().iter().map(ToString::to_string).collect(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(restricted(&diagnostics), restricted(&baseline));
+        assert_eq!(
+            restricted(&diagnostics),
+            [(
+                "/components/schemas/Vapi/properties/count".to_owned(),
+                vec!["/components/schemas/Google/properties/count".to_owned()]
+            )]
         );
     }
 }
