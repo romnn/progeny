@@ -114,6 +114,8 @@ thiserror = "2"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 toml = "1"
 ureq = "3"
+# The corpus fetch retries a download that failed in transit; the blocking sleep is all it needs.
+backon = { version = "1.6", default-features = false, features = ["std", "std-blocking-sleep"] }
 # One corpus source is published only gzip-compressed: Anthropic's spec, which its SDK repository
 # keeps as `scripts/mock-spec.json.gz`.
 flate2 = "1"

@@ -611,10 +611,11 @@ fn fetch_all(specs: &[Spec], refresh: bool) -> eyre::Result<()> {
             }
             Err(error) => {
                 println!("failed");
+                // The alternate form carries the cause, such as the status a server answered.
                 if spec.pinned() {
-                    pinned_failed.push(format!("{}: {error}", spec.name));
+                    pinned_failed.push(format!("{}: {error:#}", spec.name));
                 } else {
-                    failed.push(format!("{}: {error}", spec.name));
+                    failed.push(format!("{}: {error:#}", spec.name));
                 }
             }
         }
@@ -651,21 +652,31 @@ fn download(url: &str) -> eyre::Result<Vec<u8>> {
         env!("CARGO_PKG_VERSION"),
         " (+https://github.com/romnn/progeny)"
     );
-    let mut response = ureq::get(url)
-        .header("User-Agent", agent)
-        .config()
-        .timeout_global(Some(Duration::from_mins(3)))
-        .build()
+    // One attempt is the request and the whole body, so a transfer cut off midway is retried too.
+    // Three attempts of at most 55 s, with the sleeps between them, stay within three minutes.
+    let attempt = || {
+        let mut response = ureq::get(url)
+            .header("User-Agent", agent)
+            .config()
+            .timeout_global(Some(Duration::from_secs(55)))
+            .build()
+            .call()?;
+        // Published descriptions get large: one is roughly 5 MB and several are bigger.
+        response
+            .body_mut()
+            .with_config()
+            .limit(256 * 1024 * 1024)
+            .read_to_vec()
+    };
+    let backoff = backon::ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(1))
+        .with_max_delay(Duration::from_secs(2))
+        .with_max_times(2)
+        .with_jitter();
+    let body = backon::BlockingRetryable::retry(attempt, backoff)
+        .when(transient)
         .call()
         .wrap_err_with(|| format!("GET {url}"))?;
-
-    // Published descriptions get large: one is roughly 5 MB and several are bigger.
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(256 * 1024 * 1024)
-        .read_to_vec()
-        .wrap_err_with(|| format!("reading the response body from {url}"))?;
     // A `.gz` source is a compressed file rather than a compressed transfer, so no
     // `Content-Encoding` says so and the cache keeps the description itself.
     let path = url.split(['?', '#']).next().unwrap_or(url);
@@ -691,6 +702,35 @@ fn download(url: &str) -> eyre::Result<Vec<u8>> {
         bail!("{url} served an HTML page rather than a description");
     }
     Ok(body)
+}
+
+/// Whether a download that failed may succeed when tried again: no response, a server error, a
+/// rate limit, or a connection that dropped mid-transfer.
+///
+/// A missing host, a body over the limit and a malformed response fail at once, because trying
+/// again gets the same answer.
+fn transient(error: &ureq::Error) -> bool {
+    use std::io::ErrorKind;
+    let dropped = |error: &std::io::Error| {
+        matches!(
+            error.kind(),
+            ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::ConnectionRefused
+                | ErrorKind::BrokenPipe
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::TimedOut
+                | ErrorKind::UnexpectedEof
+        )
+    };
+    match error {
+        ureq::Error::StatusCode(status) => *status == 429 || (500..=599).contains(status),
+        ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => true,
+        // The transparent gzip reader wraps a transfer cut off midway.
+        ureq::Error::Io(error) | ureq::Error::Decompress(_, error) => dropped(error),
+        _ => false,
+    }
 }
 
 /// Check every 3.0/3.1 pair, and say how many disagreed.
@@ -1343,8 +1383,43 @@ mod tests {
     use color_eyre::eyre::{self, OptionExt as _};
 
     use super::{
-        Args, Outcome, Spec, fetch_all, require_committed, require_crate_packaging, select, verdict,
+        Args, Outcome, Spec, fetch_all, require_committed, require_crate_packaging, select,
+        transient, verdict,
     };
+
+    /// A download is retried only when trying again may get another answer: a rate limit, a
+    /// server error, no response, or a connection that dropped mid-transfer.
+    #[test]
+    fn a_download_is_retried_only_for_a_failure_in_transit() {
+        use std::io::{Error, ErrorKind};
+        let io = |kind: ErrorKind| ureq::Error::Io(Error::from(kind));
+        let retried = [
+            ureq::Error::StatusCode(429),
+            ureq::Error::StatusCode(500),
+            ureq::Error::StatusCode(599),
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::ConnectionFailed,
+            io(ErrorKind::ConnectionReset),
+            io(ErrorKind::UnexpectedEof),
+            ureq::Error::Decompress("gzip", Error::from(ErrorKind::UnexpectedEof)),
+        ];
+        for error in &retried {
+            assert!(transient(error), "{error} should be retried");
+        }
+        let final_at_once = [
+            ureq::Error::StatusCode(404),
+            ureq::Error::StatusCode(408),
+            ureq::Error::StatusCode(499),
+            ureq::Error::StatusCode(600),
+            ureq::Error::HostNotFound,
+            ureq::Error::BodyExceedsLimit(1),
+            io(ErrorKind::PermissionDenied),
+            ureq::Error::Decompress("gzip", Error::from(ErrorKind::InvalidData)),
+        ];
+        for error in &final_at_once {
+            assert!(!transient(error), "{error} should fail at once");
+        }
+    }
 
     /// `Args` is a subcommand's argument group, so parsing it needs something to hang it on.
     #[derive(Debug, clap::Parser)]
