@@ -202,6 +202,10 @@ pub fn write_wire_test(directory: &Utf8Path, file_name: &str, source: &str) -> e
 }
 
 /// Append the shared synchronous test harness and write an integration test.
+///
+/// `serde_json` is declared with `raw_value`, which the payload comparison walks JSON text with.
+/// The feature adds a type and changes no parse, so the generated crate's own `serde_json`, which
+/// cargo unifies with this one, reads payloads as a consumer's would.
 pub fn write_test(directory: &Utf8Path, file_name: &str, source: &str) -> eyre::Result<()> {
     let manifest = directory.join("Cargo.toml");
     let existing =
@@ -212,6 +216,7 @@ pub fn write_test(directory: &Utf8Path, file_name: &str, source: &str) -> eyre::
             {existing}
             [dev-dependencies]
             color-eyre = "0.6"
+            serde_json = {{ version = "1", features = ["raw_value"] }}
             test-util = {{ path = "../../../crates/test-util" }}
         "#},
     )

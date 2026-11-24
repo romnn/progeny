@@ -19,7 +19,8 @@ progeny = { workspace = true, features = ["harness", "exact-numbers"] }
 quote.workspace = true
 rayon.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `raw_value`, because the payload comparison walks JSON text without parsing its numbers.
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 syn.workspace = true
 toml.workspace = true
