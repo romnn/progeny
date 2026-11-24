@@ -1381,6 +1381,23 @@ mod tests {
         assert!(rendered.contains("Integer(Box<i64>)"), "{rendered}");
     }
 
+    /// A keyed union holds the payload under its one key behind a box, as every union does.
+    #[test_util::test]
+    fn a_keyed_union_boxes_its_payload() {
+        let rendered = types(
+            with_schemas(json!({
+                "Source": {"oneOf": [
+                    {"type": "string", "enum": ["cli"]},
+                    {"type": "object", "required": ["custom"], "properties": {
+                        "custom": {"type": "string"},
+                    }, "additionalProperties": false},
+                ]},
+            })),
+            &Config::default(),
+        )?;
+        assert!(rendered.contains("Custom(Box<String>)"), "{rendered}");
+    }
+
     /// Self-naming tagged unions whose branches each carry a title: two carry only their tag, and
     /// one carries a member beside it.
     fn tag_only_branches() -> Value {

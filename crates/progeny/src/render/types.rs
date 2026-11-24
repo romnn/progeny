@@ -500,7 +500,7 @@ fn data_enum(
     };
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
+        let ty = reference(&variant.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
     // Last, because an untagged enum takes the first variant that reads the payload and
@@ -593,7 +593,7 @@ fn keyed_enum(
         let rename = (variant_ident != *wire).then(|| quote! { #[serde(rename = #wire)] });
         // A data variant holds its payload; a unit variant is its bare string.
         if let Some(payload) = &variant.payload {
-            let ty = enum_type_ref(payload, contracts, config, scope);
+            let ty = reference(payload, contracts, config, scope);
             quote! { #rename #variant_ident(#ty), }
         } else {
             quote! { #rename #variant_ident, }
@@ -626,13 +626,13 @@ fn carried_tag_enum(
     let name = ident(contract.rust_name());
     let arms = variants.iter().map(|variant| {
         let variant_ident = ident(&variant.rust_name);
-        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
+        let ty = reference(&variant.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
     // The variants holding a value of another kind than an object
     let kinds = kinds.iter().map(|kind| {
         let variant_ident = ident(&kind.rust_name);
-        let ty = enum_type_ref(&kind.ty, contracts, config, scope);
+        let ty = reference(&kind.ty, contracts, config, scope);
         quote! { #variant_ident(#ty), }
     });
     let fallback = fallback_variant(fallback, "names no variant in its tag");
@@ -683,7 +683,7 @@ fn tagged_enum(
         if variant.ty == TypeRef::Unit {
             return quote! { #rename #variant_ident, };
         }
-        let ty = enum_type_ref(&variant.ty, contracts, config, scope);
+        let ty = reference(&variant.ty, contracts, config, scope);
         quote! { #rename #variant_ident(#ty), }
     });
     // serde tries every tagged variant first and falls through to an untagged one only when
@@ -1023,25 +1023,6 @@ pub(crate) fn response_enum_type_path(
 /// Whether a response enum payload receives the stable non-unit indirection.
 pub(crate) fn response_body_is_boxed(body: &ResponseBody) -> bool {
     !matches!(body, ResponseBody::Empty)
-}
-
-/// Whether an enum payload receives the stable non-unit indirection.
-pub(crate) fn enum_type_is_boxed(ty: &TypeRef) -> bool {
-    !matches!(ty, TypeRef::Unit)
-}
-
-fn enum_type_ref(
-    ty: &TypeRef,
-    contracts: &Contracts,
-    config: &Config,
-    scope: Scope,
-) -> TokenStream {
-    let rendered = reference(ty, contracts, config, scope);
-    if enum_type_is_boxed(ty) {
-        quote! { Box<#rendered> }
-    } else {
-        rendered
-    }
 }
 
 fn reference(ty: &TypeRef, contracts: &Contracts, config: &Config, scope: Scope) -> TokenStream {

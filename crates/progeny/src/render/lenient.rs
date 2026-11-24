@@ -11,7 +11,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use super::serde_impl::implementation_type;
-use super::types::{Scope, enum_type_is_boxed, type_ref_in};
+use super::types::{Scope, type_ref_in};
 use crate::config::{Config, UnknownFields};
 use crate::contract::{
     Capture, ContractKind, Contracts, FieldContract, Form, Presence, RustIdent, SkipRule,
@@ -372,11 +372,18 @@ fn tagged_body(
         .map(|(variant, pattern)| {
             let name = ident(&variant.rust_name);
             let ty = type_ref_in(&variant.ty, contracts, config, scope);
-            let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
+            // A variant is its own constructor, and a closure around it is a lint in the
+            // consumer's build.
+            let construct = if contract.docs().deprecated {
+                let wrap = wrapped(true, &name);
+                quote! { |value| #wrap }
+            } else {
+                quote! { Self::#name }
+            };
             // Every position of a spelling of the variant's tag
             quote! {
                 Some(#pattern) => <#ty as #support::Lenient<'de>>::lenient(#payload, site, report)
-                    .map(|value| #wrap),
+                    .map(#construct),
             }
         });
     // A value that is not an object is the first variant of its kind that reads it, and one none
@@ -414,7 +421,7 @@ fn tagged_body(
         .map(|(variant, pattern)| {
             let name = ident(&variant.rust_name);
             let ty = type_ref_in(&variant.ty, contracts, config, scope);
-            let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
+            let wrap = wrapped(contract.docs().deprecated, &name);
             quote! {
                 #pattern => {
                     if let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
@@ -451,7 +458,7 @@ fn probe(
     let support = scope.support();
     let name = ident(&variant.rust_name);
     let ty = type_ref_in(&variant.ty, contracts, config, scope);
-    let wrap = wrapped(&variant.ty, contract.docs().deprecated, &name);
+    let wrap = wrapped(contract.docs().deprecated, &name);
     quote! {
         if #guard let Some(value) = #support::lenient::probe::<#ty>(&content, site, report) {
             return Ok(#wrap);
@@ -510,7 +517,7 @@ fn keyed_body(
         let payload = variant.payload.as_ref()?;
         let name = ident(&variant.rust_name);
         let ty = type_ref_in(payload, contracts, config, scope);
-        let wrap = wrapped(payload, deprecated, &name);
+        let wrap = wrapped(deprecated, &name);
         Some(quote! {
             #support::KeyedChoice::Data(#index) => {
                 Ok(match #support::lenient::keyed_payload::<#ty>(content, site, report)? {
@@ -537,13 +544,8 @@ fn keyed_body(
     }
 }
 
-/// A read value placed in its variant, boxed the way the enum declares it.
-fn wrapped(ty: &TypeRef, deprecated: bool, variant: &proc_macro2::Ident) -> TokenStream {
-    let value = if enum_type_is_boxed(ty) {
-        quote! { Box::new(value) }
-    } else {
-        quote! { value }
-    };
+/// A read value placed in its variant.
+fn wrapped(deprecated: bool, variant: &proc_macro2::Ident) -> TokenStream {
     if deprecated {
         quote! {
             {
@@ -551,12 +553,12 @@ fn wrapped(ty: &TypeRef, deprecated: bool, variant: &proc_macro2::Ident) -> Toke
                     deprecated,
                     reason = "the generated decoder must construct this deprecated variant"
                 )]
-                let resolved = Self::#variant(#value);
+                let resolved = Self::#variant(value);
                 resolved
             }
         }
     } else {
-        quote! { Self::#variant(#value) }
+        quote! { Self::#variant(value) }
     }
 }
 
@@ -643,7 +645,7 @@ fn from_strict(
             let pairs = variants
                 .iter()
                 .zip(strict_variants)
-                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
+                .map(|(variant, source)| (&variant.rust_name, &source.ty));
             variant_conversions(pairs, fallback, &strict_name, contracts)
         }
         (
@@ -658,7 +660,7 @@ fn from_strict(
             let pairs = variants
                 .iter()
                 .zip(strict_variants)
-                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty));
+                .map(|(variant, source)| (&variant.rust_name, &source.ty));
             variant_conversions(pairs, fallback, &strict_name, contracts)
         }
         (
@@ -677,12 +679,12 @@ fn from_strict(
             let pairs = variants
                 .iter()
                 .zip(strict_variants)
-                .map(|(variant, source)| (&variant.rust_name, &variant.ty, &source.ty))
+                .map(|(variant, source)| (&variant.rust_name, &source.ty))
                 .chain(
                     kinds
                         .iter()
                         .zip(strict_kinds)
-                        .map(|(kind, source)| (&kind.rust_name, &kind.ty, &source.ty)),
+                        .map(|(kind, source)| (&kind.rust_name, &source.ty)),
                 );
             variant_conversions(pairs, fallback, &strict_name, contracts)
         }
@@ -781,14 +783,14 @@ fn struct_conversion(
 /// Every variant holds a payload: a tag-only branch any response reaches keeps its empty struct
 /// rather than becoming a unit variant, and a twinned union is one a response reaches.
 fn variant_conversions<'a>(
-    pairs: impl Iterator<Item = (&'a RustIdent, &'a TypeRef, &'a TypeRef)>,
+    pairs: impl Iterator<Item = (&'a RustIdent, &'a TypeRef)>,
     fallback: &RustIdent,
     strict_name: &TokenStream,
     contracts: &Contracts,
 ) -> TokenStream {
-    let arms = pairs.map(|(name, read, strict)| {
+    let arms = pairs.map(|(name, strict)| {
         let name = ident(name);
-        let converted = boxed_convert(strict, read, contracts);
+        let converted = convert(quote! { value }, strict, contracts);
         quote! { #strict_name::#name(value) => Self::#name(#converted), }
     });
     let fallback = ident(fallback);
@@ -814,8 +816,8 @@ fn keyed_conversion(
         .zip(strict_variants)
         .map(|(variant, source)| {
             let name = ident(&variant.rust_name);
-            if let (Some(read), Some(strict)) = (&variant.payload, &source.payload) {
-                let converted = boxed_convert(strict, read, contracts);
+            if let Some(strict) = &source.payload {
+                let converted = convert(quote! { value }, strict, contracts);
                 quote! { #strict_name::#name(value) => Self::#name(#converted), }
             } else {
                 quote! { #strict_name::#name => Self::#name, }
@@ -827,26 +829,6 @@ fn keyed_conversion(
             #(#arms)*
             #strict_name::#fallback(value) => Self::#fallback(value),
         }
-    }
-}
-
-/// A boxed variant payload, converted if its type twins.
-fn boxed_convert(strict: &TypeRef, read: &TypeRef, contracts: &Contracts) -> TokenStream {
-    if !needs_conversion(strict, contracts) {
-        return quote! { value };
-    }
-    if enum_type_is_boxed(read) {
-        // Unboxed into a binding first: a method chain would bind tighter than a bare deref,
-        // and parentheses around a deref that needs none are a lint in the consumer's build.
-        let inner = convert(quote! { unboxed }, strict, contracts);
-        quote! {
-            {
-                let unboxed = *value;
-                Box::new(#inner)
-            }
-        }
-    } else {
-        convert(quote! { value }, strict, contracts)
     }
 }
 
@@ -890,6 +872,8 @@ fn convert(value: TokenStream, ty: &TypeRef, contracts: &Contracts) -> TokenStre
             let inner = convert(quote! { inner }, inner, contracts);
             quote! { #value.into_iter().map(|(key, inner)| (key, #inner)).collect() }
         }
+        // Unboxed into a binding first: a method chain would bind tighter than a bare deref,
+        // and parentheses around a deref that needs none are a lint in the consumer's build.
         TypeRef::Boxed(inner) => {
             let inner = convert(quote! { unboxed }, inner, contracts);
             quote! {

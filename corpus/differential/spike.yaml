@@ -115,6 +115,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NoteBoard"
+  /chapters:
+    post:
+      operationId: postChapter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Chapter"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chapter"
 components:
   schemas:
     Spike:
@@ -591,3 +606,25 @@ components:
           $ref: "#/components/schemas/SharedNotes"
         status:
           $ref: "#/components/schemas/NoteStatus"
+    # A cycle through two struct members and a union: `Chapter` holds an optional `Section`, which
+    # holds an optional `Passage`, a union whose object branch is `Chapter`.
+    # The union's payload is already boxed, so no member on the cycle is, and `Chapter`, whose name
+    # sorts first, is where a member would be boxed otherwise.
+    # A request sends it and a response reads it, so it has strict and read forms.
+    Chapter:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+        section:
+          $ref: "#/components/schemas/Section"
+    Section:
+      type: object
+      properties:
+        body:
+          $ref: "#/components/schemas/Passage"
+    Passage:
+      oneOf:
+        - $ref: "#/components/schemas/Chapter"
+        - type: string
