@@ -4988,6 +4988,46 @@ mod tests {
         }
     }
 
+    /// A lenient crate whose types hold a `HashMap` ships the decoder's impl for it, and one
+    /// configured with the default map does not name `HashMap` at all.
+    #[test_util::test]
+    fn the_lenient_decoder_reads_a_hash_map_only_where_one_is_configured() {
+        let document = json!({
+            "openapi": "3.1.0",
+            "paths": {"/tags": {"get": {
+                "operationId": "getTags",
+                "responses": {"200": {"description": "the tags", "content": {
+                    "application/json": {"schema": {
+                        "type": "object",
+                        "properties": {"tags": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        }},
+                    }},
+                }}},
+            }}},
+        });
+        let support = |map| -> eyre::Result<String> {
+            let config = Config {
+                map,
+                ..Config::default()
+            };
+            let mut rendered = files(document.clone(), &config)?;
+            rendered
+                .remove(camino::Utf8Path::new("src/support.rs"))
+                .ok_or_eyre("the crate ships a support module")
+        };
+
+        let hash_map = support(crate::config::MapKind::HashMap)?;
+        assert!(
+            hash_map.contains("Lenient<'de> for std::collections::HashMap<String, T>"),
+            "{hash_map}"
+        );
+        // A consumer that refuses `HashMap` for its iteration order can build the default.
+        let b_tree_map = support(crate::config::MapKind::BTreeMap)?;
+        assert!(!b_tree_map.contains("HashMap"), "{b_tree_map}");
+    }
+
     /// The `serde`, `serde_json`, `indoc` and `thiserror` lines a manifest declares, in order.
     fn baseline_dependencies(manifest: &str) -> Vec<&str> {
         manifest

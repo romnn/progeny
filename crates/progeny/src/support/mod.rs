@@ -284,8 +284,11 @@ fn degradations_module(lenient: bool) -> proc_macro2::TokenStream {
     }
 }
 
-/// The leaf types the lenient decoder has to read that the shipped file cannot name itself:
-/// the format crates a configuration chose, and the one map type outside `std`.
+/// The leaf types the lenient decoder has to read that the shipped file does not name itself:
+/// the format crates a configuration chose, and the map types other than its `BTreeMap`.
+///
+/// `HashMap` is in `std`, and still left out of the shipped file unless the configuration chose
+/// it: a consumer may refuse it for its iteration order, the way Clippy's `disallowed-types` can.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LeafUse {
     pub(crate) chrono: bool,
@@ -293,6 +296,7 @@ pub(crate) struct LeafUse {
     pub(crate) jiff: bool,
     pub(crate) uuid: bool,
     pub(crate) indexmap: bool,
+    pub(crate) hashmap: bool,
 }
 
 impl LeafUse {
@@ -304,6 +308,7 @@ impl LeafUse {
             jiff: self.jiff || other.jiff,
             uuid: self.uuid || other.uuid,
             indexmap: self.indexmap || other.indexmap,
+            hashmap: self.hashmap || other.hashmap,
         }
     }
 }
@@ -334,9 +339,16 @@ fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
     let extra_leaves = (!leaf_types.is_empty()).then(|| {
         quote::quote! { lenient_via_serde! { #(#leaf_types),* } }
     });
-    let indexmap = leaves.indexmap.then(|| {
+    let mut map_types = Vec::new();
+    if leaves.indexmap {
+        map_types.push(quote::quote! { indexmap::IndexMap });
+    }
+    if leaves.hashmap {
+        map_types.push(quote::quote! { std::collections::HashMap });
+    }
+    let maps = map_types.iter().map(|map| {
         quote::quote! {
-            impl<'de, T> Lenient<'de> for indexmap::IndexMap<String, T>
+            impl<'de, T> Lenient<'de> for #map<String, T>
             where
                 T: Lenient<'de>,
             {
@@ -362,7 +374,7 @@ fn lenient_tokens(leaves: LeafUse) -> proc_macro2::TokenStream {
         pub mod lenient {
             #lenient
             #extra_leaves
-            #indexmap
+            #(#maps)*
         }
         pub use lenient::{Lenient, Problem};
     }
@@ -1000,6 +1012,7 @@ mod tests {
             jiff: true,
             uuid: true,
             indexmap: true,
+            hashmap: true,
         });
         let mut modules = Vec::new();
         for decoding in [super::Decoding::Strict, lenient] {

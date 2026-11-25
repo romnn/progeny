@@ -470,6 +470,9 @@ fn extra_dependencies(contracts: &Contracts, api: &ApiModel, config: &Config) ->
 /// The crates the rendered surface names beyond serde, which is one question asked twice: the
 /// manifest declares them, and the support module's lenient decoder needs a leaf impl for each
 /// type they contribute. One answer keeps the two from disagreeing.
+///
+/// It also says whether the surface names a `HashMap`, which no manifest declares and which
+/// needs a leaf impl all the same.
 pub(super) fn crates_named(
     contracts: Option<&Contracts>,
     api: Option<&ApiModel>,
@@ -518,6 +521,7 @@ pub(super) fn crates_named(
         jiff: dates && config.formats.date_time == DateTimeCrate::Jiff,
         uuid: formats.contains(&Format::Uuid) && config.formats.uuid == UuidCrate::Uuid,
         indexmap: maps && config.map == MapKind::IndexMap,
+        hashmap: maps && config.map == MapKind::HashMap,
     }
 }
 
