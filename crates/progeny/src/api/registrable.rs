@@ -32,7 +32,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{Method, OperationContract};
+use super::{Location, Method, OperationContract};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic};
 
 /// A route a router accepted. Only [`classify`] builds one.
@@ -105,6 +105,8 @@ pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
 /// Per path and method the server tells one plain operation from one whose key writes a single
 /// `name=value` pair; a second pair would leave a request carrying both with two operations to
 /// choose from.
+/// A name either operation also declares as a query parameter would put the name in a request
+/// twice, which the server refuses, or let the plain operation's caller select the other one.
 fn refused_query(
     operations: &[OperationContract],
     operation: &OperationContract,
@@ -119,6 +121,23 @@ fn refused_query(
              the client keeps it"
         ));
     }
+    let verb = operation.method.slug().to_uppercase();
+    let (name, _) = written.split_once('=')?;
+    let declared = operations.iter().any(|other| {
+        other.method == operation.method
+            && other.path.path() == path
+            && other
+                .params_at(Location::Query)
+                .any(|param| param.wire_name == name)
+    });
+    if declared {
+        return Some(format!(
+            "`{verb} {}` selects its operation by `{name}`, which an operation on `{path}` also \
+             declares as the query parameter `{name}`, so a request would carry it twice; the \
+             generated server omits this operation and the client keeps it",
+            operation.path
+        ));
+    }
     let other = operations.iter().find(|other| {
         other.path.query().is_some()
             && other
@@ -126,7 +145,6 @@ fn refused_query(
                 .as_ref()
                 .is_some_and(|route| route.path == path && route.method == operation.method)
     })?;
-    let verb = operation.method.slug().to_uppercase();
     Some(format!(
         "`{verb} {}` and `{verb} {}` both select an operation of `{path}` by a query, and the \
          server tells only one apart from the plain operation; the generated server omits this \
@@ -180,6 +198,28 @@ fn register(
                 "`{verb} {path}` has a segment starting with `:` or `*`, which axum refuses at \
                  startup (its 0.7 capture spellings); the generated server omits this \
                  operation and the client keeps it"
+            ),
+        ));
+        return None;
+    }
+    // A path a plain key does not register can still be one the router already matches, by a
+    // capture: inserting it would take those requests from that route for every method, so
+    // `/files/latest?view=preview` beside `/files/{id}` turns a working `GET /files/latest` into
+    // a `404` and a `DELETE` into a `405`.
+    // The router is asked with the template's own text, whose `{id}` a capture matches like any
+    // other value.
+    if operation.path.query().is_some()
+        && let Ok(found) = router.at(&path)
+    {
+        ctx.report(Diagnostic::new(
+            BreakageClass::UnregistrableRoute,
+            Action::Degrade,
+            operation.origin.clone(),
+            format!(
+                "`{verb} {path}` would take from `{}` requests it already serves, and a key \
+                 with a query shares only a path a plain key registers; the generated server \
+                 omits this operation and the client keeps it",
+                found.value
             ),
         ));
         return None;
@@ -347,6 +387,10 @@ mod tests {
             operation(Method::Delete, "/groups/{id}?")?,
             // A path only a query-selected operation uses is registered for it.
             operation(Method::Get, "/only?beta=true")?,
+            // A new literal path would take `/files/latest` from the capture of every method.
+            operation(Method::Get, "/files/{id}")?,
+            operation(Method::Delete, "/files/{id}")?,
+            operation(Method::Get, "/files/latest?view=preview")?,
         ];
         let mut ctx = Ctx::new();
         classify(&mut operations, &mut ctx);
@@ -366,14 +410,17 @@ mod tests {
                 Some("/groups/{id}"),
                 None,
                 Some("/only"),
+                Some("/files/{id}"),
+                Some("/files/{id}"),
+                None,
             ]
         );
 
         // Each refusal says why, at the key as written.
         let found = ctx.into_diagnostics();
         let details: Vec<&str> = found.iter().map(Diagnostic::detail).collect();
-        assert_eq!(details.len(), 3, "{details:#?}");
-        assert!(details[0].contains("beside `/a/{y}`"), "{}", details[0]);
+        assert_eq!(details.len(), 4, "{details:#?}");
+        assert!(details[0].contains("`/a/{y}`"), "{}", details[0]);
         assert!(
             details[1].contains("`POST /responses?v=2` and `POST /responses?beta=true`"),
             "{}",
@@ -384,30 +431,33 @@ mod tests {
             "{}",
             details[2]
         );
+        assert!(
+            details[3].contains("`GET /files/latest` would take from `/files/{id}`"),
+            "{}",
+            details[3]
+        );
     }
 
-    /// `miro`'s `DELETE /v2/boards/{board_id}/groups/{group_id}?` beside the plain `DELETE`:
-    /// nothing on the wire tells the two apart, so only the client keeps the second.
+    /// A selector whose name an operation on its path and method also declares as a query
+    /// parameter would put the name in a request twice, so the selected operation is left to the
+    /// client, whichever of the two declares it.
     #[test_util::test]
-    fn a_bare_question_mark_leaves_its_operation_to_the_client() {
-        let params = serde_json::json!([
-            {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
-            {"name": "delete_items", "in": "query", "schema": {"type": "boolean"}},
-        ]);
-        let (model, diagnostics) =
-            crate::api::tests::model_of(crate::api::tests::with_paths(serde_json::json!({
-                "/groups/{id}": {"delete": {
-                    "operationId": "unGroup",
-                    "parameters": params,
-                    "responses": {"204": {"description": "done"}},
+    fn a_selector_a_declared_query_parameter_also_names_is_left_to_the_client() {
+        let parameter = |name: &str| serde_json::json!([{"name": name, "in": "query", "schema": {"type": "string"}}]);
+        let done = serde_json::json!({"204": {"description": "done"}});
+        let (model, diagnostics) = crate::api::tests::model_of(crate::api::tests::with_paths(
+            serde_json::json!({
+                // The plain sibling declares the selector's name.
+                "/reports": {"get": {
+                    "operationId": "reports", "parameters": parameter("mode"), "responses": done,
                 }},
-                "/groups/{id}?": {"delete": {
-                    "operationId": "deleteGroup",
-                    "parameters": params,
-                    "responses": {"204": {"description": "done"}},
+                "/reports?mode=preview": {"get": {"operationId": "previewReports", "responses": done}},
+                // The selected operation declares it itself.
+                "/exports?format=csv": {"get": {
+                    "operationId": "csvExports", "parameters": parameter("format"), "responses": done,
                 }},
-            })))?;
-        // Both client methods exist, and only the plain one has a route.
+            }),
+        ))?;
         let routed: Vec<(&str, bool)> = model
             .operations()
             .iter()
@@ -418,16 +468,25 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(routed, [("un_group", true), ("delete_group", false)]);
-        let refused: Vec<(String, &str)> = diagnostics
-            .iter()
-            .map(|diagnostic| (diagnostic.location().to_string(), diagnostic.detail()))
-            .collect();
-        assert_eq!(refused.len(), 1, "{refused:#?}");
-        assert_eq!(refused[0].0, "/paths/~1groups~1{id}?/delete");
+        assert_eq!(
+            routed,
+            [
+                ("csv_exports", false),
+                ("reports", true),
+                ("preview_reports", false),
+            ]
+        );
+        let details: Vec<&str> = diagnostics.iter().map(Diagnostic::detail).collect();
+        assert_eq!(details.len(), 2, "{details:#?}");
         assert!(
-            refused[0].1.contains("writes `?` after its path"),
-            "{refused:?}"
+            details[0].contains("query parameter `format`"),
+            "{}",
+            details[0]
+        );
+        assert!(
+            details[1].contains("query parameter `mode`"),
+            "{}",
+            details[1]
         );
     }
 
