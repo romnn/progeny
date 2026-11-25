@@ -128,6 +128,8 @@ tasks:
     # This builds the generated crates of the small documents and the committed fixtures with
     # clippy, warnings denied, on the given toolchain: in both packagings, in both decoding modes,
     # and in crate packaging with each of the `client` and `server` features on or off.
+    # It lints the example crate as well, the only one whose configuration reaches the renderer
+    # branches a document alone does not, such as pagination.
     vars:
       TOOLCHAIN: '{{.TOOLCHAIN | default "stable"}}'
       ONLY: >-
@@ -142,6 +144,7 @@ tasks:
         cmd: >-
           cargo run -p xtask --release -- corpus --compile --clippy --jobs 1
           --toolchain {{.TOOLCHAIN}} --decoding {{.ITEM}} --packaging workspace {{.ONLY}}
+      - cargo run -p xtask --release -- example --lint {{.TOOLCHAIN}}
 
   corpus:snapshots:
     desc: "re-record every document's diagnostics snapshot (read the diff first)"

@@ -1042,7 +1042,7 @@ fn page_walk(
     quote! {
         let page = page_request.send().await?;
         let degradations = page.degradations();
-        if false #(|| degradations.touches(#sites))* {
+        if [#(#sites),*].into_iter().any(|site| degradations.touches(site)) {
             // The body is what the guard refuses; the status, the headers and the report are
             // what a caller still needs, so the page goes back whole with its body set aside.
             return ::std::result::Result::Err(Error::DegradedPage(

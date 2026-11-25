@@ -34,6 +34,11 @@ pub struct Args {
     /// Which serde strategy to generate with, rather than the configuration default.
     #[arg(long, value_name = "STRATEGY")]
     serde: Option<crate::corpus::SerdeChoice>,
+
+    /// Lint the example crate on this rustup toolchain, such as `1.88`, warnings denied, and stop
+    /// without running the wire test.
+    #[arg(long, value_name = "TOOLCHAIN", conflicts_with = "generate_only")]
+    lint: Option<String>,
 }
 
 /// The document the example is built from: committed, tiny, and exercising all four locations.
@@ -71,6 +76,9 @@ pub fn run(args: &Args) -> eyre::Result<()> {
         )?)?)?,
     )?)?)?;
     let output = progeny::generate(&keyed, &config).wrap_err("generating the example crate")?;
+    if let Some(toolchain) = &args.lint {
+        return lint(&output, toolchain);
+    }
     let directory = crate::generated::write("example-petstore", &output)?;
 
     // The test is written by hand against the crate generated from `SUBJECT`, which it imports by
@@ -114,6 +122,31 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     println!("{}", output.trim());
     println!();
     println!("example: the generated client and the generated server agree on the request line");
+    Ok(())
+}
+
+/// Lint the example crate with Clippy on one Rust release, warnings denied.
+///
+/// The example is the only generated crate whose configuration declares pagination and overrides
+/// nullability, so the renderer branches only a configuration reaches are linted here.
+/// The wire test is left out: its harness and dependencies are not generated code.
+fn lint(output: &progeny::Output, toolchain: &str) -> eyre::Result<()> {
+    // A directory of its own, so linting never clears the crate the wire test runs in.
+    let directory = crate::generated::write("example-petstore-lint", output)?;
+    let compiled = crate::generated::check(
+        &directory,
+        true,
+        0,
+        crate::generated::Features::All,
+        Some(toolchain),
+    )?;
+    if !compiled.ok {
+        bail!(
+            "the example crate does not lint clean on Rust {toolchain}: {}",
+            compiled.complaint
+        );
+    }
+    println!("example: {SUBJECT} lints clean on Rust {toolchain}");
     Ok(())
 }
 
