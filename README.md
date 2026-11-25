@@ -498,6 +498,15 @@ let route = Route::from_matched(Method::from_token("GET")?, "/pets/{petId}");
 assert_eq!(route, Some(Route::ShowPetById));
 ```
 
+Some descriptions write a query into a path key, as `openai` writes `/responses?beta=true` beside
+`/responses`. OpenAPI does not allow it, and progeny serves both on the path alone: the client
+sends the written pair ahead of its own, and the server picks the operation whose pair the request
+carries, or else the one written without a query. There `from_matched` answers `None`, and
+`Route::from_matched_with_query` also reads the request's query string, as the server does. A key
+with a query and no such twin on its path and method is served like a plain key at its path,
+whatever query a request carries. A key whose query is anything but one `name=value` pair is left
+to the client and reported as `unregistrable-route`.
+
 The variant is the upper-camel stem every other generated item for the operation already uses:
 `Operation::ShowPetById`, `ShowPetByIdParams`, `Client::show_pet_by_id`, and `Api::show_pet_by_id`
 share one stem, and `Operation::rust_name()` is that method name — the `[pagination]` key and the

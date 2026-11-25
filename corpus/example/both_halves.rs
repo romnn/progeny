@@ -40,6 +40,8 @@ struct Seen {
     photo_label: Option<support::Presence<String>>,
     attachment_upload: Option<support::Upload>,
     attachment_text: Option<String>,
+    /// Every reply handler that ran, in order, with what it was handed.
+    replies: Vec<String>,
 }
 
 /// Cloneable rather than shared behind an `Arc` from outside, because `router` takes the
@@ -397,6 +399,60 @@ impl server::Api for Double {
         }
     }
 
+    async fn show_reply(
+        &self,
+        _context: (),
+        path: server::ShowReplyPath,
+        query: server::ShowReplyQuery,
+    ) -> server::ShowReplyResponse {
+        let reply = format!("stable {} {:?}", path.reply_id, query.note);
+        self.record(|seen| seen.replies.push(reply.clone()));
+        server::ShowReplyResponse::Ok {
+            headers: Default::default(),
+            body: Box::new(reply),
+        }
+    }
+
+    async fn show_beta_reply(
+        &self,
+        _context: (),
+        path: server::ShowBetaReplyPath,
+        query: server::ShowBetaReplyQuery,
+    ) -> server::ShowBetaReplyResponse {
+        let reply = format!("beta {} {:?} {:?}", path.reply_id, query.note, query.at);
+        self.record(|seen| seen.replies.push(reply.clone()));
+        server::ShowBetaReplyResponse::Ok {
+            headers: Default::default(),
+            body: Box::new(reply),
+        }
+    }
+
+    async fn check_beta_reply(
+        &self,
+        _context: (),
+        path: server::CheckBetaReplyPath,
+    ) -> server::CheckBetaReplyResponse {
+        self.record(|seen| seen.replies.push(format!("check {}", path.reply_id)));
+        server::CheckBetaReplyResponse::NoContent {
+            headers: Default::default(),
+        }
+    }
+
+    async fn delete_reply(
+        &self,
+        _context: (),
+        path: server::DeleteReplyPath,
+        query: server::DeleteReplyQuery,
+    ) -> server::DeleteReplyResponse {
+        self.record(|seen| {
+            seen.replies
+                .push(format!("delete {} {:?}", path.reply_id, query.everything));
+        });
+        server::DeleteReplyResponse::NoContent {
+            headers: Default::default(),
+        }
+    }
+
     async fn rejection_probe(
         &self,
         _context: (),
@@ -553,6 +609,41 @@ impl server::Api for Gatekeeper {
 
     async fn download_text(&self, _: Caller) -> server::DownloadTextResponse {
         self.inner.download_text(()).await
+    }
+
+    async fn show_reply(
+        &self,
+        _: Caller,
+        path: server::ShowReplyPath,
+        query: server::ShowReplyQuery,
+    ) -> server::ShowReplyResponse {
+        self.inner.show_reply((), path, query).await
+    }
+
+    async fn show_beta_reply(
+        &self,
+        _: Caller,
+        path: server::ShowBetaReplyPath,
+        query: server::ShowBetaReplyQuery,
+    ) -> server::ShowBetaReplyResponse {
+        self.inner.show_beta_reply((), path, query).await
+    }
+
+    async fn check_beta_reply(
+        &self,
+        _: Caller,
+        path: server::CheckBetaReplyPath,
+    ) -> server::CheckBetaReplyResponse {
+        self.inner.check_beta_reply((), path).await
+    }
+
+    async fn delete_reply(
+        &self,
+        _: Caller,
+        path: server::DeleteReplyPath,
+        query: server::DeleteReplyQuery,
+    ) -> server::DeleteReplyResponse {
+        self.inner.delete_reply((), path, query).await
     }
 
     async fn rejection_probe(
@@ -783,6 +874,149 @@ async fn a_query_parameter_survives_the_round_trip() {
         .send()
         .await?;
     assert_eq!(double.seen().limit, None);
+}
+
+/// A query the description writes into a path key selects its operation on the server, by the
+/// decoded pair and wherever it stands among the query's pairs, and the reflection names the
+/// same route the handler that answered belongs to.
+#[test_util::test]
+async fn a_query_written_into_the_path_selects_its_operation() {
+    let (double, client) = serving().await?;
+
+    // Each generated method reaches its own handler, the beta one with its ordinary pair beside
+    // the fixed one.
+    let stable = client
+        .show_reply(client::ShowReplyParams {
+            reply_id: "r1".to_owned(),
+            note: Some("n".to_owned()),
+        })
+        .send()
+        .await?
+        .into_value();
+    assert_eq!(stable, r#"stable r1 Some("n")"#);
+    let beta = client
+        .show_beta_reply(client::ShowBetaReplyParams {
+            reply_id: "r1".to_owned(),
+            note: Some("n".to_owned()),
+            at: Some("a/b?c".to_owned()),
+        })
+        .send()
+        .await?
+        .into_value();
+    // The `allowReserved` pair joins the written one with `&` and keeps its reserved characters.
+    assert_eq!(beta, r#"beta r1 Some("n") Some("a/b?c")"#);
+
+    // Requests the generated client would not send: the pair after another one, spelled with an
+    // escape, with another value, and named twice, which selects nothing and runs no handler.
+    let raw = reqwest::Client::new();
+    let mut statuses = Vec::new();
+    for query in [
+        "note=x&beta=true",
+        "b%65ta=true",
+        "beta=false",
+        "beta=true&beta=true",
+    ] {
+        let response = raw
+            .get(format!("{}/replies/r2?{query}", client.base_url()))
+            .send()
+            .await?;
+        statuses.push(response.status().as_u16());
+    }
+    assert_eq!(statuses, [200, 200, 200, 404]);
+    assert_eq!(
+        double.seen().replies,
+        [
+            r#"stable r1 Some("n")"#,
+            r#"beta r1 Some("n") Some("a/b?c")"#,
+            r#"beta r2 Some("x") None"#,
+            "beta r2 None None",
+            "stable r2 None",
+        ]
+    );
+
+    // The reflection registers the path alone and resolves a match the way the server did.
+    let path = operations::Route::ShowBetaReply.path();
+    assert_eq!(path, "/replies/{replyId}");
+    assert_eq!(
+        operations::Operation::ShowBetaReply.path(),
+        "/replies/{replyId}?beta=true"
+    );
+    let get = operations::Method::Get;
+    let resolved = [
+        Some("note=x&beta=true"),
+        Some("b%65ta=true"),
+        Some("beta=false"),
+        None,
+        Some("beta=true&beta=true"),
+    ]
+    .map(|query| operations::Route::from_matched_with_query(get, path, query));
+    assert_eq!(
+        resolved,
+        [
+            Some(operations::Route::ShowBetaReply),
+            Some(operations::Route::ShowBetaReply),
+            Some(operations::Route::ShowReply),
+            Some(operations::Route::ShowReply),
+            None,
+        ]
+    );
+    // Without the query the two cannot be told apart, and the plain lookup says so.
+    assert_eq!(operations::Route::from_matched(get, path), None);
+    assert_eq!(
+        operations::Route::from_matched(operations::Method::Delete, path),
+        Some(operations::Route::DeleteReply)
+    );
+}
+
+/// A `HEAD` only the beta key declares has no twin to be told apart from, so it is served like
+/// a plain operation at its path: with the pair or without it, and never by the stable `GET`.
+#[test_util::test]
+async fn a_query_only_head_is_served_like_a_plain_one() {
+    let (double, client) = serving().await?;
+
+    client
+        .check_beta_reply(client::CheckBetaReplyParams {
+            reply_id: "r3".to_owned(),
+        })
+        .send()
+        .await?;
+    let bare = reqwest::Client::new()
+        .head(format!("{}/replies/r4", client.base_url()))
+        .send()
+        .await?;
+    assert_eq!(bare.status().as_u16(), 204);
+    assert_eq!(double.seen().replies, ["check r3", "check r4"]);
+
+    // The reflection names the sole route on the slot whatever the query carries.
+    let path = operations::Route::CheckBetaReply.path();
+    let head = operations::Method::Head;
+    for query in [Some("beta=true"), None, Some("beta=false")] {
+        assert_eq!(
+            operations::Route::from_matched_with_query(head, path, query),
+            Some(operations::Route::CheckBetaReply),
+            "{query:?}"
+        );
+    }
+    assert_eq!(
+        operations::Route::from_matched(head, path),
+        Some(operations::Route::CheckBetaReply)
+    );
+}
+
+/// A bare `?` names no pair to tell `purgeReply` from `deleteReply` by, so only the client has
+/// it, and what it sends is the plain operation's request.
+#[test_util::test]
+async fn a_bare_question_mark_leaves_its_operation_to_the_client() {
+    let (double, client) = serving().await?;
+    assert_eq!(operations::Operation::PurgeReply.route(), None);
+    client
+        .purge_reply(client::PurgeReplyParams {
+            reply_id: "r4".to_owned(),
+            everything: Some(true),
+        })
+        .send()
+        .await?;
+    assert_eq!(double.seen().replies, ["delete r4 Some(true)"]);
 }
 
 #[test_util::test]

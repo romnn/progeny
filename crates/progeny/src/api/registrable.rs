@@ -20,20 +20,28 @@
 //! would have worked — and said so, by name, in a diagnostic. The other direction is a server that
 //! panics at startup, which is the failure this exists to prevent.
 //!
+//! A key that writes a query after its path, `/responses?beta=true` beside `/responses`, is asked
+//! about its path alone, since a router never sees the query.
+//! The query only selects between two operations that share a path and method; a key whose
+//! `name=value` pair has no such twin registers and serves exactly like a plain key at its path.
+//! Per path and method the server tells one plain operation from one whose key writes a single
+//! `name=value` pair, by that pair; any other query, or a second operation competing for either
+//! place, leaves its operation to the client.
+//!
 //! *Enforcement:* [`RegistrableRoute`] has no public constructor. The server renderer takes one, so
 //! a route the router refused cannot reach rendering — the invariant is carried by a type rather
 //! than by a check somebody has to remember to run.
 
 use std::collections::BTreeSet;
 
-use super::{Method, OperationContract};
+use super::{Location, Method, OperationContract};
 use crate::diag::{Action, BreakageClass, Ctx, Diagnostic};
 
 /// A route a router accepted. Only [`classify`] builds one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrableRoute {
-    /// The template as the router takes it, which is also how it was written: `axum` 0.8 and
-    /// OpenAPI spell a path variable the same way, so there is nothing to translate.
+    /// The template as the router takes it, which is how it was written up to any `?`: `axum` 0.8
+    /// and OpenAPI spell a path variable the same way, so there is nothing to translate.
     path: String,
     method: Method,
 }
@@ -54,6 +62,9 @@ impl RegistrableRoute {
 /// document says nothing about which of two colliding routes it meant, and picking by any other
 /// property — length, specificity, alphabetical — would be progeny inventing an intent. First
 /// written, first registered; every later one says what it lost to.
+///
+/// The one exception is a key that writes a query after its path, which registers after every
+/// plain one: it is a second operation on a path, and never takes the path from a plain operation.
 pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
     // **One router for every method**, because that is what `axum` has: its `Router` keeps a single
     // path tree, and dispatching on the method happens inside a matched node. The first version of
@@ -67,101 +78,189 @@ pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
     // Two operations on the *identical* template are fine and common — `GET` and `DELETE` of
     // `/pets/{id}` — because the server renderer merges them into one registration; only the first
     // occurrence of a template is inserted.
+    //
+    // Operations whose key writes a query come second, so that sharing a path never costs a plain
+    // operation the place it would have had without them.
     let mut router = matchit::Router::new();
     let mut templates: BTreeSet<String> = BTreeSet::new();
-    for operation in operations {
-        // A body variant is its primary's route under another media type; the primary carries the
-        // registration, and giving the variant one too would register the same route twice.
-        if operation.body_variant {
-            continue;
+    for queried in [false, true] {
+        for index in 0..operations.len() {
+            let Some(operation) = operations.get(index) else {
+                continue;
+            };
+            // A body variant is its primary's route under another media type; the primary carries
+            // the registration, and giving the variant one too would register the same route
+            // twice.
+            if operation.body_variant || operation.path.query().is_some() != queried {
+                continue;
+            }
+            let registrable = register(operations, operation, &mut router, &mut templates, ctx);
+            if let Some(operation) = operations.get_mut(index) {
+                operation.registrable = registrable;
+            }
         }
-        let path = operation.path.to_string();
-        if templates.contains(&path) {
-            operation.registrable = Some(RegistrableRoute {
-                path,
-                method: operation.method,
-            });
-            continue;
+    }
+}
+
+/// Why the query an operation's key writes keeps it off the server, if it does.
+///
+/// Per path and method the server tells one plain operation from one whose key writes a single
+/// `name=value` pair; a second pair would leave a request carrying both with two operations to
+/// choose from.
+/// A name the operation or its plain twin also declares as a query parameter would put the name
+/// in a request twice, which the server refuses, or let the plain operation's caller select the
+/// other one.
+fn refused_query(
+    operations: &[OperationContract],
+    operation: &OperationContract,
+    path: &str,
+) -> Option<String> {
+    let written = operation.path.query()?;
+    if !operation.path.writes_one_pair() {
+        return Some(format!(
+            "the path key writes `?{written}` after its path, which is not one `name=value` \
+             pair a request could select the operation by, so the router cannot tell it from \
+             another operation on the same path; the generated server omits the operation and \
+             the client keeps it"
+        ));
+    }
+    let verb = operation.method.slug().to_uppercase();
+    let (name, _) = written.split_once('=')?;
+    let declares = |declaring: &OperationContract| {
+        declaring
+            .params_at(Location::Query)
+            .any(|param| param.wire_name == name)
+    };
+    let plain_twin_declares = operations.iter().any(|other| {
+        other.path.query().is_none()
+            && other.method == operation.method
+            && other.path.path() == path
+            && declares(other)
+    });
+    if declares(operation) || plain_twin_declares {
+        return Some(format!(
+            "`{verb} {}` selects its operation by `{name}`, which an operation on `{path}` also \
+             declares as the query parameter `{name}`, so a request would carry it twice; the \
+             generated server omits this operation and the client keeps it",
+            operation.path
+        ));
+    }
+    let other = operations.iter().find(|other| {
+        other.path.query().is_some()
+            && other
+                .registrable
+                .as_ref()
+                .is_some_and(|route| route.path == path && route.method == operation.method)
+    })?;
+    Some(format!(
+        "`{verb} {}` and `{verb} {}` both select an operation of `{path}` by a query, and the \
+         server tells only one apart from the plain operation; the generated server omits this \
+         operation and the client keeps it",
+        operation.path, other.path
+    ))
+}
+
+/// The route one operation registers, or `None` with the diagnostic saying why it has none.
+fn register(
+    operations: &[OperationContract],
+    operation: &OperationContract,
+    router: &mut matchit::Router<String>,
+    templates: &mut BTreeSet<String>,
+    ctx: &mut Ctx,
+) -> Option<RegistrableRoute> {
+    let path = operation.path.path().to_owned();
+    let method = operation.method;
+    let verb = method.slug().to_uppercase();
+    if let Some(detail) = refused_query(operations, operation, &path) {
+        ctx.report(Diagnostic::new(
+            BreakageClass::UnregistrableRoute,
+            Action::Degrade,
+            operation.origin.clone(),
+            detail,
+        ));
+        return None;
+    }
+    let accepted = Some(RegistrableRoute {
+        path: path.clone(),
+        method,
+    });
+    if templates.contains(&path) {
+        return accepted;
+    }
+    // axum validates on top of matchit before inserting: `Router::route` panics at startup
+    // for any segment starting with `:` or `*` — the 0.7 capture spellings, common in
+    // documents converted from Express-style routing — while matchit itself accepts both
+    // as literals. Asked-not-modelled cannot reach that check (axum is a dev-dependency
+    // here on purpose), so its two rules are replicated; the dev-dependency parity test
+    // exercises the real `Router::route` against both spellings to keep the copy honest.
+    let v07_spelling = path
+        .split('/')
+        .any(|segment| segment.starts_with(':') || segment.starts_with('*'));
+    if v07_spelling {
+        ctx.report(Diagnostic::new(
+            BreakageClass::UnregistrableRoute,
+            Action::Degrade,
+            operation.origin.clone(),
+            format!(
+                "`{verb} {path}` has a segment starting with `:` or `*`, which axum refuses at \
+                 startup (its 0.7 capture spellings); the generated server omits this \
+                 operation and the client keeps it"
+            ),
+        ));
+        return None;
+    }
+    match router.insert(&path, path.clone()) {
+        Ok(()) => {
+            templates.insert(path);
+            accepted
         }
-        // axum validates on top of matchit before inserting: `Router::route` panics at startup
-        // for any segment starting with `:` or `*` — the 0.7 capture spellings, common in
-        // documents converted from Express-style routing — while matchit itself accepts both
-        // as literals. Asked-not-modelled cannot reach that check (axum is a dev-dependency
-        // here on purpose), so its two rules are replicated; the dev-dependency parity test
-        // exercises the real `Router::route` against both spellings to keep the copy honest.
-        let v07_spelling = path
-            .split('/')
-            .any(|segment| segment.starts_with(':') || segment.starts_with('*'));
-        if v07_spelling {
+        Err(matchit::InsertError::Conflict { with }) => {
+            // The operation is kept. A colliding route is perfectly callable — the client
+            // builds a URL and sends it — and it is only the *router* that cannot tell two of
+            // them apart. Skipping the operation outright would take a working client method
+            // away to fix a server's problem.
             ctx.report(Diagnostic::new(
                 BreakageClass::UnregistrableRoute,
                 Action::Degrade,
                 operation.origin.clone(),
                 format!(
-                    "`{} {path}` has a segment starting with `:` or `*`, which axum refuses at \
-                     startup (its 0.7 capture spellings); the generated server omits this \
-                     operation and the client keeps it",
-                    operation.method.slug().to_uppercase()
+                    "`{verb} {path}` cannot be registered beside `{with}`, which the router \
+                     already matches; the generated server omits this operation and the \
+                     client keeps it"
                 ),
             ));
-            continue;
+            None
         }
-        match router.insert(&path, path.clone()) {
-            Ok(()) => {
-                templates.insert(path.clone());
-                operation.registrable = Some(RegistrableRoute {
-                    path,
-                    method: operation.method,
-                });
-            }
-            Err(matchit::InsertError::Conflict { with }) => {
-                // The operation is kept. A colliding route is perfectly callable — the client
-                // builds a URL and sends it — and it is only the *router* that cannot tell two of
-                // them apart. Skipping the operation outright would take a working client method
-                // away to fix a server's problem.
-                ctx.report(Diagnostic::new(
+        // The sentence names the router's reason and **not the route**, so that a document with
+        // a habit folds into one record instead of a hundred. `twilio-api-v2010` puts `.json`
+        // after a path variable in 99 operations: one finding, and a record per occurrence is the
+        // failure mode the aggregation rule exists to prevent. Which operations lost their handler
+        // is in the record's locations, and in the generated source.
+        //
+        // The reason is **attributed** rather than asserted, because `matchit`'s is not always
+        // accurate about the path it refused: `/screenshots/{scan_id}.png` has exactly one
+        // parameter in every segment and still comes back as "Only one parameter is allowed per
+        // path segment", that being its blanket message for a parameter that does not end its
+        // segment. Naming the crate keeps a confusing message the router's own rather than
+        // progeny's claim about the document — which matters more here than anywhere, because
+        // this module deliberately does not model the rule well enough to say it better.
+        Err(other) => {
+            ctx.report(
+                Diagnostic::new(
                     BreakageClass::UnregistrableRoute,
                     Action::Degrade,
                     operation.origin.clone(),
                     format!(
-                        "`{} {path}` cannot be registered beside `{with}`, which the router \
-                         already matches; the generated server omits this operation and the \
-                         client keeps it",
-                        operation.method.slug().to_uppercase()
+                        "the path is not one the router accepts (`matchit`: {other}); the \
+                         generated server omits the operation and the client keeps it"
                     ),
-                ));
-            }
-            // The sentence names the router's reason and **not the route**, so that a document with
-            // a habit folds into one record instead of a hundred. `twilio-api-v2010` puts `.json`
-            // after a path variable in 99 operations and `anthropic` writes `?beta=true` into 41:
-            // one finding each, and a record per occurrence is the failure mode the aggregation
-            // rule exists to prevent. Which operations lost their handler is in the record's
-            // locations, and in the generated source.
-            //
-            // The reason is **attributed** rather than asserted, because `matchit`'s is not always
-            // accurate about the path it refused: `/screenshots/{scan_id}.png` has exactly one
-            // parameter in every segment and still comes back as "Only one parameter is allowed per
-            // path segment", that being its blanket message for a parameter that does not end its
-            // segment. Naming the crate keeps a confusing message the router's own rather than
-            // progeny's claim about the document — which matters more here than anywhere, because
-            // this module deliberately does not model the rule well enough to say it better.
-            Err(other) => {
-                ctx.report(
-                    Diagnostic::new(
-                        BreakageClass::UnregistrableRoute,
-                        Action::Degrade,
-                        operation.origin.clone(),
-                        format!(
-                            "the path is not one the router accepts (`matchit`: {other}); the \
-                             generated server omits the operation and the client keeps it"
-                        ),
-                    )
-                    // Folded on a stable key rather than on the sentence, because the sentence
-                    // quotes `matchit` and has already been reworded once: identity is "the router
-                    // refused it", however the refusal is phrased this year.
-                    .folded_as("router-refusal"),
-                );
-            }
+                )
+                // Folded on a stable key rather than on the sentence, because the sentence
+                // quotes `matchit` and has already been reworded once: identity is "the router
+                // refused it", however the refusal is phrased this year.
+                .folded_as("router-refusal"),
+            );
+            None
         }
     }
 }
@@ -173,7 +272,7 @@ mod tests {
     use super::{Method, OperationContract, RegistrableRoute, classify};
     use crate::api::{ResponseContract, route};
     use crate::contract::RustIdent;
-    use crate::diag::{Ctx, JsonPointer};
+    use crate::diag::{Ctx, Diagnostic, JsonPointer};
     use crate::shape::Docs;
 
     fn operation(method: Method, template: &str) -> eyre::Result<OperationContract> {
@@ -253,6 +352,159 @@ mod tests {
             found[2].detail().contains("`DELETE /pets/{other}`"),
             "{}",
             found[2].detail()
+        );
+    }
+
+    /// A query written into a path key is asked about the path alone, and per path and method the
+    /// server keeps one plain operation and one selected by a single `name=value` pair.
+    #[test_util::test]
+    fn a_query_in_the_key_shares_the_path_or_leaves_the_operation_to_the_client() {
+        let mut operations = vec![
+            // Listed before the plain path it collides with, which still wins.
+            operation(Method::Get, "/a/{x}?beta=true")?,
+            operation(Method::Get, "/a/{y}")?,
+            operation(Method::Post, "/responses?beta=true")?,
+            operation(Method::Post, "/responses")?,
+            // A second pair on the same path and method competes with the first.
+            operation(Method::Post, "/responses?v=2")?,
+            // `miro`'s bare `?`, beside the plain operation on its path.
+            operation(Method::Delete, "/groups/{id}")?,
+            operation(Method::Delete, "/groups/{id}?")?,
+            // A path only a query-selected operation uses is registered for it.
+            operation(Method::Get, "/only?beta=true")?,
+            // A query-only key registers its path like a plain key, beside a capture too.
+            operation(Method::Get, "/files/{id}")?,
+            operation(Method::Delete, "/files/{id}")?,
+            operation(Method::Get, "/files/latest?view=preview")?,
+        ];
+        let mut ctx = Ctx::new();
+        classify(&mut operations, &mut ctx);
+
+        let routes: Vec<Option<&str>> = operations
+            .iter()
+            .map(|operation| operation.registrable.as_ref().map(RegistrableRoute::path))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                None,
+                Some("/a/{y}"),
+                Some("/responses"),
+                Some("/responses"),
+                None,
+                Some("/groups/{id}"),
+                None,
+                Some("/only"),
+                Some("/files/{id}"),
+                Some("/files/{id}"),
+                Some("/files/latest"),
+            ]
+        );
+
+        // Each refusal says why, at the key as written.
+        let found = ctx.into_diagnostics();
+        let details: Vec<&str> = found.iter().map(Diagnostic::detail).collect();
+        assert_eq!(details.len(), 3, "{details:#?}");
+        assert!(details[0].contains("beside `/a/{y}`"), "{}", details[0]);
+        assert!(
+            details[1].contains("`POST /responses?v=2` and `POST /responses?beta=true`"),
+            "{}",
+            details[1]
+        );
+        assert!(
+            details[2].contains("writes `?` after its path"),
+            "{}",
+            details[2]
+        );
+    }
+
+    /// Query-only keys register like plain keys, so a literal beside a capture keeps its place
+    /// whichever the document lists first, as `anthropic`'s query-only keys need.
+    #[test_util::test]
+    fn query_only_keys_register_a_literal_beside_a_capture_in_either_order() {
+        for keys in [
+            ["/users/{user}?v=p", "/users/~me?v=p"],
+            ["/users/~me?v=p", "/users/{user}?v=p"],
+        ] {
+            let mut operations = keys
+                .iter()
+                .map(|key| operation(Method::Get, key))
+                .collect::<eyre::Result<Vec<_>>>()?;
+            let mut ctx = Ctx::new();
+            classify(&mut operations, &mut ctx);
+            let routes: Vec<Option<&str>> = operations
+                .iter()
+                .map(|operation| operation.registrable.as_ref().map(RegistrableRoute::path))
+                .collect();
+            let expected: Vec<Option<&str>> = keys
+                .iter()
+                .map(|key| key.split_once('?').map(|(path, _)| path))
+                .collect();
+            assert_eq!(routes, expected);
+            assert!(ctx.into_diagnostics().is_empty(), "{keys:?}");
+        }
+    }
+
+    /// A selector whose name an operation on its path and method also declares as a query
+    /// parameter would put the name in a request twice, so the selected operation is left to the
+    /// client, whichever of the two declares it.
+    #[test_util::test]
+    fn a_selector_a_declared_query_parameter_also_names_is_left_to_the_client() {
+        let parameter = |name: &str| serde_json::json!([{"name": name, "in": "query", "schema": {"type": "string"}}]);
+        let done = serde_json::json!({"204": {"description": "done"}});
+        let (model, diagnostics) = crate::api::tests::model_of(crate::api::tests::with_paths(
+            serde_json::json!({
+                // The plain sibling declares the selector's name.
+                "/reports": {"get": {
+                    "operationId": "reports", "parameters": parameter("mode"), "responses": done,
+                }},
+                "/reports?mode=preview": {"get": {"operationId": "previewReports", "responses": done}},
+                // The selected operation declares it itself.
+                "/exports?format=csv": {"get": {
+                    "operationId": "csvExports", "parameters": parameter("format"), "responses": done,
+                }},
+                // An operation refused for its own query vetoes nothing, though it declares the
+                // name another key selects by.
+                "/sheets": {"get": {"operationId": "sheets", "responses": done}},
+                "/sheets?format=csv": {"get": {"operationId": "csvSheets", "responses": done}},
+                "/sheets?a=1&b=2": {"get": {
+                    "operationId": "pairedSheets", "parameters": parameter("format"), "responses": done,
+                }},
+            }),
+        ))?;
+        let routed: Vec<(&str, bool)> = model
+            .operations()
+            .iter()
+            .map(|operation| {
+                (
+                    operation.rust_name.as_str(),
+                    operation.registrable.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routed,
+            [
+                ("csv_exports", false),
+                ("reports", true),
+                ("preview_reports", false),
+                ("sheets", true),
+                ("paired_sheets", false),
+                ("csv_sheets", true),
+            ]
+        );
+        let details: Vec<&str> = diagnostics.iter().map(Diagnostic::detail).collect();
+        assert_eq!(details.len(), 3, "{details:#?}");
+        assert!(details[2].contains("writes `?a=1&b=2`"), "{}", details[2]);
+        assert!(
+            details[0].contains("query parameter `format`"),
+            "{}",
+            details[0]
+        );
+        assert!(
+            details[1].contains("query parameter `mode`"),
+            "{}",
+            details[1]
         );
     }
 

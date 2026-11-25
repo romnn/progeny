@@ -14,10 +14,10 @@
 //! * every typed header the double answers with **decodes back equal** in the client, which is
 //!   the one value the probe compares, because a header read in another spelling than it was
 //!   written in is not refused but silently arrives as something else;
-//! * the `(method, MatchedPath)` a layer on the generated router recorded **resolves through the
-//!   reflection** to the route that was driven, `operations::Route::from_matched` — including one
-//!   `HEAD` request axum dispatched to a `GET` handler, which the reflection has to name as the
-//!   `GET` route.
+//! * the method, `MatchedPath` and query a layer on the generated router recorded **resolve
+//!   through the reflection** to the route that was driven,
+//!   `operations::Route::from_matched_with_query` — including one `HEAD` request axum dispatched
+//!   to a `GET` handler, which the reflection has to name as the `GET` route.
 //!
 //! Skipped operations are counted and named — a probe that silently narrows its corpus reads as
 //! "covered" when it is not.
@@ -241,7 +241,7 @@ fn head_driver(head: &progeny::harness::ProbeHead) -> TokenStream {
             let _ = client.client().head(url).send().await?;
             let recorded = recorded(&matched);
             assert_eq!(
-                recorded.last().map(|(method, _)| method.as_str()),
+                recorded.last().map(|request| request.method.as_str()),
                 Some("HEAD"),
                 "{recorded:?}"
             );
@@ -288,11 +288,21 @@ fn preamble(client: &Ident, server: &Ident, compares_headers: bool) -> TokenStre
         #[derive(Debug, Clone)]
         struct Double;
 
-        /// What the router matched, per request: the request-line method and the template
-        /// axum's `MatchedPath` reports, recorded by a layer behind the routing step.
-        type Matched = Arc<Mutex<Vec<(String, String)>>>;
+        /// What the router matched for one request, recorded by a layer behind the routing
+        /// step.
+        #[derive(Debug, Clone)]
+        struct MatchedRequest {
+            /// The request-line method.
+            method: String,
+            /// The template axum's `MatchedPath` reports.
+            path: String,
+            query: Option<String>,
+        }
 
-        fn recorded(matched: &Matched) -> Vec<(String, String)> {
+        /// What the router matched, per request.
+        type Matched = Arc<Mutex<Vec<MatchedRequest>>>;
+
+        fn recorded(matched: &Matched) -> Vec<MatchedRequest> {
             match matched.lock() {
                 Ok(seen) => seen.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
@@ -307,6 +317,7 @@ fn preamble(client: &Ident, server: &Ident, compares_headers: bool) -> TokenStre
                     let recorder = recorder.clone();
                     async move {
                         let method = request.method().as_str().to_owned();
+                        let query = request.uri().query().map(str::to_owned);
                         let path = request
                             .extensions()
                             .get::<axum::extract::MatchedPath>()
@@ -316,7 +327,7 @@ fn preamble(client: &Ident, server: &Ident, compares_headers: bool) -> TokenStre
                                 Ok(seen) => seen,
                                 Err(poisoned) => poisoned.into_inner(),
                             };
-                            seen.push((method, path));
+                            seen.push(MatchedRequest { method, path, query });
                         }
                         next.run(request).await
                     }
@@ -335,15 +346,16 @@ fn preamble(client: &Ident, server: &Ident, compares_headers: bool) -> TokenStre
         /// the driver meant to hit.
         fn assert_matched(matched: &Matched, expected: operations::Route) -> eyre::Result<()> {
             let recorded = recorded(matched);
-            let (method, path) = recorded
+            let MatchedRequest { method, path, query } = recorded
                 .last()
                 .ok_or_eyre("the router matched nothing")?;
             let token = operations::Method::from_token(method)
                 .ok_or_eyre(format!("`{method}` is not a method the reflection knows"))?;
             assert_eq!(
-                operations::Route::from_matched(token, path),
+                operations::Route::from_matched_with_query(token, path, query.as_deref()),
                 Some(expected),
-                "`{method} {path}` was matched, and the reflection does not resolve it to `{expected:?}`"
+                "`{method} {path}` was matched with the query {query:?}, and the reflection does \
+                 not resolve it to `{expected:?}`"
             );
             Ok(())
         }
