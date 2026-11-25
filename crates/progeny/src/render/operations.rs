@@ -283,7 +283,7 @@ fn accessors(
                     }
                     rest = tail;
                 }
-                let (path, _) = written.split_at(written.len() - rest.len());
+                let (path, _) = written.split_at(written.len().saturating_sub(rest.len()));
                 path
             }
 
@@ -360,8 +360,11 @@ fn accessors(
     }
 }
 
-/// How `Route::from_matched_with_query` finds a pair in a query string, the way the server reads
-/// one: split on `&`, and percent-decoded with a `+` for a space.
+/// How `Route::from_matched_with_query` finds a pair in a query string: split on `&`, and
+/// percent-decoded.
+///
+/// A `+` stays a `+`: the pair a route is selected by is written in characters a URL never
+/// encodes, so neither a `+` nor the space a form decoder reads it as can match it.
 fn query_pairs() -> TokenStream {
     quote! {
         /// Whether `query` carries the `name=value` pair, compared percent-decoded; `None` when
@@ -382,22 +385,23 @@ fn query_pairs() -> TokenStream {
             ::std::option::Option::Some(found == ::std::option::Option::Some(true))
         }
 
-        /// One query component's bytes, its `%` escapes and its `+` for a space decoded.
+        /// One query component's bytes, its `%` escapes decoded.
         fn decoded(text: &str) -> ::std::vec::Vec<u8> {
             let mut out = ::std::vec::Vec::with_capacity(text.len());
             let mut rest = text.as_bytes();
             while let [byte, tail @ ..] = rest {
-                match (byte, escaped(tail)) {
-                    (b'%', ::std::option::Option::Some(spelled)) => {
+                let spelled = if *byte == b'%' {
+                    escaped(tail)
+                } else {
+                    ::std::option::Option::None
+                };
+                match spelled {
+                    ::std::option::Option::Some(spelled) => {
                         out.push(spelled);
                         rest = tail.get(2..).unwrap_or_default();
                     }
-                    (b'+', _) => {
-                        out.push(b' ');
-                        rest = tail;
-                    }
-                    (other, _) => {
-                        out.push(*other);
+                    ::std::option::Option::None => {
+                        out.push(*byte);
                         rest = tail;
                     }
                 }
