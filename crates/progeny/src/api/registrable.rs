@@ -22,6 +22,8 @@
 //!
 //! A key that writes a query after its path, `/responses?beta=true` beside `/responses`, is asked
 //! about its path alone, since a router never sees the query.
+//! The query only selects between two operations that share a path and method; a key whose query
+//! has no such twin registers and serves exactly like a plain key at its path.
 //! Per path and method the server tells one plain operation from one whose key writes a single
 //! `name=value` pair, by that pair; any other query, or a second operation competing for either
 //! place, leaves its operation to the client.
@@ -105,8 +107,9 @@ pub(crate) fn classify(operations: &mut [OperationContract], ctx: &mut Ctx) {
 /// Per path and method the server tells one plain operation from one whose key writes a single
 /// `name=value` pair; a second pair would leave a request carrying both with two operations to
 /// choose from.
-/// A name either operation also declares as a query parameter would put the name in a request
-/// twice, which the server refuses, or let the plain operation's caller select the other one.
+/// A name the operation or its plain twin also declares as a query parameter would put the name
+/// in a request twice, which the server refuses, or let the plain operation's caller select the
+/// other one.
 fn refused_query(
     operations: &[OperationContract],
     operation: &OperationContract,
@@ -123,14 +126,18 @@ fn refused_query(
     }
     let verb = operation.method.slug().to_uppercase();
     let (name, _) = written.split_once('=')?;
-    let declared = operations.iter().any(|other| {
-        other.method == operation.method
+    let declares = |declaring: &OperationContract| {
+        declaring
+            .params_at(Location::Query)
+            .any(|param| param.wire_name == name)
+    };
+    let plain_twin_declares = operations.iter().any(|other| {
+        other.path.query().is_none()
+            && other.method == operation.method
             && other.path.path() == path
-            && other
-                .params_at(Location::Query)
-                .any(|param| param.wire_name == name)
+            && declares(other)
     });
-    if declared {
+    if declares(operation) || plain_twin_declares {
         return Some(format!(
             "`{verb} {}` selects its operation by `{name}`, which an operation on `{path}` also \
              declares as the query parameter `{name}`, so a request would carry it twice; the \
@@ -198,28 +205,6 @@ fn register(
                 "`{verb} {path}` has a segment starting with `:` or `*`, which axum refuses at \
                  startup (its 0.7 capture spellings); the generated server omits this \
                  operation and the client keeps it"
-            ),
-        ));
-        return None;
-    }
-    // A path a plain key does not register can still be one the router already matches, by a
-    // capture: inserting it would take those requests from that route for every method, so
-    // `/files/latest?view=preview` beside `/files/{id}` turns a working `GET /files/latest` into
-    // a `404` and a `DELETE` into a `405`.
-    // The router is asked with the template's own text, whose `{id}` a capture matches like any
-    // other value.
-    if operation.path.query().is_some()
-        && let Ok(found) = router.at(&path)
-    {
-        ctx.report(Diagnostic::new(
-            BreakageClass::UnregistrableRoute,
-            Action::Degrade,
-            operation.origin.clone(),
-            format!(
-                "`{verb} {path}` would take from `{}` requests it already serves, and a key \
-                 with a query shares only a path a plain key registers; the generated server \
-                 omits this operation and the client keeps it",
-                found.value
             ),
         ));
         return None;
@@ -387,7 +372,7 @@ mod tests {
             operation(Method::Delete, "/groups/{id}?")?,
             // A path only a query-selected operation uses is registered for it.
             operation(Method::Get, "/only?beta=true")?,
-            // A new literal path would take `/files/latest` from the capture of every method.
+            // A query-only key registers its path like a plain key, beside a capture too.
             operation(Method::Get, "/files/{id}")?,
             operation(Method::Delete, "/files/{id}")?,
             operation(Method::Get, "/files/latest?view=preview")?,
@@ -412,15 +397,15 @@ mod tests {
                 Some("/only"),
                 Some("/files/{id}"),
                 Some("/files/{id}"),
-                None,
+                Some("/files/latest"),
             ]
         );
 
         // Each refusal says why, at the key as written.
         let found = ctx.into_diagnostics();
         let details: Vec<&str> = found.iter().map(Diagnostic::detail).collect();
-        assert_eq!(details.len(), 4, "{details:#?}");
-        assert!(details[0].contains("`/a/{y}`"), "{}", details[0]);
+        assert_eq!(details.len(), 3, "{details:#?}");
+        assert!(details[0].contains("beside `/a/{y}`"), "{}", details[0]);
         assert!(
             details[1].contains("`POST /responses?v=2` and `POST /responses?beta=true`"),
             "{}",
@@ -431,11 +416,33 @@ mod tests {
             "{}",
             details[2]
         );
-        assert!(
-            details[3].contains("`GET /files/latest` would take from `/files/{id}`"),
-            "{}",
-            details[3]
-        );
+    }
+
+    /// Query-only keys register like plain keys, so a literal beside a capture keeps its place
+    /// whichever the document lists first, as `anthropic`'s query-only keys need.
+    #[test_util::test]
+    fn query_only_keys_register_a_literal_beside_a_capture_in_either_order() {
+        for keys in [
+            ["/users/{user}?v=p", "/users/~me?v=p"],
+            ["/users/~me?v=p", "/users/{user}?v=p"],
+        ] {
+            let mut operations = keys
+                .iter()
+                .map(|key| operation(Method::Get, key))
+                .collect::<eyre::Result<Vec<_>>>()?;
+            let mut ctx = Ctx::new();
+            classify(&mut operations, &mut ctx);
+            let routes: Vec<Option<&str>> = operations
+                .iter()
+                .map(|operation| operation.registrable.as_ref().map(RegistrableRoute::path))
+                .collect();
+            let expected: Vec<Option<&str>> = keys
+                .iter()
+                .map(|key| key.split_once('?').map(|(path, _)| path))
+                .collect();
+            assert_eq!(routes, expected);
+            assert!(ctx.into_diagnostics().is_empty(), "{keys:?}");
+        }
     }
 
     /// A selector whose name an operation on its path and method also declares as a query
@@ -456,6 +463,13 @@ mod tests {
                 "/exports?format=csv": {"get": {
                     "operationId": "csvExports", "parameters": parameter("format"), "responses": done,
                 }},
+                // An operation refused for its own query vetoes nothing, though it declares the
+                // name another key selects by.
+                "/sheets": {"get": {"operationId": "sheets", "responses": done}},
+                "/sheets?format=csv": {"get": {"operationId": "csvSheets", "responses": done}},
+                "/sheets?a=1&b=2": {"get": {
+                    "operationId": "pairedSheets", "parameters": parameter("format"), "responses": done,
+                }},
             }),
         ))?;
         let routed: Vec<(&str, bool)> = model
@@ -474,10 +488,14 @@ mod tests {
                 ("csv_exports", false),
                 ("reports", true),
                 ("preview_reports", false),
+                ("sheets", true),
+                ("paired_sheets", false),
+                ("csv_sheets", true),
             ]
         );
         let details: Vec<&str> = diagnostics.iter().map(Diagnostic::detail).collect();
-        assert_eq!(details.len(), 2, "{details:#?}");
+        assert_eq!(details.len(), 3, "{details:#?}");
+        assert!(details[2].contains("writes `?a=1&b=2`"), "{}", details[2]);
         assert!(
             details[0].contains("query parameter `format`"),
             "{}",

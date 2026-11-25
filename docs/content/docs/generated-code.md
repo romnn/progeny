@@ -115,7 +115,7 @@ assert_eq!(route, Some(Route::ShowPetById));
 
 `Operation::ALL` is exhaustive on purpose: a table keyed on it stops compiling when the description gains, loses, or renames an operation. `Route` names only the routes `server::router()` registers.
 
-A description that writes a query into a path key, such as `/responses?beta=true` beside `/responses`, gets both operations on one route: the client sends the written pair ahead of its own, and the server picks the operation whose pair the request carries, or else the one written without a query. `Route::from_matched` cannot tell those two apart and answers `None`; `Route::from_matched_with_query` also reads the request's query string, as the server does. A key whose query is anything but one `name=value` pair is left to the client and reported as `unregistrable-route`.
+A description that writes a query into a path key, such as `/responses?beta=true` beside `/responses`, gets both operations on one route: the client sends the written pair ahead of its own, and the server picks the operation whose pair the request carries, or else the one written without a query. `Route::from_matched` cannot tell those two apart and answers `None`; `Route::from_matched_with_query` also reads the request's query string, as the server does. A key with a query and no such twin on its path and method is served like a plain key at its path, whatever query a request carries. A key whose query is anything but one `name=value` pair is left to the client and reported as `unregistrable-route`.
 
 ## Doc comments
 

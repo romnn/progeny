@@ -210,7 +210,7 @@ fn accessors(
     route_variants: &[proc_macro2::Ident],
 ) -> TokenStream {
     // An empty enum cannot be cast to an index, so its one accessor is the empty match.
-    let query_pairs = query_pairs();
+    let query_lookup = query_lookup();
     let route_operation = if route_variants.is_empty() {
         quote! { match self {} }
     } else {
@@ -287,13 +287,6 @@ fn accessors(
                 path
             }
 
-            /// The `name=value` pair the description writes after this route's path, which a
-            /// request has to carry to reach it rather than the route the pair is absent from.
-            fn selector(self) -> ::std::option::Option<&'static str> {
-                let (_, pair) = self.operation().path().split_once('?')?;
-                ::std::option::Option::Some(pair)
-            }
-
             /// The routes axum dispatches a request with this method and matched template to:
             /// the ones declared under the method, or for a `HEAD` where none is, the `GET` ones.
             fn dispatched(method: Method, path: &str) -> impl ::std::iter::Iterator<Item = Self> + '_ {
@@ -315,28 +308,52 @@ fn accessors(
             /// first, then `HEAD` falls back to the `GET` route axum dispatched it to. Linear over
             /// `ALL`; a hot middleware indexes `ALL` once.
             ///
-            /// `None` also where the description tells routes on the template apart by a query
-            /// written into their path, which [`Self::from_matched_with_query`] reads.
+            /// `None` also where the description tells two routes on the template apart by a
+            /// query written into one's path, which [`Self::from_matched_with_query`] reads.
             #[must_use]
             pub fn from_matched(method: Method, path: &str) -> ::std::option::Option<Self> {
                 let mut routes = Self::dispatched(method, path);
                 let route = routes.next()?;
-                (routes.next().is_none() && route.selector().is_none()).then_some(route)
+                routes.next().is_none().then_some(route)
+            }
+        }
+
+        #query_lookup
+    }
+}
+
+/// `Route::from_matched_with_query`, and how it finds a pair in a query string: split on `&`,
+/// and percent-decoded.
+///
+/// A `+` stays a `+`: the pair a route is selected by is written in characters a URL never
+/// encodes, so neither a `+` nor the space a form decoder reads it as can match it.
+fn query_lookup() -> TokenStream {
+    quote! {
+        impl Route {
+            /// The `name=value` pair the description writes after this route's path, which a
+            /// request has to carry to reach it rather than the route the pair is absent from.
+            fn selector(self) -> ::std::option::Option<&'static str> {
+                let (_, pair) = self.operation().path().split_once('?')?;
+                ::std::option::Option::Some(pair)
             }
 
             /// The route that served a request, from its method, matched template and query
-            /// string: the route whose path the description writes with a `name=value` pair the
-            /// query carries, or else the one it writes without a query.
+            /// string: the one [`Self::from_matched`] names where it names one, and where two
+            /// routes share the template, the one whose path the description writes with a
+            /// `name=value` pair the query carries, or else the one it writes without a query.
             ///
             /// The pair is compared percent-decoded, wherever it stands among the query's pairs.
-            /// A query naming the pair's name twice selects nothing, and the server answers it,
-            /// like one that selects no route, with `404 Not Found`.
+            /// A query naming the pair's name twice selects neither, and the server answers it
+            /// with `404 Not Found`.
             #[must_use]
             pub fn from_matched_with_query(
                 method: Method,
                 path: &str,
                 query: ::std::option::Option<&str>,
             ) -> ::std::option::Option<Self> {
+                if let ::std::option::Option::Some(route) = Self::from_matched(method, path) {
+                    return ::std::option::Option::Some(route);
+                }
                 let mut plain = ::std::option::Option::None;
                 for route in Self::dispatched(method, path) {
                     match route.selector() {
@@ -356,17 +373,6 @@ fn accessors(
             }
         }
 
-        #query_pairs
-    }
-}
-
-/// How `Route::from_matched_with_query` finds a pair in a query string: split on `&`, and
-/// percent-decoded.
-///
-/// A `+` stays a `+`: the pair a route is selected by is written in characters a URL never
-/// encodes, so neither a `+` nor the space a form decoder reads it as can match it.
-fn query_pairs() -> TokenStream {
-    quote! {
         /// Whether `query` carries the `name=value` pair, compared percent-decoded; `None` when
         /// it names the pair's name more than once.
         fn carries(query: &str, pair: &str) -> ::std::option::Option<bool> {
@@ -395,15 +401,12 @@ fn query_pairs() -> TokenStream {
                 } else {
                     ::std::option::Option::None
                 };
-                match spelled {
-                    ::std::option::Option::Some(spelled) => {
-                        out.push(spelled);
-                        rest = tail.get(2..).unwrap_or_default();
-                    }
-                    ::std::option::Option::None => {
-                        out.push(*byte);
-                        rest = tail;
-                    }
+                if let ::std::option::Option::Some(spelled) = spelled {
+                    out.push(spelled);
+                    rest = tail.get(2..).unwrap_or_default();
+                } else {
+                    out.push(*byte);
+                    rest = tail;
                 }
             }
             out

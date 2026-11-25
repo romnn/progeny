@@ -968,10 +968,10 @@ async fn a_query_written_into_the_path_selects_its_operation() {
     );
 }
 
-/// A `HEAD` only the beta key declares keeps its route: a `HEAD` without the pair finds no
-/// operation rather than falling back to the stable `GET`.
+/// A `HEAD` only the beta key declares has no twin to be told apart from, so it is served like
+/// a plain operation at its path: with the pair or without it, and never by the stable `GET`.
 #[test_util::test]
-async fn a_declared_head_keeps_its_route_when_the_query_selects_nothing() {
+async fn a_query_only_head_is_served_like_a_plain_one() {
     let (double, client) = serving().await?;
 
     client
@@ -981,21 +981,25 @@ async fn a_declared_head_keeps_its_route_when_the_query_selects_nothing() {
         .send()
         .await?;
     let bare = reqwest::Client::new()
-        .head(format!("{}/replies/r3", client.base_url()))
+        .head(format!("{}/replies/r4", client.base_url()))
         .send()
         .await?;
-    assert_eq!(bare.status().as_u16(), 404);
-    assert_eq!(double.seen().replies, ["check r3"]);
+    assert_eq!(bare.status().as_u16(), 204);
+    assert_eq!(double.seen().replies, ["check r3", "check r4"]);
 
+    // The reflection names the sole route on the slot whatever the query carries.
     let path = operations::Route::CheckBetaReply.path();
     let head = operations::Method::Head;
+    for query in [Some("beta=true"), None, Some("beta=false")] {
+        assert_eq!(
+            operations::Route::from_matched_with_query(head, path, query),
+            Some(operations::Route::CheckBetaReply),
+            "{query:?}"
+        );
+    }
     assert_eq!(
-        operations::Route::from_matched_with_query(head, path, Some("beta=true")),
+        operations::Route::from_matched(head, path),
         Some(operations::Route::CheckBetaReply)
-    );
-    assert_eq!(
-        operations::Route::from_matched_with_query(head, path, None),
-        None
     );
 }
 
