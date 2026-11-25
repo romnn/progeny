@@ -65,8 +65,11 @@ pub fn cargo_in(directory: &Utf8Path, slot: usize) -> Command {
         // for the whole corpus rather than once per document.
         .env("CARGO_TARGET_DIR", target_for(slot))
         .env("CARGO_BUILD_JOBS", "1")
-        // The generated crate is checked as itself, not through this workspace's lint policy.
-        .env_remove("RUSTFLAGS");
+        // The generated crate is checked as itself, not through this workspace's lint policy:
+        // neither its flags nor a Clippy configuration directory that overrides the empty one
+        // `write` puts beside the crate.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CLIPPY_CONF_DIR");
     command
 }
 
@@ -153,6 +156,12 @@ pub fn write(name: &str, output: &Output) -> eyre::Result<Utf8PathBuf> {
         };
         std::fs::write(&full, contents).wrap_err_with(|| format!("writing {full}"))?;
     }
+    // Clippy reads the nearest `clippy.toml` above a crate, which for the scratch crate is this
+    // repository's, so it would refuse what the generator's own policy refuses, such as the
+    // `HashMap` a configuration chose.
+    // An empty one lints the crate the way a consumer with no configuration of its own does.
+    let clippy = directory.join("clippy.toml");
+    std::fs::write(&clippy, "").wrap_err_with(|| format!("writing {clippy}"))?;
     Ok(directory)
 }
 

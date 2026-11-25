@@ -130,6 +130,8 @@ tasks:
     # and in crate packaging with each of the `client` and `server` features on or off.
     # It lints the example crate as well, the only one whose configuration reaches the renderer
     # branches a document alone does not, such as pagination.
+    # Then it lints `corpus/example/choices.yaml` under configuration choices the corpus leaves at
+    # their defaults.
     vars:
       TOOLCHAIN: '{{.TOOLCHAIN | default "stable"}}'
       ONLY: >-

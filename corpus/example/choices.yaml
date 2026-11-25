@@ -1,0 +1,55 @@
+# `example --lint` lints the crates generated from this description under the configurations
+# `CHOICE_RUNS` in `xtask/src/example.rs` lists.
+# It is not a corpus document: no snapshot records it and no wire test runs it.
+openapi: "3.1.0"
+info: {title: Choices, version: "1.0"}
+paths:
+  /events/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getEvent
+      parameters:
+        - {name: since, in: query, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: The event
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Event"}
+    put:
+      operationId: putEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Event"}
+      responses:
+        "204": {description: Stored}
+  /blobs:
+    post:
+      operationId: postBlob
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: The same bytes
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+components:
+  schemas:
+    # No `additionalProperties`, so the configured `unknown-fields` decides.
+    Event:
+      type: object
+      required: [id, at]
+      properties:
+        id: {type: string, format: uuid}
+        at: {type: string, format: date-time}
+        day: {type: string, format: date}
+        clock: {type: string, format: time}
+        small: {type: integer, format: int32}
+        tags: {type: object, additionalProperties: {type: string}}
