@@ -2414,30 +2414,6 @@ mod tests {
         assert!(rendered.contains("request.query(&query)"), "{rendered}");
     }
 
-    /// A query the path key writes is sent as written, ahead of every pair the caller sets, and
-    /// opens the query string only once.
-    #[test_util::test]
-    fn a_query_written_into_the_path_goes_ahead_of_the_callers_pairs() {
-        let document = json!({
-            "openapi": "3.1.0",
-            "paths": {
-                "/jump?beta=true": {"get": {
-                    "operationId": "jump",
-                    "parameters": [
-                        {"name": "to", "in": "query", "required": true,
-                         "allowReserved": true, "schema": {"type": "string"}},
-                    ],
-                    "responses": {"204": {"description": "done"}},
-                }},
-            },
-        });
-        let rendered = squeezed(&client(document)?);
-        let fixed = squeezed(r#"url.push_str("jump"); url.push_str("?beta=true");"#);
-        assert!(rendered.contains(&fixed), "{rendered}");
-        let separator = squeezed(r"url.push(if url.contains('?') { '&' } else { '?' });");
-        assert!(rendered.contains(&separator), "{rendered}");
-    }
-
     #[test_util::test]
     fn an_unset_declared_accept_falls_back_to_the_configured_one() {
         // The declared optional `Accept` parameter outranks the configured media types only

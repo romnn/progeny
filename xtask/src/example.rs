@@ -524,8 +524,9 @@ fn with_shared_attachment(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
 
 /// The subject with operations whose path keys write a query, which no other gate needs.
 ///
-/// `showBetaReply` writes `?beta=true` straight after the variable on `showReply`'s path, and
-/// `checkBetaReply` is a `HEAD` only that key declares.
+/// `showBetaReply` writes `?beta=true` straight after the variable on `showReply`'s path and
+/// takes an `allowReserved` pair beside it, and `checkBetaReply` is a `HEAD` only that key
+/// declares.
 /// `purgeReply` writes a bare `?` on `deleteReply`'s path and method, which nothing on the wire
 /// tells apart, so only the client has it.
 fn with_fixed_query(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
@@ -558,6 +559,7 @@ fn with_fixed_query(bytes: &[u8]) -> eyre::Result<Vec<u8>> {
             parameters:
               - {name: replyId, in: path, required: true, schema: {type: string}}
               - {name: note, in: query, schema: {type: string}}
+              - {name: at, in: query, allowReserved: true, schema: {type: string}}
             responses:
               \"200\":
                 description: The reply

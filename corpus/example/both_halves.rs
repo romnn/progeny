@@ -419,7 +419,7 @@ impl server::Api for Double {
         path: server::ShowBetaReplyPath,
         query: server::ShowBetaReplyQuery,
     ) -> server::ShowBetaReplyResponse {
-        let reply = format!("beta {} {:?}", path.reply_id, query.note);
+        let reply = format!("beta {} {:?} {:?}", path.reply_id, query.note, query.at);
         self.record(|seen| seen.replies.push(reply.clone()));
         server::ShowBetaReplyResponse::Ok {
             headers: Default::default(),
@@ -898,11 +898,13 @@ async fn a_query_written_into_the_path_selects_its_operation() {
         .show_beta_reply(client::ShowBetaReplyParams {
             reply_id: "r1".to_owned(),
             note: Some("n".to_owned()),
+            at: Some("a/b?c".to_owned()),
         })
         .send()
         .await?
         .into_value();
-    assert_eq!(beta, r#"beta r1 Some("n")"#);
+    // The `allowReserved` pair joins the written one with `&` and keeps its reserved characters.
+    assert_eq!(beta, r#"beta r1 Some("n") Some("a/b?c")"#);
 
     // Requests the generated client would not send: the pair after another one, spelled with an
     // escape, with another value, and named twice, which selects nothing and runs no handler.
@@ -925,9 +927,9 @@ async fn a_query_written_into_the_path_selects_its_operation() {
         double.seen().replies,
         [
             r#"stable r1 Some("n")"#,
-            r#"beta r1 Some("n")"#,
-            r#"beta r2 Some("x")"#,
-            "beta r2 None",
+            r#"beta r1 Some("n") Some("a/b?c")"#,
+            r#"beta r2 Some("x") None"#,
+            "beta r2 None None",
             "stable r2 None",
         ]
     );
