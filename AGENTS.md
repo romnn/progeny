@@ -32,3 +32,14 @@
   the lint fires, such as `deprecated` on a use of an item it marked deprecated,
   and an inner `#![allow(lint, reason = "…")]` when the consumer's
   configuration, features or toolchain decide, such as a Clippy threshold lint.
+
+## Changelog
+
+A pull request with a user-facing change (a new feature, a fix users can notice
+in generated code, the CLI or the configuration, or a behavior or breaking
+change) adds one bullet under `## Unreleased` in `CHANGELOG.md`: a bold one-line
+statement, optionally followed by one short sentence naming the config key,
+flag or generated item. CI, xtask gates, tests, refactors and dependency bumps
+get no entry. A release moves the Unreleased entries under the new `## vX.Y.Z`
+heading before the bump, which commits `CHANGELOG.md` through
+`.bumpversion.toml`.

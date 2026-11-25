@@ -10,6 +10,7 @@ pre_commit_hooks = [
   "cargo metadata --offline --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null",
 ]
 additional_files = [
+  "CHANGELOG.md",
   "Cargo.lock",
   "fuzz/Cargo.lock",
 ]
