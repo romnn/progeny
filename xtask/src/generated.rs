@@ -65,8 +65,11 @@ pub fn cargo_in(directory: &Utf8Path, slot: usize) -> Command {
         // for the whole corpus rather than once per document.
         .env("CARGO_TARGET_DIR", target_for(slot))
         .env("CARGO_BUILD_JOBS", "1")
-        // The generated crate is checked as itself, not through this workspace's lint policy.
-        .env_remove("RUSTFLAGS");
+        // The generated crate is checked as itself, not through this workspace's lint policy:
+        // neither its flags nor a Clippy configuration directory that overrides the empty one
+        // `write` puts beside the crate.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CLIPPY_CONF_DIR");
     command
 }
 
