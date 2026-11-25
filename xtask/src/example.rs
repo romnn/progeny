@@ -35,8 +35,8 @@ pub struct Args {
     #[arg(long, value_name = "STRATEGY")]
     serde: Option<crate::corpus::SerdeChoice>,
 
-    /// Lint the example crate on this rustup toolchain, such as `1.88`, warnings denied, and stop
-    /// without running the wire test.
+    /// Lint the example crate and the configuration choices' description on this rustup
+    /// toolchain, such as `1.88`, warnings denied, and stop without running the wire test.
     #[arg(long, value_name = "TOOLCHAIN", conflicts_with = "generate_only")]
     lint: Option<String>,
 }
@@ -125,14 +125,94 @@ pub fn run(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Lint the example crate with Clippy on one Rust release, warnings denied.
+/// Lint the example crate with Clippy on one Rust release, warnings denied, and then [`CHOICES`]
+/// under each of [`CHOICE_RUNS`].
 ///
 /// The example is the only generated crate whose configuration declares pagination and overrides
 /// nullability, so the renderer branches only a configuration reaches are linted here.
 /// The wire test is left out: its harness and dependencies are not generated code.
 fn lint(output: &progeny::Output, toolchain: &str) -> eyre::Result<()> {
     // A directory of its own, so linting never clears the crate the wire test runs in.
-    let directory = crate::generated::write("example-petstore-lint", output)?;
+    lint_crate("example-petstore-lint", output, toolchain, SUBJECT)?;
+
+    let path = crate::paths::corpus_root().join(CHOICES);
+    let bytes = std::fs::read(&path).wrap_err_with(|| format!("reading {path}"))?;
+    for choice in &CHOICE_RUNS {
+        let config = progeny::Config {
+            package: progeny::Package {
+                name: format!("choices-{}", choice.name),
+                version: "0.0.0".to_owned(),
+            },
+            formats: progeny::Formats {
+                date_time: choice.date_time,
+                uuid: progeny::UuidCrate::Uuid,
+                bytes: progeny::BytesRepr::Bytes,
+                integers: progeny::IntegerWidth::ByFormat,
+            },
+            map: choice.map,
+            unknown_fields: choice.unknown_fields,
+            ..progeny::Config::default()
+        };
+        let what = format!("{CHOICES} with {}", choice.name);
+        let output =
+            progeny::generate(&bytes, &config).wrap_err_with(|| format!("generating {what}"))?;
+        lint_crate(
+            &format!("example-choices-{}", choice.name),
+            &output,
+            toolchain,
+            &what,
+        )?;
+    }
+    Ok(())
+}
+
+/// The description linted under every value of the configuration choices that change the
+/// generated types, which the corpus builds only at their defaults.
+const CHOICES: &str = "example/choices.yaml";
+
+/// One configuration [`CHOICES`] is linted under.
+struct Choice {
+    /// The generated crate's name, after its map.
+    name: &'static str,
+    map: progeny::MapKind,
+    date_time: progeny::DateTimeCrate,
+    unknown_fields: progeny::UnknownFields,
+}
+
+/// The configurations [`CHOICES`] is linted under, with UUIDs, bytes and integers by format on in
+/// each.
+///
+/// A crate holds one date and time crate at a time, so three runs build each once, and every map
+/// and unknown-field value goes along in one of them.
+const CHOICE_RUNS: [Choice; 3] = [
+    Choice {
+        name: "hash-map",
+        map: progeny::MapKind::HashMap,
+        date_time: progeny::DateTimeCrate::Time,
+        unknown_fields: progeny::UnknownFields::Deny,
+    },
+    Choice {
+        name: "index-map",
+        map: progeny::MapKind::IndexMap,
+        date_time: progeny::DateTimeCrate::Chrono,
+        unknown_fields: progeny::UnknownFields::Capture,
+    },
+    Choice {
+        name: "b-tree-map",
+        map: progeny::MapKind::BTreeMap,
+        date_time: progeny::DateTimeCrate::Jiff,
+        unknown_fields: progeny::UnknownFields::Ignore,
+    },
+];
+
+/// Write `output` to the scratch directory `name` and lint it on `toolchain`, naming it `what`.
+fn lint_crate(
+    name: &str,
+    output: &progeny::Output,
+    toolchain: &str,
+    what: &str,
+) -> eyre::Result<()> {
+    let directory = crate::generated::write(name, output)?;
     let compiled = crate::generated::check(
         &directory,
         true,
@@ -142,11 +222,11 @@ fn lint(output: &progeny::Output, toolchain: &str) -> eyre::Result<()> {
     )?;
     if !compiled.ok {
         bail!(
-            "the example crate does not lint clean on Rust {toolchain}: {}",
+            "{what} does not lint clean on Rust {toolchain}: {}",
             compiled.complaint
         );
     }
-    println!("example: {SUBJECT} lints clean on Rust {toolchain}");
+    println!("example: {what} lints clean on Rust {toolchain}");
     Ok(())
 }
 
