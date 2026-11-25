@@ -140,7 +140,6 @@ fn lint(output: &progeny::Output, toolchain: &str) -> eyre::Result<()> {
         crate::generated::Features::All,
         Some(toolchain),
     )?;
-    crate::generated::clean(&directory, 0, Some(toolchain))?;
     if !compiled.ok {
         bail!(
             "the example crate does not lint clean on Rust {toolchain}: {}",
