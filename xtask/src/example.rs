@@ -166,8 +166,8 @@ fn lint(output: &progeny::Output, toolchain: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-/// The description linted under every value of the configuration choices that change the
-/// generated types, which the corpus builds only at their defaults.
+/// The description linted under the configuration choices that change the generated types,
+/// which the corpus builds only at their defaults.
 const CHOICES: &str = "example/choices.yaml";
 
 /// One configuration [`CHOICES`] is linted under.

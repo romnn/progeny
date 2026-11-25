@@ -1,7 +1,5 @@
-# `example --lint` lints the crates generated from this description under three configurations
-# that between them take every value of the map, date and time, and unknown-field choices, with
-# UUIDs, bytes and integers by format on in each.
-# The corpus generates with the defaults only, so these are the only lints of the other values.
+# `example --lint` lints the crates generated from this description under the configurations
+# `CHOICE_RUNS` in `xtask/src/example.rs` lists.
 # It is not a corpus document: no snapshot records it and no wire test runs it.
 openapi: "3.1.0"
 info: {title: Choices, version: "1.0"}
