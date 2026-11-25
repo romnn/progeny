@@ -153,6 +153,12 @@ pub fn write(name: &str, output: &Output) -> eyre::Result<Utf8PathBuf> {
         };
         std::fs::write(&full, contents).wrap_err_with(|| format!("writing {full}"))?;
     }
+    // Clippy reads the nearest `clippy.toml` above a crate, which for the scratch crate is this
+    // repository's, so it would refuse what the generator's own policy refuses, such as the
+    // `HashMap` a configuration chose.
+    // An empty one lints the crate the way a consumer with no configuration of its own does.
+    let clippy = directory.join("clippy.toml");
+    std::fs::write(&clippy, "").wrap_err_with(|| format!("writing {clippy}"))?;
     Ok(directory)
 }
 
