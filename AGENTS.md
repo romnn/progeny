@@ -43,3 +43,18 @@ flag or generated item. CI, xtask gates, tests, refactors and dependency bumps
 get no entry. A release moves the Unreleased entries under the new `## vX.Y.Z`
 heading before the bump, which commits `CHANGELOG.md` through
 `.bumpversion.toml`.
+
+## Versioning
+
+A patch release keeps every user's code compiling and working: the API of the
+generated clients, servers and types, the `progeny` library API, and the
+`progeny.toml` keys and CLI flags stay as they were. It may fix generated code
+that did not do what the description and the docs say, change the inner workings
+of generated code, such as decoders, support modules and private items, and make
+small changes in behavior. The minor version goes up for anything that can make
+a user's code stop compiling, including a generated type changing shape for some
+description, a renamed variant or field, and a removed or renamed configuration
+key, and for a change in behavior impactful enough that users have to adapt to
+it, such as a new default, a request the server now refuses, or a response the
+client now reads differently.
+Mark either kind's changelog entry **Breaking:**. Major versions are not used.

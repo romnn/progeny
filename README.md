@@ -631,6 +631,20 @@ crate declares the feature and the dependencies; a generated manifest declares e
 an optional `schemars` behind the JSON Schema one, but cannot know the crate an extra derive comes
 from.
 
+## Versioning
+
+A patch release keeps your code compiling and your setup working: the API of the generated
+clients, servers and types, the `progeny` library API, and the `progeny.toml` keys and CLI flags
+stay as they were. It may fix generated code that did not do what the description and these docs
+say, change how generated code works inside, such as its decoders and support modules, and make
+small changes in behavior.
+The minor version goes up for anything that can make your code stop compiling, including a
+generated type that changes shape for some description, and for a change in behavior big enough
+that you have to adapt to it, such as a new default, a request the server now refuses, or a
+response the client now reads differently.
+Major versions are not used.
+`CHANGELOG.md` marks each breaking change **Breaking:**.
+
 ## Releasing
 
 Tag pushes run the test workflow, publish `progeny` and `progeny-cli` to crates.io, and publish
@@ -639,8 +653,10 @@ separate `progeny` and `cargo-progeny` archives and Homebrew casks. The release 
 `romnn/homebrew-tap`; GitHub supplies `GITHUB_TOKEN` for release assets.
 
 `task build:goreleaser` checks the release builds locally in Docker without publishing.
-After the checks below pass, `bumpversion patch` updates the manifests and lockfile, commits the
-version bump, and creates its tag. Pushing that tag starts publication.
+After the checks below pass, move the `## Unreleased` entries in `CHANGELOG.md` under a new
+`## vX.Y.Z` heading. Then `bumpversion minor` if any entry is **Breaking:**, or `bumpversion patch`
+otherwise, updates the manifests, lockfile and docs, commits the version bump, and creates its tag.
+Pushing that tag starts publication.
 
 ```sh
 task test:all               # unit and integration tests
