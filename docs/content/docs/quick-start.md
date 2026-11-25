@@ -49,7 +49,7 @@ Every diagnostic is printed, followed by a summary line counting what was repair
 
 ```toml
 [build-dependencies]
-progeny = "0.0.5"
+progeny = "0.1.0"
 ```
 
 `packaging = "module"` renders the whole interface as one file, `progeny.rs`, to `include!`:

@@ -67,7 +67,7 @@ write it where it likes.
 
 ```toml
 [build-dependencies]
-progeny = "0.0.5"
+progeny = "0.1.0"
 ```
 
 The library leaves `serde_json`'s features alone, because Cargo unifies features across a build:

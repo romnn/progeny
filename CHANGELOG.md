@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.0
+
 - **Breaking: a binary server response streams.** Its arm carries an `axum::body::Body` instead
   of a buffered `Vec<u8>` or `Bytes`; bytes already in memory convert with `.into()`.
 - **Breaking: a server response's typed header group is boxed, like its body.** Answer with
