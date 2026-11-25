@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795632547389,
+  "lastUpdate": 1795634503289,
   "repoUrl": "https://github.com/romnn/progeny",
   "entries": {
     "Generated-crate compile cost": [
@@ -5757,6 +5757,126 @@ window.BENCHMARK_DATA = {
           {
             "name": "petstore-31.hand-written peak rss",
             "value": 324.4348955154419,
+            "range": "± 0.4",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "roman.dahm@gmx.de",
+            "name": "romnn",
+            "username": "romnn"
+          },
+          "committer": {
+            "email": "roman.dahm@gmx.de",
+            "name": "romnn",
+            "username": "romnn"
+          },
+          "distinct": true,
+          "id": "53e09c38b385525253f361f3f9cac8b3762b9416",
+          "message": "Bump version: 0.0.5 → 0.1.0",
+          "timestamp": "2026-11-25T19:03:18+01:00",
+          "tree_id": "a35f8440245604b2d7d5c5d9f7a58d777054cf78",
+          "url": "https://github.com/romnn/progeny/commit/53e09c38b385525253f361f3f9cac8b3762b9416"
+        },
+        "date": 1795634502944,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "okta.hand-written instructions",
+            "value": 126974072743,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written peak heap",
+            "value": 3189.2123641967773,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written average heap",
+            "value": 1749.8908290863037,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written cpu",
+            "value": 27.886439333333332,
+            "range": "± 0.08",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"Xeon 6975P-C\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "okta.hand-written peak rss",
+            "value": 3051.3984375,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"okta\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written instructions",
+            "value": 42425465142,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written peak heap",
+            "value": 1088.0944900512695,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written average heap",
+            "value": 612.301887512207,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written cpu",
+            "value": 9.071465666666667,
+            "range": "± 0.03",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"Xeon 6975P-C\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "oxide.hand-written peak rss",
+            "value": 1217.079426765442,
+            "range": "± 0.5",
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"oxide\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written instructions",
+            "value": 2634691688,
+            "unit": "count",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"instructions\",\"label\":\"Instructions (cachegrind)\"},\"version\":1},\"text\":\"one cachegrind run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written peak heap",
+            "value": 93.47380065917969,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak heap\",\"label\":\"Peak heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written average heap",
+            "value": 54.0024471282959,
+            "unit": "MiB",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\",\"valgrind\":\"valgrind-3.22.0\"},\"metric\":{\"direction\":\"lower\",\"id\":\"average heap\",\"label\":\"Average heap (massif)\"},\"version\":1},\"text\":\"one massif run; valgrind-3.22.0; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written cpu",
+            "value": 0.6639206666666667,
+            "range": "± 0.01",
+            "unit": "s",
+            "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"cpu\":\"Xeon 6975P-C\",\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"cpu\",\"label\":\"CPU time\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
+          },
+          {
+            "name": "petstore-31.hand-written peak rss",
+            "value": 324.24609375,
             "range": "± 0.4",
             "unit": "MiB",
             "extra": "{\"benchtrail\":{\"dimensions\":{\"document\":\"petstore-31\",\"strategy\":\"hand-written\"},\"environment\":{\"rustc\":\"rustc 1.100.0 (0ef1bc386 2026-11-09)\"},\"metric\":{\"direction\":\"lower\",\"id\":\"peak rss\",\"label\":\"Peak RSS\"},\"version\":1},\"text\":\"3 kept, 0 discarded; Intel(R) Xeon(R) 6975P-C; rustc 1.100.0 (0ef1bc386 2026-11-09)\"}"
