@@ -22,8 +22,8 @@
 //!
 //! A key that writes a query after its path, `/responses?beta=true` beside `/responses`, is asked
 //! about its path alone, since a router never sees the query.
-//! The query only selects between two operations that share a path and method; a key whose query
-//! has no such twin registers and serves exactly like a plain key at its path.
+//! The query only selects between two operations that share a path and method; a key whose
+//! `name=value` pair has no such twin registers and serves exactly like a plain key at its path.
 //! Per path and method the server tells one plain operation from one whose key writes a single
 //! `name=value` pair, by that pair; any other query, or a second operation competing for either
 //! place, leaves its operation to the client.
