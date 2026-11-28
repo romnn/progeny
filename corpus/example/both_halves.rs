@@ -881,8 +881,8 @@ async fn a_query_parameter_survives_the_round_trip() {
 #[cfg(unix)]
 #[test_util::test]
 async fn the_client_reaches_a_server_on_a_unix_socket() {
-    // A private directory keeps the path short, as socket addresses must be, and removes the
-    // socket however the test ends.
+    // A short name in a fresh directory, which removes the socket when the test returns or fails.
+    // Socket addresses have a short length limit.
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("api.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;
