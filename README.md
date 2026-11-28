@@ -394,6 +394,20 @@ identity to each trace. Applications that need it can wrap the generated `Client
 application-owned type whose operation-named methods create spans before sending the generated
 requests. A single undeclared header rides an individual request through its `.header(...)`.
 
+A service on a Unix socket, such as Docker's or incus's, takes a `reqwest::Client` bound to the
+socket on a Unix target. The base URL keeps its usual meaning, except that the socket replaces DNS
+and TCP: its host goes out as the `Host` header, which the service has to accept, and its path is
+the API's prefix. Keep the scheme `http`, as `https` would start a TLS handshake over the socket,
+and turn proxies off, so no proxy credential is sent along.
+
+```rust
+let inner = reqwest::Client::builder()
+    .no_proxy()
+    .unix_socket("/var/lib/incus/unix.socket")
+    .build()?;
+let client = client::Client::with_client("http://localhost/1.0", inner);
+```
+
 ## Serving
 
 The server is an `Api` trait with one method per operation, and `server::router(api)`. Every

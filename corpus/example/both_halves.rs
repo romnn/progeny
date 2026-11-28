@@ -876,6 +876,38 @@ async fn a_query_parameter_survives_the_round_trip() {
     assert_eq!(double.seen().limit, None);
 }
 
+/// A service on a Unix socket is reached through a `reqwest::Client` bound to it, with the base
+/// URL's path kept as the API's prefix.
+#[cfg(unix)]
+#[test_util::test]
+async fn the_client_reaches_a_server_on_a_unix_socket() {
+    // A private directory keeps the path short, as socket addresses must be, and removes the
+    // socket however the test ends.
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let double = Double::default();
+    // Mounted under `/api` alone, so a client that dropped the base URL's path would get a `404`.
+    let router = axum::Router::new().nest("/api", server::router(double.clone()));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let inner = reqwest::Client::builder()
+        .no_proxy()
+        .unix_socket(socket)
+        .build()?;
+    let client = client::Client::with_client("http://localhost/api", inner);
+    let pets = client
+        .list_pets(client::ListPetsParams { limit: Some(3) })
+        .send()
+        .await?;
+
+    // The double behind the socket saw the request, and its answer decoded.
+    assert_eq!(double.seen().limit, Some(3));
+    assert_eq!(pets.into_value()[0].name.as_deref(), Some("Rex"));
+}
+
 /// A query the description writes into a path key selects its operation on the server, by the
 /// decoded pair and wherever it stands among the query's pairs, and the reflection names the
 /// same route the handler that answered belongs to.

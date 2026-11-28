@@ -84,7 +84,7 @@ Each operation is a method taking a params struct, returning a request whose `se
 - **Pagination.** An operation declared under [`pagination`]({{< relref "reference/configuration.md#pagination" >}}) gains a `stream()` beside its `send()`.
 - **Response headers.** An arm that declares a header with a typed field decodes to a payload of its own, `{Operation}{Arm} { body, headers }` (`{ headers }` without content), whose `{Operation}{Arm}Headers` holds the typed fields only; both are numbered, as `FooBadRequest2` and `FooBadRequest2Headers`, where the name is another generated type's, such as `fooBad`'s `FooBadRequest`. Several such arms ride the success or error enum's variants, and every header stays raw on `ResponseValue::headers()`. A header is read from every field of its name in its declared `simple` style or JSON `content`, a scalar is never split on its commas, and a single value that arrives in more than one field is malformed. Leniently, every field is an `Option`, and a malformed header or a missing required one is `None` and reported with the body's drift; strictly, a required header is a plain field and either fails the call with `Error::HeaderDecode`.
 
-The client has no callback or hook system: supply a preconfigured `reqwest::Client` for transport-wide authentication, retry, and tracing.
+The client has no callback or hook system: supply a preconfigured `reqwest::Client` for transport-wide authentication, retry, and tracing. A service on a Unix socket takes a client built with `no_proxy()` and `unix_socket(path)`, on a Unix target, and an `http` base URL whose host goes out as the `Host` header and whose path is the API's prefix, such as `http://localhost/1.0`.
 
 ## The server
 
